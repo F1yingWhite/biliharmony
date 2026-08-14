@@ -18,6 +18,16 @@ import { colorWithAlpha, formatCount, formatRelativeTime, formatDate, formatDura
 import { DecoratedAvatar, UserDecorationBanner } from '../components/UserDecorations';
 import { parseReplyContent, ReplyRenderPart } from '../common/ReplyContentParser';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
+import { BasicDataSource } from '../common/BasicDataSource';
+
+/** 「加载更多」底部块参数：对象字面量按引用传入，状态变化才能驱动 @Builder 刷新。 */
+interface LoadMoreFooterOptions {
+  loading: boolean;
+  hasMore: boolean;
+  moreText: string;
+  endText: string;
+  onTap: () => void;
+}
 
 @Component
 export struct VideoDetailPage {
@@ -34,7 +44,6 @@ export struct VideoDetailPage {
   @State pageSwitchingCid: number = 0;
   @State playerSourceVersion: number = 0;
   @State related: Array<VideoItem> = [];
-  @State replies: Array<ReplyItem> = [];
   @State replyCursor: string = '';
   @State replyHasMore: boolean = true;
   @State replyLoading: boolean = false;
@@ -43,7 +52,6 @@ export struct VideoDetailPage {
   // 的系统返回/侧滑回调优先关闭，避免直接把整个视频页弹出。
   @StorageLink('videoReplyThreadOpen') @Watch('onReplyThreadStateChanged') replyThreadOpen: boolean = false;
   @State replyThreadRoot: ReplyItem = new ReplyItem();
-  @State threadReplies: Array<ReplyItem> = [];
   @State threadPage: number = 0;
   @State threadHasMore: boolean = true;
   @State threadLoading: boolean = false;
@@ -57,7 +65,7 @@ export struct VideoDetailPage {
   @State emotePackageIndex: number = 0;
   @State emotePanelOpen: boolean = false;
   @State emoteLoading: boolean = false;
-  @State tab: number = 0; // 0 简介 / 1 评论 / 2 相关
+  @State tab: number = 0; // 0 简介 / 1 评论（相关推荐已并入简介底部）
   @State visualTab: number = 0; // 仅驱动标签颜色/下划线，不反向打断 Tabs 位移动画
   @State descExpanded: boolean = false;
   @State pageTint: string = '#FB7299';
@@ -93,16 +101,34 @@ export struct VideoDetailPage {
   private replyScroller: Scroller = new Scroller();
   private threadScroller: Scroller = new Scroller();
   private videoProgressSeconds: number = 0;
-  private contentGestureActive: boolean = false;
   private pageSwitchRequest: number = 0;
   private replyListSavedOffset: number = -1;
+  private destroyed: boolean = false;
+  private timers: Set<number> = new Set<number>();
+  // 屏幕尺寸只在出现/布局变化时同步一次，避免滚动帧回调里反复 getDefaultDisplaySync。
+  private screenWidthVp: number = 0;
+  private screenHeightVp: number = 0;
+  private playerHeightKey: string = '';
+  private playerHeightValue: number = 0;
+  // playerCollapse 的未量化原值；@State 只按阈值量化写入，降低滚动期整页重排频率。
+  private playerCollapseRaw: number = 0;
+  private replySource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();
+  private threadSource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();
+  // 回复详情里「回复 @xx」的昵称表，随楼层数据加载重建一次，替代逐条线性查找。
+  private threadNameMap: Map<number, string> = new Map<number, string>();
+  private emoteLabelCache: Map<string, string> = new Map<string, string>();
+  private readonly replyActionIcons: Array<Resource> = [
+    $r('app.media.ic_dislike'),
+    $r('app.media.ic_share'),
+    $r('app.media.ic_comment'),
+  ];
 
   onReplyThreadStateChanged(): void {
     if (!this.replyThreadOpen && this.replyListSavedOffset >= 0) {
       const restoreOffset: number = this.replyListSavedOffset;
       this.replyListSavedOffset = -1;
       // 等条件分支把主评论 List 重新挂回 Scroller 后，再恢复进入详情前的精确位置。
-      setTimeout(() => {
+      this.scheduleTimeout(() => {
         try {
           this.replyScroller.scrollTo({ xOffset: 0, yOffset: restoreOffset });
         } catch (e) {
@@ -115,13 +141,33 @@ export struct VideoDetailPage {
     if (this.replyThreadOpen) this.replyThreadOpen = false;
   }
 
-  private playerHeight(): number {
+  private refreshScreenSize(): void {
     try {
       const screen: display.Display = display.getDefaultDisplaySync();
-      const widthVp: number = px2vp(screen.width);
-      const screenHeightVp: number = px2vp(screen.height);
+      this.screenWidthVp = px2vp(screen.width);
+      this.screenHeightVp = px2vp(screen.height);
+    } catch (e) {
+      // 读取失败保留旧值，playerHeight 会回退到默认高度。
+    }
+  }
+
+  private playerHeight(): number {
+    const key: string = String(this.currentCid) + '|' + String(this.detail.aid) + '|' +
+      String(this.screenWidthVp) + 'x' + String(this.screenHeightVp);
+    if (key === this.playerHeightKey && this.playerHeightValue > 0) return this.playerHeightValue;
+    const value: number = this.computePlayerHeight();
+    this.playerHeightKey = key;
+    this.playerHeightValue = value;
+    return value;
+  }
+
+  private computePlayerHeight(): number {
+    try {
+      if (this.screenWidthVp <= 0 || this.screenHeightVp <= 0) this.refreshScreenSize();
+      if (this.screenWidthVp <= 0 || this.screenHeightVp <= 0) return 220;
+      const widthVp: number = this.screenWidthVp;
       const usableHeight: number = Math.max(480,
-        screenHeightVp - Immersive.statusBarHeight() - Immersive.bottomInset());
+        this.screenHeightVp - Immersive.statusBarHeight() - Immersive.bottomInset());
       // 至少保留常规横屏视频的控制空间；竖屏按原始比例增高，但最多占可用高度 68%，
       // 且在大屏设备上不超过 520vp，确保下方简介/评论仍然可操作。
       const regularHeight: number = widthVp * 9 / 16;
@@ -167,17 +213,11 @@ export struct VideoDetailPage {
   }
 
   expandPlayerForResume(): void {
-    if (this.playerCollapse <= 0) return;
+    if (this.playerCollapseRaw <= 0) return;
     animateTo({ duration: 220, curve: Curve.EaseOut }, () => {
+      this.playerCollapseRaw = 0;
       this.playerCollapse = 0;
     });
-  }
-
-  onDetailScroll(offset: number): void {
-    if (Math.abs(offset) < 0.1) return;
-    const maxCollapse: number = Math.max(0, this.playerHeight() - this.minPlayerHeight());
-    const next: number = Math.max(0, Math.min(maxCollapse, this.playerCollapse + offset));
-    if (Math.abs(next - this.playerCollapse) > 0.1) this.playerCollapse = next;
   }
 
   /**
@@ -192,94 +232,161 @@ export struct VideoDetailPage {
     }
   }
 
+  /**
+   * 收放量的量化写入：raw 始终精确跟踪，@State 只在跨过约 2% 行程或
+   * 0/最大边界时更新，避免滚动每帧的亚像素变化驱动整页重渲染。
+   */
+  private setPlayerCollapse(raw: number): void {
+    const maxCollapse: number = Math.max(0, this.playerHeight() - this.minPlayerHeight());
+    const clamped: number = Math.max(0, Math.min(maxCollapse, raw));
+    this.playerCollapseRaw = clamped;
+    const threshold: number = Math.max(1, maxCollapse * 0.02);
+    if (Math.abs(clamped - this.playerCollapse) >= threshold ||
+      (clamped === 0 && this.playerCollapse !== 0) ||
+      (clamped === maxCollapse && this.playerCollapse !== maxCollapse)) {
+      this.playerCollapse = clamped;
+    }
+  }
+
   onContentScrollFrame(offset: number, scroller: Scroller, state: ScrollState): number {
     // onScrollStart 在部分系统版本晚于首批 frame 回调，旧门闩会把整次手势漏掉。
     // Idle 代表非动画的程序化滚动；触摸拖动与惯性滚动则直接参与播放器联动。
     if (state === ScrollState.Idle) return offset;
     if (Math.abs(offset) < 0.1) return offset;
     const maxCollapse: number = Math.max(0, this.playerHeight() - this.minPlayerHeight());
-    if (offset > 0 && this.playerCollapse < maxCollapse) {
-      const consumed: number = Math.min(offset, maxCollapse - this.playerCollapse);
-      this.playerCollapse += consumed;
+    if (offset > 0 && this.playerCollapseRaw < maxCollapse) {
+      const consumed: number = Math.min(offset, maxCollapse - this.playerCollapseRaw);
+      this.setPlayerCollapse(this.playerCollapseRaw + consumed);
       return offset - consumed;
     }
-    if (offset < 0 && this.isScrollerAtTop(scroller) && this.playerCollapse > 0) {
-      const consumed: number = Math.min(-offset, this.playerCollapse);
-      this.playerCollapse -= consumed;
+    if (offset < 0 && this.isScrollerAtTop(scroller) && this.playerCollapseRaw > 0) {
+      const consumed: number = Math.min(-offset, this.playerCollapseRaw);
+      this.setPlayerCollapse(this.playerCollapseRaw - consumed);
       return offset + consumed;
     }
     return offset;
   }
 
   aboutToAppear(): void {
+    this.destroyed = false;
+    // 上次离页时未完成的请求会因 destroyed 跳过 finally 写状态；返回页面时统一解锁。
+    this.replyLoading = false;
+    this.threadLoading = false;
+    this.replySending = false;
+    this.emoteLoading = false;
+    this.actionBusy = false;
+    this.followLoading = false;
+    this.danmakuSending = false;
+    this.pageSwitchingCid = 0;
     this.replyThreadOpen = false;
     this.bvid = this.param.bvid;
     this.aid = this.param.aid;
-    this.init();
+    this.refreshScreenSize();
+    this.init().catch(() => {
+    });
+  }
+
+  aboutToDisappear(): void {
+    this.destroyed = true;
+    this.timers.forEach((id: number) => {
+      clearTimeout(id);
+    });
+    this.timers.clear();
+  }
+
+  /** 统一登记延时任务：页面销毁时清理，回调执行前检查 destroyed。 */
+  private scheduleTimeout(callback: () => void, delayMs: number): void {
+    const id: number = setTimeout(() => {
+      this.timers.delete(id);
+      if (this.destroyed) return;
+      callback();
+    }, delayMs);
+    this.timers.add(id);
   }
 
   async init(): Promise<void> {
     this.loading = true;
+    this.errorText = '';
     this.descExpanded = false;
-    const detail: VideoDetail | null = await BiliApi.getVideoDetail(this.aid, this.bvid);
-    if (detail === null) {
-      this.loading = false;
-      this.errorText = '视频不存在或已失效';
-      return;
-    }
-    this.detail = detail;
-    this.likeCount = detail.like;
-    this.coinCount = detail.coin;
-    this.favoriteCount = detail.favorite;
-
-    // 封面取色仅用于本页播放区氛围光，不改全局主题色（主题色由用户自选）
-    ImageColor.extract(detail.cover).then((palette: ImagePalette) => {
-      this.pageTint = palette.dominant;
-    });
-
-    // 并行加载播放地址 / 相关 / 评论
-    const cid: number = detail.cid > 0 ? detail.cid : (detail.pages.length > 0 ? detail.pages[0].cid : 0);
-    this.currentCid = cid;
-    this.currentPageIndex = 0;
-    for (let i: number = 0; i < detail.pages.length; i++) {
-      if (detail.pages[i].cid === cid) {
-        this.currentPageIndex = i;
-        break;
+    try {
+      const detail: VideoDetail | null = await BiliApi.getVideoDetail(this.aid, this.bvid);
+      if (this.destroyed) return;
+      if (detail === null) {
+        this.errorText = '视频不存在或已失效';
+        return;
       }
-    }
-    BiliApi.getPlayUrl(detail.aid, detail.bvid, cid).then((info: PlayUrlInfo | null) => {
-      if (info !== null) {
-        this.playUrl = info.url;
-        this.playUrls = info.urls;
-        this.playAudioUrls = info.audioUrls;
-        this.qualityOptions = info.qualities;
-        this.currentQuality = info.quality;
-      }
-    });
-    BiliApi.getRelated(detail.aid, detail.bvid).then((list: Array<VideoItem>) => {
-      this.related = list;
-    });
-    this.loadReplies(true);
-    if (UserStore.isLogin) {
-      BiliApi.getVideoRelation(detail.aid, detail.bvid).then((relation: VideoRelationState | null) => {
-        if (relation !== null) {
-          this.liked = relation.liked;
-          this.coinCountByMe = relation.coin;
-          this.favorited = relation.favorite;
-        }
+      this.detail = detail;
+      this.likeCount = detail.like;
+      this.coinCount = detail.coin;
+      this.favoriteCount = detail.favorite;
+
+      // 封面取色仅用于本页播放区氛围光，不改全局主题色（主题色由用户自选）
+      ImageColor.extract(detail.cover).then((palette: ImagePalette) => {
+        if (!this.destroyed) this.pageTint = palette.dominant;
+      }).catch(() => {
+        // 取色失败仅影响氛围光，保留默认主题色。
       });
-      this.loadFollowState();
-      this.loadEmotes();
+
+      // 并行加载播放地址 / 相关 / 评论
+      const cid: number = detail.cid > 0 ? detail.cid : (detail.pages.length > 0 ? detail.pages[0].cid : 0);
+      this.currentCid = cid;
+      this.currentPageIndex = 0;
+      for (let i: number = 0; i < detail.pages.length; i++) {
+        if (detail.pages[i].cid === cid) {
+          this.currentPageIndex = i;
+          break;
+        }
+      }
+      BiliApi.getPlayUrl(detail.aid, detail.bvid, cid).then((info: PlayUrlInfo | null) => {
+        if (info !== null && !this.destroyed) {
+          this.playUrl = info.url;
+          this.playUrls = info.urls;
+          this.playAudioUrls = info.audioUrls;
+          this.qualityOptions = info.qualities;
+          this.currentQuality = info.quality;
+        }
+      }).catch(() => {
+        // 播放地址失败由占位封面的「获取播放地址失败」文案呈现。
+      });
+      BiliApi.getRelated(detail.aid, detail.bvid).then((list: Array<VideoItem>) => {
+        if (!this.destroyed) this.related = list;
+      }).catch(() => {
+        // 相关推荐失败保持空列表。
+      });
+      this.loadReplies(true);
+      if (UserStore.isLogin) {
+        BiliApi.getVideoRelation(detail.aid, detail.bvid).then((relation: VideoRelationState | null) => {
+          if (relation !== null && !this.destroyed) {
+            this.liked = relation.liked;
+            this.coinCountByMe = relation.coin;
+            this.favorited = relation.favorite;
+          }
+        }).catch(() => {
+          // 互动状态拉取失败保持默认的未点赞/未投币/未收藏。
+        });
+        this.loadFollowState();
+        this.loadEmotes();
+      }
+    } catch (e) {
+      if (!this.destroyed) this.errorText = '加载失败，请检查网络后重试';
+    } finally {
+      if (!this.destroyed) this.loading = false;
     }
-    this.loading = false;
   }
 
   async loadEmotes(): Promise<void> {
     if (this.emoteLoading || this.emotePackages.length > 0 || !UserStore.isLogin) return;
     this.emoteLoading = true;
-    this.emotePackages = await BiliApi.getUserEmotes('reply');
-    this.emoteLoading = false;
-    if (this.emotePackageIndex >= this.emotePackages.length) this.emotePackageIndex = 0;
+    try {
+      const packages: Array<BiliEmotePackage> = await BiliApi.getUserEmotes('reply');
+      if (this.destroyed) return;
+      this.emotePackages = packages;
+      if (this.emotePackageIndex >= this.emotePackages.length) this.emotePackageIndex = 0;
+    } catch (e) {
+      // 表情加载失败不影响评论主流程，面板显示空态。
+    } finally {
+      if (!this.destroyed) this.emoteLoading = false;
+    }
   }
 
   openEmotePanel(): void {
@@ -320,12 +427,18 @@ export struct VideoDetailPage {
       return;
     }
     this.followLoading = true;
-    const attribute: number | null = await BiliApi.getUserRelation(this.detail.upMid);
-    if (attribute !== null) {
-      // 2 为已关注，6 为互相关注；128 是拉黑，不能误显示为已关注。
-      this.following = attribute === 2 || attribute === 6;
+    try {
+      const attribute: number | null = await BiliApi.getUserRelation(this.detail.upMid);
+      if (this.destroyed) return;
+      if (attribute !== null) {
+        // 2 为已关注，6 为互相关注；128 是拉黑，不能误显示为已关注。
+        this.following = attribute === 2 || attribute === 6;
+      }
+    } catch (e) {
+      // 关注状态拉取失败保持现状，不阻塞页面其他功能。
+    } finally {
+      if (!this.destroyed) this.followLoading = false;
     }
-    this.followLoading = false;
   }
 
   async actionFollow(): Promise<void> {
@@ -338,14 +451,23 @@ export struct VideoDetailPage {
     const next: boolean = !previous;
     this.following = next;
     this.followLoading = true;
-    const result: ActionResult = await BiliApi.modifyUserRelation(this.detail.upMid, next);
-    this.followLoading = false;
-    if (!result.ok) {
-      this.following = previous;
-      promptAction.showToast({ message: result.message });
-      return;
+    try {
+      const result: ActionResult = await BiliApi.modifyUserRelation(this.detail.upMid, next);
+      if (this.destroyed) return;
+      if (!result.ok) {
+        this.following = previous;
+        promptAction.showToast({ message: result.message });
+        return;
+      }
+      promptAction.showToast({ message: next ? '关注成功' : '已取消关注' });
+    } catch (e) {
+      if (!this.destroyed) {
+        this.following = previous;
+        promptAction.showToast({ message: '网络异常，请稍后重试' });
+      }
+    } finally {
+      if (!this.destroyed) this.followLoading = false;
     }
-    promptAction.showToast({ message: next ? '关注成功' : '已取消关注' });
   }
 
   private ensureLogin(): boolean {
@@ -359,68 +481,88 @@ export struct VideoDetailPage {
     if (!this.ensureLogin() || this.actionBusy) return;
     this.actionBusy = true;
     const next: boolean = !this.liked;
-    const result: ActionResult = await BiliApi.likeVideo(this.detail.aid, this.detail.bvid, next);
-    this.actionBusy = false;
-    if (!result.ok) {
-      promptAction.showToast({ message: result.message });
-      return;
+    try {
+      const result: ActionResult = await BiliApi.likeVideo(this.detail.aid, this.detail.bvid, next);
+      if (this.destroyed) return;
+      if (!result.ok) {
+        promptAction.showToast({ message: result.message });
+        return;
+      }
+      this.liked = next;
+      this.likeCount = Math.max(0, this.likeCount + (next ? 1 : -1));
+      promptAction.showToast({ message: next ? '点赞成功' : '已取消点赞' });
+    } catch (e) {
+      if (!this.destroyed) promptAction.showToast({ message: '网络异常，请稍后重试' });
+    } finally {
+      if (!this.destroyed) this.actionBusy = false;
     }
-    this.liked = next;
-    this.likeCount = Math.max(0, this.likeCount + (next ? 1 : -1));
-    promptAction.showToast({ message: next ? '点赞成功' : '已取消点赞' });
   }
 
   async actionFavorite(): Promise<void> {
     if (!this.ensureLogin() || this.actionBusy) return;
     this.actionBusy = true;
-    const folders: Array<FavoriteFolderItem> = await BiliApi.getFavoriteFoldersForVideo(this.detail.aid);
-    if (folders.length === 0) {
-      this.actionBusy = false;
-      promptAction.showToast({ message: '未找到可用的收藏夹' });
-      return;
+    try {
+      const folders: Array<FavoriteFolderItem> = await BiliApi.getFavoriteFoldersForVideo(this.detail.aid);
+      if (this.destroyed) return;
+      if (folders.length === 0) {
+        promptAction.showToast({ message: '未找到可用的收藏夹' });
+        return;
+      }
+      const selected: Array<number> = [];
+      for (let i: number = 0; i < folders.length; i++) {
+        if (folders[i].favorited) selected.push(folders[i].id);
+      }
+      const next: boolean = !this.favorited;
+      const addIds: Array<number> = next ? [folders[0].id] : [];
+      const deleteIds: Array<number> = next ? [] : selected;
+      if (!next && deleteIds.length === 0) deleteIds.push(folders[0].id);
+      const result: ActionResult = await BiliApi.modifyVideoFavorite(this.detail.aid, addIds, deleteIds);
+      if (this.destroyed) return;
+      if (!result.ok) {
+        promptAction.showToast({ message: result.message });
+        return;
+      }
+      this.favorited = next;
+      this.favoriteCount = Math.max(0, this.favoriteCount + (next ? 1 : -1));
+      promptAction.showToast({ message: next ? '收藏成功' : '已取消收藏' });
+    } catch (e) {
+      if (!this.destroyed) promptAction.showToast({ message: '网络异常，请稍后重试' });
+    } finally {
+      if (!this.destroyed) this.actionBusy = false;
     }
-    const selected: Array<number> = [];
-    for (let i: number = 0; i < folders.length; i++) {
-      if (folders[i].favorited) selected.push(folders[i].id);
-    }
-    const next: boolean = !this.favorited;
-    const addIds: Array<number> = next ? [folders[0].id] : [];
-    const deleteIds: Array<number> = next ? [] : selected;
-    if (!next && deleteIds.length === 0) deleteIds.push(folders[0].id);
-    const result: ActionResult = await BiliApi.modifyVideoFavorite(this.detail.aid, addIds, deleteIds);
-    this.actionBusy = false;
-    if (!result.ok) {
-      promptAction.showToast({ message: result.message });
-      return;
-    }
-    this.favorited = next;
-    this.favoriteCount = Math.max(0, this.favoriteCount + (next ? 1 : -1));
-    promptAction.showToast({ message: next ? '收藏成功' : '已取消收藏' });
   }
 
   async switchVideoPage(page: VideoPage, index: number): Promise<void> {
     if (page.cid <= 0 || page.cid === this.currentCid) return;
     const request: number = ++this.pageSwitchRequest;
     this.pageSwitchingCid = page.cid;
-    const qn: number = this.currentQuality > 0 ? this.currentQuality : 127;
-    const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(this.detail.aid, this.detail.bvid, page.cid, qn);
-    if (request !== this.pageSwitchRequest) return;
-    if (info === null || info.urls.length === 0) {
+    try {
+      const qn: number = this.currentQuality > 0 ? this.currentQuality : 127;
+      const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(this.detail.aid, this.detail.bvid, page.cid, qn);
+      // 已有更新的分 P 请求在途时，结果与标志复位都归更新的请求处理。
+      if (request !== this.pageSwitchRequest || this.destroyed) return;
       this.pageSwitchingCid = 0;
-      promptAction.showToast({ message: '该分 P 暂时无法播放' });
-      return;
+      if (info === null || info.urls.length === 0) {
+        promptAction.showToast({ message: '该分 P 暂时无法播放' });
+        return;
+      }
+      this.playUrl = info.url;
+      this.playUrls = info.urls;
+      this.playAudioUrls = info.audioUrls;
+      this.qualityOptions = info.qualities;
+      this.currentQuality = info.quality;
+      this.currentCid = page.cid;
+      this.currentPageIndex = index;
+      this.playerCollapseRaw = 0;
+      this.playerCollapse = 0;
+      // 所有播放源属性先更新，最后递增版本号，让播放器一次性读取同一分 P 的完整数据。
+      this.playerSourceVersion++;
+    } catch (e) {
+      if (request === this.pageSwitchRequest && !this.destroyed) {
+        this.pageSwitchingCid = 0;
+        promptAction.showToast({ message: '网络异常，切换分 P 失败' });
+      }
     }
-    this.playUrl = info.url;
-    this.playUrls = info.urls;
-    this.playAudioUrls = info.audioUrls;
-    this.qualityOptions = info.qualities;
-    this.currentQuality = info.quality;
-    this.currentCid = page.cid;
-    this.currentPageIndex = index;
-    this.pageSwitchingCid = 0;
-    this.playerCollapse = 0;
-    // 所有播放源属性先更新，最后递增版本号，让播放器一次性读取同一分 P 的完整数据。
-    this.playerSourceVersion++;
   }
 
   openCoinSheet(): void {
@@ -442,20 +584,26 @@ export struct VideoDetailPage {
       return;
     }
     this.actionBusy = true;
-    const result: ActionResult = await BiliApi.coinVideo(this.detail.aid, this.detail.bvid, multiply, this.coinWithLike);
-    this.actionBusy = false;
-    if (!result.ok) {
-      promptAction.showToast({ message: result.message });
-      return;
+    try {
+      const result: ActionResult = await BiliApi.coinVideo(this.detail.aid, this.detail.bvid, multiply, this.coinWithLike);
+      if (this.destroyed) return;
+      if (!result.ok) {
+        promptAction.showToast({ message: result.message });
+        return;
+      }
+      this.coinCountByMe += multiply;
+      this.coinCount += multiply;
+      if (this.coinWithLike && !this.liked) {
+        this.liked = true;
+        this.likeCount++;
+      }
+      this.coinSheetOpen = false;
+      promptAction.showToast({ message: '投币成功' });
+    } catch (e) {
+      if (!this.destroyed) promptAction.showToast({ message: '网络异常，请稍后重试' });
+    } finally {
+      if (!this.destroyed) this.actionBusy = false;
     }
-    this.coinCountByMe += multiply;
-    this.coinCount += multiply;
-    if (this.coinWithLike && !this.liked) {
-      this.liked = true;
-      this.likeCount++;
-    }
-    this.coinSheetOpen = false;
-    promptAction.showToast({ message: '投币成功' });
   }
 
   actionShare(): void {
@@ -487,13 +635,26 @@ export struct VideoDetailPage {
     this.replyLoading = true;
     if (reset) this.replyPrefetchCount = 0;
     const cursor: string = reset ? '' : this.replyCursor;
-    const data = await BiliApi.getReplies(this.detail.aid, 1, cursor, this.replySortMode);
-    this.replies = reset ? data.replies : this.mergeUniqueReplies(this.replies, data.replies);
-    this.replyCursor = data.cursor;
-    this.replyHasMore = data.hasMore;
-    this.replyLoading = false;
+    let loaded: boolean = false;
+    try {
+      const data = await BiliApi.getReplies(this.detail.aid, 1, cursor, this.replySortMode);
+      if (this.destroyed) return;
+      if (reset) {
+        this.replySource.reset(data.replies);
+      } else {
+        this.appendUniqueReplies(this.replySource, data.replies);
+      }
+      this.replyCursor = data.cursor;
+      this.replyHasMore = data.hasMore;
+      loaded = true;
+    } catch (e) {
+      // 评论加载失败保持现有列表，replyLoading 复位后空态/重试入口正常可用。
+    } finally {
+      if (!this.destroyed) this.replyLoading = false;
+    }
+    if (!loaded) return;
     // 某些视频首页只返回置顶/精选的少量评论，自动继续取页直到首屏够用。
-    if (this.replyHasMore && this.replies.length < 20 && this.replyPrefetchCount < 5) {
+    if (this.replyHasMore && this.replySource.totalCount() < 20 && this.replyPrefetchCount < 5) {
       this.replyPrefetchCount++;
       await this.loadReplies(false);
     }
@@ -506,7 +667,7 @@ export struct VideoDetailPage {
     this.replySortMode = mode;
     this.replyCursor = '';
     this.replyHasMore = true;
-    this.replies = [];
+    this.replySource.clear();
     this.replyListSavedOffset = -1;
     this.replyThreadOpen = false;
     this.loadReplies(true);
@@ -528,6 +689,31 @@ export struct VideoDetailPage {
     return result;
   }
 
+  /** 分页追加时按 rpid 去重，只把新楼层推进数据源。 */
+  private appendUniqueReplies(source: BasicDataSource<ReplyItem>, incoming: Array<ReplyItem>): void {
+    const existing: Set<number> = new Set<number>();
+    const all: Array<ReplyItem> = source.getAll();
+    for (let i: number = 0; i < all.length; i++) {
+      existing.add(all[i].rpid);
+    }
+    const fresh: Array<ReplyItem> = [];
+    for (let i: number = 0; i < incoming.length; i++) {
+      if (!existing.has(incoming[i].rpid)) {
+        existing.add(incoming[i].rpid);
+        fresh.push(incoming[i]);
+      }
+    }
+    source.append(fresh);
+  }
+
+  private rebuildThreadNameMap(): void {
+    this.threadNameMap.clear();
+    const all: Array<ReplyItem> = this.threadSource.getAll();
+    for (let i: number = 0; i < all.length; i++) {
+      this.threadNameMap.set(all[i].rpid, all[i].uname);
+    }
+  }
+
   async openReplyThread(item: ReplyItem): Promise<void> {
     try {
       this.replyListSavedOffset = Math.max(0, this.replyScroller.currentOffset().yOffset);
@@ -536,18 +722,19 @@ export struct VideoDetailPage {
     }
     this.replyThreadRoot = item;
     this.replyThreadOpen = true;
-    this.threadReplies = item.replies;
+    this.threadSource.reset(item.replies);
+    this.rebuildThreadNameMap();
     this.threadPage = 0;
     this.threadHasMore = true;
     this.threadPrefetchCount = 0;
     this.replyTargetRpid = item.rpid;
     this.replyTargetName = item.uname;
     // Scroller 会保留上一次回复详情的位置；新线程必须从原评论开始显示。
-    setTimeout(() => {
+    this.scheduleTimeout(() => {
       this.threadScroller.scrollToIndex(0, false, ScrollAlign.START);
     }, 0);
     await this.loadThreadReplies(true);
-    setTimeout(() => {
+    this.scheduleTimeout(() => {
       this.threadScroller.scrollToIndex(0, false, ScrollAlign.START);
     }, 0);
   }
@@ -558,13 +745,27 @@ export struct VideoDetailPage {
     }
     this.threadLoading = true;
     const page: number = reset ? 1 : this.threadPage + 1;
-    const data = await BiliApi.getReplyReplies(this.detail.aid, 1, this.replyThreadRoot.rpid, page);
-    this.threadReplies = reset ? this.mergeUniqueReplies([], data.replies) : this.mergeUniqueReplies(this.threadReplies, data.replies);
-    this.threadPage = page;
-    this.threadHasMore = data.hasMore;
-    this.threadLoading = false;
+    let loaded: boolean = false;
+    try {
+      const data = await BiliApi.getReplyReplies(this.detail.aid, 1, this.replyThreadRoot.rpid, page);
+      if (this.destroyed) return;
+      if (reset) {
+        this.threadSource.reset(this.mergeUniqueReplies([], data.replies));
+      } else {
+        this.appendUniqueReplies(this.threadSource, data.replies);
+      }
+      this.rebuildThreadNameMap();
+      this.threadPage = page;
+      this.threadHasMore = data.hasMore;
+      loaded = true;
+    } catch (e) {
+      // 回复加载失败保持现有内容，threadLoading 复位后可点击继续加载重试。
+    } finally {
+      if (!this.destroyed) this.threadLoading = false;
+    }
+    if (!loaded) return;
     const target: number = Math.min(20, Math.max(1, this.replyThreadRoot.count));
-    if (this.threadHasMore && this.threadReplies.length < target && this.threadPrefetchCount < 5) {
+    if (this.threadHasMore && this.threadSource.totalCount() < target && this.threadPrefetchCount < 5) {
       this.threadPrefetchCount++;
       await this.loadThreadReplies(false);
     }
@@ -574,28 +775,35 @@ export struct VideoDetailPage {
     const content: string = this.replyDraft.trim();
     if (content.length === 0 || this.replySending || !this.ensureLogin()) return;
     this.replySending = true;
-    const root: number = this.replyThreadOpen ? this.replyThreadRoot.rpid : 0;
-    const parent: number = this.replyThreadOpen ?
-      (this.replyTargetRpid > 0 ? this.replyTargetRpid : root) : 0;
-    const result: ActionResult = await BiliApi.addReply(this.detail.aid, 1, content, root, parent);
-    this.replySending = false;
-    if (!result.ok) {
-      promptAction.showToast({ message: result.message });
-      return;
-    }
-    this.replyDraft = '';
-    promptAction.showToast({ message: this.replyThreadOpen ? '回复成功' : '评论成功' });
-    if (this.replyThreadOpen) {
-      this.replyTargetRpid = this.replyThreadRoot.rpid;
-      this.replyTargetName = this.replyThreadRoot.uname;
-      this.threadReplies = [];
-      this.threadPage = 0;
-      this.threadHasMore = true;
-      await this.loadThreadReplies(true);
-    } else {
-      this.replyCursor = '';
-      this.replyHasMore = true;
-      await this.loadReplies(true);
+    try {
+      const root: number = this.replyThreadOpen ? this.replyThreadRoot.rpid : 0;
+      const parent: number = this.replyThreadOpen ?
+        (this.replyTargetRpid > 0 ? this.replyTargetRpid : root) : 0;
+      const result: ActionResult = await BiliApi.addReply(this.detail.aid, 1, content, root, parent);
+      if (this.destroyed) return;
+      if (!result.ok) {
+        promptAction.showToast({ message: result.message });
+        return;
+      }
+      this.replyDraft = '';
+      promptAction.showToast({ message: this.replyThreadOpen ? '回复成功' : '评论成功' });
+      if (this.replyThreadOpen) {
+        this.replyTargetRpid = this.replyThreadRoot.rpid;
+        this.replyTargetName = this.replyThreadRoot.uname;
+        this.threadSource.clear();
+        this.rebuildThreadNameMap();
+        this.threadPage = 0;
+        this.threadHasMore = true;
+        await this.loadThreadReplies(true);
+      } else {
+        this.replyCursor = '';
+        this.replyHasMore = true;
+        await this.loadReplies(true);
+      }
+    } catch (e) {
+      if (!this.destroyed) promptAction.showToast({ message: '网络异常，发送失败' });
+    } finally {
+      if (!this.destroyed) this.replySending = false;
     }
   }
 
@@ -603,18 +811,24 @@ export struct VideoDetailPage {
     const message: string = this.danmakuDraft.trim();
     if (message.length === 0 || this.danmakuSending || !this.ensureLogin()) return;
     this.danmakuSending = true;
-    const result: ActionResult = await BiliApi.sendDanmaku(this.detail.aid, this.detail.bvid,
-      this.currentCid, this.videoProgressSeconds, message);
-    this.danmakuSending = false;
-    if (!result.ok) {
-      promptAction.showToast({ message: result.message });
-      return;
+    try {
+      const result: ActionResult = await BiliApi.sendDanmaku(this.detail.aid, this.detail.bvid,
+        this.currentCid, this.videoProgressSeconds, message);
+      if (this.destroyed) return;
+      if (!result.ok) {
+        promptAction.showToast({ message: result.message });
+        return;
+      }
+      this.danmakuDraft = '';
+      this.localDanmakuText = message;
+      this.localDanmakuToken++;
+      if (!this.danmakuOn) this.danmakuOn = true;
+      promptAction.showToast({ message: '弹幕发送成功' });
+    } catch (e) {
+      if (!this.destroyed) promptAction.showToast({ message: '网络异常，发送失败' });
+    } finally {
+      if (!this.destroyed) this.danmakuSending = false;
     }
-    this.danmakuDraft = '';
-    this.localDanmakuText = message;
-    this.localDanmakuToken++;
-    if (!this.danmakuOn) this.danmakuOn = true;
-    promptAction.showToast({ message: '弹幕发送成功' });
   }
 
   @Builder
@@ -835,7 +1049,8 @@ export struct VideoDetailPage {
               .width('100%')
               .padding({ top: 12, bottom: 12 })
           } else {
-            ForEach(this.related, (item: VideoItem) => {
+            // Scroll 内嵌无法懒加载，只渲染前 6 条控制嵌套滚动的一次性布局开销。
+            ForEach(this.related.slice(0, 6), (item: VideoItem) => {
               this.RelatedRow(item)
             }, (item: VideoItem) => item.bvid + String(item.aid))
           }
@@ -850,12 +1065,6 @@ export struct VideoDetailPage {
     .height('100%')
     .scrollBar(BarState.Off)
     .align(Alignment.Top)
-    .onScrollStart(() => {
-      this.contentGestureActive = true;
-    })
-    .onScrollStop(() => {
-      this.contentGestureActive = false;
-    })
     .onScrollFrameBegin((offset: number, state: ScrollState) => {
       return { offsetRemain: this.onContentScrollFrame(offset, this.introScroller, state) };
     })
@@ -873,18 +1082,12 @@ export struct VideoDetailPage {
           .fontSize(11)
           .fontColor('#9499A0')
       }
-      Image($r('app.media.ic_dislike'))
-        .width(17)
-        .height(17)
-        .fillColor('#9499A0')
-      Image($r('app.media.ic_share'))
-        .width(17)
-        .height(17)
-        .fillColor('#9499A0')
-      Image($r('app.media.ic_comment'))
-        .width(17)
-        .height(17)
-        .fillColor('#9499A0')
+      ForEach(this.replyActionIcons, (icon: Resource, index: number) => {
+        Image(icon)
+          .width(17)
+          .height(17)
+          .fillColor('#9499A0')
+      }, (icon: Resource, index: number) => String(index))
       Blank()
       Image($r('app.media.ic_more'))
         .width(17)
@@ -1065,10 +1268,8 @@ export struct VideoDetailPage {
 
   threadParentName(item: ReplyItem): string {
     if (item.parentRpid === this.replyThreadRoot.rpid) return this.replyThreadRoot.uname;
-    for (let i: number = 0; i < this.threadReplies.length; i++) {
-      if (this.threadReplies[i].rpid === item.parentRpid) return this.threadReplies[i].uname;
-    }
-    return '上一条回复';
+    const name: string | undefined = this.threadNameMap.get(item.parentRpid);
+    return name !== undefined ? name : '上一条回复';
   }
 
   @Builder
@@ -1153,6 +1354,22 @@ export struct VideoDetailPage {
     .border({ width: { top: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
   }
 
+  /** 当前表情包下的表情；下标越界（时序竞争）时返回空列表而不是崩溃。 */
+  private currentEmotes(): Array<BiliEmote> {
+    if (this.emotePackageIndex < 0 || this.emotePackageIndex >= this.emotePackages.length) return [];
+    return this.emotePackages[this.emotePackageIndex].emotes;
+  }
+
+  /** 表情名去方括号用于面板展示；结果缓存避免每格每次渲染重复字符串处理。 */
+  private emoteLabel(text: string): string {
+    let label: string | undefined = this.emoteLabelCache.get(text);
+    if (label === undefined) {
+      label = text.replace('[', '').replace(']', '');
+      this.emoteLabelCache.set(text, label);
+    }
+    return label;
+  }
+
   @Builder
   EmotePanel() {
     Column() {
@@ -1166,14 +1383,14 @@ export struct VideoDetailPage {
           .fontSize(13).fontColor('#9499A0').width('100%').height(90).textAlign(TextAlign.Center)
       } else {
         Grid() {
-          ForEach(this.emotePackages[this.emotePackageIndex].emotes, (item: BiliEmote) => {
+          ForEach(this.currentEmotes(), (item: BiliEmote) => {
             GridItem() {
               Column({ space: 2 }) {
                 Image(item.url)
                   .width(item.size > 1 ? 46 : 34)
                   .height(item.size > 1 ? 46 : 34)
                   .objectFit(ImageFit.Contain)
-                Text(item.text.replace('[', '').replace(']', ''))
+                Text(this.emoteLabel(item.text))
                   .fontSize(8)
                   .fontColor('#9499A0')
                   .maxLines(1)
@@ -1218,6 +1435,33 @@ export struct VideoDetailPage {
     .border({ width: { top: 0.5 }, color: this.isDark ? '#333333' : '#E7E9EC' })
   }
 
+  // 「加载更多」底部块：loading / 继续加载 / 到底啦 三分支，评论与回复详情共用。
+  @Builder
+  LoadMoreFooter(options: LoadMoreFooterOptions) {
+    Row() {
+      if (options.loading) {
+        LoadingProgress()
+          .width(22)
+          .height(22)
+          .color(this.accent)
+      } else if (options.hasMore) {
+        Text(options.moreText)
+          .fontSize(12)
+          .fontColor(this.accent)
+      } else {
+        Text(options.endText)
+          .fontSize(12)
+          .fontColor('#9499A0')
+      }
+    }
+    .width('100%')
+    .justifyContent(FlexAlign.Center)
+    .padding({ top: 12, bottom: 16 })
+    .onClick(() => {
+      options.onTap();
+    })
+  }
+
   @Builder
   ReplyThreadView() {
     Column() {
@@ -1259,33 +1503,20 @@ export struct VideoDetailPage {
           }
           .width('100%')
         }
-        ForEach(this.threadReplies, (item: ReplyItem) => {
+        LazyForEach(this.threadSource, (item: ReplyItem) => {
           ListItem() {
             this.ReplyItemRow(item, false)
           }
         }, (item: ReplyItem) => String(item.rpid))
         ListItem() {
-          Row() {
-            if (this.threadLoading) {
-            LoadingProgress()
-              .width(22)
-              .height(22)
-              .color(this.accent)
-            } else if (this.threadHasMore) {
-              Text('继续加载更多回复')
-                .fontSize(12)
-                .fontColor(this.accent)
-            } else {
-              Text('—— 回复到底啦 ——')
-                .fontSize(12)
-                .fontColor('#9499A0')
-            }
-          }
-          .width('100%')
-          .justifyContent(FlexAlign.Center)
-          .padding({ top: 12, bottom: 16 })
-          .onClick(() => {
-            if (this.threadHasMore && !this.threadLoading) this.loadThreadReplies(false);
+          this.LoadMoreFooter({
+            loading: this.threadLoading,
+            hasMore: this.threadHasMore,
+            moreText: '继续加载更多回复',
+            endText: '—— 回复到底啦 ——',
+            onTap: () => {
+              if (this.threadHasMore && !this.threadLoading) this.loadThreadReplies(false);
+            },
           })
         }
       }
@@ -1293,12 +1524,7 @@ export struct VideoDetailPage {
       .width('100%')
       .padding({ left: 12, right: 12 })
       .scrollBar(BarState.Off)
-      .onScrollStart(() => {
-        this.contentGestureActive = true;
-      })
-      .onScrollStop(() => {
-        this.contentGestureActive = false;
-      })
+      .cachedCount(3)
       .onReachEnd(() => {
         this.loadThreadReplies(false);
       })
@@ -1319,7 +1545,7 @@ export struct VideoDetailPage {
     } else {
       Column() {
         this.ReplySortBar()
-        if (this.replies.length === 0) {
+        if (this.replySource.isEmpty()) {
           LoadingView({
             loading: this.replyLoading,
             empty: !this.replyLoading,
@@ -1330,33 +1556,20 @@ export struct VideoDetailPage {
           })
         } else {
           List({ scroller: this.replyScroller }) {
-            ForEach(this.replies, (item: ReplyItem) => {
+            LazyForEach(this.replySource, (item: ReplyItem) => {
               ListItem() {
                 this.ReplyItemRow(item, true)
               }
             }, (item: ReplyItem) => String(item.rpid))
             ListItem() {
-              Row() {
-                if (this.replyLoading) {
-                  LoadingProgress()
-                    .width(22)
-                    .height(22)
-                    .color(this.accent)
-                } else if (!this.replyHasMore) {
-                  Text('—— 评论到底啦 ——')
-                    .fontSize(12)
-                    .fontColor('#9499A0')
-                } else {
-                  Text('继续加载更多评论')
-                    .fontSize(12)
-                    .fontColor(this.accent)
-                }
-              }
-              .width('100%')
-              .justifyContent(FlexAlign.Center)
-              .padding({ top: 12, bottom: 16 })
-              .onClick(() => {
-                if (this.replyHasMore && !this.replyLoading) this.loadReplies(false);
+              this.LoadMoreFooter({
+                loading: this.replyLoading,
+                hasMore: this.replyHasMore,
+                moreText: '继续加载更多评论',
+                endText: '—— 评论到底啦 ——',
+                onTap: () => {
+                  if (this.replyHasMore && !this.replyLoading) this.loadReplies(false);
+                },
               })
             }
           }
@@ -1364,12 +1577,7 @@ export struct VideoDetailPage {
           .width('100%')
           .padding({ left: 12, right: 12 })
           .scrollBar(BarState.Off)
-          .onScrollStart(() => {
-            this.contentGestureActive = true;
-          })
-          .onScrollStop(() => {
-            this.contentGestureActive = false;
-          })
+          .cachedCount(3)
           .onScrollFrameBegin((offset: number, state: ScrollState) => {
             return { offsetRemain: this.onContentScrollFrame(offset, this.replyScroller, state) };
           })
@@ -1443,69 +1651,6 @@ export struct VideoDetailPage {
     .onClick(() => {
       const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
       AppNavStack.replacePathByName(NAV_VIDEO_DETAIL, param);
-    })
-  }
-
-  @Builder
-  RelatedTab() {
-    Column() {
-      Row() {
-        Text('相关推荐')
-          .fontSize(14)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-      }
-      .width('100%')
-      .padding({ left: 14, right: 14, top: 10, bottom: 6 })
-
-      if (this.related.length === 0) {
-        LoadingView({
-          loading: false,
-          empty: true,
-          emptyText: '暂无相关视频',
-          onRetry: () => {
-            this.init();
-          },
-        })
-      } else {
-        List() {
-          ForEach(this.related, (item: VideoItem) => {
-            ListItem() {
-              this.RelatedRow(item)
-            }
-          }, (item: VideoItem) => item.bvid + String(item.aid))
-        }
-        .width('100%')
-        .height('100%')
-        .padding({ left: 14, right: 14 })
-        .scrollBar(BarState.Off)
-      }
-    }
-    .width('100%')
-    .height('100%')
-  }
-
-  // 自定义 tabBar：选中加粗 + 主题色 + 底部主题色短下划线
-  @Builder
-  DetailTabBar(label: string, index: number) {
-    Column({ space: 4 }) {
-      Text(label)
-        .fontSize(15)
-        .fontWeight(this.tab === index ? FontWeight.Bold : FontWeight.Normal)
-        .fontColor(this.tab === index ? this.accent : '#9499A0')
-      Row()
-        .width(22)
-        .height(2)
-        .borderRadius(1)
-        .backgroundColor(this.tab === index ? this.accent : '#00000000')
-    }
-    .width('100%')
-    .height(44)
-    .justifyContent(FlexAlign.Center)
-    .onClick(() => {
-      // 由 TabsController 驱动，保留系统内容切换动画；直接写 index 会瞬切。
-      this.tabsController.changeIndex(index);
-      if (index === 0) this.replyThreadOpen = false;
     })
   }
 
@@ -1607,30 +1752,26 @@ export struct VideoDetailPage {
     .clip(true)
   }
 
+  // 投币选项卡片：仅中间硬币图案、宽度与可选状态不同。
   @Builder
-  CompactPlayerBar() {
-    Row({ space: 8 }) {
-      Blank()
-      Image($r('app.media.bilix_logo_tv'))
-        .width(26)
-        .height(26)
-        .fillColor('#FFFFFF')
-      Text('立即播放')
-        .fontSize(17)
-        .fontColor('#FFFFFF')
-      Blank()
-      Image($r('app.media.ic_more'))
-        .width(22)
-        .height(22)
-        .fillColor('#FFFFFF')
-        .margin({ right: 16 })
+  CoinOption(coinImage: Resource, imageWidth: number, choice: number, enabled: boolean) {
+    Stack({ alignContent: Alignment.Center }) {
+      Image($r('app.media.bili_coin_box'))
+        .width('100%')
+        .height('100%')
+      Image(coinImage)
+        .width(imageWidth)
+        .height(94)
+        .objectFit(ImageFit.Contain)
     }
-    .width('100%')
-    .height(64)
-    .backgroundColor('#0B0B0D')
+    .layoutWeight(1)
+    .height(124)
+    .padding(8)
+    .borderRadius(14)
+    .border({ width: this.coinChoice === choice ? 2 : 0.5, color: this.coinChoice === choice ? this.accent : '#33808080' })
+    .backgroundColor(this.coinChoice === choice ? colorWithAlpha(this.accent, '14') : '#0A808080')
     .onClick(() => {
-      this.replyThreadOpen = false;
-      this.tab = 0;
+      if (enabled) this.coinChoice = choice;
     })
   }
 
@@ -1665,42 +1806,8 @@ export struct VideoDetailPage {
           .fontColor('#9499A0')
           .width('100%')
         Row({ space: 12 }) {
-          Stack({ alignContent: Alignment.Center }) {
-            Image($r('app.media.bili_coin_box'))
-              .width('100%')
-              .height('100%')
-            Image($r('app.media.bili_coin_one'))
-              .width(64)
-              .height(94)
-              .objectFit(ImageFit.Contain)
-          }
-          .layoutWeight(1)
-          .height(124)
-          .padding(8)
-          .borderRadius(14)
-          .border({ width: this.coinChoice === 1 ? 2 : 0.5, color: this.coinChoice === 1 ? this.accent : '#33808080' })
-          .backgroundColor(this.coinChoice === 1 ? colorWithAlpha(this.accent, '14') : '#0A808080')
-          .onClick(() => {
-            this.coinChoice = 1;
-          })
-          Stack({ alignContent: Alignment.Center }) {
-            Image($r('app.media.bili_coin_box'))
-              .width('100%')
-              .height('100%')
-            Image($r('app.media.bili_coin_two'))
-              .width(88)
-              .height(94)
-              .objectFit(ImageFit.Contain)
-          }
-          .layoutWeight(1)
-          .height(124)
-          .padding(8)
-          .borderRadius(14)
-          .border({ width: this.coinChoice === 2 ? 2 : 0.5, color: this.coinChoice === 2 ? this.accent : '#33808080' })
-          .backgroundColor(this.coinChoice === 2 ? colorWithAlpha(this.accent, '14') : '#0A808080')
-          .onClick(() => {
-            if (this.coinCountByMe === 0) this.coinChoice = 2;
-          })
+          this.CoinOption($r('app.media.bili_coin_one'), 64, 1, true)
+          this.CoinOption($r('app.media.bili_coin_two'), 88, 2, this.coinCountByMe === 0)
         }
         .width('100%')
         Row({ space: 8 }) {
@@ -1737,6 +1844,11 @@ export struct VideoDetailPage {
     }
     .width('100%')
     .height('100%')
+  }
+
+  /** 模糊底图用小尺寸封面，借助 B 站图片缩略参数降低下载与解码开销。 */
+  private coverThumb(url: string): string {
+    return url.startsWith('http') ? url + '@480w_270h_1c.webp' : url;
   }
 
   build() {
@@ -1790,7 +1902,7 @@ export struct VideoDetailPage {
             })
           } else {
             Stack({ alignContent: Alignment.Center }) {
-              Image(this.detail.cover)
+              Image(this.coverThumb(this.detail.cover))
                 .width('100%')
                 .height('100%')
                 .objectFit(ImageFit.Cover)
@@ -1873,6 +1985,9 @@ export struct VideoDetailPage {
     .height('100%')
     .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    .onAreaChange(() => {
+      this.refreshScreenSize();
+    })
   }
 }
 
@@ -1891,6 +2006,29 @@ struct ActionItemView {
   @StorageProp('isDarkMode') isDark: boolean = false;
   @State iconScale: number = 1;
   @State flash: boolean = false;
+  private destroyed: boolean = false;
+  private timers: Set<number> = new Set<number>();
+
+  aboutToAppear(): void {
+    this.destroyed = false;
+  }
+
+  aboutToDisappear(): void {
+    this.destroyed = true;
+    this.timers.forEach((id: number) => {
+      clearTimeout(id);
+    });
+    this.timers.clear();
+  }
+
+  private scheduleTimeout(callback: () => void, delayMs: number): void {
+    const id: number = setTimeout(() => {
+      this.timers.delete(id);
+      if (this.destroyed) return;
+      callback();
+    }, delayMs);
+    this.timers.add(id);
+  }
 
   build() {
     Column({ space: 4 }) {
@@ -1911,12 +2049,12 @@ struct ActionItemView {
       animateTo({ curve: curves.springMotion(0.6, 0.8) }, () => {
         this.iconScale = 1.28;
       });
-      setTimeout(() => {
+      this.scheduleTimeout(() => {
         animateTo({ curve: curves.springMotion(0.6, 0.8) }, () => {
           this.iconScale = 1;
         });
       }, 120);
-      setTimeout(() => {
+      this.scheduleTimeout(() => {
         this.flash = false;
       }, 420);
       this.onTap();

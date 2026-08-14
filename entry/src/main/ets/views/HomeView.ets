@@ -5,37 +5,68 @@ import { VideoItem } from '../model/Models';
 import { BiliApi } from '../api/BiliApi';
 import { VideoCard } from '../components/VideoCard';
 import { LoadingView } from '../components/LoadingView';
+import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { Immersive } from '../common/Immersive';
 import { AppTheme } from '../common/AppTheme';
 import { UserStore } from '../common/UserStore';
+import { BasicDataSource } from '../common/BasicDataSource';
 import { LiveRoomItem } from '../model/LiveModels';
 import { LiveRoomCard } from '../components/LiveRoomCard';
+
+/** 悬浮频道切换条：单独订阅 headerFade，滚动逐帧淡出时不再带动整个 HomeView 重建。 */
+@Component
+struct FloatingSubTabs {
+  @StorageProp('headerFade') fade: number = 0;
+  @BuilderParam content: () => void;
+
+  build() {
+    Row() {
+      this.content()
+      Blank()
+    }
+    .width('100%')
+    .padding({ left: 10, right: 10 })
+    .margin({ top: Immersive.statusBarHeight() + 50 })
+    .opacity(1 - this.fade)
+    .translate({ y: -12 * this.fade })
+    .animation({ duration: 160, curve: Curve.EaseOut })
+    .hitTestBehavior(this.fade > 0.9 ? HitTestMode.None : HitTestMode.Default)
+  }
+}
 
 @Component
 export struct HomeView {
   @State tab: number = 0; // 0 推荐 / 1 热门 / 2 直播
   @State visualTab: number = 0;
-  @State recList: Array<VideoItem> = [];
-  @State hotList: Array<VideoItem> = [];
-  @State liveList: Array<LiveRoomItem> = [];
-  @State loading: boolean = true;
-  @State errorText: string = '';
   @State refreshing: boolean = false;
   @State refreshStatus: RefreshStatus = RefreshStatus.Inactive;
   @State loadingMore: boolean = false;
+  // 每频道独立的分页游标 / 错误文案 / 到底标记，互不串台
   @State recIdx: number = 0;
   @State hotPage: number = 1;
   @State livePage: number = 1;
+  @State recError: string = '';
+  @State hotError: string = '';
+  @State liveError: string = '';
+  @State recHasMore: boolean = true;
+  @State hotHasMore: boolean = true;
+  @State liveHasMore: boolean = true;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
   @StorageProp('glassLevel') glassLevel: number = 1;
-  @StorageProp('headerFade') fade: number = 0;
   @StorageProp('loginVersion') @Watch('onLoginChanged') loginVersion: number = 0;
   private tabsController: TabsController = new TabsController();
   private recScroller: Scroller = new Scroller();
   private hotScroller: Scroller = new Scroller();
   private liveScroller: Scroller = new Scroller();
+  private recSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
+  private hotSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
+  private liveSource: BasicDataSource<LiveRoomItem> = new BasicDataSource<LiveRoomItem>();
+  // 防重入：刷新 / 触底 / 切频道并发触发的重复请求直接丢弃
+  private recFetching: boolean = false;
+  private hotFetching: boolean = false;
+  private liveFetching: boolean = false;
 
   async aboutToAppear(): Promise<void> {
     // 首屏必须等登录 Cookie 从 Preferences 恢复，否则会先缓存一页游客公共推荐。
@@ -44,75 +75,174 @@ export struct HomeView {
   }
 
   async onLoginChanged(): Promise<void> {
-    this.loading = true;
     await UserStore.ensureLoaded();
     await this.loadRecommend(true);
   }
 
-  async loadRecommend(reset: boolean): Promise<void> {
-    if (reset) {
-      this.recIdx = 0;
+  /** 追加前按 key 去重：B 站推荐/热门可能返回已在列表中的视频，避免 LazyForEach 重复 key。 */
+  private dedupVideos(source: BasicDataSource<VideoItem>, incoming: Array<VideoItem>): Array<VideoItem> {
+    const seen: Set<string> = new Set<string>();
+    const base: Array<VideoItem> = source.getAll();
+    for (let i: number = 0; i < base.length; i++) {
+      seen.add(base[i].bvid.length > 0 ? base[i].bvid : 'a' + String(base[i].aid));
     }
-    this.errorText = '';
-    const idx: number = this.recIdx;
-    const list: Array<VideoItem> = await BiliApi.getRecommend(idx);
-    if (list.length === 0 && this.recList.length === 0) {
-      this.loading = false;
-      this.errorText = '推荐接口请求失败，请检查网络后重试';
+    const out: Array<VideoItem> = [];
+    for (let i: number = 0; i < incoming.length; i++) {
+      const key: string = incoming[i].bvid.length > 0 ? incoming[i].bvid : 'a' + String(incoming[i].aid);
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push(incoming[i]);
+      }
+    }
+    return out;
+  }
+
+  private dedupLive(source: BasicDataSource<LiveRoomItem>, incoming: Array<LiveRoomItem>): Array<LiveRoomItem> {
+    const seen: Set<number> = new Set<number>();
+    const base: Array<LiveRoomItem> = source.getAll();
+    for (let i: number = 0; i < base.length; i++) {
+      seen.add(base[i].roomId);
+    }
+    const out: Array<LiveRoomItem> = [];
+    for (let i: number = 0; i < incoming.length; i++) {
+      if (!seen.has(incoming[i].roomId)) {
+        seen.add(incoming[i].roomId);
+        out.push(incoming[i]);
+      }
+    }
+    return out;
+  }
+
+  async loadRecommend(reset: boolean): Promise<void> {
+    if (this.recFetching || (!reset && !this.recHasMore)) {
       return;
     }
-    this.recIdx = idx + list.length;
-    this.recList = reset ? list : this.recList.concat(list);
-    this.loading = false;
+    this.recFetching = true;
+    try {
+      if (reset) {
+        this.recIdx = 0;
+        this.recHasMore = true;
+      }
+      this.recError = '';
+      const idx: number = this.recIdx;
+      const list: Array<VideoItem> = await BiliApi.getRecommend(idx);
+      if (list.length === 0) {
+        this.recHasMore = false;
+        if (this.recSource.isEmpty()) {
+          this.recError = '推荐接口请求失败，请检查网络后重试';
+        }
+        return;
+      }
+      this.recIdx = idx + list.length;
+      if (reset) {
+        this.recSource.reset(list);
+      } else {
+        this.recSource.append(this.dedupVideos(this.recSource, list));
+      }
+    } finally {
+      this.recFetching = false;
+    }
   }
 
   async loadHot(reset: boolean): Promise<void> {
-    if (reset) {
-      this.hotPage = 1;
-    }
-    this.errorText = '';
-    const pn: number = this.hotPage;
-    const list: Array<VideoItem> = await BiliApi.getHot(pn, 20);
-    if (list.length === 0 && this.hotList.length === 0) {
-      this.loading = false;
-      this.errorText = '热门接口请求失败，请检查网络后重试';
+    if (this.hotFetching || (!reset && !this.hotHasMore)) {
       return;
     }
-    this.hotPage = pn + 1;
-    this.hotList = reset ? list : this.hotList.concat(list);
-    this.loading = false;
+    this.hotFetching = true;
+    try {
+      if (reset) {
+        this.hotPage = 1;
+        this.hotHasMore = true;
+      }
+      this.hotError = '';
+      const pn: number = this.hotPage;
+      const list: Array<VideoItem> = await BiliApi.getHot(pn, 20);
+      if (list.length === 0) {
+        this.hotHasMore = false;
+        if (this.hotSource.isEmpty()) {
+          this.hotError = '热门接口请求失败，请检查网络后重试';
+        }
+        return;
+      }
+      this.hotPage = pn + 1;
+      if (list.length < 20) {
+        this.hotHasMore = false;
+      }
+      if (reset) {
+        this.hotSource.reset(list);
+      } else {
+        this.hotSource.append(this.dedupVideos(this.hotSource, list));
+      }
+    } finally {
+      this.hotFetching = false;
+    }
   }
 
   async loadLive(reset: boolean): Promise<void> {
-    if (reset) this.livePage = 1;
-    this.errorText = '';
-    const page: number = this.livePage;
-    const list: Array<LiveRoomItem> = await BiliApi.getLiveRooms(page, 20);
-    if (list.length === 0 && this.liveList.length === 0) {
-      this.loading = false;
-      this.errorText = '直播列表请求失败，请检查网络后重试';
+    if (this.liveFetching || (!reset && !this.liveHasMore)) {
       return;
     }
-    this.livePage = page + 1;
-    this.liveList = reset ? list : this.liveList.concat(list);
-    this.loading = false;
+    this.liveFetching = true;
+    try {
+      if (reset) {
+        this.livePage = 1;
+        this.liveHasMore = true;
+      }
+      this.liveError = '';
+      const page: number = this.livePage;
+      const list: Array<LiveRoomItem> = await BiliApi.getLiveRooms(page, 20);
+      if (list.length === 0) {
+        this.liveHasMore = false;
+        if (this.liveSource.isEmpty()) {
+          this.liveError = '直播列表请求失败，请检查网络后重试';
+        }
+        return;
+      }
+      this.livePage = page + 1;
+      if (list.length < 20) {
+        this.liveHasMore = false;
+      }
+      if (reset) {
+        this.liveSource.reset(list);
+      } else {
+        this.liveSource.append(this.dedupLive(this.liveSource, list));
+      }
+    } finally {
+      this.liveFetching = false;
+    }
+  }
+
+  /** 按频道分发加载：三个频道的刷新/触底入口统一走这里。 */
+  private loadChannel(feedTab: number, reset: boolean): Promise<void> {
+    if (feedTab === 0) {
+      return this.loadRecommend(reset);
+    }
+    if (feedTab === 1) {
+      return this.loadHot(reset);
+    }
+    return this.loadLive(reset);
+  }
+
+  private channelError(feedTab: number): string {
+    return feedTab === 0 ? this.recError : (feedTab === 1 ? this.hotError : this.liveError);
+  }
+
+  private channelHasMore(feedTab: number): boolean {
+    return feedTab === 0 ? this.recHasMore : (feedTab === 1 ? this.hotHasMore : this.liveHasMore);
+  }
+
+  private channelEmpty(feedTab: number): boolean {
+    return feedTab === 0 ? this.recSource.isEmpty() : (feedTab === 1 ? this.hotSource.isEmpty() : this.liveSource.isEmpty());
   }
 
   onRefresh(feedTab: number): void {
     this.refreshing = true;
-    if (feedTab === 0) {
-      this.loadRecommend(true).finally(() => {
+    this.loadChannel(feedTab, true)
+      .catch(() => {
+      })
+      .finally(() => {
         this.refreshing = false;
       });
-    } else if (feedTab === 1) {
-      this.loadHot(true).finally(() => {
-        this.refreshing = false;
-      });
-    } else {
-      this.loadLive(true).finally(() => {
-        this.refreshing = false;
-      });
-    }
   }
 
   onReachEnd(feedTab: number): void {
@@ -120,19 +250,12 @@ export struct HomeView {
       return;
     }
     this.loadingMore = true;
-    if (feedTab === 0) {
-      this.loadRecommend(false).finally(() => {
+    this.loadChannel(feedTab, false)
+      .catch(() => {
+      })
+      .finally(() => {
         this.loadingMore = false;
       });
-    } else if (feedTab === 1) {
-      this.loadHot(false).finally(() => {
-        this.loadingMore = false;
-      });
-    } else {
-      this.loadLive(false).finally(() => {
-        this.loadingMore = false;
-      });
-    }
   }
 
   @Builder
@@ -158,20 +281,23 @@ export struct HomeView {
     Row({ space: 2 }) {
       this.SubTabItem('推荐', 0, () => {
         this.tabsController.changeIndex(0);
-        if (this.recList.length === 0) {
-          this.loadRecommend(true);
+        if (this.recSource.isEmpty()) {
+          this.loadRecommend(true).catch(() => {
+          });
         }
       })
       this.SubTabItem('热门', 1, () => {
         this.tabsController.changeIndex(1);
-        if (this.hotList.length === 0) {
-          this.loadHot(true);
+        if (this.hotSource.isEmpty()) {
+          this.loadHot(true).catch(() => {
+          });
         }
       })
       this.SubTabItem('直播', 2, () => {
         this.tabsController.changeIndex(2);
-        if (this.liveList.length === 0) {
-          this.loadLive(true);
+        if (this.liveSource.isEmpty()) {
+          this.loadLive(true).catch(() => {
+          });
         }
       })
     }
@@ -217,29 +343,45 @@ export struct HomeView {
   }
 
   @Builder
-  LoadMoreFooter() {
-    Row({ space: 8 }) {
-      if (this.loadingMore) {
-        LoadingProgress()
-          .width(20)
-          .height(20)
-          .color(this.accent)
-        Text('加载中…')
-          .fontSize(12)
-          .fontColor(this.isDark ? '#D0D0D0' : '#676B72')
-      }
-    }
-    .width('100%')
-    .height(this.loadingMore ? 48 : 1)
-    .justifyContent(FlexAlign.Center)
-    .alignItems(VerticalAlign.Center)
+  VideoFeedFooter(feedTab: number) {
+    LoadMoreFooter({
+      loading: this.loadingMore,
+      hasMore: this.channelHasMore(feedTab),
+      moreText: '',
+      endText: '—— 到底啦 ——',
+      loadingText: '加载中…',
+      fixedHeight: this.loadingMore || !this.channelHasMore(feedTab) ? 48 : 1,
+    })
+  }
+
+  @Builder
+  RecFooter() {
+    this.VideoFeedFooter(0)
+  }
+
+  @Builder
+  HotFooter() {
+    this.VideoFeedFooter(1)
+  }
+
+  @Builder
+  LiveFooter() {
+    LoadMoreFooter({
+      loading: this.loadingMore,
+      hasMore: this.liveHasMore,
+      moreText: '',
+      endText: '—— 到底啦 ——',
+      loadingText: '加载中…',
+      fixedHeight: this.loadingMore || !this.liveHasMore ? 48 : 1,
+    })
   }
 
   @Builder
   VideoFeedList(feedTab: number) {
     List({ space: 10, scroller: feedTab === 0 ? this.recScroller : this.hotScroller }) {
-      ListItemGroup({ footer: this.LoadMoreFooter() }) {
-        ForEach(feedTab === 0 ? this.recList : this.hotList, (item: VideoItem) => {
+      // footer 挂在 ListItemGroup 上：双列 lanes 下保持整宽居中
+      ListItemGroup({ footer: feedTab === 0 ? this.RecFooter : this.HotFooter }) {
+        LazyForEach(feedTab === 0 ? this.recSource : this.hotSource, (item: VideoItem) => {
           ListItem() {
             VideoCard({ video: item })
           }
@@ -249,6 +391,7 @@ export struct HomeView {
     .width('100%')
     .height('100%')
     .lanes(2, 10)
+    .cachedCount(3)
     // 首屏卡片默认位于搜索栏下方。这个间距属于可滚动内容，滚走后不会因头栏重新出现而顶动卡片。
     .contentStartOffset(Immersive.statusBarHeight() + 94)
     .contentEndOffset(Immersive.bottomInset() + 56)
@@ -265,15 +408,24 @@ export struct HomeView {
   @Builder
   LiveFeedList() {
     List({ space: 10, scroller: this.liveScroller }) {
-      ListItemGroup({ footer: this.LoadMoreFooter() }) {
-        ForEach(this.liveList, (item: LiveRoomItem) => {
-          ListItem() {
-            LiveRoomCard({ room: item })
-          }
-        }, (item: LiveRoomItem) => String(item.roomId))
+      LazyForEach(this.liveSource, (item: LiveRoomItem) => {
+        ListItem() {
+          LiveRoomCard({ room: item })
+        }
+      }, (item: LiveRoomItem) => String(item.roomId))
+      ListItem() {
+        LoadMoreFooter({
+          loading: this.loadingMore,
+          hasMore: this.liveHasMore,
+          moreText: '',
+          endText: '—— 到底啦 ——',
+          loadingText: '加载中…',
+          fixedHeight: this.loadingMore || !this.liveHasMore ? 48 : 1,
+        })
       }
     }
     .width('100%').height('100%').lanes(2, 10)
+    .cachedCount(3)
     .contentStartOffset(Immersive.statusBarHeight() + 94)
     .contentEndOffset(Immersive.bottomInset() + 56)
     .padding({ left: 10, right: 10 }).scrollBar(BarState.Off)
@@ -283,21 +435,18 @@ export struct HomeView {
 
   @Builder
   FeedPage(feedTab: number) {
-    if (this.errorText.length > 0 && (feedTab === 0 ? this.recList.length === 0 :
-      (feedTab === 1 ? this.hotList.length === 0 : this.liveList.length === 0))) {
+    if (this.channelError(feedTab).length > 0 && this.channelEmpty(feedTab)) {
       LoadingView({
         loading: false,
         empty: false,
-        errorText: this.errorText,
+        errorText: this.channelError(feedTab),
         onRetry: () => {
-          if (feedTab === 0) this.loadRecommend(true);
-          else if (feedTab === 1) this.loadHot(true);
-          else this.loadLive(true);
+          this.loadChannel(feedTab, true).catch(() => {
+          });
         },
       })
       .margin({ top: 110 })
-    } else if (feedTab === 0 && this.recList.length === 0 ||
-      feedTab === 1 && this.hotList.length === 0 || feedTab === 2 && this.liveList.length === 0) {
+    } else if (this.channelEmpty(feedTab)) {
       LoadingView({ loading: true })
         .margin({ top: 110 })
     } else {
@@ -341,17 +490,8 @@ export struct HomeView {
       this.RefreshIndicator()
 
       // 紧凑悬浮频道切换：与搜索栏保持同一玻璃层级，不再用实色横条截断信息流。
-      Row() {
-        this.SubTabs()
-        Blank()
-      }
-      .width('100%')
-      .padding({ left: 10, right: 10 })
-      .margin({ top: Immersive.statusBarHeight() + 50 })
-      .opacity(1 - this.fade)
-      .translate({ y: -12 * this.fade })
-      .animation({ duration: 160, curve: Curve.EaseOut })
-      .hitTestBehavior(this.fade > 0.9 ? HitTestMode.None : HitTestMode.Default)
+      // fade 订阅收敛在 FloatingSubTabs 内，滚动不触发 HomeView 本体重建。
+      FloatingSubTabs({ content: this.SubTabs })
     }
     .width('100%')
     .layoutWeight(1)

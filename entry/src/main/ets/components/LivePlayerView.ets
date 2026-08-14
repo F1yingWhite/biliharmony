@@ -2,6 +2,7 @@
 import { media } from '@kit.MediaKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Immersive } from '../common/Immersive';
+import { Constants } from '../common/Constants';
 import { LiveChatMessage, LivePlayInfo, LiveQualityOption } from '../model/LiveModels';
 
 @Component
@@ -26,13 +27,20 @@ export struct LivePlayerView {
   private surfaceId: string = '';
   private sourceIndex: number = 0;
   private hideTimer: number = -1;
+  private fullscreenTimer: number = -1;
+  private destroyed: boolean = false;
+  private playerGeneration: number = 0;
+  private playerCreating: boolean = false;
 
   aboutToAppear(): void {
+    this.destroyed = false;
     AppStorage.setOrCreate<boolean>('livePlayerFullscreen', false);
     AppStorage.setOrCreate<number>('livePlayerExitRequest', 0);
   }
 
   aboutToDisappear(): void {
+    this.destroyed = true;
+    this.playerGeneration++;
     this.release();
     if (this.fullscreen) Immersive.setFullscreen(false);
     AppStorage.setOrCreate<boolean>('livePlayerFullscreen', false);
@@ -52,6 +60,7 @@ export struct LivePlayerView {
   }
 
   async restartForSource(): Promise<void> {
+    const generation: number = ++this.playerGeneration;
     this.sourceIndex = 0;
     this.prepared = false;
     this.playing = false;
@@ -62,24 +71,33 @@ export struct LivePlayerView {
     if (old !== null) {
       try { await old.release(); } catch (e) {}
     }
-    if (this.surfaceId.length > 0) await this.initPlayer();
+    if (!this.destroyed && generation === this.playerGeneration && this.surfaceId.length > 0) await this.initPlayer();
   }
 
   async initPlayer(): Promise<void> {
-    if (this.player !== null || this.surfaceId.length === 0 || this.playInfo.urls.length === 0) return;
+    if (this.destroyed || this.player !== null || this.playerCreating || this.surfaceId.length === 0 ||
+      this.playInfo.urls.length === 0) return;
+    const generation: number = this.playerGeneration;
+    this.playerCreating = true;
+    let p: media.AVPlayer | null = null;
     try {
-      const p: media.AVPlayer = await media.createAVPlayer();
-      this.player = p;
-      p.on('stateChange', (state: media.AVPlayerState) => {
-        if (this.player !== p) return;
+      const createdPlayer: media.AVPlayer = await media.createAVPlayer();
+      p = createdPlayer;
+      if (this.destroyed || generation !== this.playerGeneration) {
+        try { await createdPlayer.release(); } catch (e) {}
+        return;
+      }
+      this.player = createdPlayer;
+      createdPlayer.on('stateChange', (state: media.AVPlayerState) => {
+        if (this.player !== createdPlayer) return;
         if (state === 'initialized') {
-          p.surfaceId = this.surfaceId;
-          p.prepare();
+          createdPlayer.surfaceId = this.surfaceId;
+          createdPlayer.prepare();
         } else if (state === 'prepared') {
           this.prepared = true;
           this.buffering = false;
-          p.videoScaleType = media.VideoScaleType.VIDEO_SCALE_TYPE_SCALED_ASPECT;
-          p.play();
+          createdPlayer.videoScaleType = media.VideoScaleType.VIDEO_SCALE_TYPE_SCALED_ASPECT;
+          createdPlayer.play();
         } else if (state === 'playing') {
           this.playing = true;
           this.buffering = false;
@@ -89,31 +107,38 @@ export struct LivePlayerView {
           this.controls = true;
         }
       });
-      p.on('bufferingUpdate', (type: media.BufferingInfoType) => {
-        if (this.player !== p) return;
+      createdPlayer.on('bufferingUpdate', (type: media.BufferingInfoType) => {
+        if (this.player !== createdPlayer) return;
         if (type === media.BufferingInfoType.BUFFERING_START) this.buffering = true;
         if (type === media.BufferingInfoType.BUFFERING_END) this.buffering = false;
       });
-      p.on('error', (err: BusinessError) => this.handleError(p, err.message));
+      createdPlayer.on('error', (err: BusinessError) => this.handleError(createdPlayer, err.message));
       const url: string = this.playInfo.urls[this.sourceIndex] ?? '';
       const source: media.MediaSource = media.createMediaSourceWithUrl(url, {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15',
+        'User-Agent': Constants.browserUa,
         'Referer': 'https://live.bilibili.com/',
       });
-      await p.setMediaSource(source, {
+      await createdPlayer.setMediaSource(source, {
         preferredBufferDuration: 8,
         preferredBufferDurationForPlaying: 0.8,
         thresholdForAutoQuickPlay: 2,
         showFirstFrameOnPrepare: true,
       });
     } catch (e) {
-      this.errorText = '直播播放失败';
-      this.buffering = false;
+      if (p !== null && this.player !== p) {
+        try { await p.release(); } catch (releaseError) {}
+      }
+      if (!this.destroyed && generation === this.playerGeneration) {
+        this.errorText = '直播播放失败';
+        this.buffering = false;
+      }
+    } finally {
+      if (generation === this.playerGeneration) this.playerCreating = false;
     }
   }
 
   async handleError(failed: media.AVPlayer, message: string): Promise<void> {
-    if (this.player !== failed) return;
+    if (this.destroyed || this.player !== failed) return;
     this.player = null;
     try { await failed.release(); } catch (e) {}
     if (this.sourceIndex + 1 < this.playInfo.urls.length) {
@@ -128,11 +153,17 @@ export struct LivePlayerView {
 
   release(): void {
     if (this.hideTimer >= 0) clearTimeout(this.hideTimer);
+    this.hideTimer = -1;
+    if (this.fullscreenTimer >= 0) clearTimeout(this.fullscreenTimer);
+    this.fullscreenTimer = -1;
+    this.playerGeneration++;
+    this.playerCreating = false;
     const p: media.AVPlayer | null = this.player;
     this.player = null;
     if (p !== null) {
       try { p.setVolume(0); } catch (e) {}
-      try { p.release(); } catch (e) {}
+      p.release().catch(() => {
+      });
     }
   }
 
@@ -173,7 +204,10 @@ export struct LivePlayerView {
     if (!this.fullscreen) return;
     this.fullscreen = false;
     Immersive.setFullscreen(false);
-    setTimeout(() => {
+    if (this.fullscreenTimer >= 0) clearTimeout(this.fullscreenTimer);
+    this.fullscreenTimer = setTimeout(() => {
+      this.fullscreenTimer = -1;
+      if (this.destroyed) return;
       this.onFullscreenChange(false);
       AppStorage.setOrCreate<boolean>('livePlayerFullscreen', false);
     }, 220);

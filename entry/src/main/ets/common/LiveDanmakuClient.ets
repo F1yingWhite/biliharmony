@@ -24,59 +24,64 @@ export class LiveDanmakuClient {
     this.close();
     this.roomId = roomId;
     this.closed = false;
-    const info: LiveDanmakuInfo | null = await BiliApi.getLiveDanmakuInfo(roomId);
-    if (this.closed || info === null || info.servers.length === 0) {
-      this.onConnected(false);
-      return;
-    }
-    const server: LiveDanmakuServer = info.servers[0];
-    const ws: webSocket.WebSocket = webSocket.createWebSocket();
-    this.socket = ws;
-    ws.on('open', (err: BusinessError) => {
-      if (err || this.socket !== ws || this.closed) return;
-      const uid: number = Number(HttpClient.getCookie('DedeUserID')) || 0;
-      const body: string = JSON.stringify({
-        'uid': uid,
-        'roomid': this.roomId,
-        'protover': 0,
-        'platform': 'web',
-        'type': 2,
-        'key': info.token,
-      });
-      ws.send(this.packet(7, body));
-      this.onConnected(true);
-      this.startHeartbeat();
-    });
-    ws.on('message', (err: BusinessError, value: string | ArrayBuffer) => {
-      if (err || this.socket !== ws || this.closed) return;
-      if (typeof value === 'string') {
-        this.parseJson(value as string);
-      } else {
-        this.parsePackets(value as ArrayBuffer);
-      }
-    });
-    ws.on('close', () => {
-      if (this.socket === ws) {
-        this.stopHeartbeat();
-        this.onConnected(false);
-        this.scheduleReconnect();
-      }
-    });
-    ws.on('error', () => {
-      if (this.socket === ws) {
-        this.onConnected(false);
-        this.scheduleReconnect();
-      }
-    });
     try {
-      await ws.connect('wss://' + server.host + ':' + String(server.wssPort) + '/sub', {
-        header: {
-          'User-Agent': 'Mozilla/5.0',
-          'Origin': 'https://live.bilibili.com',
-        },
+      const info: LiveDanmakuInfo | null = await BiliApi.getLiveDanmakuInfo(roomId);
+      if (this.closed || info === null || info.servers.length === 0) {
+        this.onConnected(false);
+        return;
+      }
+      const server: LiveDanmakuServer = info.servers[0];
+      const ws: webSocket.WebSocket = webSocket.createWebSocket();
+      this.socket = ws;
+      ws.on('open', (err: BusinessError) => {
+        if (err || this.socket !== ws || this.closed) return;
+        const uid: number = Number(HttpClient.getCookie('DedeUserID')) || 0;
+        const body: string = JSON.stringify({
+          'uid': uid,
+          'roomid': this.roomId,
+          'protover': 0,
+          'platform': 'web',
+          'type': 2,
+          'key': info.token,
+        });
+        ws.send(this.packet(7, body));
+        this.onConnected(true);
+        this.startHeartbeat();
       });
+      ws.on('message', (err: BusinessError, value: string | ArrayBuffer) => {
+        if (err || this.socket !== ws || this.closed) return;
+        if (typeof value === 'string') {
+          this.parseJson(value as string);
+        } else {
+          this.parsePackets(value as ArrayBuffer);
+        }
+      });
+      ws.on('close', () => {
+        if (this.socket === ws) {
+          this.stopHeartbeat();
+          this.onConnected(false);
+          this.scheduleReconnect();
+        }
+      });
+      ws.on('error', () => {
+        if (this.socket === ws) {
+          this.onConnected(false);
+          this.scheduleReconnect();
+        }
+      });
+      try {
+        await ws.connect('wss://' + server.host + ':' + String(server.wssPort) + '/sub', {
+          header: {
+            'User-Agent': 'Mozilla/5.0',
+            'Origin': 'https://live.bilibili.com',
+          },
+        });
+      } catch (e) {
+        if (this.socket === ws) this.onConnected(false);
+      }
     } catch (e) {
-      if (this.socket === ws) this.onConnected(false);
+      // 弹幕信息拉取或 WebSocket 创建失败：按连接失败处理，重试语义不变。
+      this.onConnected(false);
     }
   }
 

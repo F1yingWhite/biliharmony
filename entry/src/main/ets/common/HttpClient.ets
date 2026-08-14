@@ -3,6 +3,7 @@
  */
 import { http } from '@kit.NetworkKit';
 import { asObject, asString } from './Utils';
+import { Constants } from './Constants';
 
 export class HttpResponse {
   status: number;
@@ -29,11 +30,11 @@ export class HttpResponse {
     }
   }
 
-  /** 解析 JSON 数组 body */
+  /** 解析 JSON 数组 body；body 非数组（如 JSON 对象）时返回空数组 */
   jsonArray(): Array<Object> {
     try {
       const parsed: Object = JSON.parse(this.body) as Object;
-      return parsed as Array<Object>;
+      return Array.isArray(parsed) ? parsed as Array<Object> : [] as Array<Object>;
     } catch (e) {
       return [] as Array<Object>;
     }
@@ -81,7 +82,7 @@ export class HttpClient {
       const resp: http.HttpResponse = await request.request('https://api.bilibili.com/x/frontend/finger/spi', {
         method: http.RequestMethod.GET,
         header: {
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.2 Safari/605.1.15',
+          'User-Agent': Constants.browserUa,
           'Accept': 'application/json, text/plain, */*',
         },
         connectTimeout: 8000,
@@ -111,6 +112,19 @@ export class HttpClient {
     HttpClient.cookieJar[name] = value;
   }
 
+  /** 从 cookie 罐中真正删除（登出用）。ArkTS 对 Record 不用 delete，重建剔除。 */
+  static removeCookie(name: string): void {
+    HttpClient.ensureInit();
+    const jar: Record<string, string> = {};
+    const keys: Array<string> = Object.keys(HttpClient.cookieJar);
+    for (let i: number = 0; i < keys.length; i++) {
+      if (keys[i] !== name) {
+        jar[keys[i]] = HttpClient.cookieJar[keys[i]];
+      }
+    }
+    HttpClient.cookieJar = jar;
+  }
+
   /** 导入/导出登录 Cookie，交由应用私有 PersistentStorage 保存。 */
   static exportCookieJson(): string {
     HttpClient.ensureInit();
@@ -138,7 +152,9 @@ export class HttpClient {
     if (setCookie.length === 0) {
       return;
     }
-    const parts: Array<string> = setCookie.split(',');
+    // 不能按 ',' 直接切：Expires=Wed, 21 Oct 2015 07:28:00 GMT 内含逗号。
+    // 真实分隔是“逗号 + 空白 + 新 cookie 的 name=”，lookahead 保证只在 name=value 前断开。
+    const parts: Array<string> = setCookie.split(/,\s+(?=[^;,]+=)/);
     for (let i: number = 0; i < parts.length; i++) {
       const part: string = parts[i].trim();
       const eq: number = part.indexOf('=');
@@ -174,7 +190,7 @@ export class HttpClient {
   private static mergeHeaders(extra?: Record<string, string>, includeCookie: boolean = true): Record<string, string> {
     const merged: Record<string, string> = {};
     // 默认 web 头
-    merged['User-Agent'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.2 Safari/605.1.15';
+    merged['User-Agent'] = Constants.browserUa;
     merged['Accept'] = 'application/json, text/plain, */*';
     if (includeCookie) {
       const cookie: string = HttpClient.buildCookieHeader();
@@ -203,49 +219,55 @@ export class HttpClient {
     }
   }
 
-  static async get(url: string, extraHeaders?: Record<string, string>): Promise<HttpResponse> {
-    HttpClient.ensureInit();
-    await HttpClient.ensureBuvid();
+  /** create-try-finally-destroy 公共脚手架：成功返回原始响应，网络异常返回 null */
+  private static async execute(url: string, method: http.RequestMethod, dataType: http.HttpDataType,
+    extraHeaders?: Record<string, string>, body?: string): Promise<http.HttpResponse | null> {
     const request: http.HttpRequest = http.createHttp();
     try {
-      const resp: http.HttpResponse = await request.request(url, {
-        method: http.RequestMethod.GET,
-        header: HttpClient.mergeHeaders(extraHeaders),
+      const headers: Record<string, string> = HttpClient.mergeHeaders(extraHeaders);
+      if (method === http.RequestMethod.POST) {
+        headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=utf-8';
+      }
+      const options: http.HttpRequestOptions = {
+        method: method,
+        header: headers,
         connectTimeout: 12000,
         readTimeout: 20000,
-        expectDataType: http.HttpDataType.STRING,
-      });
-      HttpClient.absorbCookies(resp.header);
-      return new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>);
+        expectDataType: dataType,
+      };
+      if (body !== undefined) {
+        options.extraData = body;
+      }
+      return await request.request(url, options);
     } catch (e) {
-      return new HttpResponse(-1, '', {});
+      return null;
     } finally {
       request.destroy();
     }
   }
 
+  static async get(url: string, extraHeaders?: Record<string, string>): Promise<HttpResponse> {
+    HttpClient.ensureInit();
+    await HttpClient.ensureBuvid();
+    const resp: http.HttpResponse | null =
+      await HttpClient.execute(url, http.RequestMethod.GET, http.HttpDataType.STRING, extraHeaders);
+    if (resp === null) {
+      return new HttpResponse(-1, '', {});
+    }
+    HttpClient.absorbCookies(resp.header);
+    return new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>);
+  }
+
   static async post(url: string, body?: string, extraHeaders?: Record<string, string>): Promise<HttpResponse> {
     HttpClient.ensureInit();
     await HttpClient.ensureBuvid();
-    const request: http.HttpRequest = http.createHttp();
-    try {
-      const headers: Record<string, string> = HttpClient.mergeHeaders(extraHeaders);
-      headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=utf-8';
-      const resp: http.HttpResponse = await request.request(url, {
-        method: http.RequestMethod.POST,
-        header: headers,
-        extraData: body ?? '',
-        connectTimeout: 12000,
-        readTimeout: 20000,
-        expectDataType: http.HttpDataType.STRING,
-      });
-      HttpClient.absorbCookies(resp.header);
-      return new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>);
-    } catch (e) {
+    const resp: http.HttpResponse | null =
+      await HttpClient.execute(url, http.RequestMethod.POST, http.HttpDataType.STRING, extraHeaders, body ?? '');
+    if (resp === null) {
       return new HttpResponse(-1, '', {});
-    } finally {
-      request.destroy();
     }
+    HttpClient.absorbCookies(resp.header);
+    return new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>);
   }
 
   /** 合并两个 header 表（ArkTS 不支持对象展开） */
@@ -265,21 +287,9 @@ export class HttpClient {
   /** 下载二进制数据（用于图片取色等） */
   static async getBytes(url: string, extraHeaders?: Record<string, string>): Promise<ArrayBuffer> {
     HttpClient.ensureInit();
-    const request: http.HttpRequest = http.createHttp();
-    try {
-      const resp: http.HttpResponse = await request.request(url, {
-        method: http.RequestMethod.GET,
-        header: HttpClient.mergeHeaders(extraHeaders),
-        connectTimeout: 12000,
-        readTimeout: 20000,
-        expectDataType: http.HttpDataType.ARRAY_BUFFER,
-      });
-      return resp.result as ArrayBuffer;
-    } catch (e) {
-      return new ArrayBuffer(0);
-    } finally {
-      request.destroy();
-    }
+    const resp: http.HttpResponse | null =
+      await HttpClient.execute(url, http.RequestMethod.GET, http.HttpDataType.ARRAY_BUFFER, extraHeaders);
+    return resp === null ? new ArrayBuffer(0) : resp.result as ArrayBuffer;
   }
 
   /** 构造 query string */

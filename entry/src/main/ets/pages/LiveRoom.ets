@@ -1,9 +1,10 @@
 /** 直播间：仅观看直播、切换画质、查看实时弹幕与 SC。 */
 import { BiliApi } from '../api/BiliApi';
-import { AppNavStack, LiveRoomParam } from '../common/AppRouter';
+import { LiveRoomParam } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { LiveDanmakuClient } from '../common/LiveDanmakuClient';
 import { LivePlayerView } from '../components/LivePlayerView';
+import { BackButton, BackButtonVariant } from '../components/BackButton';
 import { LiveChatMessage, LivePlayInfo, LiveRoomInfo } from '../model/LiveModels';
 
 @Component
@@ -11,7 +12,9 @@ export struct LiveRoomPage {
   param: LiveRoomParam = { roomId: 0, uid: 0, title: '', uname: '', face: '', cover: '' };
   @State roomInfo: LiveRoomInfo = new LiveRoomInfo();
   @State playInfo: LivePlayInfo = new LivePlayInfo();
+  // messages 保持时间正序（LivePlayerView 弹幕浮层取尾部 N 条）；chatList 为渲染用倒序（新消息在前）
   @State messages: Array<LiveChatMessage> = [];
+  @State chatList: Array<LiveChatMessage> = [];
   @State superChats: Array<LiveChatMessage> = [];
   @State loading: boolean = true;
   @State qualityLoading: boolean = false;
@@ -23,8 +26,15 @@ export struct LiveRoomPage {
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   private client: LiveDanmakuClient = new LiveDanmakuClient();
+  // 弹幕合帧缓冲：高频消息攒 220ms 批量写入 @State，避免每条消息驱动整页重渲染
+  private pendingMsgs: Array<LiveChatMessage> = [];
+  private flushTimer: number = -1;
+  private destroyed: boolean = false;
+  private lifecycleGeneration: number = 0;
 
   aboutToAppear(): void {
+    this.destroyed = false;
+    this.lifecycleGeneration++;
     this.roomInfo.roomId = this.param.roomId;
     this.roomInfo.uid = this.param.uid;
     this.roomInfo.title = this.param.title;
@@ -33,57 +43,92 @@ export struct LiveRoomPage {
     this.roomInfo.cover = this.param.cover;
     this.client.onMessage = (message: LiveChatMessage) => this.appendMessage(message);
     this.client.onConnected = (value: boolean) => this.connected = value;
-    this.loadRoom();
+    this.loadRoom().catch(() => {
+    });
   }
 
   aboutToDisappear(): void {
+    this.destroyed = true;
+    this.lifecycleGeneration++;
+    if (this.flushTimer >= 0) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = -1;
+    }
+    this.pendingMsgs = [];
     this.client.close();
   }
 
   async loadRoom(): Promise<void> {
+    const generation: number = this.lifecycleGeneration;
     this.loading = true;
     this.errorText = '';
-    const info: LiveRoomInfo | null = await BiliApi.getLiveRoomInfo(this.param.roomId, this.param.uid);
-    if (info !== null) this.roomInfo = info;
-    const play: LivePlayInfo | null = await BiliApi.getLivePlayInfo(this.param.roomId, 10000);
-    if (play === null || play.url.length === 0) {
-      this.errorText = info !== null && info.liveStatus !== 1 ? '主播当前未开播' : '直播播放地址获取失败';
-      this.loading = false;
-      return;
+    try {
+      const info: LiveRoomInfo | null = await BiliApi.getLiveRoomInfo(this.param.roomId, this.param.uid);
+      if (this.destroyed || generation !== this.lifecycleGeneration) return;
+      if (info !== null) this.roomInfo = info;
+      const play: LivePlayInfo | null = await BiliApi.getLivePlayInfo(this.param.roomId, 10000);
+      if (this.destroyed || generation !== this.lifecycleGeneration) return;
+      if (play === null || play.url.length === 0) {
+        this.errorText = info !== null && info.liveStatus !== 1 ? '主播当前未开播' : '直播播放地址获取失败';
+        return;
+      }
+      this.playInfo = play;
+      const history: Array<LiveChatMessage> = await BiliApi.getLiveDanmakuHistory(this.param.roomId);
+      if (this.destroyed || generation !== this.lifecycleGeneration) return;
+      this.messages = history;
+      this.chatList = history.slice().reverse().slice(0, 200);
+      this.superChats = await BiliApi.getLiveSuperChats(this.param.roomId);
+      if (this.destroyed || generation !== this.lifecycleGeneration) return;
+      this.client.connect(this.param.roomId).catch(() => {
+      });
+    } catch (e) {
+      if (!this.destroyed && generation === this.lifecycleGeneration) {
+        this.errorText = '直播间加载失败，请检查网络后重试';
+      }
+    } finally {
+      if (!this.destroyed && generation === this.lifecycleGeneration) this.loading = false;
     }
-    this.playInfo = play;
-    const history: Array<LiveChatMessage> = await BiliApi.getLiveDanmakuHistory(this.param.roomId);
-    this.messages = history;
-    this.superChats = await BiliApi.getLiveSuperChats(this.param.roomId);
-    this.loading = false;
-    this.client.connect(this.param.roomId);
   }
 
   async changeQuality(qn: number): Promise<void> {
     if (this.qualityLoading) return;
     this.qualityLoading = true;
-    const next: LivePlayInfo | null = await BiliApi.getLivePlayInfo(this.param.roomId, qn);
-    if (next !== null && next.url.length > 0) this.playInfo = next;
-    this.qualityLoading = false;
+    const generation: number = this.lifecycleGeneration;
+    try {
+      const next: LivePlayInfo | null = await BiliApi.getLivePlayInfo(this.param.roomId, qn);
+      if (!this.destroyed && generation === this.lifecycleGeneration && next !== null && next.url.length > 0) {
+        this.playInfo = next;
+      }
+    } finally {
+      if (!this.destroyed && generation === this.lifecycleGeneration) this.qualityLoading = false;
+    }
   }
 
   appendMessage(message: LiveChatMessage): void {
+    if (this.destroyed) return;
     if (message.type === 'sc') {
       const nextSc: Array<LiveChatMessage> = [message].concat(this.superChats);
       this.superChats = nextSc.slice(0, 50);
     }
-    const next: Array<LiveChatMessage> = this.messages.concat([message]);
-    this.messages = next.length > 240 ? next.slice(next.length - 200) : next;
+    this.pendingMsgs.push(message);
+    if (this.flushTimer < 0) {
+      this.flushTimer = setTimeout(() => {
+        this.flushTimer = -1;
+        this.flushMessages();
+      }, 220);
+    }
   }
 
-  @Builder
-  BackButton() {
-    Stack({ alignContent: Alignment.Center }) {
-      Image($r('app.media.ic_back')).width(20).height(20).fillColor('#FFFFFF')
+  /** 合帧落盘：正序 messages 供播放器浮层，倒序 chatList 供弹幕列表直接渲染（不再 slice().reverse()）。 */
+  private flushMessages(): void {
+    if (this.destroyed || this.pendingMsgs.length === 0) {
+      return;
     }
-    .width(36).height(36).borderRadius(18).backgroundColor('#73000000')
-    .margin({ left: 10, top: Immersive.statusBarHeight() + 8 })
-    .onClick(() => AppNavStack.pop())
+    const batch: Array<LiveChatMessage> = this.pendingMsgs;
+    this.pendingMsgs = [];
+    const next: Array<LiveChatMessage> = this.messages.concat(batch);
+    this.messages = next.length > 240 ? next.slice(next.length - 200) : next;
+    this.chatList = batch.slice().reverse().concat(this.chatList).slice(0, 200);
   }
 
   @Builder
@@ -141,7 +186,7 @@ export struct LiveRoomPage {
   @Builder
   DanmakuList() {
     List({ space: 8 }) {
-      ForEach(this.messages.slice().reverse(), (msg: LiveChatMessage) => {
+      ForEach(this.chatList, (msg: LiveChatMessage) => {
         ListItem() {
           Row({ space: 7 }) {
             Text(msg.uname.length > 0 ? msg.uname : '观众')
@@ -211,7 +256,7 @@ export struct LiveRoomPage {
         }
         .width('100%').aspectRatio(16 / 9).backgroundColor('#000000')
         .onAreaChange((oldValue: Area, newValue: Area) => {
-          const height: number = newValue.height as number;
+          const height: number = Number(newValue.height);
           if (height > 0) this.playerHeight = height;
         })
         this.RoomHeader()
@@ -239,7 +284,8 @@ export struct LiveRoomPage {
         .zIndex(this.fullscreen ? 10 : 2)
       }
       if (!this.fullscreen) {
-        this.BackButton()
+        BackButton({ variant: BackButtonVariant.DARK })
+          .margin({ left: 10, top: Immersive.statusBarHeight() + 8 })
       }
       if (this.qualityLoading) {
         Row({ space: 7 }) {

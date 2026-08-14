@@ -1,29 +1,29 @@
 /**
  * 视频卡片（B 站风格）：封面 + 时长/播放/弹幕 + 标题 + UP
  * 带毛玻璃遮罩与渐变光感效果
+ * @Reusable：LazyForEach 回收复用，数据通过 @Prop + aboutToReuse 刷新
  */
 import { VideoItem } from '../model/Models';
 import { formatDuration } from '../common/Utils';
 import { AppNavStack, NAV_VIDEO_DETAIL, VideoDetailParam } from '../common/AppRouter';
+import { FeedCardTitle, FeedCoverImage, FeedGradientMask } from './FeedCardParts';
 
+@Reusable
 @Component
 export struct VideoCard {
-  video: VideoItem = new VideoItem();
+  @Prop video: VideoItem = new VideoItem();
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
+
+  aboutToReuse(params: Record<string, Object>): void {
+    this.video = params.video as VideoItem;
+  }
 
   build() {
     Column({ space: 6 }) {
       // 封面
       Stack() {
-        Image(this.video.cover)
-          .width('100%')
-          .aspectRatio(16 / 9)
-          .objectFit(ImageFit.Cover)
-          .borderRadius(12)
-          .backgroundColor(this.isDark ? '#2A2C31' : '#E5E7EB')
-          .draggable(false)
-          .alt($r('app.media.placeholder_cover'))
+        FeedCoverImage({ cover: this.video.cover, isDark: this.isDark })
         // 覆盖层：上 = 多P标识，下 = 数据条（左播放/弹幕，右时长，同一行垂直居中保证对齐）
         Column() {
           Row() {
@@ -41,14 +41,7 @@ export struct VideoCard {
           Blank()
 
           Stack({ alignContent: Alignment.BottomStart }) {
-            // 底部渐变遮罩（上透下暗，保证底部数据可读）
-            Column()
-              .width('100%')
-              .height(36)
-              .linearGradient({
-                angle: 180,
-                colors: [['#00000000', 0.0], ['#73000000', 1.0]],
-              })
+            FeedGradientMask({ height: 36, bottomColor: '#73000000' })
             Row({ space: 8 }) {
               Row({ space: 3 }) {
                 Image($r('app.media.ic_play'))
@@ -99,14 +92,7 @@ export struct VideoCard {
       .shadow({ radius: 12, color: this.isDark ? '#59000000' : '#1F000000', offsetX: 0, offsetY: 4 })
 
       // 标题
-      Text(this.video.title)
-        .fontSize(14)
-        .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-        .fontWeight(FontWeight.Medium)
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .lineHeight(19)
-        .width('100%')
+      FeedCardTitle({ title: this.video.title, isDark: this.isDark })
 
       // UP 主 + 推荐理由 / 分区
       Row({ space: 6 }) {

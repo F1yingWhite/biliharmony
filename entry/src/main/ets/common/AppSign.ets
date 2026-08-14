@@ -16,10 +16,8 @@ function makeQuery(sortedKeys: Array<string>, params: Record<string, string>): s
     const value: string = params[key] ?? '';
     result += separator;
     separator = '&';
-    result += encodeComponent(key);
-    if (value.length > 0) {
-      result += '=' + encodeComponent(value);
-    }
+    // 与 HttpClient.buildQuery 的实际发送串保持一致：空值参数也写作 key=
+    result += encodeComponent(key) + '=' + encodeComponent(value);
   }
   return result;
 }

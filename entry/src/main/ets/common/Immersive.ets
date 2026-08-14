@@ -6,6 +6,8 @@ import { window } from '@kit.ArkUI';
 
 export class Immersive {
   private static mainWindow: window.Window | null = null;
+  private static cachedStatusBarHeight: number = -1;
+  private static cachedBottomInset: number = -1;
 
   /** 由 EntryAbility 在窗口创建时注入 */
   static attach(windowStage: window.WindowStage): void {
@@ -14,6 +16,22 @@ export class Immersive {
     } catch (e) {
       Immersive.mainWindow = null;
     }
+    Immersive.invalidate();
+  }
+
+  /** avoidArea 缓存失效：窗口/系统栏/方向变化后调用，下次取值时重新计算 */
+  static invalidate(): void {
+    Immersive.cachedStatusBarHeight = -1;
+    Immersive.cachedBottomInset = -1;
+  }
+
+  private static barProperties(statusIconLight: boolean, navIconLight: boolean): window.SystemBarProperties {
+    return {
+      statusBarColor: '#00000000',
+      navigationBarColor: '#00000000',
+      statusBarContentColor: statusIconLight ? '#FFFFFF' : '#000000',
+      navigationBarContentColor: navIconLight ? '#FFFFFF' : '#000000',
+    };
   }
 
   /**
@@ -28,16 +46,11 @@ export class Immersive {
     }
     try {
       win.setWindowLayoutFullScreen(true);
-      const props: window.SystemBarProperties = {
-        statusBarColor: '#00000000',
-        navigationBarColor: '#00000000',
-        statusBarContentColor: statusIconLight ? '#FFFFFF' : '#000000',
-        navigationBarContentColor: navIconLight ? '#FFFFFF' : '#000000',
-      };
-      win.setWindowSystemBarProperties(props);
+      win.setWindowSystemBarProperties(Immersive.barProperties(statusIconLight, navIconLight));
     } catch (e) {
       // ignore
     }
+    Immersive.invalidate();
   }
 
   /** 仅更新系统栏图标深浅（背景保持透明） */
@@ -47,52 +60,57 @@ export class Immersive {
       return;
     }
     try {
-      const props: window.SystemBarProperties = {
-        statusBarColor: '#00000000',
-        navigationBarColor: '#00000000',
-        statusBarContentColor: statusIconLight ? '#FFFFFF' : '#000000',
-        navigationBarContentColor: navIconLight ? '#FFFFFF' : '#000000',
-      };
-      win.setWindowSystemBarProperties(props);
+      win.setWindowSystemBarProperties(Immersive.barProperties(statusIconLight, navIconLight));
     } catch (e) {
       // ignore
     }
+    Immersive.invalidate();
   }
 
-  /** 状态栏高度（vp）。getWindowAvoidArea 返回 px，需 px2vp 换算；夹紧到安全范围，无窗口时返回 0 */
+  /** 状态栏高度（vp）。进程内缓存，避免 build 路径反复同步调 getWindowAvoidArea；窗口变化由 invalidate 刷新 */
   static statusBarHeight(): number {
+    if (Immersive.cachedStatusBarHeight >= 0) {
+      return Immersive.cachedStatusBarHeight;
+    }
     const win: window.Window | null = Immersive.mainWindow;
     if (win === null) {
       return 0;
     }
+    let height: number = 0;
     try {
       const area: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
       const h: number = px2vp(area.topRect.height);
-      if (h <= 0 || h > 100) {
-        return 0;
+      if (h > 0 && h <= 100) {
+        height = h;
       }
-      return h;
     } catch (e) {
-      return 0;
+      height = 0;
     }
+    Immersive.cachedStatusBarHeight = height;
+    return height;
   }
 
-  /** 底部导航区高度（vp）。getWindowAvoidArea 返回 px，需 px2vp 换算；夹紧到安全范围 */
+  /** 底部导航区高度（vp）。同样走进程内缓存，窗口变化由 invalidate 刷新 */
   static bottomInset(): number {
+    if (Immersive.cachedBottomInset >= 0) {
+      return Immersive.cachedBottomInset;
+    }
     const win: window.Window | null = Immersive.mainWindow;
     if (win === null) {
       return 0;
     }
+    let height: number = 0;
     try {
       const area: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
       const h: number = px2vp(area.bottomRect.height);
-      if (h <= 0 || h > 60) {
-        return 0;
+      if (h > 0 && h <= 60) {
+        height = h;
       }
-      return h;
     } catch (e) {
-      return 0;
+      height = 0;
     }
+    Immersive.cachedBottomInset = height;
+    return height;
   }
 
   /** 视频播放页全屏：隐藏系统栏；退出恢复 */
@@ -107,14 +125,23 @@ export class Immersive {
       } catch (e) {
         // ignore
       }
-      win.setPreferredOrientation(window.Orientation.LANDSCAPE);
+      try {
+        win.setPreferredOrientation(window.Orientation.LANDSCAPE);
+      } catch (e) {
+        // ignore
+      }
     } else {
       try {
         win.setWindowSystemBarEnable(['status', 'navigation']);
       } catch (e) {
         // ignore
       }
-      win.setPreferredOrientation(window.Orientation.PORTRAIT);
+      try {
+        win.setPreferredOrientation(window.Orientation.PORTRAIT);
+      } catch (e) {
+        // ignore
+      }
     }
+    Immersive.invalidate();
   }
 }

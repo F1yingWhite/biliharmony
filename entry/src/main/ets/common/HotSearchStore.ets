@@ -9,9 +9,15 @@ export class HotSearchStore {
   static async load(force: boolean = false): Promise<Array<HotSearchItem>> {
     if (!force && HotSearchStore.items.length > 0) return HotSearchStore.items;
     if (!force && HotSearchStore.pending !== null) return HotSearchStore.pending;
-    HotSearchStore.pending = BiliApi.getHotSearch();
-    const list: Array<HotSearchItem> = await HotSearchStore.pending;
-    HotSearchStore.pending = null;
+    const request: Promise<Array<HotSearchItem>> = BiliApi.getHotSearch();
+    HotSearchStore.pending = request;
+    let list: Array<HotSearchItem> = [];
+    try {
+      list = await request;
+    } finally {
+      // force 加载可能覆盖 pending；旧请求完成时不能把新请求的标记清掉。
+      if (HotSearchStore.pending === request) HotSearchStore.pending = null;
+    }
     if (list.length > 0) {
       HotSearchStore.items = list;
       AppStorage.setOrCreate<string>('homeHotSearch', list[0].showName);

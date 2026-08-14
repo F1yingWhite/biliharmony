@@ -10,8 +10,13 @@ import {
 } from '../model/Models';
 import { BiliApi } from '../api/BiliApi';
 import { LoadingView } from '../components/LoadingView';
+import { BackButton } from '../components/BackButton';
+import { FilterChip } from '../components/FilterChip';
+import { LoadMoreFooter } from '../components/LoadMoreFooter';
+import { VideoRowCard } from '../components/VideoRowCard';
 import { formatCount } from '../common/Utils';
 import { AppTheme } from '../common/AppTheme';
+import { BasicDataSource } from '../common/BasicDataSource';
 import { HotSearchStore } from '../common/HotSearchStore';
 import { SearchHistoryStore } from '../common/SearchHistoryStore';
 
@@ -23,8 +28,6 @@ export struct SearchPage {
   // ===== 结果态 =====
   @State searching: boolean = false;
   @State searchTab: number = 0;              // 0 视频 1 用户
-  @State results: Array<VideoItem> = [];
-  @State userResults: Array<UserSearchItem> = [];
   @State videoTotal: number = -1;            // numResults 总数徽标，-1 未加载
   @State userTotal: number = -1;
   @State loading: boolean = false;
@@ -47,25 +50,64 @@ export struct SearchPage {
   @StorageProp('glassEnabled') glassOn: boolean = true;
   @StorageProp('glassLevel') glassLevel: number = 1;
   @StorageProp('searchSuggestedKeyword') suggestedKeyword: string = '';
+  private resultsSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
+  private userSource: BasicDataSource<UserSearchItem> = new BasicDataSource<UserSearchItem>();
+  // 搜索建议：300ms 防抖 + 请求序号（慢响应乱序到达时丢弃旧结果）
+  private suggestTimer: number = -1;
+  private suggestSeq: number = 0;
+  // 结果请求防重入；destroyed 阻止销毁后异步回调写 @State
+  private searchInflight: boolean = false;
+  private pendingResetSearch: boolean = false;
+  private destroyed: boolean = false;
 
   async aboutToAppear(): Promise<void> {
+    this.destroyed = false;
     this.history = await SearchHistoryStore.ensureLoaded();
-    this.loadHotSearch();
+    this.loadHotSearch().catch(() => {
+    });
+  }
+
+  aboutToDisappear(): void {
+    this.destroyed = true;
+    if (this.suggestTimer >= 0) {
+      clearTimeout(this.suggestTimer);
+      this.suggestTimer = -1;
+    }
   }
 
   async loadHotSearch(): Promise<void> {
     const list: Array<HotSearchItem> = await HotSearchStore.load();
+    if (this.destroyed) {
+      return;
+    }
     this.hotList = list;
   }
 
-  async onInput(value: string): Promise<void> {
+  onInput(value: string): void {
     this.keyword = value;
+    this.suggestSeq++;
+    if (this.suggestTimer >= 0) {
+      clearTimeout(this.suggestTimer);
+      this.suggestTimer = -1;
+    }
     if (value.length === 0) {
       this.showSuggest = false;
       this.suggests = [];
       return;
     }
+    const seq: number = this.suggestSeq;
+    this.suggestTimer = setTimeout(() => {
+      this.suggestTimer = -1;
+      this.fetchSuggest(value, seq).catch(() => {
+      });
+    }, 300);
+  }
+
+  async fetchSuggest(value: string, seq: number): Promise<void> {
     const s: Array<string> = await BiliApi.searchSuggest(value);
+    if (this.destroyed || seq !== this.suggestSeq) {
+      return;
+    }
     this.suggests = s;
     this.showSuggest = s.length > 0;
   }
@@ -75,36 +117,68 @@ export struct SearchPage {
     if (kw.length === 0) {
       return;
     }
+    if (this.searchInflight) {
+      // 用户在旧请求中切换关键词/Tab/排序时，保留最后一次首页请求，不让新操作被并发守卫吞掉。
+      if (reset) this.pendingResetSearch = true;
+      return;
+    }
+    this.searchInflight = true;
     this.showSuggest = false;
     this.searching = true;
     this.loading = reset;
-    if (this.searchTab === 0) {
-      if (reset) {
-        this.videoPage = 1;
-      }
-      const page: number = this.videoPage;
-      // 发布时间筛选：客户端换算为秒级时间戳起点
-      let pubtimeBegin: number = 0;
-      if (this.filterPubtime > 0) {
-        pubtimeBegin = Math.floor(Date.now() / 1000) - VIDEO_PUBTIME_OPTIONS[this.filterPubtime].value;
-      }
-      const res: VideoSearchResult = await BiliApi.searchVideosByType(kw, page, this.videoOrder,
-        VIDEO_DURATION_OPTIONS[this.filterDuration].value, pubtimeBegin, this.filterTids);
-      this.results = reset ? res.videos : this.results.concat(res.videos);
-      this.videoTotal = res.numResults;
-      this.videoPage = page + 1;
-    } else {
-      if (reset) {
-        this.userPage = 1;
-      }
-      const page: number = this.userPage;
-      const res: UserSearchResult = await BiliApi.searchUsers(kw, page, this.userOrder);
-      this.userResults = reset ? res.users : this.userResults.concat(res.users);
-      this.userTotal = res.numResults;
-      this.userPage = page + 1;
+    if (!reset) {
+      this.loadingMore = true;
     }
-    this.loading = false;
-    this.loadingMore = false;
+    try {
+      if (this.searchTab === 0) {
+        if (reset) {
+          this.videoPage = 1;
+        }
+        const page: number = this.videoPage;
+        // 发布时间筛选：客户端换算为秒级时间戳起点
+        let pubtimeBegin: number = 0;
+        if (this.filterPubtime > 0) {
+          pubtimeBegin = Math.floor(Date.now() / 1000) - VIDEO_PUBTIME_OPTIONS[this.filterPubtime].value;
+        }
+        const res: VideoSearchResult = await BiliApi.searchVideosByType(kw, page, this.videoOrder,
+          VIDEO_DURATION_OPTIONS[this.filterDuration].value, pubtimeBegin, this.filterTids);
+        if (this.destroyed) {
+          return;
+        }
+        if (reset) {
+          this.resultsSource.reset(res.videos);
+        } else {
+          this.resultsSource.append(res.videos);
+        }
+        this.videoTotal = res.numResults;
+        this.videoPage = page + 1;
+      } else {
+        if (reset) {
+          this.userPage = 1;
+        }
+        const page: number = this.userPage;
+        const res: UserSearchResult = await BiliApi.searchUsers(kw, page, this.userOrder);
+        if (this.destroyed) {
+          return;
+        }
+        if (reset) {
+          this.userSource.reset(res.users);
+        } else {
+          this.userSource.append(res.users);
+        }
+        this.userTotal = res.numResults;
+        this.userPage = page + 1;
+      }
+    } finally {
+      this.searchInflight = false;
+      this.loading = false;
+      this.loadingMore = false;
+      if (this.pendingResetSearch && !this.destroyed) {
+        this.pendingResetSearch = false;
+        this.doSearch(true).catch(() => {
+        });
+      }
+    }
   }
 
   // 新关键词搜索：回到视频 Tab 重新加载
@@ -116,7 +190,8 @@ export struct SearchPage {
     if (this.keyword.trim().length === 0) return;
     this.history = SearchHistoryStore.add(this.keyword);
     this.searchTab = 0;
-    this.doSearch(true);
+    this.doSearch(true).catch(() => {
+    });
   }
 
   @Builder
@@ -173,31 +248,17 @@ export struct SearchPage {
   onTabChanged(index: number): void {
     this.searchTab = index;
     // 切到未加载过的 Tab 时拉取首屏
-    if (index === 0 && this.results.length === 0) {
-      this.doSearch(true);
-    } else if (index === 1 && this.userResults.length === 0) {
-      this.doSearch(true);
+    if (index === 0 && this.resultsSource.isEmpty()) {
+      this.doSearch(true).catch(() => {
+      });
+    } else if (index === 1 && this.userSource.isEmpty()) {
+      this.doSearch(true).catch(() => {
+      });
     }
   }
 
   hasVideoFilter(): boolean {
     return this.filterDuration > 0 || this.filterPubtime > 0 || this.filterTids > 0;
-  }
-
-  @Builder
-  BackButton() {
-    Row() {
-      Text('‹')
-        .fontSize(26)
-        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-        .translate({ y: -1 })
-    }
-    .width(32)
-    .height(32)
-    .justifyContent(FlexAlign.Center)
-    .onClick(() => {
-      AppNavStack.pop();
-    })
   }
 
   @Builder
@@ -284,21 +345,6 @@ export struct SearchPage {
     .margin({ left: 10, right: 10 })
   }
 
-  // ===== 结果态：排序/筛选 chip（选中主题色填充，未选灰底） =====
-  @Builder
-  Chip(label: string, selected: boolean, onTap: () => void) {
-    Text(label)
-      .fontSize(12)
-      .fontColor(selected ? '#FFFFFF' : (this.isDark ? '#C6C7CB' : '#61666D'))
-      .padding({ left: 12, right: 12, top: 5, bottom: 5 })
-      .backgroundColor(selected ? this.accent : (this.isDark ? '#2E3136' : '#ECEEF0'))
-      .borderRadius(14)
-      .margin({ right: 8, bottom: 8 })
-      .onClick(() => {
-        onTap();
-      })
-  }
-
   // ===== 结果态：二级 Tab 栏（轻量文字样式 + 主题色下划线） =====
   @Builder
   ResultTabBar(index: number, label: string) {
@@ -323,9 +369,15 @@ export struct SearchPage {
       Scroll() {
         Row() {
           ForEach(VIDEO_ORDER_OPTIONS, (opt: SearchOption) => {
-            this.Chip(opt.label, this.videoOrder === opt.value, () => {
-              this.videoOrder = opt.value;
-              this.doSearch(true);
+            FilterChip({
+              label: opt.label,
+              selected: this.videoOrder === opt.value,
+              bottomMargin: 8,
+              onTap: () => {
+                this.videoOrder = opt.value;
+                this.doSearch(true).catch(() => {
+                });
+              },
             })
           }, (opt: SearchOption) => opt.value)
         }
@@ -364,9 +416,15 @@ export struct SearchPage {
   UserSortRow() {
     Row() {
       ForEach(USER_ORDER_OPTIONS, (opt: SearchOption) => {
-        this.Chip(opt.label, this.userOrder === opt.value, () => {
-          this.userOrder = opt.value;
-          this.doSearch(true);
+        FilterChip({
+          label: opt.label,
+          selected: this.userOrder === opt.value,
+          bottomMargin: 8,
+          onTap: () => {
+            this.userOrder = opt.value;
+            this.doSearch(true).catch(() => {
+            });
+          },
         })
       }, (opt: SearchOption) => opt.label)
     }
@@ -383,14 +441,19 @@ export struct SearchPage {
         .fontColor(this.isDark ? '#C6C7CB' : '#61666D')
       Flex({ wrap: FlexWrap.Wrap }) {
         ForEach(options, (opt: SearchNumOption, idx: number) => {
-          this.Chip(opt.label, kind === 2 ? opt.value === selected : idx === selected, () => {
-            if (kind === 0) {
-              this.tmpPubtime = idx;
-            } else if (kind === 1) {
-              this.tmpDuration = idx;
-            } else {
-              this.tmpTids = opt.value;
-            }
+          FilterChip({
+            label: opt.label,
+            selected: kind === 2 ? opt.value === selected : idx === selected,
+            bottomMargin: 8,
+            onTap: () => {
+              if (kind === 0) {
+                this.tmpPubtime = idx;
+              } else if (kind === 1) {
+                this.tmpDuration = idx;
+              } else {
+                this.tmpTids = opt.value;
+              }
+            },
           })
         }, (opt: SearchNumOption) => String(opt.value))
       }
@@ -441,55 +504,14 @@ export struct SearchPage {
             this.filterPubtime = this.tmpPubtime;
             this.filterTids = this.tmpTids;
             this.showFilter = false;
-            this.doSearch(true);
+            this.doSearch(true).catch(() => {
+            });
           })
       }
       .width('100%')
     }
     .width('100%')
     .padding({ left: 16, right: 16, top: 4, bottom: 20 })
-  }
-
-  @Builder
-  ResultRow(item: VideoItem) {
-    Row({ space: 10 }) {
-      Stack({ alignContent: Alignment.BottomEnd }) {
-        Image(item.cover)
-          .width(130)
-          .height(74)
-          .objectFit(ImageFit.Cover)
-          .borderRadius(6)
-        Text(item.playText + ' · ' + item.danmakuText)
-          .fontSize(10)
-          .fontColor('#FFFFFF')
-          .backgroundColor('#88000000')
-          .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-          .borderRadius(3)
-          .margin({ right: 4, bottom: 4 })
-      }
-      .width(130)
-      .clip(true)
-      Column({ space: 5 }) {
-        Text(item.title)
-          .fontSize(13)
-          .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .lineHeight(17)
-        Text(item.upName)
-          .fontSize(11)
-          .fontColor('#9499A0')
-          .maxLines(1)
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-    }
-    .width('100%')
-    .padding({ left: 14, right: 14, top: 8, bottom: 8 })
-    .onClick(() => {
-      const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
-      AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
-    })
   }
 
   // ===== 结果态：用户卡片（头像 + 昵称 + 等级/认证 + 粉丝/视频数 + 简介） =====
@@ -544,30 +566,6 @@ export struct SearchPage {
     })
   }
 
-  // ===== 结果态：底部"加载更多" =====
-  @Builder
-  LoadMoreFooter() {
-    Row() {
-      if (this.loadingMore) {
-        LoadingProgress()
-          .width(20)
-          .height(20)
-          .color(this.accent)
-      } else {
-        Text('加载更多')
-          .fontSize(13)
-          .fontColor(this.accent)
-          .onClick(() => {
-            this.loadingMore = true;
-            this.doSearch(false);
-          })
-      }
-    }
-    .width('100%')
-    .justifyContent(FlexAlign.Center)
-    .padding({ top: 12, bottom: 20 })
-  }
-
   // ===== 结果态：视频 Tab 内容 =====
   @Builder
   VideoResultTab() {
@@ -575,28 +573,51 @@ export struct SearchPage {
       this.VideoSortRow()
       if (this.loading) {
         LoadingView({ loading: true })
-      } else if (this.results.length === 0) {
+      } else if (this.resultsSource.totalCount() === 0) {
         LoadingView({
           loading: false,
           empty: true,
           emptyText: '没有找到相关视频',
           onRetry: () => {
-            this.doSearch(true);
+            this.doSearch(true).catch(() => {
+            });
           },
         })
       } else {
         List() {
-          ForEach(this.results, (item: VideoItem) => {
+          LazyForEach(this.resultsSource, (item: VideoItem) => {
             ListItem() {
-              this.ResultRow(item)
+              VideoRowCard({
+                cover: item.cover,
+                title: item.title,
+                upName: item.upName,
+                overlayText: item.playText + ' · ' + item.danmakuText,
+                compact: true,
+                onTap: () => {
+                  const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
+                  AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+                },
+              })
             }
           }, (item: VideoItem) => item.bvid + String(item.aid))
           ListItem() {
-            this.LoadMoreFooter()
+            LoadMoreFooter({
+              loading: this.loadingMore,
+              hasMore: true,
+              moreText: '加载更多',
+              fontSize: 13,
+              padTop: 12,
+              padBottom: 20,
+              onLoadMore: () => {
+                this.doSearch(false).catch(() => {
+                });
+              },
+            })
           }
         }
         .width('100%')
         .height('100%')
+        .cachedCount(5)
         .scrollBar(BarState.Off)
       }
     }
@@ -611,28 +632,41 @@ export struct SearchPage {
       this.UserSortRow()
       if (this.loading) {
         LoadingView({ loading: true })
-      } else if (this.userResults.length === 0) {
+      } else if (this.userSource.totalCount() === 0) {
         LoadingView({
           loading: false,
           empty: true,
           emptyText: '没有找到相关用户',
           onRetry: () => {
-            this.doSearch(true);
+            this.doSearch(true).catch(() => {
+            });
           },
         })
       } else {
         List() {
-          ForEach(this.userResults, (item: UserSearchItem) => {
+          LazyForEach(this.userSource, (item: UserSearchItem) => {
             ListItem() {
               this.UserRow(item)
             }
           }, (item: UserSearchItem) => String(item.mid))
           ListItem() {
-            this.LoadMoreFooter()
+            LoadMoreFooter({
+              loading: this.loadingMore,
+              hasMore: true,
+              moreText: '加载更多',
+              fontSize: 13,
+              padTop: 12,
+              padBottom: 20,
+              onLoadMore: () => {
+                this.doSearch(false).catch(() => {
+                });
+              },
+            })
           }
         }
         .width('100%')
         .height('100%')
+        .cachedCount(5)
         .scrollBar(BarState.Off)
       }
     }
@@ -645,7 +679,7 @@ export struct SearchPage {
       Column() {
         // 顶部搜索栏
         Row({ space: 8 }) {
-          this.BackButton()
+          BackButton()
           Row({ space: 6 }) {
             Image($r('app.media.ic_search'))
               .width(21)

@@ -23,6 +23,18 @@ import { ImageViewerPage } from './ImageViewer';
 import { UserStore } from '../common/UserStore';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
 
+/** NavDestination 公共修饰：隐藏标题栏 + 页面显示/消失回调（各页面回调体不变，消除 8 分支重复）。 */
+@Extend(NavDestination)
+function stdDestination(onShownCb: () => void, onWillDisappearCb: () => void) {
+  .hideTitleBar(true)
+  .onShown(() => {
+    onShownCb();
+  })
+  .onWillDisappear(() => {
+    onWillDisappearCb();
+  })
+}
+
 @Entry
 @Component
 struct Index {
@@ -56,17 +68,66 @@ struct Index {
     AppTheme.resetHeaderFade();
   }
 
+  /** 路由参数守卫：非法参数返回 null，页面渲染为空态而不是裸强转崩溃。 */
+  private static asVideoDetailParam(param: Object): VideoDetailParam | null {
+    const p: VideoDetailParam = param as VideoDetailParam;
+    if (p === null || p === undefined) {
+      return null;
+    }
+    if (typeof p.bvid !== 'string' || typeof p.aid !== 'number' || typeof p.title !== 'string') {
+      return null;
+    }
+    if (p.bvid.length === 0 && p.aid <= 0) {
+      return null;
+    }
+    return p;
+  }
+
+  private static asUserSpaceParam(param: Object): UserSpaceParam | null {
+    const p: UserSpaceParam = param as UserSpaceParam;
+    if (p === null || p === undefined || typeof p.mid !== 'number' || p.mid <= 0) {
+      return null;
+    }
+    return p;
+  }
+
+  private static asLiveRoomParam(param: Object): LiveRoomParam | null {
+    const p: LiveRoomParam = param as LiveRoomParam;
+    if (p === null || p === undefined || typeof p.roomId !== 'number' || p.roomId <= 0) {
+      return null;
+    }
+    return p;
+  }
+
+  private static asImageViewerParam(param: Object): ImageViewerParam | null {
+    const p: ImageViewerParam = param as ImageViewerParam;
+    if (p === null || p === undefined || !Array.isArray(p.images) || p.images.length === 0) {
+      return null;
+    }
+    return p;
+  }
+
+  @Builder
+  InvalidParamContent() {
+    Column() {
+      Text('页面参数无效，请返回重试')
+        .fontSize(14)
+        .fontColor('#9499A0')
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+  }
+
   @Builder
   PageMap(name: string, param: Object) {
     if (name === NAV_SEARCH) {
       NavDestination() {
         SearchPage()
       }
-      .hideTitleBar(true)
-      .onShown(() => {
+      .stdDestination(() => {
         Immersive.setBarIcons(this.isDark, this.isDark);
-      })
-      .onWillDisappear(() => {
+      }, () => {
         // 出栈回根页时没有页面级回调，提前恢复根页系统栏图标
         this.syncBarColors();
       })
@@ -74,7 +135,7 @@ struct Index {
       NavDestination() {
         MessagesPage()
       }
-      .hideTitleBar(true)
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
       .onBackPressed(() => {
         // 私信详情是页内二级导航：侧滑/返回键先回会话列表，不直接弹回首页。
         if (AppStorage.get<boolean>('messageThreadOpen') ?? false) {
@@ -83,27 +144,31 @@ struct Index {
         }
         return false;
       })
-      .onShown(() => Immersive.setBarIcons(this.isDark, this.isDark))
-      .onWillDisappear(() => this.syncBarColors())
     } else if (name === NAV_HISTORY) {
       NavDestination() {
         HistoryPage()
       }
-      .hideTitleBar(true)
-      .onShown(() => Immersive.setBarIcons(this.isDark, this.isDark))
-      .onWillDisappear(() => this.syncBarColors())
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
     } else if (name === NAV_FAVORITES) {
       NavDestination() {
         FavoritesPage()
       }
-      .hideTitleBar(true)
-      .onShown(() => Immersive.setBarIcons(this.isDark, this.isDark))
-      .onWillDisappear(() => this.syncBarColors())
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
     } else if (name === NAV_VIDEO_DETAIL) {
       NavDestination() {
-        VideoDetailPage({ param: param as VideoDetailParam })
+        if (Index.asVideoDetailParam(param) !== null) {
+          VideoDetailPage({ param: param as VideoDetailParam })
+        } else {
+          this.InvalidParamContent()
+        }
       }
-      .hideTitleBar(true)
+      .stdDestination(() => {
+        // 顶部为播放器黑底 → 状态栏透明 + 浅色图标
+        Immersive.setBarIcons(true, true);
+      }, () => {
+        PlayerCommandBus.stop();
+        this.syncBarColors();
+      })
       .onBackPressed(() => {
         // 评论回复详情是视频页内二级状态：系统返回键和侧滑都先退出回复详情。
         if (AppStorage.get<boolean>('videoReplyThreadOpen') ?? false) {
@@ -117,19 +182,15 @@ struct Index {
         }
         return false;
       })
-      .onShown(() => {
-        // 顶部为播放器黑底 → 状态栏透明 + 浅色图标
-        Immersive.setBarIcons(true, true);
-      })
-      .onWillDisappear(() => {
-        PlayerCommandBus.stop();
-        this.syncBarColors();
-      })
     } else if (name === NAV_LIVE_ROOM) {
       NavDestination() {
-        LiveRoomPage({ param: param as LiveRoomParam })
+        if (Index.asLiveRoomParam(param) !== null) {
+          LiveRoomPage({ param: param as LiveRoomParam })
+        } else {
+          this.InvalidParamContent()
+        }
       }
-      .hideTitleBar(true)
+      .stdDestination(() => Immersive.setBarIcons(true, true), () => this.syncBarColors())
       .onBackPressed(() => {
         if (AppStorage.get<boolean>('livePlayerFullscreen') ?? false) {
           const token: number = AppStorage.get<number>('livePlayerExitRequest') ?? 0;
@@ -138,36 +199,36 @@ struct Index {
         }
         return false;
       })
-      .onShown(() => Immersive.setBarIcons(true, true))
-      .onWillDisappear(() => this.syncBarColors())
     } else if (name === NAV_IMAGE_VIEWER) {
       NavDestination() {
-        ImageViewerPage({ param: param as ImageViewerParam })
+        if (Index.asImageViewerParam(param) !== null) {
+          ImageViewerPage({ param: param as ImageViewerParam })
+        } else {
+          this.InvalidParamContent()
+        }
       }
-      .hideTitleBar(true)
-      .onShown(() => Immersive.setBarIcons(true, true))
-      .onWillDisappear(() => this.syncBarColors())
+      .stdDestination(() => Immersive.setBarIcons(true, true), () => this.syncBarColors())
     } else if (name === NAV_LOGIN) {
       NavDestination() {
         LoginPage()
       }
-      .hideTitleBar(true)
-      .onShown(() => {
+      .stdDestination(() => {
         Immersive.setBarIcons(this.isDark, this.isDark);
-      })
-      .onWillDisappear(() => {
+      }, () => {
         this.syncBarColors();
       })
     } else if (name === NAV_USER_SPACE) {
       NavDestination() {
-        UserSpacePage({ param: param as UserSpaceParam })
+        if (Index.asUserSpaceParam(param) !== null) {
+          UserSpacePage({ param: param as UserSpaceParam })
+        } else {
+          this.InvalidParamContent()
+        }
       }
-      .hideTitleBar(true)
-      .onShown(() => {
+      .stdDestination(() => {
         // 顶部为 banner 氛围图 → 状态栏图标浅色
         Immersive.setBarIcons(true, this.isDark);
-      })
-      .onWillDisappear(() => {
+      }, () => {
         this.syncBarColors();
       })
     }

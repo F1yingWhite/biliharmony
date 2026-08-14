@@ -130,17 +130,6 @@ export function randomString(len: number): string {
   return result;
 }
 
-// 简单 buvid 生成（真实 buvid 算法较复杂，此处模拟格式）
-export function generateBuvid(): string {
-  const rand: string = randomString(32);
-  return 'XX' + rand.toUpperCase();
-}
-
-// URL 编码（与 encodeURIComponent 一致，用于签名）
-export function urlEncode(s: string): string {
-  return encodeURIComponent(s);
-}
-
 // http → https（鸿蒙默认安全网络策略，且 B 站 CDN 支持 https）
 export function toHttps(url: string): string {
   // 搜索接口的 pic/face 经常返回 //i0.hdslb.com/...；ArkUI Image 不会自动补协议。

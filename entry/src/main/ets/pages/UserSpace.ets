@@ -9,8 +9,12 @@ import { VideoItem, UserSpaceInfo, UserStat, SpaceArcData } from '../model/Model
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { VideoCard } from '../components/VideoCard';
 import { LoadingView } from '../components/LoadingView';
+import { BackButton, BackButtonVariant } from '../components/BackButton';
+import { FilterChip } from '../components/FilterChip';
+import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { colorWithAlpha, formatCount } from '../common/Utils';
 import { UserStore } from '../common/UserStore';
+import { BasicDataSource } from '../common/BasicDataSource';
 import { DecoratedAvatar } from '../components/UserDecorations';
 import { DynamicView } from '../views/DynamicView';
 
@@ -29,7 +33,6 @@ export struct UserSpacePage {
   @State loading: boolean = true;
   @State errorText: string = '';
   // ===== 投稿 Tab =====
-  @State videos: Array<VideoItem> = [];
   @State arcTotal: number = 0;
   @State arcPage: number = 1;
   @State arcOrder: string = 'pubdate';
@@ -43,34 +46,65 @@ export struct UserSpacePage {
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
   private tabsController: TabsController = new TabsController();
+  private videosSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
+  private arcFetching: boolean = false;
+  private destroyed: boolean = false;
+  private lifecycleGeneration: number = 0;
 
   aboutToAppear(): void {
-    this.init();
+    this.destroyed = false;
+    this.lifecycleGeneration++;
+    this.followLoading = false;
+    this.arcFetching = false;
+    this.loadingMore = false;
+    this.init().catch(() => {
+    });
+  }
+
+  aboutToDisappear(): void {
+    this.destroyed = true;
+    this.lifecycleGeneration++;
   }
 
   async init(): Promise<void> {
+    const generation: number = this.lifecycleGeneration;
     this.loading = true;
     this.errorText = '';
-    const info: UserSpaceInfo | null = await BiliApi.getUserSpaceInfo(this.param.mid);
-    if (info === null) {
-      this.loading = false;
-      this.errorText = '用户信息加载失败，请检查网络后重试';
-      return;
+    try {
+      const info: UserSpaceInfo | null = await BiliApi.getUserSpaceInfo(this.param.mid);
+      if (this.destroyed || generation !== this.lifecycleGeneration) return;
+      if (info === null) {
+        this.errorText = '用户信息加载失败，请检查网络后重试';
+        return;
+      }
+      this.info = info;
+      BiliApi.getUserStat(this.param.mid).then((stat: UserStat) => {
+        if (!this.destroyed && generation === this.lifecycleGeneration) this.stat = stat;
+      }).catch(() => {
+      });
+      if (UserStore.isLogin) this.loadFollowState().catch(() => {
+      });
+      this.loadArcs(true).catch(() => {
+      });
+    } catch (e) {
+      if (!this.destroyed && generation === this.lifecycleGeneration) {
+        this.errorText = '用户信息加载失败，请检查网络后重试';
+      }
+    } finally {
+      if (!this.destroyed && generation === this.lifecycleGeneration) this.loading = false;
     }
-    this.info = info;
-    this.loading = false;
-    BiliApi.getUserStat(this.param.mid).then((stat: UserStat) => {
-      this.stat = stat;
-    });
-    if (UserStore.isLogin) this.loadFollowState();
-    this.loadArcs(true);
   }
 
   async loadFollowState(): Promise<void> {
+    const generation: number = this.lifecycleGeneration;
     this.followLoading = true;
-    const attribute: number | null = await BiliApi.getUserRelation(this.param.mid);
-    if (attribute !== null) this.following = attribute === 2 || attribute === 6;
-    this.followLoading = false;
+    try {
+      const attribute: number | null = await BiliApi.getUserRelation(this.param.mid);
+      if (this.destroyed || generation !== this.lifecycleGeneration) return;
+      if (attribute !== null) this.following = attribute === 2 || attribute === 6;
+    } finally {
+      if (!this.destroyed && generation === this.lifecycleGeneration) this.followLoading = false;
+    }
   }
 
   async toggleFollow(): Promise<void> {
@@ -87,29 +121,59 @@ export struct UserSpacePage {
     const previous: boolean = this.following;
     this.following = !previous;
     this.followLoading = true;
-    const result: ActionResult = await BiliApi.modifyUserRelation(this.param.mid, this.following);
-    this.followLoading = false;
-    if (!result.ok) {
-      this.following = previous;
-      promptAction.showToast({ message: result.message });
+    const generation: number = this.lifecycleGeneration;
+    try {
+      const result: ActionResult = await BiliApi.modifyUserRelation(this.param.mid, this.following);
+      if (this.destroyed || generation !== this.lifecycleGeneration) return;
+      if (!result.ok) {
+        this.following = previous;
+        promptAction.showToast({ message: result.message });
+      }
+    } catch (e) {
+      if (!this.destroyed && generation === this.lifecycleGeneration) {
+        this.following = previous;
+        promptAction.showToast({ message: '关注操作失败，请检查网络' });
+      }
+    } finally {
+      if (!this.destroyed && generation === this.lifecycleGeneration) this.followLoading = false;
     }
   }
 
   async loadArcs(reset: boolean): Promise<void> {
-    if (reset) {
-      this.arcPage = 1;
-      this.arcLoading = true;
+    if (this.arcFetching) {
+      return;
     }
-    const pn: number = this.arcPage;
-    const data: SpaceArcData = await BiliApi.getUserSpaceArcs(this.param.mid, pn, this.arcOrder);
-    this.videos = reset ? data.videos : this.videos.concat(data.videos);
-    this.arcTotal = data.total;
-    this.arcPage = pn + 1;
-    this.arcLoading = false;
+    this.arcFetching = true;
+    const generation: number = this.lifecycleGeneration;
+    try {
+      if (reset) {
+        this.arcPage = 1;
+        this.arcLoading = true;
+      }
+      const pn: number = this.arcPage;
+      const data: SpaceArcData = await BiliApi.getUserSpaceArcs(this.param.mid, pn, this.arcOrder);
+      if (this.destroyed || generation !== this.lifecycleGeneration) {
+        return;
+      }
+      if (reset) {
+        this.videosSource.reset(data.videos);
+      } else {
+        this.videosSource.append(data.videos);
+      }
+      this.arcTotal = data.total;
+      this.arcPage = pn + 1;
+    } catch (e) {
+      // 保留已加载投稿，排序或重试时可再次请求。
+    } finally {
+      if (!this.destroyed && generation === this.lifecycleGeneration) {
+        this.arcLoading = false;
+        this.arcFetching = false;
+      }
+    }
   }
 
   hasMoreArcs(): boolean {
-    return this.videos.length > 0 && this.videos.length < this.arcTotal;
+    return this.videosSource.totalCount() > 0 && this.videosSource.totalCount() < this.arcTotal;
   }
 
   onReachEnd(): void {
@@ -117,28 +181,12 @@ export struct UserSpacePage {
       return;
     }
     this.loadingMore = true;
-    this.loadArcs(false).finally(() => {
-      this.loadingMore = false;
-    });
-  }
-
-  @Builder
-  BackButton() {
-    Row() {
-      Image($r('app.media.ic_back'))
-        .width(18)
-        .height(18)
-        .fillColor('#FFFFFF')
-    }
-    .width(34)
-    .height(34)
-    .borderRadius(17)
-    .backgroundColor(this.glassOn ? '#66000000' : '#B3000000')
-    .backdropBlur(this.glassOn ? 10 : 0)
-    .justifyContent(FlexAlign.Center)
-    .onClick(() => {
-      AppNavStack.pop();
-    })
+    this.loadArcs(false)
+      .catch(() => {
+      })
+      .finally(() => {
+        this.loadingMore = false;
+      });
   }
 
   // ===== 头部氛围层：top_photo banner（无则主题色渐变）+ 头像/昵称/等级/认证/签名 =====
@@ -267,76 +315,64 @@ export struct UserSpacePage {
 
   // ===== 投稿 Tab：排序 chips + 双列视频流 =====
   @Builder
-  Chip(label: string, value: string) {
-    Text(label)
-      .fontSize(12)
-      .fontColor(this.arcOrder === value ? '#FFFFFF' : (this.isDark ? '#C6C7CB' : '#61666D'))
-      .padding({ left: 12, right: 12, top: 5, bottom: 5 })
-      .backgroundColor(this.arcOrder === value ? this.accent : (this.isDark ? '#2E3136' : '#ECEEF0'))
-      .borderRadius(14)
-      .margin({ right: 8 })
-      .onClick(() => {
-        if (this.arcOrder !== value) {
-          this.arcOrder = value;
-          this.loadArcs(true);
-        }
-      })
-  }
-
-  @Builder
   ArcTab() {
     Column() {
       // 排序 chips
       Row() {
         ForEach(ARC_ORDERS, (opt: Record<string, string>) => {
-          this.Chip(opt['label'], opt['value'])
+          FilterChip({
+            label: opt['label'],
+            selected: this.arcOrder === opt['value'],
+            onTap: () => {
+              if (this.arcOrder !== opt['value']) {
+                this.arcOrder = opt['value'];
+                this.loadArcs(true).catch(() => {
+                });
+              }
+            },
+          })
         }, (opt: Record<string, string>) => opt['value'])
       }
       .width('100%')
       .padding({ left: 12, right: 12, top: 8, bottom: 2 })
 
-      if (this.arcLoading && this.videos.length === 0) {
+      if (this.arcLoading && this.videosSource.isEmpty()) {
         LoadingView({ loading: true })
-      } else if (this.videos.length === 0) {
+      } else if (this.videosSource.isEmpty()) {
         LoadingView({
           loading: false,
           empty: true,
           emptyText: '暂无投稿视频',
           onRetry: () => {
-            this.loadArcs(true);
+            this.loadArcs(true).catch(() => {
+            });
           },
         })
       } else {
         List({ space: 10 }) {
-          ForEach(this.videos, (item: VideoItem) => {
+          LazyForEach(this.videosSource, (item: VideoItem) => {
             ListItem() {
               VideoCard({ video: item })
             }
           }, (item: VideoItem) => item.bvid.length > 0 ? item.bvid : String(item.aid))
           ListItem() {
-            Row() {
-              if (this.loadingMore) {
-                LoadingProgress()
-                  .width(20)
-                  .height(20)
-                  .color(this.accent)
-              } else {
-                Text(this.hasMoreArcs() ? '加载更多' : '—— 到底啦 ——')
-                  .fontSize(12)
-                  .fontColor(this.hasMoreArcs() ? this.accent : '#999999')
-                  .onClick(() => {
-                    this.onReachEnd();
-                  })
-              }
-            }
-            .width('100%')
-            .justifyContent(FlexAlign.Center)
-            .padding({ top: 8, bottom: 16 })
+            LoadMoreFooter({
+              loading: this.loadingMore,
+              hasMore: this.hasMoreArcs(),
+              moreText: '加载更多',
+              endText: '—— 到底啦 ——',
+              padTop: 8,
+              padBottom: 16,
+              onLoadMore: () => {
+                this.onReachEnd();
+              },
+            })
           }
         }
         .width('100%')
         .height('100%')
         .lanes(2, 10)
+        .cachedCount(3)
         .padding({ left: 10, right: 10, top: 6 })
         .scrollBar(BarState.Off)
         .onReachEnd(() => {
@@ -394,7 +430,8 @@ export struct UserSpacePage {
             empty: false,
             errorText: this.errorText,
             onRetry: () => {
-              this.init();
+              this.init().catch(() => {
+              });
             },
           })
         }
@@ -439,7 +476,7 @@ export struct UserSpacePage {
 
       // 悬浮返回键（banner 之上，浅色图标）
       Column() {
-        this.BackButton()
+        BackButton({ variant: BackButtonVariant.GLASS })
       }
       .margin({ top: Immersive.statusBarHeight() + 8, left: 10 })
     }

@@ -158,7 +158,8 @@ export function tonalPalette(seed: string, dark: boolean): Record<string, string
   const lumi: number = luminance(seed);
 
   palette['primary'] = vivid;
-  palette['onPrimary'] = isDarkColor(vivid) ? '#FFFFFF' : '#FFFFFF';
+  // 主色上的文字/图标恒为白（品牌主色均为中深色调，白字对比度足够）
+  palette['onPrimary'] = '#FFFFFF';
   if (dark) {
     // 深色模式：主色提亮
     const p: string = lumi < 0.3 ? mixWithWhite(vivid, 0.2) : vivid;
