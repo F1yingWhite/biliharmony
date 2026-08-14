@@ -4,8 +4,9 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { promptAction } from '@kit.ArkUI';
 import { systemShare } from '@kit.ShareKit';
-import { AppNavStack, ImageViewerParam } from '../common/AppRouter';
+import { ImageViewerParam } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
+import { BackButton } from '../components/BackButton';
 
 @Component
 struct ZoomableImage {
@@ -103,6 +104,15 @@ export struct ImageViewerPage {
 
   private currentUrl(): string {
     return this.param.images.length > 0 ? this.param.images[this.currentIndex] : '';
+  }
+
+  /** 非当前页用缩略参数图（B 站 @<宽>w 后缀），滑到该页时再加载原图。 */
+  private thumbUrl(url: string): string {
+    const clean: string = url.split('?')[0];
+    if (clean.indexOf('hdslb.com') < 0) {
+      return url;
+    }
+    return clean + '@640w.webp';
   }
 
   private imageExtension(url: string): string {
@@ -223,9 +233,9 @@ export struct ImageViewerPage {
     Stack({ alignContent: Alignment.Center }) {
       if (this.param.images.length > 0) {
         Swiper() {
-          ForEach(this.param.images, (source: string) => {
+          ForEach(this.param.images, (source: string, index: number) => {
             ZoomableImage({
-              source: source,
+              source: index === this.currentIndex ? source : this.thumbUrl(source),
               onLongPress: () => this.actionMenuOpen = true,
               onZoomChange: (zoomed: boolean) => this.currentZoomed = zoomed,
             })
@@ -236,6 +246,7 @@ export struct ImageViewerPage {
         .index(this.currentIndex)
         .indicator(false)
         .loop(false)
+        .cachedCount(1)
         .disableSwipe(this.currentZoomed)
         .onChange((index: number) => {
           this.currentIndex = index;
@@ -246,13 +257,7 @@ export struct ImageViewerPage {
       // 顶部只放返回键，页码固定在底部，不再悬在图片正中央。
       Column() {
         Row() {
-          Text('‹')
-            .fontSize(34)
-            .fontColor('#FFFFFF')
-            .width(44)
-            .height(44)
-            .textAlign(TextAlign.Center)
-            .onClick(() => AppNavStack.pop())
+          BackButton({ triggerWidth: 44, triggerHeight: 44, fontSize: 34, color: '#FFFFFF', nudgeY: 0 })
           Blank()
         }
         .width('100%')

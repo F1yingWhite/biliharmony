@@ -1,27 +1,23 @@
 import { LiveRoomItem } from '../model/LiveModels';
 import { AppNavStack, LiveRoomParam, NAV_LIVE_ROOM } from '../common/AppRouter';
+import { FeedCardTitle, FeedCoverImage, FeedGradientMask } from './FeedCardParts';
 
+@Reusable
 @Component
 export struct LiveRoomCard {
-  room: LiveRoomItem = new LiveRoomItem();
+  @Prop room: LiveRoomItem = new LiveRoomItem();
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
+
+  aboutToReuse(params: Record<string, Object>): void {
+    this.room = params.room as LiveRoomItem;
+  }
 
   build() {
     Column({ space: 6 }) {
       Stack({ alignContent: Alignment.BottomStart }) {
-        Image(this.room.cover)
-          .width('100%')
-          .aspectRatio(16 / 9)
-          .objectFit(ImageFit.Cover)
-          .borderRadius(12)
-          .backgroundColor(this.isDark ? '#2A2C31' : '#E5E7EB')
-          .alt($r('app.media.placeholder_cover'))
-          .draggable(false)
-        Column()
-          .width('100%')
-          .height(42)
-          .linearGradient({ angle: 180, colors: [['#00000000', 0], ['#99000000', 1]] })
+        FeedCoverImage({ cover: this.room.cover, isDark: this.isDark })
+        FeedGradientMask({ height: 42, bottomColor: '#99000000' })
         Row({ space: 5 }) {
           Image($r('app.media.ic_live'))
             .width(13)
@@ -43,14 +39,7 @@ export struct LiveRoomCard {
       .clip(true)
       .borderRadius(12)
 
-      Text(this.room.title)
-        .width('100%')
-        .fontSize(14)
-        .lineHeight(19)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      FeedCardTitle({ title: this.room.title, isDark: this.isDark })
       Row({ space: 6 }) {
         if (this.room.face.length > 0) {
           Image(this.room.face)

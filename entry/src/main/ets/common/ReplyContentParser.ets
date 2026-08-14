@@ -1,5 +1,14 @@
 import { BiliEmote, ReplyItem, ReplyJump } from '../model/Models';
 
+// 模块级正则与结果缓存：列表重渲染会反复解析同一条评论，避免重复建正则与重复解析
+const BVID_REGEX: RegExp = /BV[0-9A-Za-z]{10}/;
+const AID_REGEX: RegExp = /(?:^|[^A-Za-z])av(\d{1,18})/i;
+const ACTION_REGEX: RegExp = /(BV[0-9A-Za-z]{10}|(?:^|\s|[（(【\[])(?:\d{1,2}:)?[0-5]?\d:[0-5]\d|(?:^|[^A-Za-z])av\d{1,18})/i;
+const LEADING_BRACKET_REGEX: RegExp = /^[（(【\[]/;
+const PARSE_CACHE_MAX: number = 300;
+const PARSE_CACHE_TRIM: number = 60;
+const parseCache: Map<string, Array<ReplyRenderPart>> = new Map<string, Array<ReplyRenderPart>>();
+
 /** 评论正文和回复预览共用的富文本片段。 */
 export class ReplyRenderPart {
   text: string = '';
@@ -24,12 +33,12 @@ function parseClock(value: string): number {
 }
 
 function bvidFrom(value: string): string {
-  const match: RegExpExecArray | null = /BV[0-9A-Za-z]{10}/.exec(value);
+  const match: RegExpExecArray | null = BVID_REGEX.exec(value);
   return match === null ? '' : match[0];
 }
 
 function aidFrom(value: string): number {
-  const match: RegExpExecArray | null = /(?:^|[^A-Za-z])av(\d{1,18})/i.exec(value);
+  const match: RegExpExecArray | null = AID_REGEX.exec(value);
   return match === null ? 0 : Number(match[1]);
 }
 
@@ -46,6 +55,12 @@ function pushText(result: Array<ReplyRenderPart>, item: ReplyItem, text: string,
  * 主评论与未展开的回复预览必须调用同一个解析器，避免功能再次分叉。
  */
 export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
+  // key 含 rpid：不同评论正文可能相同，而片段 key 取自 rpid，混在一起会拿到错误的渲染 key
+  const cacheKey: string = String(item.rpid) + '\n' + item.content;
+  const cached: Array<ReplyRenderPart> | undefined = parseCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached.slice();
+  }
   const result: Array<ReplyRenderPart> = [];
   let rest: string = item.content;
   let serial: number = 0;
@@ -79,10 +94,10 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
         foundToken = '';
       }
     }
-    const actionMatch: RegExpExecArray | null = /(BV[0-9A-Za-z]{10}|(?:^|\s|[（(【\[])(?:\d{1,2}:)?[0-5]?\d:[0-5]\d|(?:^|[^A-Za-z])av\d{1,18})/i.exec(rest);
+    const actionMatch: RegExpExecArray | null = ACTION_REGEX.exec(rest);
     if (actionMatch !== null) {
       const leading: string = actionMatch[0];
-      const trimmed: string = leading.trim().replace(/^[（(【\[]/, '');
+      const trimmed: string = leading.trim().replace(LEADING_BRACKET_REGEX, '');
       const tokenAt: number = actionMatch.index + leading.indexOf(trimmed);
       if (tokenAt < foundAt) {
         foundAt = tokenAt;
@@ -113,5 +128,15 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
     result.push(part);
     rest = rest.substring(foundAt + foundLength);
   }
-  return result;
+  if (parseCache.size >= PARSE_CACHE_MAX) {
+    // Map 迭代序即插入序：超限删除最老的一批
+    const keys: Array<string> = Array.from(parseCache.keys());
+    const removeCount: number = Math.min(PARSE_CACHE_TRIM, keys.length);
+    for (let i: number = 0; i < removeCount; i++) {
+      parseCache.delete(keys[i]);
+    }
+  }
+  parseCache.set(cacheKey, result);
+  // 返回拷贝：调用方直接拿到的数组不进缓存，缓存副本不被外部修改污染
+  return result.slice();
 }

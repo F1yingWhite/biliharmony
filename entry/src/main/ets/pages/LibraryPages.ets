@@ -6,134 +6,115 @@ import { FavoriteFolderItem, FavoriteVideoPageData, HistoryPageData, HistoryVide
 import { UserStore } from '../common/UserStore';
 import { formatCount, formatDuration, formatRelativeTime } from '../common/Utils';
 import { LoadingView } from '../components/LoadingView';
+import { LoadMoreFooter } from '../components/LoadMoreFooter';
+import { PageHeader } from '../components/PageHeader';
+import { VideoRowCard } from '../components/VideoRowCard';
+import { BasicDataSource } from '../common/BasicDataSource';
 
 @Component
 export struct HistoryPage {
-  @State items: Array<HistoryVideoItem> = [];
   @State loading: boolean = false;
   @State hasMore: boolean = true;
   @State cursorMax: number = 0;
   @State cursorViewAt: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
+  private itemsSource: BasicDataSource<HistoryVideoItem> = new BasicDataSource<HistoryVideoItem>();
 
   aboutToAppear(): void {
-    this.load(true);
+    this.load(true).catch(() => {
+    });
   }
 
   async load(reset: boolean): Promise<void> {
     if (this.loading || (!reset && !this.hasMore)) return;
     this.loading = true;
-    const data: HistoryPageData = await BiliApi.getHistory(reset ? 0 : this.cursorMax, reset ? 0 : this.cursorViewAt);
-    this.items = reset ? data.items : this.merge(this.items, data.items);
-    this.cursorMax = data.max;
-    this.cursorViewAt = data.viewAt;
-    this.hasMore = data.hasMore;
-    this.loading = false;
+    try {
+      const data: HistoryPageData = await BiliApi.getHistory(reset ? 0 : this.cursorMax, reset ? 0 : this.cursorViewAt);
+      if (reset) {
+        this.itemsSource.reset(data.items);
+      } else {
+        this.itemsSource.append(this.mergeNew(data.items));
+      }
+      this.cursorMax = data.max;
+      this.cursorViewAt = data.viewAt;
+      this.hasMore = data.hasMore;
+    } catch (e) {
+      // 保留现有历史，重试入口仍可用。
+    } finally {
+      this.loading = false;
+    }
   }
 
-  private merge(base: Array<HistoryVideoItem>, incoming: Array<HistoryVideoItem>): Array<HistoryVideoItem> {
+  /** 追加前按 bvid+观看时间去重，游标翻页边界可能重复返回同一条记录。 */
+  private mergeNew(incoming: Array<HistoryVideoItem>): Array<HistoryVideoItem> {
     const keys: Set<string> = new Set<string>();
-    const result: Array<HistoryVideoItem> = [];
+    const base: Array<HistoryVideoItem> = this.itemsSource.getAll();
     for (let i: number = 0; i < base.length; i++) {
       keys.add(base[i].video.bvid + ':' + String(base[i].viewAt));
-      result.push(base[i]);
     }
+    const result: Array<HistoryVideoItem> = [];
     for (let i: number = 0; i < incoming.length; i++) {
       const key: string = incoming[i].video.bvid + ':' + String(incoming[i].viewAt);
-      if (!keys.has(key)) result.push(incoming[i]);
+      if (!keys.has(key)) {
+        keys.add(key);
+        result.push(incoming[i]);
+      }
     }
     return result;
   }
 
-  @Builder
-  Header(title: string) {
-    Row({ space: 10 }) {
-      Text('‹')
-        .fontSize(28)
-        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-        .width(34)
-        .onClick(() => AppNavStack.pop())
-      Text(title)
-        .fontSize(18)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-      Blank()
-    }
-    .width('100%')
-    .height(48)
-    .padding({ left: 8, right: 14 })
-    .border({ width: { bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
-  }
-
-  @Builder
-  HistoryRow(item: HistoryVideoItem) {
-    Row({ space: 11 }) {
-      Stack({ alignContent: Alignment.BottomEnd }) {
-        Image(item.video.cover)
-          .width(132)
-          .height(74)
-          .objectFit(ImageFit.Cover)
-          .borderRadius(7)
-        if (item.progress > 0 && item.video.duration > 0) {
-          Text(formatDuration(item.progress) + ' / ' + formatDuration(item.video.duration))
-            .fontSize(9)
-            .fontColor('#FFFFFF')
-            .padding({ left: 4, right: 4, top: 2, bottom: 2 })
-            .backgroundColor('#99000000')
-            .borderRadius(3)
-            .margin(4)
-        }
-      }
-      Column({ space: 6 }) {
-        Text(item.video.title)
-          .fontSize(14)
-          .fontColor(this.isDark ? '#F2F2F4' : '#18191C')
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(item.video.upName)
-          .fontSize(11)
-          .fontColor('#9499A0')
-          .maxLines(1)
-        Text(formatRelativeTime(item.viewAt) + '看过')
-          .fontSize(11)
-          .fontColor('#B0B3B8')
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-    }
-    .width('100%')
-    .padding({ top: 10, bottom: 10 })
-    .onClick(() => {
-      const param: VideoDetailParam = { bvid: item.video.bvid, aid: item.video.aid, title: item.video.title };
-      AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
-    })
-  }
-
   build() {
     Column() {
-      this.Header('历史记录')
-      if (this.items.length === 0) {
-        LoadingView({ loading: this.loading, empty: !this.loading, emptyText: '暂无观看历史', onRetry: () => this.load(true) })
+      PageHeader({ title: '历史记录' })
+      if (this.itemsSource.totalCount() === 0) {
+        LoadingView({ loading: this.loading, empty: !this.loading, emptyText: '暂无观看历史',
+          onRetry: () => this.load(true).catch(() => {
+          }) })
       } else {
         List() {
-          ForEach(this.items, (item: HistoryVideoItem) => {
-            ListItem() { this.HistoryRow(item) }
+          LazyForEach(this.itemsSource, (item: HistoryVideoItem) => {
+            ListItem() {
+              VideoRowCard({
+                cover: item.video.cover,
+                title: item.video.title,
+                upName: item.video.upName,
+                overlayText: item.progress > 0 && item.video.duration > 0 ?
+                  formatDuration(item.progress) + ' / ' + formatDuration(item.video.duration) : '',
+                extraText: formatRelativeTime(item.viewAt) + '看过',
+                titleDarkColor: '#F2F2F4',
+                onTap: () => {
+                  const param: VideoDetailParam = { bvid: item.video.bvid, aid: item.video.aid, title: item.video.title };
+                  AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+                },
+              })
+            }
           }, (item: HistoryVideoItem) => item.video.bvid + String(item.viewAt))
           ListItem() {
-            Text(this.loading ? '加载中…' : (this.hasMore ? '继续加载' : '—— 到底啦 ——'))
-              .fontSize(12)
-              .fontColor(this.hasMore ? this.accent : '#9499A0')
-              .width('100%')
-              .textAlign(TextAlign.Center)
-              .padding(18)
-              .onClick(() => this.load(false))
+            LoadMoreFooter({
+              loading: this.loading,
+              hasMore: this.hasMore,
+              moreText: '继续加载',
+              endText: '—— 到底啦 ——',
+              loadingText: '加载中…',
+              accentLoadingText: true,
+              padTop: 18,
+              padBottom: 18,
+              onLoadMore: () => {
+                this.load(false).catch(() => {
+                });
+              },
+            })
           }
         }
         .layoutWeight(1)
         .padding({ left: 12, right: 12 })
+        .cachedCount(5)
         .scrollBar(BarState.Off)
-        .onReachEnd(() => this.load(false))
+        .onReachEnd(() => {
+          this.load(false).catch(() => {
+          });
+        })
       }
     }
     .width('100%')
@@ -145,9 +126,6 @@ export struct HistoryPage {
 
 @Component
 export struct FavoritesPage {
-  @State folders: Array<FavoriteFolderItem> = [];
-  @State collections: Array<FavoriteFolderItem> = [];
-  @State videos: Array<VideoItem> = [];
   @State selected: FavoriteFolderItem = new FavoriteFolderItem();
   @State category: number = 0; // 0 收藏夹 / 1 收藏集
   @State folderPage: number = 0;
@@ -159,15 +137,21 @@ export struct FavoritesPage {
   @State collectionLoading: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
+  private foldersSource: BasicDataSource<FavoriteFolderItem> = new BasicDataSource<FavoriteFolderItem>();
+  private collectionsSource: BasicDataSource<FavoriteFolderItem> = new BasicDataSource<FavoriteFolderItem>();
+  private videosSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
 
   aboutToAppear(): void {
-    this.initFavorites();
+    this.initFavorites().catch(() => {
+    });
   }
 
   async initFavorites(): Promise<void> {
     await UserStore.ensureLoaded();
-    this.loadFolders(true);
-    this.loadCollections(true);
+    this.loadFolders(true).catch(() => {
+    });
+    this.loadCollections(true).catch(() => {
+    });
   }
 
   async loadCollections(reset: boolean): Promise<void> {
@@ -175,12 +159,20 @@ export struct FavoritesPage {
     const user = UserStore.current;
     if (user === null) return;
     this.collectionLoading = true;
-    const page: number = reset ? 1 : this.collectionPage + 1;
-    const data = await BiliApi.getCollectedFolders(user.mid, page);
-    this.collections = reset ? data.folders : this.collections.concat(data.folders);
-    this.collectionPage = page;
-    this.collectionHasMore = data.hasMore;
-    this.collectionLoading = false;
+    try {
+      const page: number = reset ? 1 : this.collectionPage + 1;
+      const data = await BiliApi.getCollectedFolders(user.mid, page);
+      if (reset) {
+        this.collectionsSource.reset(data.folders);
+      } else {
+        this.collectionsSource.append(data.folders);
+      }
+      this.collectionPage = page;
+      this.collectionHasMore = data.hasMore;
+    } catch (e) {
+    } finally {
+      this.collectionLoading = false;
+    }
   }
 
   async loadFolders(reset: boolean): Promise<void> {
@@ -188,18 +180,26 @@ export struct FavoritesPage {
     const user = UserStore.current;
     if (user === null) return;
     this.loading = true;
-    const page: number = reset ? 1 : this.folderPage + 1;
-    const data = await BiliApi.getFavoriteFolders(user.mid, page);
-    this.folders = reset ? data.folders : this.folders.concat(data.folders);
-    this.folderPage = page;
-    this.hasMore = data.hasMore;
-    this.loading = false;
+    try {
+      const page: number = reset ? 1 : this.folderPage + 1;
+      const data = await BiliApi.getFavoriteFolders(user.mid, page);
+      if (reset) {
+        this.foldersSource.reset(data.folders);
+      } else {
+        this.foldersSource.append(data.folders);
+      }
+      this.folderPage = page;
+      this.hasMore = data.hasMore;
+    } catch (e) {
+    } finally {
+      this.loading = false;
+    }
   }
 
   async openFolder(folder: FavoriteFolderItem): Promise<void> {
     if (this.category === 1 && folder.type === 0) folder.type = 21;
     this.selected = folder;
-    this.videos = [];
+    this.videosSource.clear();
     this.videoPage = 0;
     this.hasMore = true;
     await this.loadVideos(true);
@@ -208,43 +208,54 @@ export struct FavoritesPage {
   async loadVideos(reset: boolean): Promise<void> {
     if (this.loading || this.selected.id === 0 || (!reset && !this.hasMore)) return;
     this.loading = true;
-    const page: number = reset ? 1 : this.videoPage + 1;
-    const data: FavoriteVideoPageData = this.selected.type === 21 ?
-      await BiliApi.getCollectionVideos(this.selected.id, page) : await BiliApi.getFavoriteVideos(this.selected.id, page);
-    this.videos = reset ? data.videos : this.videos.concat(data.videos);
-    this.videoPage = page;
-    this.hasMore = data.hasMore;
-    this.loading = false;
+    try {
+      const page: number = reset ? 1 : this.videoPage + 1;
+      const data: FavoriteVideoPageData = this.selected.type === 21 ?
+        await BiliApi.getCollectionVideos(this.selected.id, page) : await BiliApi.getFavoriteVideos(this.selected.id, page);
+      if (reset) {
+        this.videosSource.reset(data.videos);
+      } else {
+        this.videosSource.append(data.videos);
+      }
+      this.videoPage = page;
+      this.hasMore = data.hasMore;
+    } catch (e) {
+    } finally {
+      this.loading = false;
+    }
   }
 
   goBack(): void {
     if (this.selected.id > 0) {
       this.selected = new FavoriteFolderItem();
-      this.videos = [];
+      this.videosSource.clear();
       this.hasMore = this.folderPage > 0;
     } else {
       AppNavStack.pop();
     }
   }
 
-  @Builder
-  Header() {
-    Row({ space: 10 }) {
-      Text('‹')
-        .fontSize(28)
-        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-        .width(34)
-      Text(this.selected.id > 0 ? this.selected.title : '我的收藏')
-        .fontSize(18)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-      Blank()
+  /** 当前列表的分页加载入口（footer 点击与触底共用） */
+  private loadMore(): void {
+    if (this.selected.id > 0) {
+      this.loadVideos(false).catch(() => {
+      });
+    } else if (this.category === 1) {
+      this.loadCollections(false).catch(() => {
+      });
+    } else {
+      this.loadFolders(false).catch(() => {
+      });
     }
-    .width('100%')
-    .height(48)
-    .padding({ left: 8, right: 14 })
-    .onClick(() => this.goBack())
-    .border({ width: { bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
+  }
+
+  /** 收藏集 Tab 有自己的加载/到底状态，footer 需要按当前列表切换。 */
+  private footerLoading(): boolean {
+    return this.selected.id === 0 && this.category === 1 ? this.collectionLoading : this.loading;
+  }
+
+  private footerHasMore(): boolean {
+    return this.selected.id === 0 && this.category === 1 ? this.collectionHasMore : this.hasMore;
   }
 
   @Builder
@@ -284,29 +295,12 @@ export struct FavoritesPage {
     .onClick(() => this.openFolder(item))
   }
 
-  @Builder
-  VideoRow(item: VideoItem) {
-    Row({ space: 11 }) {
-      Image(item.cover).width(132).height(74).objectFit(ImageFit.Cover).borderRadius(7)
-      Column({ space: 7 }) {
-        Text(item.title).fontSize(14).fontColor(this.isDark ? '#FFFFFF' : '#18191C').maxLines(2)
-        Text(item.upName).fontSize(11).fontColor('#9499A0').maxLines(1)
-        Text(formatCount(item.play) + ' 播放').fontSize(11).fontColor('#B0B3B8')
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-    }
-    .width('100%')
-    .padding({ top: 10, bottom: 10 })
-    .onClick(() => {
-      const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
-      AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
-    })
-  }
-
   build() {
     Column() {
-      this.Header()
+      PageHeader({
+        title: this.selected.id > 0 ? this.selected.title : '我的收藏',
+        onBack: () => this.goBack(),
+      })
       if (this.selected.id === 0) {
         Row() {
           Text('收藏夹')
@@ -323,40 +317,57 @@ export struct FavoritesPage {
         .width('100%')
         .border({ width: { bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
       }
-      if (this.loading && this.folders.length === 0 && this.videos.length === 0) {
+      if (this.loading && this.foldersSource.isEmpty() && this.videosSource.isEmpty()) {
         LoadingView({ loading: true })
       } else {
         List() {
           if (this.selected.id === 0) {
             if (this.category === 0) {
-              ForEach(this.folders, (item: FavoriteFolderItem) => {
+              LazyForEach(this.foldersSource, (item: FavoriteFolderItem) => {
                 ListItem() { this.FolderRow(item) }
               }, (item: FavoriteFolderItem) => String(item.id))
             } else {
-              ForEach(this.collections, (item: FavoriteFolderItem) => {
+              LazyForEach(this.collectionsSource, (item: FavoriteFolderItem) => {
                 ListItem() { this.FolderRow(item) }
               }, (item: FavoriteFolderItem) => 'collection-' + String(item.id))
             }
           } else {
-            ForEach(this.videos, (item: VideoItem) => {
-              ListItem() { this.VideoRow(item) }
+            LazyForEach(this.videosSource, (item: VideoItem) => {
+              ListItem() {
+                VideoRowCard({
+                  cover: item.cover,
+                  title: item.title,
+                  upName: item.upName,
+                  extraText: formatCount(item.play) + ' 播放',
+                  contentSpace: 7,
+                  titleDarkColor: '#FFFFFF',
+                  onTap: () => {
+                    const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
+                    AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+                  },
+                })
+              }
             }, (item: VideoItem) => item.bvid + String(item.aid))
           }
           ListItem() {
-            Text(this.selected.id === 0 && this.category === 1 ?
-              (this.collectionLoading ? '加载中…' : (this.collectionHasMore ? '继续加载' : '—— 收藏集到底啦 ——')) :
-              (this.loading ? '加载中…' : (this.hasMore ? '继续加载' : '—— 到底啦 ——')))
-              .fontSize(12).fontColor((this.category === 1 ? this.collectionHasMore : this.hasMore) ? this.accent : '#9499A0')
-              .width('100%').textAlign(TextAlign.Center).padding(18)
-              .onClick(() => this.selected.id > 0 ? this.loadVideos(false) :
-                (this.category === 1 ? this.loadCollections(false) : this.loadFolders(false)))
+            LoadMoreFooter({
+              loading: this.footerLoading(),
+              hasMore: this.footerHasMore(),
+              moreText: '继续加载',
+              endText: this.selected.id === 0 && this.category === 1 ? '—— 收藏集到底啦 ——' : '—— 到底啦 ——',
+              loadingText: '加载中…',
+              accentLoadingText: true,
+              padTop: 18,
+              padBottom: 18,
+              onLoadMore: () => this.loadMore(),
+            })
           }
         }
         .layoutWeight(1)
         .padding({ left: 12, right: 12 })
+        .cachedCount(5)
         .scrollBar(BarState.Off)
-        .onReachEnd(() => this.selected.id > 0 ? this.loadVideos(false) :
-          (this.category === 1 ? this.loadCollections(false) : this.loadFolders(false)))
+        .onReachEnd(() => this.loadMore())
       }
     }
     .width('100%')

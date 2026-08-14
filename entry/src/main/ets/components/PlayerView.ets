@@ -8,6 +8,7 @@ import { BiliApi, DanmakuItem, SponsorSegment, VideoChapter } from '../api/BiliA
 import { Immersive } from '../common/Immersive';
 import { formatDuration } from '../common/Utils';
 import { PlayUrlInfo, VideoQualityOption } from '../model/Models';
+import { Constants } from '../common/Constants';
 
 // 活跃弹幕（正在屏幕上运动/停留）
 class ActiveDm {
@@ -64,7 +65,6 @@ export struct PlayerView {
   onLike: () => void = () => {};
   onCoin: () => void = () => {};
   onShare: () => void = () => {};
-  @State surfaceId: string = '';
   @State playing: boolean = false;
   @State prepared: boolean = false;
   @State errorText: string = '';
@@ -145,8 +145,27 @@ export struct PlayerView {
   private holdPreviousRate: number = 1.0;
   private panStartTime: number = 0;
   private panGestureActive: boolean = false;
+  private surfaceId: string = '';
+  // 组件销毁后置位：所有跨 await 的换源/重建流程在 initPlayer 前据此放弃，避免泄漏无人释放的 AVPlayer。
+  private destroyed: boolean = false;
+  // 高精度播放头（秒）：弹幕引擎与恢复定位使用；@State curTime 只做秒级 UI 刷新。
+  private playheadSec: number = 0;
+  // 拖动进度条期间滑块以拖动值为准，避免 timeUpdate 回写 curTime 把滑块拽回。
+  private sliderDragging: boolean = false;
+  private sliderDragValue: number = 0;
+  private volumeRestoreTimer: number = -1;
+  private fullscreenExitTimer: number = -1;
+  // AVPlayer 创建本身是异步的：代次使离页/换源前发起的 createAVPlayer 结果失效并立即释放。
+  private playerCreateGeneration: number = 0;
+  private playerCreating: boolean = false;
+  // 已加载弹幕对应的 cid，避免 aboutToAppear 与换源触发的并发/重复加载。
+  private dmLoadedCid: number = -1;
+  // drawFrame 双缓冲，避免每帧分配 keep 数组。
+  private activeBack: Array<ActiveDm> = [];
 
   aboutToAppear(): void {
+    // 被其他 NavDestination 覆盖时 aboutToDisappear 已置位；返回同一实例需恢复。
+    this.destroyed = false;
     this.showControls = false;
     AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
     AppStorage.setOrCreate<number>('videoFullscreenExitRequest', 0);
@@ -173,6 +192,7 @@ export struct PlayerView {
   }
 
   async onSourceVersionChanged(): Promise<void> {
+    this.invalidatePlayerCreation();
     const oldPlayer: media.AVPlayer | null = this.player;
     const oldAudioPlayer: media.AVPlayer | null = this.audioPlayer;
     this.player = null;
@@ -183,6 +203,7 @@ export struct PlayerView {
     this.buffering = true;
     this.errorText = '';
     this.curTime = 0;
+    this.playheadSec = 0;
     this.duration = 0;
     this.sourceIndex = 0;
     this.audioSourceIndex = 0;
@@ -208,6 +229,12 @@ export struct PlayerView {
       } catch (e) {
       }
     }
+    // await 期间组件可能已销毁（release 已执行），此时再 initPlayer 会泄漏无人释放的 AVPlayer。
+    if (this.destroyed) {
+      this.buffering = false;
+      return;
+    }
+    this.dmLoadedCid = -1;
     this.loadDanmaku();
     this.loadSponsorSegments();
     this.loadVideoChapters();
@@ -221,31 +248,41 @@ export struct PlayerView {
   onLocalDanmakuRequested(): void {
     const text: string = this.localDanmakuText.trim();
     if (text.length === 0) return;
-    const item: DanmakuItem = new DanmakuItem(this.curTime, 1, 0xFFFFFF, text);
-    this.dmList.splice(this.dmCursor, 0, item);
-    this.spawnDanmaku(this.curTime);
+    const item: DanmakuItem = new DanmakuItem(this.playheadSec, 1, 0xFFFFFF, text);
+    // dmList 按 time 有序（二分查找依赖），本地弹幕也必须落在有序位置而非游标处。
+    let low: number = 0;
+    let high: number = this.dmList.length;
+    while (low < high) {
+      const middle: number = Math.floor((low + high) / 2);
+      if (this.dmList[middle].time <= item.time) low = middle + 1;
+      else high = middle;
+    }
+    this.dmList.splice(low, 0, item);
+    if (low < this.dmCursor) this.dmCursor++;
+    this.spawnDanmaku(this.playheadSec);
   }
 
   onCompactModeChanged(): void {
     if (!this.compactMode || this.fullscreen) return;
     // 收起播放器时底部抽屉没有足够空间，避免其越出视频框。
-    this.showDmSettings = false;
-    this.showQualitySettings = false;
-    this.showSpeedSettings = false;
-    this.showChapterSettings = false;
+    this.closeSettingPanels();
   }
 
   aboutToDisappear(): void {
+    this.destroyed = true;
+    this.invalidatePlayerCreation();
     AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
     this.endHoldSpeed();
-    this.gestureSeekPreview = -1;
-    this.resumeAfterPrepare = this.curTime;
+    this.resumeAfterPrepare = this.playheadSec;
     this.shouldPlayAfterPrepare = false;
     this.muteImmediately();
     this.release();
-    this.playing = false;
-    this.showControls = true;
-    this.onPlayingChange(false);
+    // 销毁阶段写 @State 无效且高风险，只做资源清理；父组件通知保留但隔离异常。
+    try {
+      this.onPlayingChange(false);
+    } catch (e) {
+      // 父组件可能已先行销毁。
+    }
     Immersive.setFullscreen(false);
   }
 
@@ -277,7 +314,10 @@ export struct PlayerView {
     this.stopDmLoop(false);
     this.onPlayingChange(false);
     // pause 完成后恢复音量；播放器仍保持暂停，返回点击继续时声音正常。
-    setTimeout(() => {
+    if (this.volumeRestoreTimer >= 0) clearTimeout(this.volumeRestoreTimer);
+    this.volumeRestoreTimer = setTimeout(() => {
+      this.volumeRestoreTimer = -1;
+      if (this.destroyed) return;
       try {
         if (this.player === video && video !== null && this.prepared) video.setVolume(1);
         if (this.audioPlayer === audio && audio !== null && this.audioPrepared) audio.setVolume(1);
@@ -296,12 +336,29 @@ export struct PlayerView {
   }
 
   async loadSponsorSegments(): Promise<void> {
-    this.sponsorSegments = await BiliApi.getSponsorSegments(this.bvid, this.cid);
-    this.lastSponsorUuid = '';
+    const bvid: string = this.bvid;
+    const cid: number = this.cid;
+    try {
+      const segments: Array<SponsorSegment> = await BiliApi.getSponsorSegments(bvid, cid);
+      if (this.destroyed || this.bvid !== bvid || this.cid !== cid) return;
+      this.sponsorSegments = segments;
+      this.lastSponsorUuid = '';
+    } catch (e) {
+      // 空降数据是增强能力，请求失败不能影响播放器主流程。
+    }
   }
 
   async loadVideoChapters(): Promise<void> {
-    this.chapters = await BiliApi.getVideoChapters(this.aid, this.bvid, this.cid);
+    const aid: number = this.aid;
+    const bvid: string = this.bvid;
+    const cid: number = this.cid;
+    try {
+      const chapters: Array<VideoChapter> = await BiliApi.getVideoChapters(aid, bvid, cid);
+      if (this.destroyed || this.aid !== aid || this.bvid !== bvid || this.cid !== cid) return;
+      this.chapters = chapters;
+    } catch (e) {
+      // 章节请求失败时保留普通进度条，不影响播放。
+    }
   }
 
   maybeSkipSponsor(now: number): boolean {
@@ -319,11 +376,21 @@ export struct PlayerView {
   }
 
   async loadDanmaku(): Promise<void> {
-    const list: Array<DanmakuItem> = await BiliApi.getDanmaku(this.cid);
-    list.sort((a: DanmakuItem, b: DanmakuItem) => a.time - b.time);
-    this.dmList = list;
-    this.syncDanmakuCursor(this.curTime);
-    this.lastSpawnTime = -1;
+    // 同一 cid 不重复加载；先占位再 await 的写法同时挡住 aboutToAppear 与换源触发的并发加载。
+    const cid: number = this.cid;
+    if (this.dmLoadedCid === cid) return;
+    this.dmLoadedCid = cid;
+    try {
+      const list: Array<DanmakuItem> = await BiliApi.getDanmaku(cid);
+      if (this.destroyed || this.dmLoadedCid !== cid) return;
+      list.sort((a: DanmakuItem, b: DanmakuItem) => a.time - b.time);
+      this.dmList = list;
+      this.syncDanmakuCursor(this.playheadSec);
+      this.lastSpawnTime = -1;
+    } catch (e) {
+      // 失败后允许下一次进入/换源重新请求，而不是把 cid 永久标记为已加载。
+      if (!this.destroyed && this.dmLoadedCid === cid) this.dmLoadedCid = -1;
+    }
   }
 
   // XComponent 就绪后初始化播放器
@@ -333,12 +400,22 @@ export struct PlayerView {
   }
 
   async initPlayer(): Promise<void> {
-    if (this.player !== null) {
+    if (this.destroyed || this.player !== null || this.playerCreating) {
       return;
     }
+    const generation: number = ++this.playerCreateGeneration;
+    this.playerCreating = true;
     try {
       const p: media.AVPlayer = await media.createAVPlayer();
+      if (this.destroyed || generation !== this.playerCreateGeneration) {
+        try {
+          await p.release();
+        } catch (e) {
+        }
+        return;
+      }
       this.player = p;
+      this.playerCreating = false;
       // 官方状态机模式：先挂监听再 setMediaSource，initialized 后再 prepare
       p.on('stateChange', (state: media.AVPlayerState) => {
         if (this.player !== p) return;
@@ -386,9 +463,11 @@ export struct PlayerView {
           this.resetDanmakuAt(nextTime);
         }
         this.dmLastPlayerTime = nextTime;
-        this.curTime = nextTime;
+        this.playheadSec = nextTime;
+        // 控制层只需秒级刷新，避免 250ms 一次的 @State 写入驱动整棵控制子树重建。
+        if (Math.floor(nextTime) !== Math.floor(this.curTime)) this.curTime = nextTime;
         this.onProgress(nextTime);
-        this.spawnDanmaku(this.curTime);
+        this.spawnDanmaku(nextTime);
         if (this.maybeSkipSponsor(nextTime)) return;
         const audio: media.AVPlayer | null = this.audioPlayer;
         // 双 DASH 轨只在明显失步时兜底校时；原先每 5 秒、220ms 阈值会制造周期性顿挫。
@@ -422,14 +501,13 @@ export struct PlayerView {
         this.player = null;
         return;
       }
-      // PiliPlus 同样在底层播放器统一设置 PC UA + bilibili Referer。
-      const source: media.MediaSource = media.createMediaSourceWithUrl(sourceUrl, {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.2 Safari/605.1.15',
-        'Referer': 'https://www.bilibili.com/',
-      });
-      if (this.runtimeAudioSources.length > 0) await this.initAudioPlayer();
+      const source: media.MediaSource = media.createMediaSourceWithUrl(sourceUrl, this.playbackHeaders());
+      if (this.runtimeAudioSources.length > 0) await this.initAudioPlayer(generation);
+      if (this.destroyed || generation !== this.playerCreateGeneration || this.player !== p) return;
       await p.setMediaSource(source, this.videoPlaybackStrategy());
     } catch (e) {
+      if (generation === this.playerCreateGeneration) this.playerCreating = false;
+      if (this.destroyed || generation !== this.playerCreateGeneration) return;
       const msg: string = (e as Error)?.message ?? JSON.stringify(e);
       const failedPlayer: media.AVPlayer | null = this.player;
       if (failedPlayer !== null && this.sourceIndex + 1 < this.sourceCount()) {
@@ -471,11 +549,26 @@ export struct PlayerView {
     };
   }
 
-  private async initAudioPlayer(): Promise<void> {
+  /** PiliPlus 同样在底层播放器统一设置 PC UA + bilibili Referer。 */
+  private playbackHeaders(): Record<string, string> {
+    return {
+      'User-Agent': Constants.browserUa,
+      'Referer': 'https://www.bilibili.com/',
+    };
+  }
+
+  private async initAudioPlayer(generation: number): Promise<void> {
     if (this.audioPlayer !== null || this.runtimeAudioSources.length === 0) return;
     const sourceUrl: string = this.currentAudioSourceUrl();
     if (sourceUrl.length === 0) return;
     const audio: media.AVPlayer = await media.createAVPlayer();
+    if (this.destroyed || generation !== this.playerCreateGeneration || this.player === null) {
+      try {
+        await audio.release();
+      } catch (e) {
+      }
+      return;
+    }
     this.audioPlayer = audio;
     this.audioPrepared = false;
     audio.on('stateChange', (state: media.AVPlayerState) => {
@@ -498,11 +591,13 @@ export struct PlayerView {
     audio.on('seekDone', (position: number) => {
       this.onAudioSeekDone(audio, position);
     });
-    const source: media.MediaSource = media.createMediaSourceWithUrl(sourceUrl, {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.2 Safari/605.1.15',
-      'Referer': 'https://www.bilibili.com/',
-    });
+    const source: media.MediaSource = media.createMediaSourceWithUrl(sourceUrl, this.playbackHeaders());
     await audio.setMediaSource(source, this.audioPlaybackStrategy());
+  }
+
+  private invalidatePlayerCreation(): void {
+    this.playerCreateGeneration++;
+    this.playerCreating = false;
   }
 
   private tryStartPreparedPlayers(): void {
@@ -533,46 +628,55 @@ export struct PlayerView {
       return;
     }
     this.qualityLoading = true;
-    const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(this.aid, this.bvid, this.cid, qn);
-    if (info === null || info.urls.length === 0) {
+    try {
+      const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(this.aid, this.bvid, this.cid, qn);
+      if (info === null || info.urls.length === 0) {
+        this.errorText = '该清晰度暂时不可用';
+        return;
+      }
+      const oldPlayer: media.AVPlayer | null = this.player;
+      const oldAudioPlayer: media.AVPlayer | null = this.audioPlayer;
+      this.invalidatePlayerCreation();
+      this.resumeAfterPrepare = this.playheadSec;
+      this.shouldPlayAfterPrepare = this.playing;
+      this.runtimeSources = info.urls;
+      this.runtimeAudioSources = info.audioUrls;
+      if (info.qualities.length > 0) this.runtimeQualityOptions = info.qualities;
+      this.activeQuality = info.quality;
+      this.sourceIndex = 0;
+      this.audioSourceIndex = 0;
+      this.player = null;
+      this.audioPlayer = null;
+      this.audioPrepared = false;
+      this.prepared = false;
+      this.playing = false;
+      this.buffering = true;
+      this.showQualitySettings = false;
+      this.stopDmLoop(false);
+      if (oldPlayer !== null) {
+        try {
+          await oldPlayer.release();
+        } catch (e) {
+          // 错误状态播放器可能已经由系统释放。
+        }
+      }
+      if (oldAudioPlayer !== null) {
+        try {
+          await oldAudioPlayer.release();
+        } catch (e) {
+          // 错误状态音频播放器可能已经由系统释放。
+        }
+      }
+      // await 期间组件可能已销毁，此时重建播放器会泄漏。
+      if (this.destroyed) {
+        this.buffering = false;
+        return;
+      }
+      await this.initPlayer();
+    } finally {
+      // 同步抛错（如签名异常）也必须复位，否则 qualityLoading 永远卡 true。
       this.qualityLoading = false;
-      this.errorText = '该清晰度暂时不可用';
-      return;
     }
-    const oldPlayer: media.AVPlayer | null = this.player;
-    const oldAudioPlayer: media.AVPlayer | null = this.audioPlayer;
-    this.resumeAfterPrepare = this.curTime;
-    this.shouldPlayAfterPrepare = this.playing;
-    this.runtimeSources = info.urls;
-    this.runtimeAudioSources = info.audioUrls;
-    if (info.qualities.length > 0) this.runtimeQualityOptions = info.qualities;
-    this.activeQuality = info.quality;
-    this.sourceIndex = 0;
-    this.audioSourceIndex = 0;
-    this.player = null;
-    this.audioPlayer = null;
-    this.audioPrepared = false;
-    this.prepared = false;
-    this.playing = false;
-    this.buffering = true;
-    this.showQualitySettings = false;
-    this.stopDmLoop(false);
-    if (oldPlayer !== null) {
-      try {
-        await oldPlayer.release();
-      } catch (e) {
-        // 错误状态播放器可能已经由系统释放。
-      }
-    }
-    if (oldAudioPlayer !== null) {
-      try {
-        await oldAudioPlayer.release();
-      } catch (e) {
-        // 错误状态音频播放器可能已经由系统释放。
-      }
-    }
-    this.qualityLoading = false;
-    await this.initPlayer();
   }
 
   setPlaybackSpeed(rate: number): void {
@@ -615,7 +719,7 @@ export struct PlayerView {
 
   private beginHorizontalSeek(): void {
     if (this.duration <= 0) return;
-    this.panStartTime = this.curTime;
+    this.panStartTime = this.playheadSec;
     this.panGestureActive = false;
     this.gestureSeekPreview = -1;
   }
@@ -649,11 +753,15 @@ export struct PlayerView {
       return;
     }
     if (this.sourceIndex + 1 >= this.sourceCount()) {
+      // 备用线路已用尽：复位播放状态并释放仍挂在错误态的播放器，避免卡 loading。
       this.errorText = '播放出错：' + message;
+      this.buffering = false;
+      this.release();
       return;
     }
     this.retryingSource = true;
-    this.resumeAfterPrepare = this.curTime;
+    this.invalidatePlayerCreation();
+    this.resumeAfterPrepare = this.playheadSec;
     this.shouldPlayAfterPrepare = this.playing;
     this.player = null;
     const failedAudio: media.AVPlayer | null = this.audioPlayer;
@@ -675,6 +783,11 @@ export struct PlayerView {
         // 音频播放器可能也已进入错误态。
       }
     }
+    // await 期间组件可能已销毁，放弃重建并复位重试标志。
+    if (this.destroyed) {
+      this.retryingSource = false;
+      return;
+    }
     this.sourceIndex++;
     this.retryingSource = false;
     await this.initPlayer();
@@ -687,7 +800,8 @@ export struct PlayerView {
       return;
     }
     this.retryingSource = true;
-    this.resumeAfterPrepare = this.curTime;
+    this.invalidatePlayerCreation();
+    this.resumeAfterPrepare = this.playheadSec;
     this.shouldPlayAfterPrepare = this.playing;
     const video: media.AVPlayer | null = this.player;
     this.player = null;
@@ -707,6 +821,11 @@ export struct PlayerView {
       } catch (e) {
         // ignore
       }
+    }
+    // await 期间组件可能已销毁，放弃重建并复位重试标志。
+    if (this.destroyed) {
+      this.retryingSource = false;
+      return;
     }
     this.audioSourceIndex++;
     this.retryingSource = false;
@@ -737,6 +856,7 @@ export struct PlayerView {
     const clamped: number = Math.max(0, Math.min(this.duration > 0 ? this.duration : positionSec, positionSec));
     const targetMs: number = Math.floor(clamped * 1000);
     this.resetDanmakuAt(clamped);
+    this.playheadSec = clamped;
     this.curTime = clamped;
     this.onProgress(clamped);
     this.pendingSeekMs = targetMs;
@@ -860,6 +980,7 @@ export struct PlayerView {
 
   private async recoverPlayersAfterSeekStall(stalledVideo: media.AVPlayer, targetMs: number): Promise<void> {
     if (this.player !== stalledVideo) return;
+    this.invalidatePlayerCreation();
     const stalledAudio: media.AVPlayer | null = this.audioPlayer;
     this.player = null;
     this.audioPlayer = null;
@@ -884,6 +1005,8 @@ export struct PlayerView {
       } catch (e) {
       }
     }
+    // 看门狗触发后组件可能已销毁，避免重建出无人释放的播放器。
+    if (this.destroyed) return;
     await this.initPlayer();
   }
 
@@ -912,7 +1035,10 @@ export struct PlayerView {
     // 先恢复竖屏，待窗口尺寸稳定后再恢复详情布局，避免短暂套用横屏宽度。
     // 在过渡结束前继续标记为全屏，使连续的返回手势也不会误把视频页弹出。
     Immersive.setFullscreen(false);
-    setTimeout(() => {
+    if (this.fullscreenExitTimer >= 0) clearTimeout(this.fullscreenExitTimer);
+    this.fullscreenExitTimer = setTimeout(() => {
+      this.fullscreenExitTimer = -1;
+      if (this.destroyed) return;
       this.onFullscreenChange(false);
       AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
     }, 240);
@@ -929,10 +1055,7 @@ export struct PlayerView {
 
   toggleControls(): void {
     if (this.showDmSettings || this.showQualitySettings || this.showSpeedSettings || this.showChapterSettings) {
-      this.showDmSettings = false;
-      this.showQualitySettings = false;
-      this.showSpeedSettings = false;
-      this.showChapterSettings = false;
+      this.closeSettingPanels();
       return;
     }
     this.showControls = !this.showControls;
@@ -942,6 +1065,24 @@ export struct PlayerView {
     if (this.showControls) {
       this.scheduleControlsHide();
     }
+  }
+
+  private closeSettingPanels(): void {
+    this.showDmSettings = false;
+    this.showQualitySettings = false;
+    this.showSpeedSettings = false;
+    this.showChapterSettings = false;
+  }
+
+  /** 底部设置面板互斥开关：打开目标面板时关掉其余三个，再点一次则全部收起。 */
+  private exclusiveToggle(which: string): void {
+    const next: boolean = !(which === 'dm' ? this.showDmSettings : which === 'quality' ? this.showQualitySettings :
+      which === 'speed' ? this.showSpeedSettings : this.showChapterSettings);
+    this.closeSettingPanels();
+    if (which === 'dm') this.showDmSettings = next;
+    else if (which === 'quality') this.showQualitySettings = next;
+    else if (which === 'speed') this.showSpeedSettings = next;
+    else this.showChapterSettings = next;
   }
 
   private scheduleControlsHide(): void {
@@ -956,6 +1097,7 @@ export struct PlayerView {
   }
 
   release(): void {
+    this.invalidatePlayerCreation();
     if (this.hideTimer >= 0) {
       clearTimeout(this.hideTimer);
       this.hideTimer = -1;
@@ -963,6 +1105,14 @@ export struct PlayerView {
     if (this.seekDispatchTimer >= 0) {
       clearTimeout(this.seekDispatchTimer);
       this.seekDispatchTimer = -1;
+    }
+    if (this.volumeRestoreTimer >= 0) {
+      clearTimeout(this.volumeRestoreTimer);
+      this.volumeRestoreTimer = -1;
+    }
+    if (this.fullscreenExitTimer >= 0) {
+      clearTimeout(this.fullscreenExitTimer);
+      this.fullscreenExitTimer = -1;
     }
     this.clearSeekWatchdog();
     this.clearSeekSpinner();
@@ -974,21 +1124,18 @@ export struct PlayerView {
     this.colorCache.clear();
     const p: media.AVPlayer | null = this.player;
     if (p !== null) {
-      try {
-        p.release();
-      } catch (e) {
-        // ignore
-      }
       this.player = null;
+      // release 返回 Promise，同步 try/catch 捕获不到异步 rejection，需显式 catch。
+      p.release().catch(() => {
+        // 释放失败无需兜底，组件已脱离该播放器。
+      });
     }
     const audio: media.AVPlayer | null = this.audioPlayer;
     if (audio !== null) {
-      try {
-        audio.release();
-      } catch (e) {
-        // ignore
-      }
       this.audioPlayer = null;
+      audio.release().catch(() => {
+        // 同上。
+      });
     }
     this.audioPrepared = false;
     this.prepared = false;
@@ -996,7 +1143,6 @@ export struct PlayerView {
   }
 
   // ===== 弹幕引擎 =====
-  private dmLastTime: number = 0;
 
   spawnDanmaku(now: number): void {
     if (!this.danmakuOn || this.dmList.length === 0) {
@@ -1120,7 +1266,15 @@ export struct PlayerView {
     this.ctx.font = '600 ' + size + 'px sans-serif';
     const w: number = this.ctx.measureText(text).width;
     const result: number = Math.max(20, w);
-    if (this.textWidthCache.size > 512) this.textWidthCache.clear();
+    if (this.textWidthCache.size > 512) {
+      // 整体清空会造成短时间内大量重复测量；改为淘汰最早插入的一半（Map 迭代序即插入序）。
+      let evict: number = 256;
+      for (const oldest of this.textWidthCache.keys()) {
+        if (evict <= 0) break;
+        this.textWidthCache.delete(oldest);
+        evict--;
+      }
+    }
     this.textWidthCache.set(key, result);
     return result;
   }
@@ -1135,10 +1289,12 @@ export struct PlayerView {
 
   drawFrame(advance: boolean = true): void {
     this.ctx.clearRect(0, 0, this.canvasW, this.canvasH);
-    const now: number = this.curTime;
+    const now: number = this.playheadSec;
     const fontSize: number = this.dmFontSize();
     const laneH: number = this.dmLineHeight();
-    const keep: Array<ActiveDm> = [];
+    // 双缓冲原地复用，避免每帧分配 keep 数组带来的 GC 压力。
+    const keep: Array<ActiveDm> = this.activeBack;
+    keep.length = 0;
     const drawMs: number = Date.now();
     const deltaSec: number = advance ?
       (this.dmLastDrawMs > 0 ? Math.min(0.12, Math.max(0.012, (drawMs - this.dmLastDrawMs) / 1000)) : 0.033) : 0;
@@ -1172,6 +1328,7 @@ export struct PlayerView {
       }
     }
     this.ctx.globalAlpha = 1;
+    this.activeBack = this.active;
     this.active = keep;
     if (this.active.length === 0) this.stopDmLoop(false);
   }
@@ -1232,10 +1389,10 @@ export struct PlayerView {
       this.stopDmLoop(true);
     } else {
       // 重新开启时从当前播放位置继续，不补画已经错过的一大批弹幕。
-      while (this.dmCursor < this.dmList.length && this.dmList[this.dmCursor].time < this.curTime - 0.2) {
+      while (this.dmCursor < this.dmList.length && this.dmList[this.dmCursor].time < this.playheadSec - 0.2) {
         this.dmCursor++;
       }
-      this.spawnDanmaku(this.curTime);
+      this.spawnDanmaku(this.playheadSec);
     }
     if (notify) this.onDanmakuChange(enabled);
   }
@@ -1431,50 +1588,15 @@ export struct PlayerView {
               Blank()
               // 播放中的收起态使用单行控制，所有按钮都限制在视频框内。
               Row({ space: 7 }) {
-              Stack({ alignContent: Alignment.Center }) {
-                Circle()
-                  .width(32)
-                  .height(32)
-                  .fill('#66000000')
-                Image(this.playing ? $r('app.media.ic_pause') : $r('app.media.ic_play'))
-                  .width(16)
-                  .height(16)
-                  .fillColor('#FFFFFF')
-              }
-              .width(36)
-              .height(36)
-              .onClick(() => {
-                this.togglePlay();
-              })
+              this.IconButton(this.playing ? $r('app.media.ic_pause') : $r('app.media.ic_play'), 16, 36, 36, '#FFFFFF', true,
+                () => {
+                  this.togglePlay();
+                })
               Text(formatDuration(this.curTime))
                 .fontSize(10)
                 .fontColor('#FFFFFF')
-              Slider({
-                value: this.duration > 0 ? this.curTime : 0,
-                min: 0,
-                max: this.duration > 0 ? this.duration : 1,
-                style: SliderStyle.InSet,
-              })
-                .layoutWeight(1)
-                .height(28)
-                .blockSize({ width: 10, height: 10 })
-                .blockColor('#FFFFFF')
-                .selectedColor('#FB7299')
-                .trackColor('#55FFFFFF')
-                .onChange((value: number, mode: SliderChangeMode) => {
-                  if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
-                    this.seekTo(value);
-                  }
-                })
-              Stack({ alignContent: Alignment.Center }) {
-                Image($r('app.media.ic_fullscreen'))
-                  .width(20)
-                  .height(20)
-                  .fillColor('#FFFFFF')
-              }
-              .width(36)
-              .height(36)
-              .onClick(() => {
+              this.ProgressSlider(true)
+              this.IconButton($r('app.media.ic_fullscreen'), 20, 36, 36, '#FFFFFF', false, () => {
                 this.toggleFullscreen();
               })
               }
@@ -1486,15 +1608,7 @@ export struct PlayerView {
             if (this.fullscreen) {
               // 参考 B 站横屏控制层：顶部只保留身份信息与高频动作，避免画面上方完全空白。
               Row({ space: 10 }) {
-                Stack({ alignContent: Alignment.Center }) {
-                  Image($r('app.media.ic_back'))
-                    .width(24)
-                    .height(24)
-                    .fillColor('#FFFFFF')
-                }
-                .width(42)
-                .height(42)
-                .onClick(() => {
+                this.IconButton($r('app.media.ic_back'), 24, 42, 42, '#FFFFFF', false, () => {
                   this.exitFullscreen();
                 })
                 if (this.ownerFace.length > 0) {
@@ -1518,37 +1632,14 @@ export struct PlayerView {
                 }
                 .alignItems(HorizontalAlign.Start)
                 .layoutWeight(1)
-                Stack({ alignContent: Alignment.Center }) {
-                  Image(this.liked ? $r('app.media.ic_like_fill') : $r('app.media.ic_like'))
-                    .width(24)
-                    .height(24)
-                    .fillColor(this.liked ? this.accent : '#FFFFFF')
-                }
-                .width(42)
-                .height(42)
-                .onClick(() => {
-                  this.onLike();
-                })
-                Stack({ alignContent: Alignment.Center }) {
-                  Image($r('app.media.bilix_icon_coin'))
-                    .width(24)
-                    .height(24)
-                    .fillColor('#FFFFFF')
-                }
-                .width(42)
-                .height(42)
-                .onClick(() => {
+                this.IconButton(this.liked ? $r('app.media.ic_like_fill') : $r('app.media.ic_like'), 24, 42, 42,
+                  this.liked ? this.accent : '#FFFFFF', false, () => {
+                    this.onLike();
+                  })
+                this.IconButton($r('app.media.bilix_icon_coin'), 24, 42, 42, '#FFFFFF', false, () => {
                   this.onCoin();
                 })
-                Stack({ alignContent: Alignment.Center }) {
-                  Image($r('app.media.bilix_icon_share'))
-                    .width(25)
-                    .height(25)
-                    .fillColor('#FFFFFF')
-                }
-                .width(42)
-                .height(42)
-                .onClick(() => {
+                this.IconButton($r('app.media.bilix_icon_share'), 25, 42, 42, '#FFFFFF', false, () => {
                   this.onShare();
                 })
               }
@@ -1585,21 +1676,7 @@ export struct PlayerView {
                 Text(formatDuration(this.curTime))
                   .fontSize(11)
                   .fontColor('#FFFFFF')
-                Slider({
-                  value: this.duration > 0 ? this.curTime : 0,
-                  min: 0,
-                  max: this.duration > 0 ? this.duration : 1,
-                  style: SliderStyle.OutSet,
-                })
-                  .layoutWeight(1)
-                  .blockColor('#FFFFFF')
-                  .selectedColor('#FB7299')
-                  .trackColor('#33FFFFFF')
-                  .onChange((value: number, mode: SliderChangeMode) => {
-                    if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
-                      this.seekTo(value);
-                    }
-                  })
+                this.ProgressSlider(false)
                 Text(formatDuration(this.duration))
                   .fontSize(11)
                   .fontColor('#FFFFFF')
@@ -1607,43 +1684,18 @@ export struct PlayerView {
               .width('100%')
               Row({ space: 8 }) {
                 if (this.fullscreen) {
-                  Stack({ alignContent: Alignment.Center }) {
-                    Image(this.playing ? $r('app.media.ic_pause') : $r('app.media.ic_play'))
-                      .width(25)
-                      .height(25)
-                      .fillColor('#FFFFFF')
-                  }
-                  .width(38)
-                  .height(34)
-                  .onClick(() => {
-                    this.togglePlay();
-                  })
+                  this.IconButton(this.playing ? $r('app.media.ic_pause') : $r('app.media.ic_play'), 25, 38, 34, '#FFFFFF',
+                    false, () => {
+                      this.togglePlay();
+                    })
                 }
                 if (this.fullscreen) {
-                  Stack({ alignContent: Alignment.Center }) {
-                    Image(this.danmakuOn ? $r('app.media.ic_danmaku_on') : $r('app.media.ic_danmaku_off'))
-                      .width(23)
-                      .height(23)
-                      .fillColor(this.danmakuOn ? '#FB7299' : '#99FFFFFF')
-                  }
-                  .width(36)
-                  .height(32)
-                  .onClick(() => {
-                    this.toggleDanmaku();
-                  })
-                  Stack({ alignContent: Alignment.Center }) {
-                    Image($r('app.media.ic_danmaku_settings'))
-                      .width(21)
-                      .height(21)
-                      .fillColor('#FFFFFF')
-                  }
-                  .width(34)
-                  .height(32)
-                  .onClick(() => {
-                    this.showDmSettings = !this.showDmSettings;
-                    this.showQualitySettings = false;
-                    this.showSpeedSettings = false;
-                    this.showChapterSettings = false;
+                  this.IconButton(this.danmakuOn ? $r('app.media.ic_danmaku_on') : $r('app.media.ic_danmaku_off'), 23, 36,
+                    32, this.danmakuOn ? '#FB7299' : '#99FFFFFF', false, () => {
+                      this.toggleDanmaku();
+                    })
+                  this.IconButton($r('app.media.ic_danmaku_settings'), 21, 34, 32, '#FFFFFF', false, () => {
+                    this.exclusiveToggle('dm');
                   })
                 }
                 Text('空降')
@@ -1666,10 +1718,7 @@ export struct PlayerView {
                     .borderRadius(14)
                     .backgroundColor(this.showChapterSettings ? '#66FFFFFF' : '#26000000')
                     .onClick(() => {
-                      this.showChapterSettings = !this.showChapterSettings;
-                      this.showQualitySettings = false;
-                      this.showSpeedSettings = false;
-                      this.showDmSettings = false;
+                      this.exclusiveToggle('chapter');
                     })
                 }
                 Blank()
@@ -1682,10 +1731,7 @@ export struct PlayerView {
                   .backgroundColor(this.fullscreen ? '#00000000' :
                     (this.showQualitySettings ? '#66FFFFFF' : '#26000000'))
                   .onClick(() => {
-                    this.showQualitySettings = !this.showQualitySettings;
-                    this.showSpeedSettings = false;
-                    this.showDmSettings = false;
-                    this.showChapterSettings = false;
+                    this.exclusiveToggle('quality');
                   })
                 Text(this.playbackRate === 1 ? '倍速' : this.playbackRate.toFixed(this.playbackRate % 1 === 0 ? 0 : 2) + 'x')
                   .fontSize(12)
@@ -1696,20 +1742,10 @@ export struct PlayerView {
                   .backgroundColor(this.fullscreen ? '#00000000' :
                     (this.showSpeedSettings ? '#66FFFFFF' : '#26000000'))
                   .onClick(() => {
-                    this.showSpeedSettings = !this.showSpeedSettings;
-                    this.showQualitySettings = false;
-                    this.showDmSettings = false;
-                    this.showChapterSettings = false;
+                    this.exclusiveToggle('speed');
                   })
-                Stack({ alignContent: Alignment.Center }) {
-                  Image(this.fullscreen ? $r('app.media.ic_fullscreen_exit') : $r('app.media.ic_fullscreen'))
-                    .width(23)
-                    .height(23)
-                    .fillColor('#FFFFFF')
-                }
-                .width(36)
-                .height(32)
-                  .onClick(() => {
+                this.IconButton(this.fullscreen ? $r('app.media.ic_fullscreen_exit') : $r('app.media.ic_fullscreen'), 23,
+                  36, 32, '#FFFFFF', false, () => {
                     this.toggleFullscreen();
                   })
               }
@@ -1723,190 +1759,24 @@ export struct PlayerView {
         .height('100%')
         .linearGradient({
           angle: 180,
-          colors: [[this.isDarkGradientTop(), 0.0], ['#00000000', 0.35], [this.isDarkGradientTop(), 1.0]],
+          colors: CONTROLS_GRADIENT_COLORS,
         })
       }
 
       if (this.showControls && this.fullscreen && this.showDmSettings && this.errorText.length === 0) {
-        Column({ space: 2 }) {
-          Row() {
-            Text('弹幕设置')
-              .fontSize(15)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#FFFFFF')
-            Blank()
-            Text('恢复默认')
-              .fontSize(11)
-              .fontColor('#CCFFFFFF')
-              .onClick(() => {
-                this.dmOpacity = 0.85;
-                this.setDmSpeed(1);
-                this.setDmFontScale(1);
-                this.setDmDensity(12);
-                this.blockScrollDm = false;
-                this.blockTopDm = false;
-                this.blockBottomDm = false;
-                this.blockColorDm = false;
-                this.applyDmFilters();
-              })
-          }
-          .width('100%')
-          this.DmSliderRow('透明度', this.dmOpacity, 0.2, 1.0, (value: number) => {
-            this.dmOpacity = value;
-          })
-          this.DmSliderRow('速度', this.dmSpeed, 0.5, 2.0, (value: number) => {
-            this.setDmSpeed(value);
-          })
-          this.DmSliderRow('字号', this.dmFontScale, 0.7, 1.5, (value: number) => {
-            this.setDmFontScale(value);
-          })
-          this.DmSliderRow('密度', this.dmDensity, 6, 30, (value: number) => {
-            this.setDmDensity(value);
-          })
-          Row({ space: 6 }) {
-            this.DmBlockChip('滚动', this.blockScrollDm, () => {
-              this.blockScrollDm = !this.blockScrollDm;
-              this.applyDmFilters();
-            })
-            this.DmBlockChip('顶部', this.blockTopDm, () => {
-              this.blockTopDm = !this.blockTopDm;
-              this.applyDmFilters();
-            })
-            this.DmBlockChip('底部', this.blockBottomDm, () => {
-              this.blockBottomDm = !this.blockBottomDm;
-              this.applyDmFilters();
-            })
-            this.DmBlockChip('彩色', this.blockColorDm, () => {
-              this.blockColorDm = !this.blockColorDm;
-              this.applyDmFilters();
-            })
-          }
-          .width('100%')
-        }
-        .width(this.fullscreen ? 420 : '100%')
-        .padding({ left: 16, right: 16, top: 10, bottom: 12 })
-        .borderRadius({ topLeft: 16, topRight: 16 })
-        .backgroundColor('#E81A1A1E')
-        .backdropBlur(24)
-        .border({ width: { top: 0.5 }, color: '#33FFFFFF' })
-        .align(Alignment.Bottom)
+        this.SettingsPanel(0)
       }
 
       if (this.showControls && this.showQualitySettings && this.errorText.length === 0) {
-        Column({ space: 8 }) {
-          Row() {
-            Text('清晰度')
-              .fontSize(14)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#FFFFFF')
-            Blank()
-            Text('灰色画质需要会员或当前片源未提供')
-              .fontSize(9)
-              .fontColor('#88FFFFFF')
-          }
-          .width('100%')
-          Flex({ wrap: FlexWrap.Wrap, direction: FlexDirection.Row, justifyContent: FlexAlign.Start }) {
-            ForEach(this.runtimeQualityOptions, (option: VideoQualityOption) => {
-              Text(option.label)
-                .fontSize(12)
-                .fontColor(option.available ? (option.qn === this.activeQuality ? '#FFFFFF' : '#CCFFFFFF') : '#66FFFFFF')
-                .padding({ left: 12, right: 12, top: 7, bottom: 7 })
-                .margin({ right: 8, bottom: 6 })
-                .borderRadius(16)
-                .backgroundColor(option.qn === this.activeQuality ? this.accent : (option.available ? '#33FFFFFF' : '#16FFFFFF'))
-                .onClick(() => {
-                  if (option.available) this.changeQuality(option.qn);
-                  else promptAction.showToast({ message: option.label + ' 需要相应会员权限，或当前视频未提供该轨道' });
-                })
-            }, (option: VideoQualityOption) => String(option.qn))
-          }
-          .width('100%')
-        }
-        .width(this.fullscreen ? 420 : '100%')
-        .padding({ left: 16, right: 16, top: 12, bottom: 12 })
-        .borderRadius({ topLeft: 16, topRight: 16 })
-        .backgroundColor('#E81A1A1E')
-        .backdropBlur(24)
-        .align(Alignment.Bottom)
+        this.SettingsPanel(1)
       }
 
       if (this.showControls && this.showChapterSettings && this.errorText.length === 0) {
-        Column({ space: 8 }) {
-          Text('视频章节')
-            .fontSize(14)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#FFFFFF')
-            .width('100%')
-          List({ space: 6 }) {
-            ForEach(this.chapters, (chapter: VideoChapter, index: number) => {
-              ListItem() {
-                Row({ space: 9 }) {
-                  if (chapter.image.length > 0) {
-                    Image(chapter.image)
-                      .width(64)
-                      .height(36)
-                      .objectFit(ImageFit.Cover)
-                      .borderRadius(5)
-                  }
-                  Column({ space: 2 }) {
-                    Text(chapter.title)
-                      .fontSize(12)
-                      .fontColor(this.curTime >= chapter.from && this.curTime < chapter.to ? '#FB7299' : '#FFFFFF')
-                      .maxLines(1)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    Text(formatDuration(chapter.from) + ' - ' + formatDuration(chapter.to))
-                      .fontSize(10)
-                      .fontColor('#A6FFFFFF')
-                  }
-                  .alignItems(HorizontalAlign.Start)
-                  .layoutWeight(1)
-                }
-                .width('100%')
-                .padding({ left: 8, right: 8, top: 6, bottom: 6 })
-                .borderRadius(8)
-                .backgroundColor(this.curTime >= chapter.from && this.curTime < chapter.to ? '#26FB7299' : '#1FFFFFFF')
-                .onClick(() => {
-                  this.seekTo(chapter.from, true);
-                  this.showChapterSettings = false;
-                })
-              }
-            }, (chapter: VideoChapter, index: number) => String(chapter.from) + '-' + String(index))
-          }
-          .width('100%')
-          .height(this.fullscreen ? 230 : 180)
-          .scrollBar(BarState.Off)
-        }
-        .width(this.fullscreen ? 420 : '100%')
-        .padding({ left: 14, right: 14, top: 12, bottom: 12 })
-        .borderRadius({ topLeft: 16, topRight: 16 })
-        .backgroundColor('#E81A1A1E')
-        .backdropBlur(24)
-        .align(Alignment.Bottom)
+        this.SettingsPanel(2)
       }
 
       if (this.showControls && this.showSpeedSettings && this.errorText.length === 0) {
-        Column({ space: 8 }) {
-          Text('播放速度')
-            .fontSize(14)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#FFFFFF')
-            .width('100%')
-          Row({ space: 7 }) {
-            this.SpeedChip('0.5x', 0.5)
-            this.SpeedChip('0.75x', 0.75)
-            this.SpeedChip('1x', 1)
-            this.SpeedChip('1.25x', 1.25)
-            this.SpeedChip('1.5x', 1.5)
-            this.SpeedChip('2x', 2)
-          }
-          .width('100%')
-        }
-        .width(this.fullscreen ? 420 : '100%')
-        .padding({ left: 14, right: 14, top: 12, bottom: 14 })
-        .borderRadius({ topLeft: 16, topRight: 16 })
-        .backgroundColor('#E81A1A1E')
-        .backdropBlur(24)
-        .align(Alignment.Bottom)
+        this.SettingsPanel(3)
       }
     }
     .width('100%')
@@ -1930,8 +1800,239 @@ export struct PlayerView {
     )
   }
 
-  isDarkGradientTop(): string {
-    return '#99000000';
+  /** 圆形图标按钮：Stack 居中 Image，可选深色圆形底。 */
+  @Builder
+  IconButton(icon: Resource, iconSize: number, boxWidth: number, boxHeight: number, fill: ResourceColor,
+    circleBg: boolean, onClick: () => void) {
+    Stack({ alignContent: Alignment.Center }) {
+      if (circleBg) {
+        Circle()
+          .width(32)
+          .height(32)
+          .fill('#66000000')
+      }
+      Image(icon)
+        .width(iconSize)
+        .height(iconSize)
+        .fillColor(fill)
+    }
+    .width(boxWidth)
+    .height(boxHeight)
+    .onClick(() => {
+      onClick();
+    })
+  }
+
+  /** 播放进度条：compact 为收起态 InSet 样式，否则为底部控制条 OutSet 样式。 */
+  @Builder
+  ProgressSlider(compact: boolean) {
+    if (compact) {
+      Slider({
+        value: this.sliderDragging ? this.sliderDragValue : (this.duration > 0 ? this.curTime : 0),
+        min: 0,
+        max: this.duration > 0 ? this.duration : 1,
+        style: SliderStyle.InSet,
+      })
+        .layoutWeight(1)
+        .height(28)
+        .blockSize({ width: 10, height: 10 })
+        .blockColor('#FFFFFF')
+        .selectedColor('#FB7299')
+        .trackColor('#55FFFFFF')
+        .onChange((value: number, mode: SliderChangeMode) => {
+          this.onProgressSliderChange(value, mode);
+        })
+    } else {
+      Slider({
+        value: this.sliderDragging ? this.sliderDragValue : (this.duration > 0 ? this.curTime : 0),
+        min: 0,
+        max: this.duration > 0 ? this.duration : 1,
+        style: SliderStyle.OutSet,
+      })
+        .layoutWeight(1)
+        .blockColor('#FFFFFF')
+        .selectedColor('#FB7299')
+        .trackColor('#33FFFFFF')
+        .onChange((value: number, mode: SliderChangeMode) => {
+          this.onProgressSliderChange(value, mode);
+        })
+    }
+  }
+
+  private onProgressSliderChange(value: number, mode: SliderChangeMode): void {
+    // 拖动期间滑块以拖动值为准，避免 timeUpdate 回写 curTime 把滑块拽回；仍在 End/Click 才 seek。
+    if (mode === SliderChangeMode.Begin) {
+      this.sliderDragging = true;
+      this.sliderDragValue = value;
+    } else if (mode === SliderChangeMode.Moving) {
+      this.sliderDragValue = value;
+    } else {
+      this.sliderDragging = false;
+      if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
+        this.seekTo(value);
+      }
+    }
+  }
+
+  /** 底部设置面板外壳：0 弹幕 / 1 清晰度 / 2 章节 / 3 倍速，仅内容与 padding、顶部描边有差异。 */
+  @Builder
+  SettingsPanel(which: number) {
+    Column({ space: which === 0 ? 2 : 8 }) {
+      if (which === 0) {
+        Row() {
+          Text('弹幕设置')
+            .fontSize(15)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#FFFFFF')
+          Blank()
+          Text('恢复默认')
+            .fontSize(11)
+            .fontColor('#CCFFFFFF')
+            .onClick(() => {
+              this.dmOpacity = 0.85;
+              this.setDmSpeed(1);
+              this.setDmFontScale(1);
+              this.setDmDensity(12);
+              this.blockScrollDm = false;
+              this.blockTopDm = false;
+              this.blockBottomDm = false;
+              this.blockColorDm = false;
+              this.applyDmFilters();
+            })
+        }
+        .width('100%')
+        this.DmSliderRow('透明度', this.dmOpacity, 0.2, 1.0, (value: number) => {
+          this.dmOpacity = value;
+        })
+        this.DmSliderRow('速度', this.dmSpeed, 0.5, 2.0, (value: number) => {
+          this.setDmSpeed(value);
+        })
+        this.DmSliderRow('字号', this.dmFontScale, 0.7, 1.5, (value: number) => {
+          this.setDmFontScale(value);
+        })
+        this.DmSliderRow('密度', this.dmDensity, 6, 30, (value: number) => {
+          this.setDmDensity(value);
+        })
+        Row({ space: 6 }) {
+          this.DmBlockChip('滚动', this.blockScrollDm, () => {
+            this.blockScrollDm = !this.blockScrollDm;
+            this.applyDmFilters();
+          })
+          this.DmBlockChip('顶部', this.blockTopDm, () => {
+            this.blockTopDm = !this.blockTopDm;
+            this.applyDmFilters();
+          })
+          this.DmBlockChip('底部', this.blockBottomDm, () => {
+            this.blockBottomDm = !this.blockBottomDm;
+            this.applyDmFilters();
+          })
+          this.DmBlockChip('彩色', this.blockColorDm, () => {
+            this.blockColorDm = !this.blockColorDm;
+            this.applyDmFilters();
+          })
+        }
+        .width('100%')
+      } else if (which === 1) {
+        Row() {
+          Text('清晰度')
+            .fontSize(14)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#FFFFFF')
+          Blank()
+          Text('灰色画质需要会员或当前片源未提供')
+            .fontSize(9)
+            .fontColor('#88FFFFFF')
+        }
+        .width('100%')
+        Flex({ wrap: FlexWrap.Wrap, direction: FlexDirection.Row, justifyContent: FlexAlign.Start }) {
+          ForEach(this.runtimeQualityOptions, (option: VideoQualityOption) => {
+            Text(option.label)
+              .fontSize(12)
+              .fontColor(option.available ? (option.qn === this.activeQuality ? '#FFFFFF' : '#CCFFFFFF') : '#66FFFFFF')
+              .padding({ left: 12, right: 12, top: 7, bottom: 7 })
+              .margin({ right: 8, bottom: 6 })
+              .borderRadius(16)
+              .backgroundColor(option.qn === this.activeQuality ? this.accent : (option.available ? '#33FFFFFF' : '#16FFFFFF'))
+              .onClick(() => {
+                if (option.available) this.changeQuality(option.qn);
+                else promptAction.showToast({ message: option.label + ' 需要相应会员权限，或当前视频未提供该轨道' });
+              })
+          }, (option: VideoQualityOption) => String(option.qn))
+        }
+        .width('100%')
+      } else if (which === 2) {
+        Text('视频章节')
+          .fontSize(14)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#FFFFFF')
+          .width('100%')
+        List({ space: 6 }) {
+          ForEach(this.chapters, (chapter: VideoChapter, index: number) => {
+            ListItem() {
+              Row({ space: 9 }) {
+                if (chapter.image.length > 0) {
+                  Image(chapter.image)
+                    .width(64)
+                    .height(36)
+                    .objectFit(ImageFit.Cover)
+                    .borderRadius(5)
+                }
+                Column({ space: 2 }) {
+                  Text(chapter.title)
+                    .fontSize(12)
+                    .fontColor(this.curTime >= chapter.from && this.curTime < chapter.to ? '#FB7299' : '#FFFFFF')
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  Text(formatDuration(chapter.from) + ' - ' + formatDuration(chapter.to))
+                    .fontSize(10)
+                    .fontColor('#A6FFFFFF')
+                }
+                .alignItems(HorizontalAlign.Start)
+                .layoutWeight(1)
+              }
+              .width('100%')
+              .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+              .borderRadius(8)
+              .backgroundColor(this.curTime >= chapter.from && this.curTime < chapter.to ? '#26FB7299' : '#1FFFFFFF')
+              .onClick(() => {
+                this.seekTo(chapter.from, true);
+                this.showChapterSettings = false;
+              })
+            }
+          }, (chapter: VideoChapter, index: number) => String(chapter.from) + '-' + String(index))
+        }
+        .width('100%')
+        .height(this.fullscreen ? 230 : 180)
+        .scrollBar(BarState.Off)
+      } else {
+        Text('播放速度')
+          .fontSize(14)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#FFFFFF')
+          .width('100%')
+        Row({ space: 7 }) {
+          this.SpeedChip('0.5x', 0.5)
+          this.SpeedChip('0.75x', 0.75)
+          this.SpeedChip('1x', 1)
+          this.SpeedChip('1.25x', 1.25)
+          this.SpeedChip('1.5x', 1.5)
+          this.SpeedChip('2x', 2)
+        }
+        .width('100%')
+      }
+    }
+    .width(this.fullscreen ? 420 : '100%')
+    .padding({
+      left: which <= 1 ? 16 : 14,
+      right: which <= 1 ? 16 : 14,
+      top: which === 0 ? 10 : 12,
+      bottom: which === 3 ? 14 : 12,
+    })
+    .borderRadius({ topLeft: 16, topRight: 16 })
+    .backgroundColor('#E81A1A1E')
+    .backdropBlur(24)
+    .border({ width: { top: which === 0 ? 0.5 : 0 }, color: '#33FFFFFF' })
+    .align(Alignment.Bottom)
   }
 
   @Builder
@@ -1988,6 +2089,10 @@ export struct PlayerView {
       })
   }
 }
+
+// 控制层上下压黑渐变（常量数组，避免每次渲染新建字面量）。
+const CONTROLS_GRADIENT_COLORS: Array<[ResourceColor, number]> =
+  [['#99000000', 0.0], ['#00000000', 0.35], ['#99000000', 1.0]];
 
 // 弹幕颜色：数字 → #RRGGBB
 function colorHex(color: number): string {

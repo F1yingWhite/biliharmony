@@ -92,6 +92,8 @@ export class UserStore {
         if (space === null || space.pendant.length === 0 || UserStore.user !== u) return;
         u.pendant = space.pendant;
         AppStorage.setOrCreate<string>('userPendant', space.pendant);
+      }).catch(() => {
+        // 空间装扮拉取失败不影响登录态，下次刷新再补齐。
       });
     }
     return u;
@@ -108,11 +110,11 @@ export class UserStore {
   }
 
   static async logout(): Promise<void> {
-    // 清除关键 cookie
-    HttpClient.setCookie('SESSDATA', '');
-    HttpClient.setCookie('bili_jct', '');
-    HttpClient.setCookie('DedeUserID', '');
-    HttpClient.setCookie('DedeUserID__ckMd5', '');
+    // 从 cookie 罐中真正删除关键 cookie（置空串会让 SESSDATA=; bili_jct=; 空值对继续随请求发出）
+    HttpClient.removeCookie('SESSDATA');
+    HttpClient.removeCookie('bili_jct');
+    HttpClient.removeCookie('DedeUserID');
+    HttpClient.removeCookie('DedeUserID__ckMd5');
     await UserStore.persistCookies('');
     UserStore.user = null;
     UserStore.loaded = false;

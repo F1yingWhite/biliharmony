@@ -14,28 +14,31 @@ import { DecoratedAvatar } from './UserDecorations';
 @Component
 export struct GlassHeaderBar {
   @StorageProp('accentColor') accent: string = '#FB7299';
-  @StorageProp('isDarkMode') isDark: boolean = false;
+  @StorageProp('isDarkMode') @Watch('onThemeChanged') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
   @StorageProp('glassLevel') glassLevel: number = 1;
   // 头像单独放入 AppStorage，登录成功后可直接触发头栏刷新。
   @StorageProp('userAvatar') userAvatar: string = '';
   @StorageProp('userPendant') userPendant: string = '';
-  @StorageProp('headerFade') @Watch('onFadeChanged') fade: number = 0;
+  // headerFade 每帧变化，只驱动 build 中的透明度；系统栏图标改由主题变化时设置（onThemeChanged）。
+  @StorageProp('headerFade') fade: number = 0;
   @StorageProp('homeHotSearch') hotSearch: string = '';
   private hotTimer: number = -1;
   private hotIndex: number = 0;
   onAvatarTap: () => void = () => {
   };
 
-  onFadeChanged(): void {
+  onThemeChanged(): void {
     // 状态栏图标深浅始终跟随主题（浅色模式→深色图标，深色模式→浅色图标），
-    // 保证浮在玻璃光效上始终可读
+    // 保证浮在玻璃光效上始终可读；仅明暗切换时设置，滚动不再逐帧触发。
     Immersive.setBarIcons(this.isDark, this.isDark);
   }
 
   aboutToAppear(): void {
     HotSearchStore.load().then(() => {
       HotSearchStore.publish(0);
+    }).catch(() => {
+      // 热搜只是头栏占位文案，网络失败不应形成未处理的 Promise rejection。
     });
     this.hotTimer = setInterval(() => {
       this.hotIndex++;

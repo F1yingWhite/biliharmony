@@ -28,21 +28,28 @@ export struct MineView {
 
   onLoginChanged(): void {
     // 登录/登出广播：刷新用户信息（Tabs 保活，aboutToAppear 不会再触发）
-    this.init();
+    this.init().catch(() => {
+    });
   }
 
   aboutToAppear(): void {
-    this.init();
+    this.init().catch(() => {
+    });
   }
 
   async init(): Promise<void> {
     this.loading = true;
-    const u: UserInfo = await UserStore.refresh();
-    this.user = u;
-    if (u.isLogin) {
-      this.stat = await BiliApi.getUserStat(u.mid);
+    try {
+      const u: UserInfo = await UserStore.refresh();
+      this.user = u;
+      if (u.isLogin) {
+        this.stat = await BiliApi.getUserStat(u.mid);
+      } else {
+        this.stat = new UserStat();
+      }
+    } finally {
+      this.loading = false;
     }
-    this.loading = false;
   }
 
   /** 分组容器底色（浅色白底 / 深色 #2A2C31） */
@@ -81,6 +88,57 @@ export struct MineView {
         .fontColor('#9499A0')
     }
     .layoutWeight(1)
+  }
+
+  /** 菜单行：图标 + 文案 + 右侧箭头（历史记录 / 我的收藏） */
+  @Builder
+  MenuRow(icon: Resource, label: string, onTap: () => void) {
+    Row({ space: 14 }) {
+      Image(icon)
+        .width(20)
+        .height(20)
+        .fillColor(this.isDark ? '#C6C7CB' : '#61666D')
+      Text(label)
+        .fontSize(15)
+        .fontColor(this.itemColor())
+      Blank()
+      Image($r('app.media.ic_arrow_right'))
+        .width(18)
+        .height(18)
+        .fillColor('#C1C2C5')
+    }
+    .width('100%')
+    .height(48)
+    .padding({ left: 14, right: 14 })
+    .alignItems(VerticalAlign.Center)
+    .onClick(() => {
+      onTap();
+    })
+  }
+
+  /** 菜单行：文案 + 右侧值 + 箭头（关于） */
+  @Builder
+  NavRow(label: string, value: string, onTap: () => void) {
+    Row({ space: 14 }) {
+      Text(label)
+        .fontSize(15)
+        .fontColor(this.itemColor())
+      Blank()
+      Text(value)
+        .fontSize(13)
+        .fontColor('#9499A0')
+      Image($r('app.media.ic_arrow_right'))
+        .width(18)
+        .height(18)
+        .fillColor('#C1C2C5')
+    }
+    .width('100%')
+    .height(48)
+    .padding({ left: 14, right: 14 })
+    .alignItems(VerticalAlign.Center)
+    .onClick(() => {
+      onTap();
+    })
   }
 
   /** 顶部用户区（无重渐变卡片，直接铺在页面氛围背景上） */
@@ -176,50 +234,14 @@ export struct MineView {
     Column({ space: 12 }) {
       // ===== 组1：内容入口 =====
       Column() {
-        Row({ space: 14 }) {
-          Image($r('app.media.ic_history'))
-            .width(20)
-            .height(20)
-            .fillColor(this.isDark ? '#C6C7CB' : '#61666D')
-          Text('历史记录')
-            .fontSize(15)
-            .fontColor(this.itemColor())
-          Blank()
-          Image($r('app.media.ic_arrow_right'))
-            .width(18)
-            .height(18)
-            .fillColor('#C1C2C5')
-        }
-        .width('100%')
-        .height(48)
-        .padding({ left: 14, right: 14 })
-        .alignItems(VerticalAlign.Center)
-        .onClick(() => {
+        this.MenuRow($r('app.media.ic_history'), '历史记录', () => {
           if (UserStore.isLogin) AppNavStack.pushPathByName(NAV_HISTORY, null);
           else AppNavStack.pushPathByName(NAV_LOGIN, null);
         })
 
         this.GroupDivider()
 
-        Row({ space: 14 }) {
-          Image($r('app.media.ic_favorite'))
-            .width(20)
-            .height(20)
-            .fillColor(this.isDark ? '#C6C7CB' : '#61666D')
-          Text('我的收藏')
-            .fontSize(15)
-            .fontColor(this.itemColor())
-          Blank()
-          Image($r('app.media.ic_arrow_right'))
-            .width(18)
-            .height(18)
-            .fillColor('#C1C2C5')
-        }
-        .width('100%')
-        .height(48)
-        .padding({ left: 14, right: 14 })
-        .alignItems(VerticalAlign.Center)
-        .onClick(() => {
+        this.MenuRow($r('app.media.ic_favorite'), '我的收藏', () => {
           if (UserStore.isLogin) AppNavStack.pushPathByName(NAV_FAVORITES, null);
           else AppNavStack.pushPathByName(NAV_LOGIN, null);
         })
@@ -350,24 +372,7 @@ export struct MineView {
 
       // ===== 组3：关于 / 退出登录 =====
       Column() {
-        Row({ space: 14 }) {
-          Text('关于')
-            .fontSize(15)
-            .fontColor(this.itemColor())
-          Blank()
-          Text('v1.0.0')
-            .fontSize(13)
-            .fontColor('#9499A0')
-          Image($r('app.media.ic_arrow_right'))
-            .width(18)
-            .height(18)
-            .fillColor('#C1C2C5')
-        }
-        .width('100%')
-        .height(48)
-        .padding({ left: 14, right: 14 })
-        .alignItems(VerticalAlign.Center)
-        .onClick(() => {
+        this.NavRow('关于', 'v1.0.0', () => {
           promptAction.showDialog({
             title: 'BiliHaromny',
             message: '基于开源项目 PiliPlus 移植的鸿蒙原生哔哩哔哩第三方客户端（API 26）。\n支持沉浸式全屏、封面取色动态主题、环境光自适应。\n仅供学习交流使用。',
@@ -388,7 +393,8 @@ export struct MineView {
           .padding({ left: 14, right: 14 })
           .justifyContent(FlexAlign.Center)
           .onClick(() => {
-            UserStore.logout().finally(() => {
+            UserStore.logout().catch(() => {
+            }).finally(() => {
               this.user = new UserInfo();
               this.stat = new UserStat();
               promptAction.showToast({ message: '已退出登录' });

@@ -5,6 +5,7 @@
 import { image } from '@kit.ImageKit';
 import { HttpClient } from './HttpClient';
 import { RGB, rgbToHex, withSaturation } from './ColorUtil';
+import { Constants } from './Constants';
 
 export class ImagePalette {
   dominant: string = '#FB7299';   // 主色（出现频率最高）
@@ -57,23 +58,23 @@ export class ImageColor {
     if (url.length === 0) {
       return fallback;
     }
+    let source: image.ImageSource | null = null;
+    let pixelMap: image.PixelMap | null = null;
     try {
       const bytes: ArrayBuffer = await HttpClient.getBytes(url, {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.2 Safari/605.1.15',
+        'User-Agent': Constants.browserUa,
         'Referer': 'https://www.bilibili.com/',
       });
       if (bytes.byteLength === 0) {
         return fallback;
       }
-      const source: image.ImageSource = image.createImageSource(bytes);
-      const pixelMap: image.PixelMap = await source.createPixelMap({
+      source = image.createImageSource(bytes);
+      pixelMap = await source.createPixelMap({
         desiredSize: { width: sampleSize, height: sampleSize },
       });
       const buffer: ArrayBuffer = new ArrayBuffer(sampleSize * sampleSize * 4);
       await pixelMap.readPixelsToBuffer(buffer);
       const pixels: Uint8Array = new Uint8Array(buffer);
-      pixelMap.release();
-      source.release();
 
       // 4bit 量化分桶（每通道 4bit → 共 4096 桶）
       const bucketMap: Map<number, Bucket> = new Map<number, Bucket>();
@@ -121,6 +122,20 @@ export class ImageColor {
       return new ImagePalette(rgbToHex(dominant), vibrantHex);
     } catch (e) {
       return fallback;
+    } finally {
+      // 解码资源无论成功失败都要释放；各自判空，每实例只释放一次
+      if (pixelMap !== null) {
+        try {
+          pixelMap.release();
+        } catch (e) {
+        }
+      }
+      if (source !== null) {
+        try {
+          source.release();
+        } catch (e) {
+        }
+      }
     }
   }
 }

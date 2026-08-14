@@ -5,8 +5,9 @@
 import { promptAction } from '@kit.ArkUI';
 import { Immersive } from '../common/Immersive';
 import { AppNavStack } from '../common/AppRouter';
-import { BiliApi, CookiePair, LoginResult, SmsSendResult } from '../api/BiliApi';
+import { BiliApi, CookiePair, LoginResult, SmsSendResult, TVCodeResult } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
+import { BackButton } from '../components/BackButton';
 
 // 登录表单输入框统一样式
 @Extend(TextInput)
@@ -46,15 +47,26 @@ export struct LoginPage {
   @StorageProp('isDarkMode') isDark: boolean = false;
   private pollTimer: number = -1;
   private smsTimer: number = -1;
+  private popTimer: number = -1;
+  private pollInflight: boolean = false;
   private loggedIn: boolean = false;
+  private destroyed: boolean = false;
 
   aboutToAppear(): void {
-    this.requestCode();
+    this.destroyed = false;
+    this.requestCode().catch(() => {
+    });
   }
 
   aboutToDisappear(): void {
+    this.destroyed = true;
     this.stopPoll();
     this.stopSmsCountdown();
+    // 登录成功后的延迟 pop：页面若已先被关闭，清理定时器避免误 pop 栈顶其他页面
+    if (this.popTimer >= 0) {
+      clearTimeout(this.popTimer);
+      this.popTimer = -1;
+    }
   }
 
   // ===== 扫码登录 =====
@@ -65,7 +77,13 @@ export struct LoginPage {
     this.qrUrl = '';
     this.statusText = '获取登录二维码...';
     this.statusColor = '#9499A0';
-    const result = await BiliApi.getTVCode();
+    let result: TVCodeResult | null = null;
+    try {
+      result = await BiliApi.getTVCode();
+    } catch (e) {
+      // 与 null 走同一失败态。
+    }
+    if (this.destroyed) return;
     if (result === null) {
       this.qrError = true;
       this.statusText = '获取二维码失败，请检查网络后点击重试';
@@ -80,8 +98,10 @@ export struct LoginPage {
   }
 
   startPoll(): void {
+    this.stopPoll();
     this.pollTimer = setInterval(() => {
-      this.poll();
+      this.poll().catch(() => {
+      });
     }, 3000);
   }
 
@@ -92,34 +112,52 @@ export struct LoginPage {
     }
   }
 
+  /** 登录成功后延迟返回，页面销毁时由 aboutToDisappear 清理。 */
+  private schedulePop(): void {
+    if (this.destroyed) return;
+    if (this.popTimer >= 0) {
+      clearTimeout(this.popTimer);
+    }
+    this.popTimer = setTimeout(() => {
+      this.popTimer = -1;
+      AppNavStack.pop();
+    }, 600);
+  }
+
   async poll(): Promise<void> {
-    if (this.loggedIn || this.authCode.length === 0) {
+    // 慢网络下上一轮 poll 未返回时跳过，避免轮询重叠
+    if (this.loggedIn || this.authCode.length === 0 || this.pollInflight) {
       return;
     }
-    const result = await BiliApi.pollTVCode(this.authCode);
-    if (result.code === 0) {
-      // 登录成功
-      this.stopPoll();
-      this.loggedIn = true;
-      this.statusText = '登录成功！';
-      this.statusColor = '#2FB96A';
-      await UserStore.applyLoginCookies(result.cookies);
-      promptAction.showToast({ message: '登录成功，欢迎回来' });
-      setTimeout(() => {
-        AppNavStack.pop();
-      }, 600);
-    } else if (result.code === 86039) {
-      this.statusText = '二维码尚未扫描，请使用 App 扫码';
-    } else if (result.code === 86090) {
-      this.statusText = '已扫码，请在手机上确认登录';
-      this.statusColor = '#2FB96A';
-    } else if (result.code === 86038) {
-      this.stopPoll();
-      this.expired = true;
-      this.statusText = '二维码已过期，点击刷新';
-      this.statusColor = '#FB4A4A';
-    } else {
-      this.statusText = result.message.length > 0 ? result.message : '登录失败，请重试';
+    this.pollInflight = true;
+    try {
+      const result = await BiliApi.pollTVCode(this.authCode);
+      if (this.destroyed) return;
+      if (result.code === 0) {
+        // 登录成功
+        this.stopPoll();
+        this.loggedIn = true;
+        this.statusText = '登录成功！';
+        this.statusColor = '#2FB96A';
+        await UserStore.applyLoginCookies(result.cookies);
+        if (this.destroyed) return;
+        promptAction.showToast({ message: '登录成功，欢迎回来' });
+        this.schedulePop();
+      } else if (result.code === 86039) {
+        this.statusText = '二维码尚未扫描，请使用 App 扫码';
+      } else if (result.code === 86090) {
+        this.statusText = '已扫码，请在手机上确认登录';
+        this.statusColor = '#2FB96A';
+      } else if (result.code === 86038) {
+        this.stopPoll();
+        this.expired = true;
+        this.statusText = '二维码已过期，点击刷新';
+        this.statusColor = '#FB4A4A';
+      } else {
+        this.statusText = result.message.length > 0 ? result.message : '登录失败，请重试';
+      }
+    } finally {
+      this.pollInflight = false;
     }
   }
 
@@ -134,20 +172,26 @@ export struct LoginPage {
       return;
     }
     this.pwdLoading = true;
-    const result: LoginResult = await BiliApi.loginByPassword(name, this.password);
-    this.pwdLoading = false;
-    if (result.code === 0 && result.cookies.length > 0) {
-      await this.finishLogin(result.cookies);
-      return;
-    }
-    if (result.code === 0 && result.dataStatus === 2) {
-      // 风控：需手机号二次验证，v1 不做内嵌验证流程
-      promptAction.showToast({ message: '本次登录环境存在风险，需手机验证，请改用扫码登录' });
-    } else if (result.code === -105) {
-      // 触发极验滑块验证码，v1 不支持内嵌验证
-      promptAction.showToast({ message: '需要完成滑块验证，请改用扫码登录' });
-    } else {
-      promptAction.showToast({ message: result.message.length > 0 ? result.message : '登录失败，请检查账号密码' });
+    try {
+      const result: LoginResult = await BiliApi.loginByPassword(name, this.password);
+      if (this.destroyed) return;
+      if (result.code === 0 && result.cookies.length > 0) {
+        await this.finishLogin(result.cookies);
+        return;
+      }
+      if (result.code === 0 && result.dataStatus === 2) {
+        // 风控：需手机号二次验证，v1 不做内嵌验证流程
+        promptAction.showToast({ message: '本次登录环境存在风险，需手机验证，请改用扫码登录' });
+      } else if (result.code === -105) {
+        // 触发极验滑块验证码，v1 不支持内嵌验证
+        promptAction.showToast({ message: '需要完成滑块验证，请改用扫码登录' });
+      } else {
+        promptAction.showToast({ message: result.message.length > 0 ? result.message : '登录失败，请检查账号密码' });
+      }
+    } catch (e) {
+      if (!this.destroyed) promptAction.showToast({ message: '登录请求失败，请检查网络' });
+    } finally {
+      this.pwdLoading = false;
     }
   }
 
@@ -162,17 +206,23 @@ export struct LoginPage {
       return;
     }
     this.smsSending = true;
-    const result: SmsSendResult = await BiliApi.sendSmsCode(tel);
-    this.smsSending = false;
-    if (result.code === 0 && result.captchaKey.length > 0) {
-      this.captchaKey = result.captchaKey;
-      promptAction.showToast({ message: '验证码已发送，请查收' });
-      this.startSmsCountdown();
-    } else if (result.needCaptcha) {
-      // 触发极验滑块验证码，v1 不支持内嵌验证
-      promptAction.showToast({ message: '需要先完成滑块验证，请改用扫码登录' });
-    } else {
-      promptAction.showToast({ message: result.message.length > 0 ? result.message : '发送失败，请稍后重试' });
+    try {
+      const result: SmsSendResult = await BiliApi.sendSmsCode(tel);
+      if (this.destroyed) return;
+      if (result.code === 0 && result.captchaKey.length > 0) {
+        this.captchaKey = result.captchaKey;
+        promptAction.showToast({ message: '验证码已发送，请查收' });
+        this.startSmsCountdown();
+      } else if (result.needCaptcha) {
+        // 触发极验滑块验证码，v1 不支持内嵌验证
+        promptAction.showToast({ message: '需要先完成滑块验证，请改用扫码登录' });
+      } else {
+        promptAction.showToast({ message: result.message.length > 0 ? result.message : '发送失败，请稍后重试' });
+      }
+    } catch (e) {
+      if (!this.destroyed) promptAction.showToast({ message: '验证码发送失败，请检查网络' });
+    } finally {
+      this.smsSending = false;
     }
   }
 
@@ -214,13 +264,19 @@ export struct LoginPage {
       return;
     }
     this.smsLoading = true;
-    const result: LoginResult = await BiliApi.loginBySms(tel, code, this.captchaKey);
-    this.smsLoading = false;
-    if (result.code === 0 && result.cookies.length > 0) {
-      await this.finishLogin(result.cookies);
-      return;
+    try {
+      const result: LoginResult = await BiliApi.loginBySms(tel, code, this.captchaKey);
+      if (this.destroyed) return;
+      if (result.code === 0 && result.cookies.length > 0) {
+        await this.finishLogin(result.cookies);
+        return;
+      }
+      promptAction.showToast({ message: result.message.length > 0 ? result.message : '登录失败，请检查验证码' });
+    } catch (e) {
+      if (!this.destroyed) promptAction.showToast({ message: '登录请求失败，请检查网络' });
+    } finally {
+      this.smsLoading = false;
     }
-    promptAction.showToast({ message: result.message.length > 0 ? result.message : '登录失败，请检查验证码' });
   }
 
   // ===== 登录成功统一收尾：写回 cookie 并返回 =====
@@ -228,10 +284,9 @@ export struct LoginPage {
     this.stopPoll();
     this.loggedIn = true;
     await UserStore.applyLoginCookies(cookies);
+    if (this.destroyed) return;
     promptAction.showToast({ message: '登录成功，欢迎回来' });
-    setTimeout(() => {
-      AppNavStack.pop();
-    }, 600);
+    this.schedulePop();
   }
 
   // ===== 登录方式切换 chip =====
@@ -245,6 +300,14 @@ export struct LoginPage {
       .backgroundColor(this.tab === index ? this.accent : (this.isDark ? '#2F3136' : '#FFFFFF'))
       .onClick(() => {
         this.tab = index;
+        // 扫码轮询只在扫码 tab 运行；切回时若二维码仍有效则恢复
+        if (index === 0) {
+          if (!this.loggedIn && !this.expired && this.authCode.length > 0) {
+            this.startPoll();
+          }
+        } else {
+          this.stopPoll();
+        }
       })
   }
 
@@ -343,18 +406,7 @@ export struct LoginPage {
     Column() {
       // 顶部栏
       Row() {
-        Row() {
-          Text('‹')
-            .fontSize(26)
-            .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-            .translate({ y: -1 })
-        }
-        .width(32)
-        .height(32)
-        .justifyContent(FlexAlign.Center)
-        .onClick(() => {
-          AppNavStack.pop();
-        })
+        BackButton()
         Blank()
         Text('登录')
           .fontSize(17)

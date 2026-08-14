@@ -7,20 +7,24 @@ import { MessageSessionItem, MessageSessionPageData, PrivateMessageItem, Private
 import { UserStore } from '../common/UserStore';
 import { colorWithAlpha, formatRelativeTime } from '../common/Utils';
 import { LoadingView } from '../components/LoadingView';
+import { LoadMoreFooter } from '../components/LoadMoreFooter';
+import { PageHeader } from '../components/PageHeader';
+import { BasicDataSource } from '../common/BasicDataSource';
 
 @Component
 export struct MessagesPage {
-  @State sessions: Array<MessageSessionItem> = [];
   @State current: MessageSessionItem = new MessageSessionItem();
   @State messages: Array<PrivateMessageItem> = [];
   @State loading: boolean = false;
   @State hasMore: boolean = true;
+  @State sessionHasMore: boolean = true;
   @State minSeqno: number = 0;
   @State draft: string = '';
   @State sending: boolean = false;
   @StorageProp('messageThreadOpen') @Watch('onThreadNavigationChanged') threadOpen: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
+  private sessionsSource: BasicDataSource<MessageSessionItem> = new BasicDataSource<MessageSessionItem>();
 
   aboutToAppear(): void {
     AppStorage.setOrCreate<boolean>('messageThreadOpen', false);
@@ -28,16 +32,43 @@ export struct MessagesPage {
       AppNavStack.replacePathByName(NAV_LOGIN, null);
       return;
     }
-    this.loadSessions();
+    this.loadSessions(true).catch(() => {
+    });
   }
 
-  async loadSessions(): Promise<void> {
-    if (this.loading) return;
+  async loadSessions(reset: boolean): Promise<void> {
+    if (this.loading || (!reset && !this.sessionHasMore)) return;
     this.loading = true;
-    const data: MessageSessionPageData = await BiliApi.getMessageSessions();
-    this.sessions = data.sessions;
-    this.hasMore = data.hasMore;
-    this.loading = false;
+    try {
+      const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
+      const beginTs: number = reset || all.length === 0 ? 0 : all[all.length - 1].sessionTs;
+      const data: MessageSessionPageData = await BiliApi.getMessageSessions(beginTs);
+      if (reset) {
+        this.sessionsSource.reset(data.sessions);
+      } else {
+        this.sessionsSource.append(this.dedupSessions(data.sessions));
+      }
+      this.sessionHasMore = data.hasMore;
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  /** 分页去重：B 站会话接口按 session_ts 翻页，边界处可能重复返回同一会话。 */
+  private dedupSessions(incoming: Array<MessageSessionItem>): Array<MessageSessionItem> {
+    const seen: Set<number> = new Set<number>();
+    const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
+    for (let i: number = 0; i < all.length; i++) {
+      seen.add(all[i].talkerId);
+    }
+    const out: Array<MessageSessionItem> = [];
+    for (let i: number = 0; i < incoming.length; i++) {
+      if (!seen.has(incoming[i].talkerId)) {
+        seen.add(incoming[i].talkerId);
+        out.push(incoming[i]);
+      }
+    }
+    return out;
   }
 
   async openSession(item: MessageSessionItem): Promise<void> {
@@ -61,20 +92,29 @@ export struct MessagesPage {
   async loadMessages(reset: boolean): Promise<void> {
     if (this.loading || this.current.talkerId === 0 || (!reset && !this.hasMore)) return;
     this.loading = true;
-    const data: PrivateMessagePageData = await BiliApi.getPrivateMessages(this.current.talkerId, reset ? 0 : this.minSeqno);
-    this.messages = reset ? data.messages : this.mergeMessages(data.messages, this.messages);
-    this.minSeqno = data.minSeqno > 0 ? data.minSeqno : this.minSeqno;
-    this.hasMore = data.hasMore;
-    this.loading = false;
-    if (reset && this.messages.length > 0) {
-      const ackSeqno: number = this.messages[this.messages.length - 1].seqno;
-      // 打开会话即在本地消除红点，同时向 B 站回写最后已读 seqno。
-      for (let i: number = 0; i < this.sessions.length; i++) {
-        if (this.sessions[i].talkerId === this.current.talkerId) this.sessions[i].unread = 0;
+    const talkerId: number = this.current.talkerId;
+    try {
+      const data: PrivateMessagePageData = await BiliApi.getPrivateMessages(talkerId, reset ? 0 : this.minSeqno);
+      if (this.current.talkerId !== talkerId) return;
+      this.messages = reset ? data.messages : this.mergeMessages(data.messages, this.messages);
+      this.minSeqno = data.minSeqno > 0 ? data.minSeqno : this.minSeqno;
+      this.hasMore = data.hasMore;
+      if (reset && this.messages.length > 0) {
+        const ackSeqno: number = this.messages[this.messages.length - 1].seqno;
+        // 打开会话即在本地消除红点，同时向 B 站回写最后已读 seqno。
+        const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
+        for (let i: number = 0; i < all.length; i++) {
+          if (all[i].talkerId === talkerId) all[i].unread = 0;
+        }
+        this.sessionsSource.reset(all);
+        this.current.unread = 0;
+        BiliApi.markPrivateMessagesRead(talkerId, ackSeqno).catch(() => {
+        });
       }
-      this.sessions = this.sessions.slice();
-      this.current.unread = 0;
-      BiliApi.markPrivateMessagesRead(this.current.talkerId, ackSeqno);
+    } catch (e) {
+      // 保留当前会话内容，触顶或重试时可再次请求。
+    } finally {
+      this.loading = false;
     }
   }
 
@@ -101,20 +141,25 @@ export struct MessagesPage {
     const user = UserStore.current;
     if (content.length === 0 || user === null || this.sending) return;
     this.sending = true;
-    const result: ActionResult = await BiliApi.sendPrivateMessage(user.mid, this.current.talkerId, content);
-    this.sending = false;
-    if (!result.ok) {
-      promptAction.showToast({ message: result.message });
-      return;
+    try {
+      const result: ActionResult = await BiliApi.sendPrivateMessage(user.mid, this.current.talkerId, content);
+      if (!result.ok) {
+        promptAction.showToast({ message: result.message });
+        return;
+      }
+      const local: PrivateMessageItem = new PrivateMessageItem();
+      local.senderId = user.mid;
+      local.receiverId = this.current.talkerId;
+      local.text = content;
+      local.timestamp = Math.floor(Date.now() / 1000);
+      local.seqno = Date.now();
+      this.messages = this.messages.concat([local]);
+      this.draft = '';
+    } catch (e) {
+      promptAction.showToast({ message: '发送失败，请检查网络' });
+    } finally {
+      this.sending = false;
     }
-    const local: PrivateMessageItem = new PrivateMessageItem();
-    local.senderId = user.mid;
-    local.receiverId = this.current.talkerId;
-    local.text = content;
-    local.timestamp = Math.floor(Date.now() / 1000);
-    local.seqno = Date.now();
-    this.messages = this.messages.concat([local]);
-    this.draft = '';
   }
 
   goBack(): void {
@@ -126,29 +171,10 @@ export struct MessagesPage {
   }
 
   @Builder
-  Header() {
-    Row({ space: 10 }) {
-      Stack({ alignContent: Alignment.Center }) {
-        Text('‹')
-          .fontSize(28)
-          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-      }
-      .width(40)
-      .height(46)
-      .onClick(() => this.goBack())
-      if (this.current.talkerId > 0 && this.current.avatar.length > 0) {
-        Image(this.current.avatar).width(30).height(30).borderRadius(15).objectFit(ImageFit.Cover)
-      }
-      Text(this.current.talkerId > 0 ? this.current.name : '私信')
-        .fontSize(18)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-      Blank()
+  SessionAvatar() {
+    if (this.current.talkerId > 0 && this.current.avatar.length > 0) {
+      Image(this.current.avatar).width(30).height(30).borderRadius(15).objectFit(ImageFit.Cover)
     }
-    .width('100%')
-    .height(50)
-    .padding({ left: 4, right: 14 })
-    .border({ width: { bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
   }
 
   @Builder
@@ -239,17 +265,40 @@ export struct MessagesPage {
 
   build() {
     Column() {
-      this.Header()
+      PageHeader({
+        title: this.current.talkerId > 0 ? this.current.name : '私信',
+        headerHeight: 50,
+        padLeft: 4,
+        backWidth: 40,
+        onBack: () => this.goBack(),
+        middle: this.SessionAvatar,
+      })
       if (this.current.talkerId === 0) {
-        if (this.sessions.length === 0) {
-          LoadingView({ loading: this.loading, empty: !this.loading, emptyText: '暂无私信会话', onRetry: () => this.loadSessions() })
+        if (this.sessionsSource.totalCount() === 0) {
+          LoadingView({ loading: this.loading, empty: !this.loading, emptyText: '暂无私信会话',
+            onRetry: () => this.loadSessions(true).catch(() => {
+            }) })
         } else {
           List() {
-            ForEach(this.sessions, (item: MessageSessionItem) => {
+            LazyForEach(this.sessionsSource, (item: MessageSessionItem) => {
               ListItem() { this.SessionRow(item) }
             }, (item: MessageSessionItem) => String(item.talkerId))
+            ListItem() {
+              LoadMoreFooter({
+                loading: this.loading,
+                hasMore: this.sessionHasMore,
+                moreText: '',
+                endText: '',
+                fixedHeight: this.loading ? 48 : 1,
+              })
+            }
           }
           .layoutWeight(1).padding({ left: 12, right: 12 }).scrollBar(BarState.Off)
+          .cachedCount(5)
+          .onReachEnd(() => {
+            this.loadSessions(false).catch(() => {
+            });
+          })
         }
       } else {
         List() {

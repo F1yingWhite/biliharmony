@@ -8,7 +8,7 @@ import { appSign } from '../common/AppSign';
 import { RsaUtil } from '../common/RsaUtil';
 import { md5Hex } from '../common/Md5';
 import { Api, Constants, RecommendParams } from '../common/Constants';
-import { asObject, asArray, asString, asNumber, asBool, str, num, randomString, toHttps } from '../common/Utils';
+import { asObject, asArray, asString, asNumber, asBool, str, randomString, toHttps } from '../common/Utils';
 import { VideoItem, VideoDetail, PlayUrlInfo, ReplyData, ReplyItem, ReplyPageData, UserInfo, UserStat, DynamicItem, DynamicPageData, HotSearchItem, UserSearchItem, SearchTypes,
   UserSpaceInfo, SpaceArcData, VideoSearchResult, UserSearchResult, VideoRelationState, HistoryVideoItem, HistoryPageData,
   FavoriteFolderItem, FavoriteFolderPageData, FavoriteVideoPageData, MessageSessionItem, MessageSessionPageData,
@@ -98,7 +98,7 @@ export class BiliApi {
     };
     await WbiSign.encWbi(params);
     const url: string = Api.recommendListWeb + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return [];
     const source: Array<Object> = asArray(data['item']);
@@ -143,7 +143,7 @@ export class BiliApi {
   static async getHot(pn: number, ps: number): Promise<Array<VideoItem>> {
     const params: Record<string, string> = { 'pn': String(pn), 'ps': String(ps) };
     const url: string = Api.hotList + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return [];
@@ -334,7 +334,7 @@ export class BiliApi {
   static async getVideoDetail(aid: number, bvid: string): Promise<VideoDetail | null> {
     const params: Record<string, string> = bvid.length > 0 ? { 'bvid': bvid } : { 'aid': String(aid) };
     const url: string = Api.videoIntro + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return null;
@@ -398,21 +398,29 @@ export class BiliApi {
     const params: Record<string, string> = { 'aid': String(aid) };
     if (bvid.length > 0) params['bvid'] = bvid;
     const resp: HttpResponse = await HttpClient.get(Api.videoRelation + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, {}));
+      Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     return data === null ? null : VideoRelationState.from(data);
   }
 
-  private static async postVideoAction(url: string, params: Record<string, string>): Promise<ActionResult> {
+  /** 互动接口公共骨架：取 bili_jct 判空 → 发请求 → ok/code/message 统一转结果文案。 */
+  private static async actionWithCsrf(csrfError: string, okMessage: string, failMessage: string,
+    doRequest: (csrf: string) => Promise<HttpResponse>): Promise<ActionResult> {
     const csrf: string = HttpClient.getCookie('bili_jct');
-    if (csrf.length === 0) return new ActionResult(false, '登录状态缺少 CSRF，请重新登录');
-    params['csrf'] = csrf;
-    const resp: HttpResponse = await HttpClient.post(url, HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, {}));
+    if (csrf.length === 0) return new ActionResult(false, csrfError);
+    const resp: HttpResponse = await doRequest(csrf);
     if (!resp.ok) return new ActionResult(false, '网络请求失败');
     const json: Record<string, Object> = resp.json();
     const ok: boolean = asNumber(json['code'], -1) === 0;
-    return new ActionResult(ok, ok ? '操作成功' : str(json, 'message', '操作失败'));
+    return new ActionResult(ok, ok ? okMessage : str(json, 'message', failMessage));
+  }
+
+  private static async postVideoAction(url: string, params: Record<string, string>): Promise<ActionResult> {
+    return BiliApi.actionWithCsrf('登录状态缺少 CSRF，请重新登录', '操作成功', '操作失败',
+      (csrf: string): Promise<HttpResponse> => {
+        params['csrf'] = csrf;
+        return HttpClient.post(url, HttpClient.buildQuery(params), Constants.webHeaders);
+      });
   }
 
   static async likeVideo(aid: number, bvid: string, like: boolean): Promise<ActionResult> {
@@ -465,7 +473,7 @@ export class BiliApi {
   static async getUserRelation(mid: number): Promise<number | null> {
     if (mid <= 0) return null;
     const url: string = Api.userRelation + '?' + HttpClient.buildQuery({ 'fid': String(mid) });
-    const resp: HttpResponse = await HttpClient.get(url, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     return data === null ? null : asNumber(data['attribute'], 0);
   }
@@ -484,7 +492,7 @@ export class BiliApi {
   static async getRelated(aid: number, bvid: string): Promise<Array<VideoItem>> {
     const params: Record<string, string> = bvid.length > 0 ? { 'bvid': bvid } : { 'aid': String(aid) };
     const url: string = Api.relatedList + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return [];
@@ -558,7 +566,7 @@ export class BiliApi {
       'web_location': '333.1245',
     };
     const resp: HttpResponse = await HttpClient.get(Api.userEmotes + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, {}));
+      Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return [];
     const packages: Array<Object> = asArray(data['packages']);
@@ -580,7 +588,7 @@ export class BiliApi {
       'ps': '20',
     };
     const url: string = Api.replyReplyList + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     return data === null ? new ReplyPageData() : ReplyPageData.from(data);
   }
@@ -591,7 +599,7 @@ export class BiliApi {
       'type': 'archive', 'ps': '20', 'max': String(max), 'view_at': String(viewAt),
     };
     const resp: HttpResponse = await HttpClient.get(Api.historyList + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, {}));
+      Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     const result: HistoryPageData = new HistoryPageData();
     if (data === null) return result;
@@ -612,7 +620,7 @@ export class BiliApi {
       'up_mid': String(mid), 'pn': String(page), 'ps': '20',
     };
     const resp: HttpResponse = await HttpClient.get(Api.favoriteFolders + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, {}));
+      Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     const result: FavoriteFolderPageData = new FavoriteFolderPageData();
     if (data === null) return result;
@@ -626,7 +634,7 @@ export class BiliApi {
   static async getFavoriteFoldersForVideo(aid: number): Promise<Array<FavoriteFolderItem>> {
     const params: Record<string, string> = { 'rid': String(aid), 'type': '2' };
     const resp: HttpResponse = await HttpClient.get(Api.favoriteFoldersForVideo + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, {}));
+      Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     const result: Array<FavoriteFolderItem> = [];
     if (data === null) return result;
@@ -651,7 +659,7 @@ export class BiliApi {
       'order': 'mtime', 'type': '0', 'tid': '0', 'platform': 'web',
     };
     const resp: HttpResponse = await HttpClient.get(Api.favoriteResources + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, {}));
+      Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     const result: FavoriteVideoPageData = new FavoriteVideoPageData();
     if (data === null) return result;
@@ -682,7 +690,7 @@ export class BiliApi {
       'up_mid': String(mid), 'pn': String(page), 'ps': '20', 'platform': 'web',
     };
     const resp: HttpResponse = await HttpClient.get(Api.collectedFolders + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, {}));
+      Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     const result: FavoriteFolderPageData = new FavoriteFolderPageData();
     if (data === null) return result;
@@ -697,7 +705,7 @@ export class BiliApi {
       'season_id': String(seasonId), 'pn': String(page), 'ps': '20',
     };
     const resp: HttpResponse = await HttpClient.get(Api.collectionResources + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, {}));
+      Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     const result: FavoriteVideoPageData = new FavoriteVideoPageData();
     if (data === null) return result;
@@ -791,47 +799,41 @@ export class BiliApi {
   /** 将指定会话确认到最后一条已展示消息，对齐 PiliPlus 的 update_ack 行为。 */
   static async markPrivateMessagesRead(talkerId: number, ackSeqno: number): Promise<ActionResult> {
     if (talkerId <= 0 || ackSeqno <= 0) return new ActionResult(false, '无可确认的私信');
-    const csrf: string = HttpClient.getCookie('bili_jct');
-    if (csrf.length === 0) return new ActionResult(false, '登录状态缺少 CSRF');
-    const params: Record<string, string> = {
-      'talker_id': String(talkerId), 'session_type': '1', 'ack_seqno': String(ackSeqno),
-      'build': '0', 'mobi_app': 'web', 'csrf_token': csrf, 'csrf': csrf,
-    };
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await HttpClient.get(Api.ackSessionMessage + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
-    if (!resp.ok) return new ActionResult(false, '网络请求失败');
-    const json: Record<string, Object> = resp.json();
-    const ok: boolean = asNumber(json['code'], -1) === 0;
-    return new ActionResult(ok, ok ? '已读' : str(json, 'message', '标记已读失败'));
+    return BiliApi.actionWithCsrf('登录状态缺少 CSRF', '已读', '标记已读失败',
+      async (csrf: string): Promise<HttpResponse> => {
+        const params: Record<string, string> = {
+          'talker_id': String(talkerId), 'session_type': '1', 'ack_seqno': String(ackSeqno),
+          'build': '0', 'mobi_app': 'web', 'csrf_token': csrf, 'csrf': csrf,
+        };
+        await WbiSign.encWbi(params);
+        return HttpClient.get(Api.ackSessionMessage + '?' + HttpClient.buildQuery(params),
+          HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+      });
   }
 
   static async sendPrivateMessage(senderId: number, receiverId: number, content: string): Promise<ActionResult> {
-    const csrf: string = HttpClient.getCookie('bili_jct');
-    if (csrf.length === 0) return new ActionResult(false, '登录状态缺少 CSRF，请重新登录');
     const devId: string = randomString(8) + '-' + randomString(4) + '-4' + randomString(3) + '-a' + randomString(3) + '-' + randomString(12);
-    const query: Record<string, string> = {
-      'w_sender_uid': String(senderId), 'w_receiver_id': String(receiverId), 'w_dev_id': devId,
-    };
-    await WbiSign.encWbi(query);
-    const body: Record<string, string> = {
-      'msg[sender_uid]': String(senderId), 'msg[receiver_id]': String(receiverId), 'msg[receiver_type]': '1',
-      'msg[msg_type]': '1', 'msg[msg_status]': '0', 'msg[dev_id]': devId,
-      'msg[timestamp]': String(Math.floor(Date.now() / 1000)), 'msg[new_face_version]': '1',
-      'msg[content]': JSON.stringify({ 'content': content }), 'csrf_token': csrf, 'csrf': csrf,
-      'build': '0', 'mobi_app': 'web',
-    };
-    const resp: HttpResponse = await HttpClient.post(Api.sendMessage + '?' + HttpClient.buildQuery(query),
-      HttpClient.buildQuery(body), HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
-    if (!resp.ok) return new ActionResult(false, '网络请求失败');
-    const json: Record<string, Object> = resp.json();
-    const ok: boolean = asNumber(json['code'], -1) === 0;
-    return new ActionResult(ok, ok ? '发送成功' : str(json, 'message', '发送失败'));
+    return BiliApi.actionWithCsrf('登录状态缺少 CSRF，请重新登录', '发送成功', '发送失败',
+      async (csrf: string): Promise<HttpResponse> => {
+        const query: Record<string, string> = {
+          'w_sender_uid': String(senderId), 'w_receiver_id': String(receiverId), 'w_dev_id': devId,
+        };
+        await WbiSign.encWbi(query);
+        const body: Record<string, string> = {
+          'msg[sender_uid]': String(senderId), 'msg[receiver_id]': String(receiverId), 'msg[receiver_type]': '1',
+          'msg[msg_type]': '1', 'msg[msg_status]': '0', 'msg[dev_id]': devId,
+          'msg[timestamp]': String(Math.floor(Date.now() / 1000)), 'msg[new_face_version]': '1',
+          'msg[content]': JSON.stringify({ 'content': content }), 'csrf_token': csrf, 'csrf': csrf,
+          'build': '0', 'mobi_app': 'web',
+        };
+        return HttpClient.post(Api.sendMessage + '?' + HttpClient.buildQuery(query),
+          HttpClient.buildQuery(body), HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+      });
   }
 
   // ===== 热搜 =====
   static async getHotSearch(): Promise<Array<HotSearchItem>> {
-    const resp: HttpResponse = await HttpClient.get(Api.hotSearchList, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(Api.hotSearchList, Constants.webHeaders);
     if (!resp.ok) {
       return [];
     }
@@ -852,7 +854,7 @@ export class BiliApi {
     };
     await WbiSign.encWbi(params);
     const url: string = Api.searchAll + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return [];
@@ -892,7 +894,7 @@ export class BiliApi {
     }
     await WbiSign.encWbi(params);
     const url: string = Api.searchByType + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
     return getData(resp);
   }
 
@@ -946,7 +948,7 @@ export class BiliApi {
   static async searchSuggest(term: string): Promise<Array<string>> {
     const params: Record<string, string> = { 'term': term, 'main_ver': 'v1' };
     const url: string = Api.searchSuggest + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
     if (!resp.ok) {
       return [];
     }
@@ -966,7 +968,7 @@ export class BiliApi {
 
   // ===== 当前登录用户（nav） =====
   static async getNav(): Promise<UserInfo> {
-    const resp: HttpResponse = await HttpClient.get(Api.userInfo, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(Api.userInfo, Constants.webHeaders);
     if (!resp.ok) {
       return new UserInfo();
     }
@@ -976,7 +978,7 @@ export class BiliApi {
   // ===== 用户统计 =====
   static async getUserStat(mid: number): Promise<UserStat> {
     const url: string = Api.userStat + '?' + HttpClient.buildQuery({ 'vmid': String(mid) });
-    const resp: HttpResponse = await HttpClient.get(url, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
     if (!resp.ok) {
       return new UserStat();
     }
@@ -989,7 +991,7 @@ export class BiliApi {
     const params: Record<string, string> = { 'mid': String(mid) };
     await WbiSign.encWbi(params);
     const url: string = Api.memberInfo + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return null;
@@ -1082,7 +1084,7 @@ export class BiliApi {
     else params['aid'] = String(aid);
     await WbiSign.encWbi(params);
     const url: string = Api.playerInfo + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return [];
     const points: Array<Object> = asArray(data['view_points']);
@@ -1110,7 +1112,7 @@ export class BiliApi {
     };
     await WbiSign.encWbi(params);
     const url: string = Api.memberArcSearch + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
     const result: SpaceArcData = new SpaceArcData();
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
@@ -1137,7 +1139,7 @@ export class BiliApi {
       'offset': offset,
     };
     const url: string = Api.followDynamic + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, HttpClient.merge(Constants.webHeaders, {}));
+    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
     return BiliApi.parseDynamicPage(resp);
   }
 
@@ -1185,7 +1187,7 @@ export class BiliApi {
   static async getDanmaku(cid: number): Promise<Array<DanmakuItem>> {
     const url: string = Api.danmakuXml + cid + '.xml';
     const resp: HttpResponse = await HttpClient.get(url, {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.2 Safari/605.1.15',
+      'User-Agent': Constants.browserUa,
     });
     if (!resp.ok) {
       return [];
@@ -1206,7 +1208,10 @@ export class BiliApi {
         const mode: number = Number(parts[1]);
         const color: number = Number(parts[3]);
         if (!Number.isNaN(time)) {
-          result.push(new DanmakuItem(time, mode, color, text));
+          // mode/color 脏数据回退默认值，避免 NaN 进入渲染
+          result.push(new DanmakuItem(time,
+            Number.isNaN(mode) ? 1 : mode,
+            Number.isNaN(color) ? 0xFFFFFF : color, text));
         }
       }
       m = re.exec(xml);
@@ -1221,6 +1226,7 @@ export class BiliApi {
     out = out.replace(/&gt;/g, '>');
     out = out.replace(/&quot;/g, '"');
     out = out.replace(/&#39;/g, "'");
+    out = out.replace(/&apos;/g, "'");
     out = out.replace(/<[^>]*>/g, '');
     return out;
   }
