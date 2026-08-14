@@ -1,0 +1,29 @@
+# HarmonyOS / DevEco build outputs
+/node_modules
+/oh_modules
+**/oh_modules
+/local.properties
+/.idea
+**/build
+/.hvigor
+/.home
+/.clangd
+/.clang-format
+/.clang-tidy
+/.cxx
+**/.test
+/.appanalyzer
+**/oh-package-lock.json5.bak
+/.asset-backups
+/.qa
+
+# OS
+.DS_Store
+
+# Flutter reference project (PiliPlus 原工程)
+/PiliPlus/
+/PiliPlus/.dart_tool
+/PiliPlus/build
+/PiliPlus/.flutter-plugins*
+/PiliPlus/android/.gradle
+/PiliPlus/android/local.properties
