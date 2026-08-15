@@ -1,9 +1,10 @@
 /**
  * 我的视图：B 站风格布局——顶部用户区（头像/昵称/Lv/签名 + 关注/粉丝/获赞）
- * + 圆角分组功能列表；功能逻辑（深色模式/沉浸光感/强度/主题色/退出登录/关于）不变
+ * + 圆角分组功能列表；功能逻辑（深色模式/沉浸光感/主题色/退出登录/关于）不变
  */
 import { promptAction } from '@kit.ArkUI';
-import { AppNavStack, NAV_FAVORITES, NAV_HISTORY, NAV_LOGIN, NAV_USER_SPACE, UserSpaceParam } from '../common/AppRouter';
+import { AppNavStack, NAV_FAVORITES, NAV_HISTORY, NAV_LOGIN, NAV_RELATION_LIST, NAV_USER_SPACE,
+  RelationListParam, UserSpaceParam } from '../common/AppRouter';
 import { UserInfo, UserStat } from '../model/Models';
 import { BiliApi } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
@@ -22,7 +23,6 @@ export struct MineView {
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('themeMode') themeMode: string = AppTheme.MODE_SYSTEM;
   @StorageProp('glassEnabled') glassOn: boolean = true;
-  @StorageProp('glassLevel') glassLevel: number = 1;
   @StorageProp('loginVersion') @Watch('onLoginChanged') loginVer: number = 0;
   @StorageProp('userPendant') userPendant: string = '';
 
@@ -77,7 +77,7 @@ export struct MineView {
   }
 
   @Builder
-  StatBlock(num: string, label: string) {
+  StatBlock(num: string, label: string, onTap: () => void) {
     Column({ space: 3 }) {
       Text(num)
         .fontSize(17)
@@ -88,6 +88,7 @@ export struct MineView {
         .fontColor('#9499A0')
     }
     .layoutWeight(1)
+    .onClick(() => onTap())
   }
 
   /** 菜单行：图标 + 文案 + 右侧箭头（历史记录 / 我的收藏） */
@@ -188,9 +189,16 @@ export struct MineView {
         })
 
         Row() {
-          this.StatBlock(formatCount(this.stat.following), '关注')
-          this.StatBlock(formatCount(this.stat.follower), '粉丝')
-          this.StatBlock(formatCount(this.stat.likeNum), '获赞')
+          this.StatBlock(formatCount(this.stat.following), '关注', () => {
+            const param: RelationListParam = { mid: this.user.mid, mode: 'following' };
+            AppNavStack.pushPathByName(NAV_RELATION_LIST, param);
+          })
+          this.StatBlock(formatCount(this.stat.follower), '粉丝', () => {
+            const param: RelationListParam = { mid: this.user.mid, mode: 'follower' };
+            AppNavStack.pushPathByName(NAV_RELATION_LIST, param);
+          })
+          this.StatBlock(formatCount(this.stat.likeNum), '获赞', () => {
+          })
         }
         .width('100%')
         .margin({ top: 18 })
@@ -298,36 +306,6 @@ export struct MineView {
         .height(48)
         .padding({ left: 14, right: 14 })
         .alignItems(VerticalAlign.Center)
-
-        this.GroupDivider()
-
-        // 材质强度三档（沉浸光感关闭时置灰）
-        Row({ space: 14 }) {
-          Text('材质强度')
-            .fontSize(15)
-            .fontColor(this.itemColor())
-          Blank()
-          Row({ space: 8 }) {
-            ForEach(['弱', '标准', '强'], (label: string, index: number) => {
-              Text(label)
-                .fontSize(13)
-                .fontColor(this.glassLevel === index ? '#FFFFFF' : (this.isDark ? '#C8C8CC' : '#5A5F66'))
-                .backgroundColor(this.glassLevel === index ? this.accent : (this.isDark ? '#3A3D44' : '#F0F1F3'))
-                .padding({ left: 12, right: 12, top: 5, bottom: 5 })
-                .borderRadius(14)
-                .onClick(() => {
-                  if (this.glassOn) {
-                    AppTheme.setGlassLevel(index);
-                  }
-                })
-            }, (label: string) => label)
-          }
-        }
-        .width('100%')
-        .height(48)
-        .padding({ left: 14, right: 14 })
-        .alignItems(VerticalAlign.Center)
-        .opacity(this.glassOn ? 1 : 0.4)
 
         this.GroupDivider()
 

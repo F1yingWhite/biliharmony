@@ -3,7 +3,8 @@
  * 结果态：视频 | 用户 二级 Tab + 排序 chips + 视频筛选面板（search/type 接口）
  */
 import { Immersive } from '../common/Immersive';
-import { AppNavStack, NAV_VIDEO_DETAIL, NAV_USER_SPACE, VideoDetailParam, UserSpaceParam } from '../common/AppRouter';
+import { AppNavStack, LiveRoomParam, NAV_LIVE_ROOM, NAV_VIDEO_DETAIL, NAV_USER_SPACE, VideoDetailParam,
+  UserSpaceParam } from '../common/AppRouter';
 import {
   VideoItem, HotSearchItem, UserSearchItem, SearchOption, SearchNumOption, VideoSearchResult, UserSearchResult,
   VIDEO_ORDER_OPTIONS, USER_ORDER_OPTIONS, VIDEO_DURATION_OPTIONS, VIDEO_PUBTIME_OPTIONS, VIDEO_ZONE_OPTIONS
@@ -19,6 +20,7 @@ import { AppTheme } from '../common/AppTheme';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { HotSearchStore } from '../common/HotSearchStore';
 import { SearchHistoryStore } from '../common/SearchHistoryStore';
+import { LayoutTokens } from '../common/LayoutTokens';
 
 @Component
 export struct SearchPage {
@@ -48,7 +50,6 @@ export struct SearchPage {
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
-  @StorageProp('glassLevel') glassLevel: number = 1;
   @StorageProp('searchSuggestedKeyword') suggestedKeyword: string = '';
   private resultsSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
   private userSource: BasicDataSource<UserSearchItem> = new BasicDataSource<UserSearchItem>();
@@ -309,6 +310,8 @@ export struct SearchPage {
       }
       .width('100%')
       .height('100%')
+      .constraintSize({ maxWidth: LayoutTokens.pageMaxWidth })
+      .alignSelf(ItemAlign.Center)
       .scrollBar(BarState.Off)
     }
     .width('100%')
@@ -515,13 +518,40 @@ export struct SearchPage {
   }
 
   // ===== 结果态：用户卡片（头像 + 昵称 + 等级/认证 + 粉丝/视频数 + 简介） =====
+  private openUserSpace(item: UserSearchItem): void {
+    const param: UserSpaceParam = { mid: item.mid };
+    AppNavStack.pushPathByName(NAV_USER_SPACE, param);
+  }
+
+  private openUserLive(item: UserSearchItem): void {
+    if (item.liveStatus !== 1 || item.liveRoomId <= 0) {
+      this.openUserSpace(item);
+      return;
+    }
+    const param: LiveRoomParam = {
+      roomId: item.liveRoomId, uid: item.mid, title: '', uname: item.uname, face: item.face, cover: '',
+    };
+    AppNavStack.pushPathByName(NAV_LIVE_ROOM, param);
+  }
+
   @Builder
   UserRow(item: UserSearchItem) {
     Row({ space: 10 }) {
-      Image(item.face)
-        .width(52)
-        .height(52)
-        .borderRadius(26)
+      Stack({ alignContent: Alignment.Bottom }) {
+        Image(item.face.length > 0 ? item.face : $r('app.media.placeholder_avatar_noface'))
+          .width(52)
+          .height(52)
+          .borderRadius(26)
+          .objectFit(ImageFit.Cover)
+        if (item.liveStatus === 1 && item.liveRoomId > 0) {
+          Text('直播')
+            .width(38).height(17).textAlign(TextAlign.Center)
+            .fontSize(10).fontWeight(FontWeight.Medium).fontColor('#FFFFFF')
+            .backgroundColor(this.accent).borderRadius(9)
+        }
+      }
+      .width(56).height(58)
+      .onClick(() => this.openUserLive(item))
       Column({ space: 4 }) {
         Row({ space: 6 }) {
           Text(item.uname)
@@ -557,13 +587,10 @@ export struct SearchPage {
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
+      .onClick(() => this.openUserSpace(item))
     }
     .width('100%')
     .padding({ left: 14, right: 14, top: 10, bottom: 10 })
-    .onClick(() => {
-      const param: UserSpaceParam = { mid: item.mid };
-      AppNavStack.pushPathByName(NAV_USER_SPACE, param);
-    })
   }
 
   // ===== 结果态：视频 Tab 内容 =====
@@ -704,7 +731,7 @@ export struct SearchPage {
           .padding({ left: 10, right: 10 })
           .borderRadius(18)
           .backgroundColor(this.isDark ? '#4DFFFFFF' : '#B3FFFFFF')
-          .backgroundBlurStyle(AppTheme.floatBlur(this.glassOn, this.glassLevel))
+          .backgroundBlurStyle(AppTheme.floatBlur(this.glassOn))
           .border({ width: 0.5, color: this.isDark ? '#2EFFFFFF' : '#26000000' })
           Text('搜索')
             .fontSize(14)
@@ -751,6 +778,8 @@ export struct SearchPage {
       }
       .width('100%')
       .height('100%')
+      .constraintSize({ maxWidth: LayoutTokens.pageMaxWidth })
+      .alignSelf(ItemAlign.Center)
     }
     .width('100%')
     .height('100%')
@@ -762,7 +791,7 @@ export struct SearchPage {
       showClose: false,
       radius: { topLeft: 20, topRight: 20 },
       backgroundColor: AppTheme.sheetBg(this.isDark, this.glassOn),
-      blurStyle: AppTheme.sheetBlur(this.glassOn, this.glassLevel),
+      blurStyle: AppTheme.sheetBlur(this.glassOn),
     })
   }
 }

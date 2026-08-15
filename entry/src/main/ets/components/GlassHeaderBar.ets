@@ -16,7 +16,6 @@ export struct GlassHeaderBar {
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') @Watch('onThemeChanged') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
-  @StorageProp('glassLevel') glassLevel: number = 1;
   // 头像单独放入 AppStorage，登录成功后可直接触发头栏刷新。
   @StorageProp('userAvatar') userAvatar: string = '';
   @StorageProp('userPendant') userPendant: string = '';
@@ -31,6 +30,10 @@ export struct GlassHeaderBar {
   onThemeChanged(): void {
     // 状态栏图标深浅始终跟随主题（浅色模式→深色图标，深色模式→浅色图标），
     // 保证浮在玻璃光效上始终可读；仅明暗切换时设置，滚动不再逐帧触发。
+    // 头栏只在导航栈根页可见：栈顶有二级页（如黑底播放器）时跳过，避免把图标刷成深色。
+    if (AppNavStack.getAllPathName().length > 0) {
+      return;
+    }
     Immersive.setBarIcons(this.isDark, this.isDark);
   }
 
@@ -111,7 +114,7 @@ export struct GlassHeaderBar {
         .layoutWeight(1)
         .borderRadius(16)
         .backgroundColor(this.glassOn ? '#00000000' : (this.isDark ? '#3DFFFFFF' : '#66FFFFFF'))
-        .systemMaterial(AppTheme.floatMaterial(this.glassOn, this.glassLevel))
+        .systemMaterial(AppTheme.floatMaterial(this.glassOn))
         .border({ width: 0.5, color: this.isDark ? '#2EFFFFFF' : '#33FFFFFF' })
         .justifyContent(FlexAlign.Center)
         // Block 在当前系统版本会截断子 Text/Image 到父 Row 的点击冒泡。
@@ -156,10 +159,7 @@ export struct GlassHeaderBar {
         avatarSize: 32,
         containerSize: 42,
         pendantScale: 1.38,
-        avatarBorderWidth: 1,
-        avatarBorderColor: this.isDark ? '#3DFFFFFF' : '#66FFFFFF',
       })
-        .shadow({ radius: 6, color: this.isDark ? '#59000000' : '#1A000000', offsetX: 0, offsetY: 2 })
         .margin({ left: 7, top: Immersive.statusBarHeight() - 1 })
         .onClick(() => {
           this.onAvatarTap();

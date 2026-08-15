@@ -2,8 +2,9 @@
  * 动态视图：关注动态 feed（需登录）
  */
 import { DynamicItem, DynamicPageData, BiliEmote } from '../model/Models';
-import { AppNavStack, NAV_IMAGE_VIEWER, NAV_LOGIN, NAV_VIDEO_DETAIL, NAV_USER_SPACE, ImageViewerParam,
-  VideoDetailParam, UserSpaceParam } from '../common/AppRouter';
+import { AppNavStack, NAV_DYNAMIC_DETAIL, NAV_IMAGE_VIEWER, NAV_LIVE_ROOM, NAV_LOGIN, NAV_VIDEO_DETAIL,
+  NAV_USER_SPACE, DynamicDetailParam, ImageViewerParam, LiveRoomParam, VideoDetailParam,
+  UserSpaceParam } from '../common/AppRouter';
 import { BiliApi } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
 import { LoadingView } from '../components/LoadingView';
@@ -13,6 +14,7 @@ import { Immersive } from '../common/Immersive';
 import { AppTheme } from '../common/AppTheme';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { DecoratedAvatar, UserDecorationBanner } from '../components/UserDecorations';
+import { LayoutTokens } from '../common/LayoutTokens';
 
 class DynamicContentPart {
   text: string = '';
@@ -25,7 +27,13 @@ const DYN_PARTS_CACHE_LIMIT: number = 100;
 const dynPartsCache: Map<string, Array<DynamicContentPart>> = new Map<string, Array<DynamicContentPart>>();
 
 function contentPartsOf(item: DynamicItem): Array<DynamicContentPart> {
-  const cached: Array<DynamicContentPart> | undefined = dynPartsCache.get(item.dynId);
+  // 同一 dynId 的 feed 简版与 detail 完整版可能拥有不同表情节点，缓存键必须包含节点签名。
+  let emoteSignature: string = '';
+  for (let i: number = 0; i < item.emotes.length; i++) {
+    emoteSignature += '|' + item.emotes[i].text + '=' + item.emotes[i].url;
+  }
+  const cacheKey: string = item.dynId + '|' + item.content + emoteSignature;
+  const cached: Array<DynamicContentPart> | undefined = dynPartsCache.get(cacheKey);
   if (cached !== undefined) {
     return cached;
   }
@@ -57,19 +65,128 @@ function contentPartsOf(item: DynamicItem): Array<DynamicContentPart> {
       dynPartsCache.delete(oldest.value);
     }
   }
-  dynPartsCache.set(item.dynId, result);
+  dynPartsCache.set(cacheKey, result);
   return result;
 }
 
 /** 单条动态卡片：独立 @Component，父组件状态变化不再整列表重建。 */
 @Component
-struct DynCard {
+export struct DynCard {
   @Prop item: DynamicItem = new DynamicItem();
   @Prop embedded: boolean = false;
+  @Prop detailMode: boolean = false;
   @StorageProp('isDarkMode') isDark: boolean = false;
 
   private shownImages(): Array<string> {
     return this.item.images.slice(0, 9);
+  }
+
+  private openDetail(focusComments: boolean = false): void {
+    if (this.detailMode || this.item.dynId.length === 0) return;
+    const param: DynamicDetailParam = { item: this.item as Object, focusComments: focusComments };
+    AppNavStack.pushPathByName(NAV_DYNAMIC_DETAIL, param);
+  }
+
+  private openItemDetail(item: DynamicItem): void {
+    if (item.dynId.length === 0) return;
+    const param: DynamicDetailParam = { item: item as Object };
+    AppNavStack.pushPathByName(NAV_DYNAMIC_DETAIL, param);
+  }
+
+  private openLive(item: DynamicItem): void {
+    if (item.liveRoomId <= 0) return;
+    const param: LiveRoomParam = {
+      roomId: item.liveRoomId,
+      uid: item.liveUid > 0 ? item.liveUid : item.mid,
+      title: item.title,
+      uname: item.uname,
+      face: item.face,
+      cover: item.cover,
+    };
+    AppNavStack.pushPathByName(NAV_LIVE_ROOM, param);
+  }
+
+  private openMajor(item: DynamicItem): void {
+    if (item.liveRoomId > 0) {
+      this.openLive(item);
+    } else if (item.bvid.length > 0) {
+      const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
+      AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+    } else {
+      this.openItemDetail(item);
+    }
+  }
+
+  private openItemImage(item: DynamicItem, index: number): void {
+    const images: Array<string> = item.images.slice(0, 9);
+    const transitionId: string = 'image-viewer-dynamic-' + item.dynId + '-' + String(index);
+    const viewer: ImageViewerParam = { images: images, initialIndex: index, transitionId: transitionId };
+    AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer);
+  }
+
+  @Builder
+  ForwardedCard(item: DynamicItem) {
+    Column({ space: 7 }) {
+      Text('@' + (item.uname.length > 0 ? item.uname : '原动态作者'))
+        .width('100%').fontSize(13).fontWeight(FontWeight.Medium).fontColor('#008AC5')
+        .onClick(() => {
+          this.openItemDetail(item);
+        })
+      if (item.content.length > 0) {
+        Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+          ForEach(contentPartsOf(item), (part: DynamicContentPart) => {
+            if (part.image.length > 0) {
+              Image(part.image).width(23).height(23).objectFit(ImageFit.Contain).margin({ right: 2 })
+            } else {
+              Text(part.text).fontSize(13).lineHeight(20)
+                .fontColor(this.isDark ? '#D8D8DC' : '#303236')
+            }
+          }, (part: DynamicContentPart) => 'forward-' + part.key)
+        }
+        .width('100%')
+        .onClick(() => {
+          this.openItemDetail(item);
+        })
+      }
+      if (item.images.length > 0) {
+        Grid() {
+          ForEach(item.images.slice(0, 3), (src: string, index: number) => {
+            GridItem() {
+              Image(src).width('100%').height('100%').objectFit(ImageFit.Cover).borderRadius(6)
+                .sharedTransition('image-viewer-dynamic-' + item.dynId + '-' + String(index), {
+                  duration: 300, curve: Curve.EaseInOut,
+                })
+                .onClick(() => {
+                  this.openItemImage(item, index);
+                })
+            }
+          }, (src: string, index: number) => 'forward-' + src + String(index))
+        }
+        .columnsTemplate(item.images.length === 1 ? '1fr' : (item.images.length === 2 ? '1fr 1fr' : '1fr 1fr 1fr'))
+        .columnsGap(4).height(item.images.length === 1 ? 170 : 104).width('100%')
+      }
+      if (item.title.length > 0) {
+        Row({ space: 9 }) {
+          if (item.cover.length > 0) {
+            Image(item.cover).width(112).height(68).objectFit(ImageFit.Cover).borderRadius(6)
+          }
+          Column({ space: 5 }) {
+            Text(item.title).fontSize(13).fontColor(this.isDark ? '#E6E6E6' : '#18191C').maxLines(2)
+            if (item.badge.length > 0 || item.subtitle.length > 0) {
+              Text(item.badge.length > 0 ? item.badge : item.subtitle).fontSize(10)
+                .fontColor(item.liveRoomId > 0 ? '#FB7299' : '#9499A0')
+            }
+          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        }
+        .width('100%')
+        .onClick(() => {
+          this.openMajor(item);
+        })
+      }
+      if (item.original !== null) this.ForwardedCard(item.original)
+    }
+    .width('100%').padding(10).borderRadius(8)
+    .backgroundColor(this.isDark ? '#222429' : '#F1F3F5')
   }
 
   build() {
@@ -123,12 +240,14 @@ struct DynCard {
         }
         .layoutWeight(1)
         .height(52)
-        .onClick(() => {
-          if (this.item.mid > 0) AppNavStack.pushPathByName(NAV_USER_SPACE, { mid: this.item.mid } as UserSpaceParam);
-        })
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
+      .onClick(() => {
+        if (this.item.mid > 0) {
+          AppNavStack.pushPathByName(NAV_USER_SPACE, { mid: this.item.mid } as UserSpaceParam);
+        }
+      })
 
       // 内容
       if (this.item.content.length > 0) {
@@ -142,6 +261,11 @@ struct DynCard {
           }, (part: DynamicContentPart) => part.key)
         }
         .width('100%')
+        .onClick(() => this.openDetail())
+      }
+
+      if (this.item.original !== null) {
+        this.ForwardedCard(this.item.original)
       }
 
       // 图文/专栏动态图片卡片
@@ -154,8 +278,17 @@ struct DynCard {
                 .height('100%')
                 .objectFit(ImageFit.Cover)
                 .borderRadius(6)
+                .id('dyn-img-' + this.item.dynId + '-' + String(index))
+                .sharedTransition('image-viewer-dynamic-' + this.item.dynId + '-' + String(index), {
+                  duration: 300,
+                  curve: Curve.EaseInOut,
+                })
                 .onClick(() => {
-                  const viewer: ImageViewerParam = { images: this.shownImages(), initialIndex: index };
+                  const viewer: ImageViewerParam = {
+                    images: this.shownImages(),
+                    initialIndex: index,
+                    transitionId: 'image-viewer-dynamic-' + this.item.dynId + '-' + String(index),
+                  };
                   AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer);
                 })
             }
@@ -203,10 +336,7 @@ struct DynCard {
         .borderRadius(9)
         .backgroundColor(this.isDark ? '#222429' : '#F5F7F9')
         .onClick(() => {
-          if (this.item.bvid.length > 0) {
-            const param: VideoDetailParam = { bvid: this.item.bvid, aid: this.item.aid, title: this.item.title };
-            AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
-          }
+          this.openMajor(this.item);
         })
       }
 
@@ -218,6 +348,10 @@ struct DynCard {
         Text('评 ' + this.item.comment)
           .fontSize(12)
           .fontColor('#9499A0')
+          .padding({ top: 5, bottom: 5 })
+          .onClick(() => {
+            this.openDetail(true);
+          })
         Text('转 ' + this.item.forward)
           .fontSize(12)
           .fontColor('#9499A0')
@@ -242,6 +376,8 @@ export struct DynamicView {
   @State dynOffset: string = '';
   @State dynHasMore: boolean = true;
   @State feedLoading: boolean = false;
+  @State dynCount: number = 0;
+  @State errorText: string = '';
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('loginVersion') @Watch('onLoginChanged') loginVer: number = 0;
@@ -267,15 +403,16 @@ export struct DynamicView {
     this.initializing = true;
     try {
       this.loading = true;
+      this.errorText = '';
       if (this.hostMid <= 0 && !UserStore.isLogin) {
-        await UserStore.refresh();
+        await UserStore.ensureLoaded();
       }
       this.login = this.hostMid > 0 || UserStore.isLogin;
       if (this.login) {
         await this.loadFeed(true);
       }
     } catch (e) {
-      // 动态流失败保留空态，用户可点击重试。
+      this.errorText = '动态加载失败，请检查登录状态或网络后重试';
     } finally {
       this.loading = false;
       this.initializing = false;
@@ -294,10 +431,11 @@ export struct DynamicView {
       } else {
         this.dynSource.append(page.items);
       }
+      this.dynCount = this.dynSource.totalCount();
       this.dynOffset = page.offset;
       this.dynHasMore = page.hasMore;
     } catch (e) {
-      // 保留已加载数据，触底时可再次重试。
+      if (this.dynSource.isEmpty()) this.errorText = '动态加载失败，请检查登录状态或网络后重试';
     } finally {
       this.feedLoading = false;
     }
@@ -334,11 +472,12 @@ export struct DynamicView {
           .margin({ top: 80 })
       } else if (!this.login) {
         this.LoginPrompt()
-      } else if (this.dynSource.totalCount() === 0) {
+      } else if (this.dynCount === 0) {
         LoadingView({
           loading: false,
-          empty: true,
+          empty: this.errorText.length === 0,
           emptyText: this.hostMid > 0 ? '该用户暂时没有发布动态' : '暂时没有动态，去关注一些UP主吧',
+          errorText: this.errorText,
           onRetry: () => {
             this.init();
           },
@@ -365,11 +504,19 @@ export struct DynamicView {
         }
         .width('100%')
         .height('100%')
+        .constraintSize({ maxWidth: LayoutTokens.readingMaxWidth })
+        .alignSelf(ItemAlign.Center)
         .cachedCount(3)
-        .contentStartOffset(this.embedded ? 4 : Immersive.statusBarHeight() + 56)
+        // 头栏留白使用 List 原生内容偏移，不再伪造空 ListItem，
+        // 避免短列表把空项也纳入内容高度后看起来整体下沉。
+        .contentStartOffset(this.embedded ? 4 : Immersive.statusBarHeight() + 44)
         .contentEndOffset(this.embedded ? 16 : Immersive.bottomInset() + 56)
-        .padding({ left: 10, right: 10 })
+        .padding({ left: LayoutTokens.phonePadding, right: LayoutTokens.phonePadding })
         .scrollBar(BarState.Off)
+        .nestedScroll({
+          scrollForward: this.embedded ? NestedScrollMode.PARENT_FIRST : NestedScrollMode.SELF_ONLY,
+          scrollBackward: this.embedded ? NestedScrollMode.SELF_FIRST : NestedScrollMode.SELF_ONLY,
+        })
         .onScroll((offset: number) => {
           if (!this.embedded) AppTheme.updateHeaderFade(offset);
         })
@@ -380,5 +527,7 @@ export struct DynamicView {
     }
     .width('100%')
     .layoutWeight(1)
+    .justifyContent(FlexAlign.Start)
+    .alignItems(HorizontalAlign.Start)
   }
 }

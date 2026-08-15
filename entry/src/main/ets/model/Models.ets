@@ -625,6 +625,8 @@ export class MessageSessionItem {
 export class MessageSessionPageData {
   sessions: Array<MessageSessionItem> = [];
   hasMore: boolean = false;
+  /** 加载失败原因（空串表示成功；用于 UI 呈现与区分"真的没私信"） */
+  error: string = '';
 }
 
 export class PrivateMessageItem {
@@ -652,6 +654,8 @@ export class PrivateMessagePageData {
   messages: Array<PrivateMessageItem> = [];
   hasMore: boolean = false;
   minSeqno: number = 0;
+  /** 加载失败原因；空串表示请求成功，避免失败被 UI 误判成空会话。 */
+  error: string = '';
 }
 
 function messageContentText(raw: string, type: number): string {
@@ -673,6 +677,12 @@ export class ReplyJump {
   url: string = '';
 }
 
+/** 评论正文中的可跳转 @ 用户。 */
+export class ReplyMention {
+  label: string = '';
+  mid: number = 0;
+}
+
 export class ReplyItem {
   rpid: number = 0;
   rootRpid: number = 0;
@@ -683,6 +693,8 @@ export class ReplyItem {
   avatar: string = '';
   content: string = '';
   like: number = 0;
+  liked: boolean = false;
+  disliked: boolean = false;
   ctime: number = 0;
   count: number = 0;
   level: number = 0;
@@ -691,10 +703,12 @@ export class ReplyItem {
   nameplate: string = '';
   nameColor: string = '';
   cardBackground: string = '';
+  cardNumberPrefix: string = 'NO.';
   cardNumber: string = '';
   cardNumberColor: string = '';
   emotes: Array<BiliEmote> = [];
   jumps: Array<ReplyJump> = [];
+  mentions: Array<ReplyMention> = [];
   pictures: Array<string> = [];
   replies: Array<ReplyItem> = [];
 
@@ -712,6 +726,8 @@ export class ReplyItem {
     r.avatar = toHttps(str(member, 'avatar', ''));
     r.content = str(content, 'message', '');
     r.like = asNumber(j['like'], 0);
+    r.liked = asNumber(j['action'], 0) === 1;
+    r.disliked = asNumber(j['action'], 0) === 2;
     r.ctime = asNumber(j['ctime'], 0);
     r.count = asNumber(j['count'], 0);
     const levelInfo: Record<string, Object> = asObject(member['level_info']);
@@ -744,6 +760,32 @@ export class ReplyItem {
       jump.url = str(jumpObj, 'pc_url', str(jumpObj, 'app_url_schema', ''));
       if (jump.label.length > 0 && jump.url.length > 0) r.jumps.push(jump);
     }
+    // 新旧评论接口分别可能返回 members 数组或 at_name_to_mid 映射；统一成
+    // 带 UID 的文本片段，渲染层只让真实可解析的 @ 用户具有点击行为。
+    const mentionMids: Set<number> = new Set<number>();
+    const atNameMap: Record<string, Object> = asObject(content['at_name_to_mid']);
+    const atNames: Array<string> = Object.keys(atNameMap);
+    for (let i: number = 0; i < atNames.length; i++) {
+      const mid: number = asNumber(atNameMap[atNames[i]], 0);
+      if (mid <= 0 || mentionMids.has(mid)) continue;
+      const mention: ReplyMention = new ReplyMention();
+      mention.label = atNames[i].startsWith('@') ? atNames[i] : '@' + atNames[i];
+      mention.mid = mid;
+      r.mentions.push(mention);
+      mentionMids.add(mid);
+    }
+    const members: Array<Object> = asArray(content['members']);
+    for (let i: number = 0; i < members.length; i++) {
+      const mentionMember: Record<string, Object> = asObject(members[i]);
+      const mid: number = asNumber(mentionMember['mid'], 0);
+      const uname: string = str(mentionMember, 'uname', '');
+      if (mid <= 0 || uname.length === 0 || mentionMids.has(mid)) continue;
+      const mention: ReplyMention = new ReplyMention();
+      mention.label = '@' + uname;
+      mention.mid = mid;
+      r.mentions.push(mention);
+      mentionMids.add(mid);
+    }
     const pictures: Array<Object> = asArray(content['pictures']);
     for (let i: number = 0; i < pictures.length; i++) {
       const picture: Record<string, Object> = asObject(pictures[i]);
@@ -757,11 +799,14 @@ export class ReplyItem {
     const sailing: Record<string, Object> = asObject(member['user_sailing']);
     const sailingV2: Record<string, Object> = asObject(member['user_sailing_v2']);
     const sailingCard: Record<string, Object> = asObject(sailing['cardbg']);
+    const sailingCardWithFocus: Record<string, Object> = asObject(sailing['cardbg_with_focus']);
     const sailingCardV2: Record<string, Object> = asObject(sailingV2['card_bg']);
-    const activeCard: Record<string, Object> = Object.keys(sailingCardV2).length > 0 ? sailingCardV2 : sailingCard;
+    const activeCard: Record<string, Object> = Object.keys(sailingCardV2).length > 0 ? sailingCardV2 :
+      (Object.keys(sailingCardWithFocus).length > 0 ? sailingCardWithFocus : sailingCard);
     r.cardBackground = toHttps(str(activeCard, 'image',
       str(garb, 'card_image', str(decoration, 'card_url', ''))));
     const fan: Record<string, Object> = asObject(activeCard['fan']);
+    r.cardNumberPrefix = str(fan, 'num_prefix', str(garb, 'card_number_prefix', 'NO.'));
     r.cardNumber = str(fan, 'num_desc', str(fan, 'num_str', str(garb, 'card_number', '')));
     r.cardNumberColor = str(fan, 'color', str(garb, 'card_fan_color', ''));
     const sub: Array<Object> = asArray(j['replies']);
@@ -887,6 +932,32 @@ export class UserStat {
   }
 }
 
+export class RelationUserItem {
+  mid: number = 0;
+  uname: string = '';
+  face: string = '';
+  sign: string = '';
+  attribute: number = 0;
+  special: boolean = false;
+
+  static from(o: Object): RelationUserItem {
+    const j: Record<string, Object> = asObject(o);
+    const item: RelationUserItem = new RelationUserItem();
+    item.mid = asNumber(j['mid'], 0);
+    item.uname = str(j, 'uname', '');
+    item.face = toHttps(str(j, 'face', ''));
+    item.sign = str(j, 'sign', '');
+    item.attribute = asNumber(j['attribute'], 0);
+    item.special = asNumber(j['special'], 0) === 1;
+    return item;
+  }
+}
+
+export class RelationUserPageData {
+  users: Array<RelationUserItem> = [];
+  total: number = 0;
+}
+
 // ===== 动态 =====
 export class DynamicItem {
   dynId: string = '';
@@ -913,6 +984,12 @@ export class DynamicItem {
   subtitle: string = '';
   images: Array<string> = [];
   emotes: Array<BiliEmote> = [];
+  commentId: number = 0;
+  commentType: number = 0;
+  liveRoomId: number = 0;
+  liveUid: number = 0;
+  liveStatus: number = 0;
+  original: DynamicItem | null = null;
 
   static from(o: Object): DynamicItem {
     const j: Record<string, Object> = asObject(o);
@@ -925,6 +1002,10 @@ export class DynamicItem {
     d.dynId = str(j, 'id_str', '');
     if (d.dynId.length === 0) d.dynId = String(asNumber(j['id'], 0));
     d.type = str(j, 'type', '');
+    const basic: Record<string, Object> = asObject(j['basic']);
+    d.commentId = Number(str(basic, 'comment_id_str', '0'));
+    if (Number.isNaN(d.commentId)) d.commentId = 0;
+    d.commentType = asNumber(basic['comment_type'], 0);
     d.mid = asNumber(author['mid'], 0);
     d.uname = str(author, 'name', '');
     d.face = toHttps(str(author, 'face', ''));
@@ -952,7 +1033,7 @@ export class DynamicItem {
       const emoji: Record<string, Object> = asObject(node['emoji']);
       if (Object.keys(emoji).length > 0) {
         const emote: BiliEmote = BiliEmote.from(emoji);
-        emote.text = str(node, 'orig_text', str(node, 'text', ''));
+        emote.text = str(node, 'orig_text', str(node, 'text', emote.text));
         if (emote.text.length > 0 && emote.url.length > 0) d.emotes.push(emote);
       }
     }
@@ -974,6 +1055,13 @@ export class DynamicItem {
     d.aid = asNumber(card['aid'], asNumber(card['id'], 0));
     d.cid = asNumber(card['cid'], 0);
     d.subtitle = str(card, 'sub_title', str(card, 'desc', str(card, 'label', str(card, 'desc_first', ''))));
+    d.liveRoomId = asNumber(card['room_id'], asNumber(card['roomid'], 0));
+    d.liveUid = asNumber(card['uid'], 0);
+    d.liveStatus = asNumber(card['live_status'], asNumber(card['live_state'], 0));
+    // MAJOR_TYPE_LIVE 的房间号字段名就是 id，不是 room_id。
+    if (d.liveRoomId <= 0 && d.type === 'DYNAMIC_TYPE_LIVE') {
+      d.liveRoomId = asNumber(card['id'], 0);
+    }
     const badge: Record<string, Object> = asObject(card['badge']);
     d.badge = str(badge, 'text', '');
     // 图文/专栏卡片使用 opus 图片；普通图文也可能放在 major.draw.items。
@@ -987,7 +1075,7 @@ export class DynamicItem {
       const emoji: Record<string, Object> = asObject(node['emoji']);
       if (Object.keys(emoji).length > 0) {
         const emote: BiliEmote = BiliEmote.from(emoji);
-        emote.text = str(node, 'orig_text', str(node, 'text', ''));
+        emote.text = str(node, 'orig_text', str(node, 'text', emote.text));
         if (emote.text.length > 0 && emote.url.length > 0) d.emotes.push(emote);
       }
     }
@@ -1010,10 +1098,35 @@ export class DynamicItem {
         d.cover = toHttps(str(liveInfo, 'cover', d.cover));
         d.subtitle = str(liveInfo, 'area_name', d.subtitle);
         d.badge = '直播';
+        d.liveRoomId = asNumber(liveInfo['room_id'], asNumber(liveInfo['roomid'], d.liveRoomId));
+        d.liveUid = asNumber(liveInfo['uid'], d.liveUid);
+        d.liveStatus = asNumber(liveInfo['live_status'], 1);
       } catch (e) {
         // 无效直播卡不阻断整个动态 feed。
       }
     }
+    // 预约开播动态使用 subscription_new.live_rcmd，content 结构与 live_rcmd 一致。
+    const subscriptionNew: Record<string, Object> = asObject(major['subscription_new']);
+    const subscriptionLive: Record<string, Object> = asObject(subscriptionNew['live_rcmd']);
+    const subscriptionContent: string = str(subscriptionLive, 'content', '');
+    if (subscriptionContent.length > 0) {
+      try {
+        const subscriptionJson: Record<string, Object> = asObject(JSON.parse(subscriptionContent) as Object);
+        const subscriptionInfo: Record<string, Object> = asObject(subscriptionJson['live_play_info']);
+        d.title = str(subscriptionInfo, 'title', d.title);
+        d.cover = toHttps(str(subscriptionInfo, 'cover', d.cover));
+        d.subtitle = str(subscriptionInfo, 'area_name', d.subtitle);
+        d.badge = '直播';
+        d.liveRoomId = asNumber(subscriptionInfo['room_id'], asNumber(subscriptionInfo['roomid'], d.liveRoomId));
+        d.liveUid = asNumber(subscriptionInfo['uid'], d.liveUid);
+        d.liveStatus = asNumber(subscriptionInfo['live_status'], d.liveStatus);
+      } catch (e) {
+        // 无效预约卡不阻断整个动态 feed。
+      }
+    }
+    // 转发动态的原始卡片与当前动态同构，保留完整媒体与跳转信息。
+    const original: Record<string, Object> = asObject(j['orig']);
+    if (Object.keys(original).length > 0) d.original = DynamicItem.from(original);
     return d;
   }
 }
@@ -1113,6 +1226,17 @@ export const VIDEO_ZONE_OPTIONS: Array<SearchNumOption> = [
 ];
 
 // ===== 用户空间：用户信息（x/space/wbi/acc/info） =====
+/** 用户空间普通/典藏头图。动画典藏仅让当前页加载 video，preview 用于相邻页预览。 */
+export class UserSpaceHeaderItem {
+  preview: string = '';
+  fullCover: string = '';
+  animationUrl: string = '';
+  sourceWidth: number = 0;
+  sourceHeight: number = 0;
+  focusX: number = 0.5;
+  focusY: number = 0.5;
+}
+
 export class UserSpaceInfo {
   mid: number = 0;
   name: string = '';
@@ -1124,7 +1248,12 @@ export class UserSpaceInfo {
   officialDesc: string = '';
   topPhoto: string = '';       // 空间头图，可能没有
   topPhotoDark: string = '';   // App 空间装扮提供的深色头图
+  collectionHeaders: Array<UserSpaceHeaderItem> = []; // 典藏卡头图（静态或 MP4 动画）
   pendant: string = '';        // 头像框/头像挂件
+  liveStatus: number = 0;
+  liveRoomId: number = 0;
+  liveTitle: string = '';
+  liveCover: string = '';
 
   static from(o: Object): UserSpaceInfo {
     const j: Record<string, Object> = asObject(o);
@@ -1142,6 +1271,13 @@ export class UserSpaceInfo {
     u.topPhoto = toHttps(str(j, 'top_photo', ''));
     const pendant: Record<string, Object> = asObject(j['pendant']);
     u.pendant = toHttps(str(pendant, 'image', ''));
+    // x/space/wbi/acc/info 的直播字段使用 live_room.liveStatus / roomid。
+    // 同时兼容少量代理接口返回的 snake_case 字段。
+    const liveRoom: Record<string, Object> = asObject(j['live_room']);
+    u.liveStatus = asNumber(liveRoom['liveStatus'], asNumber(liveRoom['live_status'], 0));
+    u.liveRoomId = asNumber(liveRoom['roomid'], asNumber(liveRoom['room_id'], 0));
+    u.liveTitle = str(liveRoom, 'title', '');
+    u.liveCover = toHttps(str(liveRoom, 'cover', str(liveRoom, 'keyframe', '')));
     return u;
   }
 }
@@ -1172,6 +1308,8 @@ export class UserSearchItem {
   level: number = 0;
   verifyType: number = -1;   // 0 个人认证 1 机构认证 -1 无认证
   verifyDesc: string = '';
+  liveStatus: number = 0;
+  liveRoomId: number = 0;
 
   static from(o: Object): UserSearchItem {
     const j: Record<string, Object> = asObject(o);
@@ -1179,7 +1317,8 @@ export class UserSearchItem {
     u.mid = asNumber(j['mid'], 0);
     // 昵称里可能包含高亮 <em> 标签，去除
     u.uname = str(j, 'uname', '').replace(/<[^>]*>/g, '');
-    u.face = toHttps(str(j, 'face', ''));
+    // search/type 的 bili_user 返回 upic；face/pic/avatar 仅用于兼容旧版和代理接口。
+    u.face = toHttps(str(j, 'upic', str(j, 'face', str(j, 'pic', str(j, 'avatar', '')))));
     u.fans = asNumber(j['fans'], 0);
     u.videos = asNumber(j['videos'], 0);
     u.usign = str(j, 'usign', '');
@@ -1187,6 +1326,8 @@ export class UserSearchItem {
     const verify: Record<string, Object> = asObject(j['official_verify']);
     u.verifyType = asNumber(verify['type'], -1);
     u.verifyDesc = str(verify, 'desc', '');
+    u.liveStatus = asNumber(j['is_live'], asNumber(j['live_status'], 0));
+    u.liveRoomId = asNumber(j['room_id'], asNumber(j['roomid'], 0));
     return u;
   }
 }

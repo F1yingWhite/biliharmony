@@ -17,18 +17,33 @@ export struct HistoryPage {
   @State hasMore: boolean = true;
   @State cursorMax: number = 0;
   @State cursorViewAt: number = 0;
+  @State itemCount: number = 0;
+  @State errorText: string = '';
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   private itemsSource: BasicDataSource<HistoryVideoItem> = new BasicDataSource<HistoryVideoItem>();
 
   aboutToAppear(): void {
-    this.load(true).catch(() => {
-    });
+    this.prepareAndLoad();
+  }
+
+  private async prepareAndLoad(): Promise<void> {
+    try {
+      await UserStore.ensureLoaded();
+      if (!UserStore.isLogin) {
+        this.errorText = '登录后才能加载观看历史';
+        return;
+      }
+      await this.load(true);
+    } catch (e) {
+      this.errorText = '历史记录加载失败，请检查网络后重试';
+    }
   }
 
   async load(reset: boolean): Promise<void> {
     if (this.loading || (!reset && !this.hasMore)) return;
     this.loading = true;
+    this.errorText = '';
     try {
       const data: HistoryPageData = await BiliApi.getHistory(reset ? 0 : this.cursorMax, reset ? 0 : this.cursorViewAt);
       if (reset) {
@@ -39,8 +54,9 @@ export struct HistoryPage {
       this.cursorMax = data.max;
       this.cursorViewAt = data.viewAt;
       this.hasMore = data.hasMore;
+      this.itemCount = this.itemsSource.totalCount();
     } catch (e) {
-      // 保留现有历史，重试入口仍可用。
+      if (this.itemsSource.isEmpty()) this.errorText = '历史记录加载失败，请检查网络后重试';
     } finally {
       this.loading = false;
     }
@@ -67,9 +83,10 @@ export struct HistoryPage {
   build() {
     Column() {
       PageHeader({ title: '历史记录' })
-      if (this.itemsSource.totalCount() === 0) {
-        LoadingView({ loading: this.loading, empty: !this.loading, emptyText: '暂无观看历史',
-          onRetry: () => this.load(true).catch(() => {
+      if (this.itemCount === 0) {
+        LoadingView({ loading: this.loading, empty: !this.loading && this.errorText.length === 0,
+          emptyText: '暂无观看历史', errorText: this.errorText,
+          onRetry: () => this.prepareAndLoad().catch(() => {
           }) })
       } else {
         List() {

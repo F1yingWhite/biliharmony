@@ -1,14 +1,33 @@
-/** 直播播放器：低延迟 AVPlayer、基础画质、弹幕开关与全屏；不含礼物/发送入口。 */
+/** 直播播放器：低延迟 AVPlayer、基础画质与视频同款 Canvas 分轨弹幕。 */
 import { media } from '@kit.MediaKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Immersive } from '../common/Immersive';
 import { Constants } from '../common/Constants';
 import { LiveChatMessage, LivePlayInfo, LiveQualityOption } from '../model/LiveModels';
+import { colorHex } from './PlayerDanmakuSupport';
+
+class ActiveLiveDanmaku {
+  message: LiveChatMessage;
+  x: number;
+  lane: number;
+  speed: number;
+  width: number;
+  text: string;
+
+  constructor(message: LiveChatMessage, x: number, lane: number, speed: number, width: number, text: string) {
+    this.message = message;
+    this.x = x;
+    this.lane = lane;
+    this.speed = speed;
+    this.width = width;
+    this.text = text;
+  }
+}
 
 @Component
 export struct LivePlayerView {
   @Prop @Watch('onPlayInfoChanged') playInfo: LivePlayInfo = new LivePlayInfo();
-  @Prop messages: Array<LiveChatMessage> = [];
+  @Prop @Watch('onMessagesChanged') messages: Array<LiveChatMessage> = [];
   @Prop title: string = '';
   @Prop uname: string = '';
   onQualityChange: (qn: number) => void = () => {};
@@ -31,17 +50,29 @@ export struct LivePlayerView {
   private destroyed: boolean = false;
   private playerGeneration: number = 0;
   private playerCreating: boolean = false;
+  private dmContext: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
+  private activeDanmaku: Array<ActiveLiveDanmaku> = [];
+  private dmTick: number = -1;
+  private dmLastDrawMs: number = 0;
+  private dmWidth: number = 1;
+  private dmHeight: number = 1;
+  private nextLane: number = 0;
+  private seenMessageIds: Set<string> = new Set<string>();
+  private messageBaselineReady: boolean = false;
 
   aboutToAppear(): void {
     this.destroyed = false;
     AppStorage.setOrCreate<boolean>('livePlayerFullscreen', false);
     AppStorage.setOrCreate<number>('livePlayerExitRequest', 0);
+    for (let i: number = 0; i < this.messages.length; i++) this.seenMessageIds.add(this.messages[i].id);
+    this.messageBaselineReady = true;
   }
 
   aboutToDisappear(): void {
     this.destroyed = true;
     this.playerGeneration++;
     this.release();
+    this.stopDanmakuLoop(true);
     if (this.fullscreen) Immersive.setFullscreen(false);
     AppStorage.setOrCreate<boolean>('livePlayerFullscreen', false);
   }
@@ -101,6 +132,7 @@ export struct LivePlayerView {
         } else if (state === 'playing') {
           this.playing = true;
           this.buffering = false;
+          if (this.activeDanmaku.length > 0) this.startDanmakuLoop();
           this.scheduleHide();
         } else if (state === 'paused') {
           this.playing = false;
@@ -157,6 +189,7 @@ export struct LivePlayerView {
     if (this.fullscreenTimer >= 0) clearTimeout(this.fullscreenTimer);
     this.fullscreenTimer = -1;
     this.playerGeneration++;
+    this.stopDanmakuLoop(true);
     this.playerCreating = false;
     const p: media.AVPlayer | null = this.player;
     this.player = null;
@@ -220,29 +253,119 @@ export struct LivePlayerView {
     return '画质';
   }
 
-  @Builder
-  DanmakuOverlay() {
-    Column({ space: 4 }) {
-      ForEach(this.messages.slice(Math.max(0, this.messages.length - (this.fullscreen ? 7 : 4))),
-        (msg: LiveChatMessage) => {
-          Marquee({
-            start: this.playing,
-            step: this.fullscreen ? 7 : 5,
-            loop: -1,
-            fromStart: true,
-            src: msg.type === 'sc' ? 'SC ¥' + String(msg.price) + '  ' + msg.text : msg.text,
-          })
-            .width('100%')
-            .height(this.fullscreen ? 30 : 25)
-            .fontSize(this.fullscreen ? 22 : 18)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(msg.type === 'sc' ? '#FFD45A' : '#FFFFFF')
-        }, (msg: LiveChatMessage) => msg.id)
+  onMessagesChanged(): void {
+    if (!this.messageBaselineReady) return;
+    for (let i: number = 0; i < this.messages.length; i++) {
+      const message: LiveChatMessage = this.messages[i];
+      if (this.seenMessageIds.has(message.id)) continue;
+      this.seenMessageIds.add(message.id);
+      this.spawnLiveDanmaku(message);
     }
-    .width('100%')
-    .padding({ left: 8, right: 8, top: this.fullscreen ? 56 : 8 })
-    .alignSelf(ItemAlign.Start)
-    .hitTestBehavior(HitTestMode.None)
+    if (this.seenMessageIds.size > 600) {
+      this.seenMessageIds.clear();
+      for (let i: number = 0; i < this.messages.length; i++) this.seenMessageIds.add(this.messages[i].id);
+    }
+  }
+
+  private dmFontSize(): number {
+    return this.fullscreen ? 28 : 18;
+  }
+
+  private dmLineHeight(): number {
+    return this.dmFontSize() + 5;
+  }
+
+  private dmLaneCount(): number {
+    const topInset: number = this.fullscreen ? 54 : 6;
+    const usable: number = Math.max(this.dmLineHeight(), this.dmHeight * 0.78 - topInset);
+    return Math.max(1, Math.floor(usable / this.dmLineHeight()));
+  }
+
+  private laneAvailable(lane: number, spawnX: number): boolean {
+    const gap: number = Math.max(20, this.dmFontSize());
+    for (let i: number = 0; i < this.activeDanmaku.length; i++) {
+      const current: ActiveLiveDanmaku = this.activeDanmaku[i];
+      if (current.lane === lane && current.x + current.width + gap > spawnX) return false;
+    }
+    return true;
+  }
+
+  private allocateLane(spawnX: number): number {
+    const count: number = this.dmLaneCount();
+    for (let offset: number = 0; offset < count; offset++) {
+      const lane: number = (this.nextLane + offset) % count;
+      if (this.laneAvailable(lane, spawnX)) {
+        this.nextLane = (lane + 1) % count;
+        return lane;
+      }
+    }
+    return -1;
+  }
+
+  private spawnLiveDanmaku(message: LiveChatMessage): void {
+    if (!this.danmakuOn || this.dmWidth <= 1 || message.text.length === 0 || this.activeDanmaku.length >= 28) return;
+    const text: string = message.type === 'sc' ? 'SC ¥' + String(message.price) + '  ' + message.text :
+      (message.emotes.length > 0 && message.text === message.emotes[0].unique ? '[直播表情]' : message.text);
+    this.dmContext.font = '600 ' + String(this.dmFontSize()) + 'px sans-serif';
+    const width: number = Math.max(24, this.dmContext.measureText(text).width);
+    const spawnX: number = this.dmWidth + 10;
+    const lane: number = this.allocateLane(spawnX);
+    if (lane < 0) return;
+    const travelSeconds: number = this.fullscreen ? 10 : 8.5;
+    this.activeDanmaku.push(new ActiveLiveDanmaku(message, spawnX, lane,
+      (spawnX + width) / travelSeconds, width, text));
+    if (this.playing) this.startDanmakuLoop();
+  }
+
+  private drawDanmakuFrame(): void {
+    this.dmContext.clearRect(0, 0, this.dmWidth, this.dmHeight);
+    const now: number = Date.now();
+    const delta: number = this.dmLastDrawMs > 0 ? Math.min(0.12, Math.max(0.012, (now - this.dmLastDrawMs) / 1000)) : 0.033;
+    this.dmLastDrawMs = now;
+    const fontSize: number = this.dmFontSize();
+    const topInset: number = this.fullscreen ? 54 : 6;
+    this.dmContext.font = '600 ' + String(fontSize) + 'px sans-serif';
+    this.dmContext.lineWidth = this.fullscreen ? 2.5 : 2;
+    this.dmContext.strokeStyle = '#B3000000';
+    this.dmContext.globalAlpha = 0.88;
+    const keep: Array<ActiveLiveDanmaku> = [];
+    for (let i: number = 0; i < this.activeDanmaku.length; i++) {
+      const dm: ActiveLiveDanmaku = this.activeDanmaku[i];
+      dm.x -= dm.speed * delta;
+      if (dm.x + dm.width < -10) continue;
+      this.dmContext.fillStyle = dm.message.type === 'sc' ? '#FFD45A' : colorHex(dm.message.color);
+      const y: number = topInset + dm.lane * this.dmLineHeight() + fontSize;
+      this.dmContext.strokeText(dm.text, dm.x, y);
+      this.dmContext.fillText(dm.text, dm.x, y);
+      keep.push(dm);
+    }
+    this.dmContext.globalAlpha = 1;
+    this.activeDanmaku = keep;
+    if (keep.length === 0) this.stopDanmakuLoop(false);
+  }
+
+  private startDanmakuLoop(): void {
+    if (this.dmTick >= 0 || !this.danmakuOn || this.activeDanmaku.length === 0) return;
+    this.dmLastDrawMs = Date.now();
+    this.dmTick = setInterval(() => {
+      if (this.playing && this.danmakuOn) this.drawDanmakuFrame();
+    }, this.fullscreen ? 25 : 33);
+  }
+
+  private stopDanmakuLoop(clear: boolean): void {
+    if (this.dmTick >= 0) clearInterval(this.dmTick);
+    this.dmTick = -1;
+    this.dmLastDrawMs = 0;
+    if (clear) {
+      this.activeDanmaku = [];
+      this.nextLane = 0;
+    }
+    this.dmContext.clearRect(0, 0, this.dmWidth, this.dmHeight);
+  }
+
+  private toggleDanmaku(): void {
+    this.danmakuOn = !this.danmakuOn;
+    if (!this.danmakuOn) this.stopDanmakuLoop(true);
   }
 
   build() {
@@ -261,7 +384,16 @@ export struct LivePlayerView {
           .onClick(() => this.toggleControls())
       }
 
-      if (this.danmakuOn) this.DanmakuOverlay()
+      Canvas(this.dmContext)
+        .width('100%').height('100%')
+        .visibility(this.danmakuOn ? Visibility.Visible : Visibility.Hidden)
+        .hitTestBehavior(HitTestMode.None)
+        .onAreaChange((oldValue: Area, newValue: Area) => {
+          const width: number = Number(newValue.width);
+          const height: number = Number(newValue.height);
+          if (width > 0) this.dmWidth = width;
+          if (height > 0) this.dmHeight = height;
+        })
 
       if (this.buffering) {
         LoadingProgress().width(38).height(38).color('#FFFFFF')
@@ -296,7 +428,7 @@ export struct LivePlayerView {
               .onClick(() => this.togglePlay())
             Image(this.danmakuOn ? $r('app.media.ic_danmaku_on') : $r('app.media.ic_danmaku_off'))
               .width(23).height(23).fillColor(this.danmakuOn ? '#FB7299' : '#AAFFFFFF')
-              .onClick(() => this.danmakuOn = !this.danmakuOn)
+              .onClick(() => this.toggleDanmaku())
             Text(this.showQuality ? '收起画质' : this.qualityLabel())
               .fontSize(12).fontColor('#FFFFFF')
               .padding({ left: 9, right: 9, top: 6, bottom: 6 })

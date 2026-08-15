@@ -8,6 +8,8 @@ export class Immersive {
   private static mainWindow: window.Window | null = null;
   private static cachedStatusBarHeight: number = -1;
   private static cachedBottomInset: number = -1;
+  private static brightnessPending: number = -2;
+  private static brightnessApplying: boolean = false;
 
   /** 由 EntryAbility 在窗口创建时注入 */
   static attach(windowStage: window.WindowStage): void {
@@ -111,6 +113,47 @@ export class Immersive {
     }
     Immersive.cachedBottomInset = height;
     return height;
+  }
+
+  /** 播放器手势读取当前窗口亮度；-1 表示仍跟随系统。 */
+  static windowBrightness(): number {
+    const win: window.Window | null = Immersive.mainWindow;
+    if (win === null) return -1;
+    try {
+      return win.getWindowProperties().brightness;
+    } catch (e) {
+      return -1;
+    }
+  }
+
+  /** 仅调整当前应用窗口亮度，不修改系统全局亮度。 */
+  static setWindowBrightness(value: number): void {
+    Immersive.brightnessPending = Math.max(0.02, Math.min(1, value));
+    Immersive.flushWindowBrightness();
+  }
+
+  static restoreWindowBrightness(): void {
+    Immersive.brightnessPending = -1;
+    Immersive.flushWindowBrightness();
+  }
+
+  private static flushWindowBrightness(): void {
+    const win: window.Window | null = Immersive.mainWindow;
+    if (win === null || Immersive.brightnessApplying || Immersive.brightnessPending < -1) return;
+    const target: number = Immersive.brightnessPending;
+    Immersive.brightnessPending = -2;
+    Immersive.brightnessApplying = true;
+    win.setWindowBrightness(target).then(() => {
+      Immersive.completeBrightnessApply();
+    }).catch(() => {
+      Immersive.completeBrightnessApply();
+    });
+  }
+
+  private static completeBrightnessApply(): void {
+    Immersive.brightnessApplying = false;
+    // 手指移动速度快于系统窗口 API 时只提交最新值，避免旧 Promise 排队造成明显延迟。
+    if (Immersive.brightnessPending >= -1) Immersive.flushWindowBrightness();
   }
 
   /** 视频播放页全屏：隐藏系统栏；退出恢复 */

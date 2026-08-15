@@ -12,11 +12,14 @@ import { FeedCardTitle, FeedCoverImage, FeedGradientMask } from './FeedCardParts
 @Component
 export struct VideoCard {
   @Prop video: VideoItem = new VideoItem();
+  /** 用户空间等紧凑网格隐藏 UP/分区行，复用同一封面和跳转逻辑。 */
+  @Prop compact: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
 
   aboutToReuse(params: Record<string, Object>): void {
     this.video = params.video as VideoItem;
+    this.compact = params.compact === true;
   }
 
   build() {
@@ -95,27 +98,30 @@ export struct VideoCard {
       FeedCardTitle({ title: this.video.title, isDark: this.isDark })
 
       // UP 主 + 推荐理由 / 分区
-      Row({ space: 6 }) {
-        Text(this.video.upName)
-          .fontSize(11)
-          .fontColor(this.isDark ? '#8a8a8a' : '#9499A0')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-        Text(this.video.rcmdReason.length > 0 ? this.video.rcmdReason : this.video.tname)
-          .fontSize(10)
-          .fontColor(this.accent)
-          .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-          .border({ width: 0.5, color: this.accent, radius: 3 })
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .constraintSize({ maxWidth: '48%' })
-          .visibility(this.video.rcmdReason.length > 0 || this.video.tname.length > 0 ? Visibility.Visible : Visibility.None)
+      if (!this.compact) {
+        Row({ space: 6 }) {
+          Text(this.video.upName)
+            .fontSize(11)
+            .fontColor(this.isDark ? '#8a8a8a' : '#9499A0')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
+          Text(this.video.rcmdReason.length > 0 ? this.video.rcmdReason : this.video.tname)
+            .fontSize(10)
+            .fontColor(this.accent)
+            .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+            .border({ width: 0.5, color: this.accent, radius: 3 })
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .constraintSize({ maxWidth: '48%' })
+            .visibility(this.video.rcmdReason.length > 0 || this.video.tname.length > 0 ? Visibility.Visible : Visibility.None)
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
       }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
     }
     .width('100%')
+    .padding({ bottom: 8 })
     .alignItems(HorizontalAlign.Start)
     .stateStyles({
       pressed: {
