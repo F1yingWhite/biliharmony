@@ -11,7 +11,8 @@ import { Immersive } from '../common/Immersive';
 import { AppTheme } from '../common/AppTheme';
 import { GlassHeaderBar } from '../components/GlassHeaderBar';
 import { AppNavStack, NAV_SEARCH, NAV_VIDEO_DETAIL, NAV_LOGIN, NAV_USER_SPACE, NAV_MESSAGES, NAV_HISTORY, NAV_FAVORITES,
-  NAV_LIVE_ROOM, NAV_IMAGE_VIEWER, VideoDetailParam, UserSpaceParam, LiveRoomParam, ImageViewerParam } from '../common/AppRouter';
+  NAV_LIVE_ROOM, NAV_IMAGE_VIEWER, NAV_DYNAMIC_DETAIL, VideoDetailParam, UserSpaceParam, LiveRoomParam, ImageViewerParam,
+  DynamicDetailParam, NAV_RELATION_LIST, RelationListParam } from '../common/AppRouter';
 import { SearchPage } from './Search';
 import { MessagesPage } from './Messages';
 import { FavoritesPage, HistoryPage } from './LibraryPages';
@@ -20,6 +21,8 @@ import { LoginPage } from './Login';
 import { UserSpacePage } from './UserSpace';
 import { LiveRoomPage } from './LiveRoom';
 import { ImageViewerPage } from './ImageViewer';
+import { DynamicDetailPage } from './DynamicDetail';
+import { RelationListPage } from './RelationList';
 import { UserStore } from '../common/UserStore';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
 
@@ -42,25 +45,42 @@ struct Index {
   @StorageProp('accentColor') @Watch('onThemeChanged') accent: string = '#FB7299';
   @StorageProp('isDarkMode') @Watch('onThemeChanged') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
-  @StorageProp('glassLevel') glassLevel: number = 1;
   @StorageProp('headerFade') fade: number = 0;
 
   aboutToAppear(): void {
-    this.syncBarColors();
+    this.reapplyBarColors();
     UserStore.ensureLoaded();
   }
 
   onPageShow(): void {
-    this.syncBarColors();
+    // 应用从后台回到前台也会触发根页 onPageShow，必须按导航栈顶重算而不是无条件套根页配色，
+    // 否则播放页（黑底）上状态栏图标被刷成深色，看不清时间电量。
+    this.reapplyBarColors();
   }
 
   onThemeChanged(): void {
-    this.syncBarColors();
+    this.reapplyBarColors();
   }
 
+  /** 恢复为根页配色。二级页 onWillDisappear 预恢复用（出栈回根页没有页面级回调）。 */
   syncBarColors(): void {
     // 根页顶部为玻璃头栏：浅色背景配深色图标，深色模式配浅色图标
     Immersive.setBarIcons(this.isDark, this.isDark);
+  }
+
+  /** 按导航栈顶页面重算系统栏图标深浅：栈顶为深色顶部页面（播放器/直播/看图/用户空间 banner）时保持浅色图标。 */
+  private reapplyBarColors(): void {
+    const names: Array<string> = AppNavStack.getAllPathName();
+    const top: string = names.length > 0 ? names[names.length - 1] : '';
+    if (top === NAV_VIDEO_DETAIL || top === NAV_LIVE_ROOM || top === NAV_IMAGE_VIEWER) {
+      Immersive.setBarIcons(true, true);
+      return;
+    }
+    if (top === NAV_USER_SPACE) {
+      Immersive.setBarIcons(true, this.isDark);
+      return;
+    }
+    this.syncBarColors();
   }
 
   switchTab(index: number): void {
@@ -104,6 +124,19 @@ struct Index {
     if (p === null || p === undefined || !Array.isArray(p.images) || p.images.length === 0) {
       return null;
     }
+    return p;
+  }
+
+  private static asDynamicDetailParam(param: Object): DynamicDetailParam | null {
+    const p: DynamicDetailParam = param as DynamicDetailParam;
+    if (p === null || p === undefined || p.item === null || p.item === undefined) return null;
+    return p;
+  }
+
+  private static asRelationListParam(param: Object): RelationListParam | null {
+    const p: RelationListParam = param as RelationListParam;
+    if (p === null || p === undefined || typeof p.mid !== 'number' || p.mid <= 0 ||
+      (p.mode !== 'following' && p.mode !== 'follower')) return null;
     return p;
   }
 
@@ -172,7 +205,8 @@ struct Index {
       .onBackPressed(() => {
         // 评论回复详情是视频页内二级状态：系统返回键和侧滑都先退出回复详情。
         if (AppStorage.get<boolean>('videoReplyThreadOpen') ?? false) {
-          AppStorage.setOrCreate<boolean>('videoReplyThreadOpen', false);
+          const request: number = AppStorage.get<number>('videoReplyThreadCloseRequest') ?? 0;
+          AppStorage.setOrCreate<number>('videoReplyThreadCloseRequest', request + 1);
           return true;
         }
         // 横屏播放器仍处于全屏时，侧滑/返回键只退出全屏，不把整个视频页出栈。
@@ -208,6 +242,30 @@ struct Index {
         }
       }
       .stdDestination(() => Immersive.setBarIcons(true, true), () => this.syncBarColors())
+      .onBackPressed(() => {
+        // 看图页拦截系统返回/侧滑，交给页面做"缩回缩略图"的收合动画。
+        const request: number = AppStorage.get<number>('imageViewerCloseRequest') ?? 0;
+        AppStorage.setOrCreate<number>('imageViewerCloseRequest', request + 1);
+        return true;
+      })
+    } else if (name === NAV_DYNAMIC_DETAIL) {
+      NavDestination() {
+        if (Index.asDynamicDetailParam(param) !== null) {
+          DynamicDetailPage({ param: param as DynamicDetailParam })
+        } else {
+          this.InvalidParamContent()
+        }
+      }
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+    } else if (name === NAV_RELATION_LIST) {
+      NavDestination() {
+        if (Index.asRelationListParam(param) !== null) {
+          RelationListPage({ param: param as RelationListParam })
+        } else {
+          this.InvalidParamContent()
+        }
+      }
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
     } else if (name === NAV_LOGIN) {
       NavDestination() {
         LoginPage()
@@ -279,7 +337,7 @@ struct Index {
         .barFloatingStyle({
           barSideMargin: 16,
           barBottomMargin: 16,
-          systemMaterial: AppTheme.floatMaterial(this.glassOn, this.glassLevel),
+          systemMaterial: AppTheme.floatMaterial(this.glassOn),
         })
         // 深色模式给原生玻璃叠一层深色吸收底，避免系统材质在 Dock 上泛成白雾。
         .barBackgroundColor(this.glassOn ? (this.isDark ? '#B315161A' : '#00000000') : AppTheme.floatBg(this.isDark, false))
@@ -310,7 +368,7 @@ struct Index {
             .height(40)
             .borderRadius(20)
             .backgroundColor(this.glassOn ? '#00000000' : AppTheme.floatBg(this.isDark, false))
-            .systemMaterial(AppTheme.floatMaterial(this.glassOn, this.glassLevel))
+            .systemMaterial(AppTheme.floatMaterial(this.glassOn))
             .shadow({ radius: 8, color: this.isDark ? '#59000000' : '#1A000000', offsetX: 0, offsetY: 2 })
             .opacity(this.fade)
             .scale({ x: 0.6 + 0.4 * this.fade, y: 0.6 + 0.4 * this.fade })

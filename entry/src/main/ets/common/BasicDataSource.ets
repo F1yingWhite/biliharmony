@@ -43,6 +43,14 @@ export class BasicDataSource<T> implements IDataSource {
     });
   }
 
+  /** 局部刷新某一项（点赞/点踩等原地修改后通知 LazyForEach 重绑） */
+  public notifyItemChanged(index: number): void {
+    if (index < 0 || index >= this.items.length) return;
+    this.listeners.forEach((listener: DataChangeListener) => {
+      listener.onDataChange(index);
+    });
+  }
+
   /** 尾部追加（分页加载） */
   public append(items: Array<T>): void {
     if (items.length === 0) {

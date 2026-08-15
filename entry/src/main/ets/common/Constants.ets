@@ -89,6 +89,8 @@ export class Api {
   static readonly liveDanmakuHistory: string = HttpString.liveBaseUrl + '/xlive/web-room/v1/dM/gethistory';
   static readonly liveDanmakuInfo: string = HttpString.liveBaseUrl + '/xlive/web-room/v1/index/getDanmuInfo';
   static readonly liveSuperChat: string = HttpString.liveBaseUrl + '/av/v1/SuperChat/getMessageList';
+  static readonly liveSendDanmaku: string = HttpString.liveBaseUrl + '/msg/send';
+  static readonly liveEmoticons: string = HttpString.liveBaseUrl + '/xlive/web-ucenter/v2/emoticon/GetEmoticons';
 
   // ===== 视频 =====
   static readonly videoIntro: string = HttpString.apiBaseUrl + '/x/web-interface/view';
@@ -109,6 +111,8 @@ export class Api {
   static readonly replyList: string = HttpString.apiBaseUrl + '/x/v2/reply';
   static readonly replyReplyList: string = HttpString.apiBaseUrl + '/x/v2/reply/reply';
   static readonly replyAdd: string = HttpString.apiBaseUrl + '/x/v2/reply/add';
+  static readonly replyLike: string = HttpString.apiBaseUrl + '/x/v2/reply/action';
+  static readonly replyHate: string = HttpString.apiBaseUrl + '/x/v2/reply/hate';
   static readonly userEmotes: string = HttpString.apiBaseUrl + '/x/emote/user/panel/web';
 
   // ===== 私信 =====
@@ -120,6 +124,7 @@ export class Api {
 
   // ===== 历史 / 收藏 =====
   static readonly historyList: string = HttpString.apiBaseUrl + '/x/web-interface/history/cursor';
+  static readonly dynamicDetail: string = HttpString.apiBaseUrl + '/x/polymer/web-dynamic/v1/detail';
   static readonly favoriteFolders: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/created/list';
   static readonly favoriteFoldersForVideo: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/created/list-all';
   static readonly favoriteResourceDeal: string = HttpString.apiBaseUrl + '/x/v3/fav/resource/deal';
@@ -139,6 +144,8 @@ export class Api {
   static readonly userStat: string = HttpString.apiBaseUrl + '/x/relation/stat';
   static readonly userRelation: string = HttpString.apiBaseUrl + '/x/relation';
   static readonly modifyUserRelation: string = HttpString.apiBaseUrl + '/x/relation/modify';
+  static readonly userFollowings: string = HttpString.apiBaseUrl + '/x/relation/followings';
+  static readonly userFollowers: string = HttpString.apiBaseUrl + '/x/relation/followers';
   static readonly memberInfo: string = HttpString.apiBaseUrl + '/x/space/wbi/acc/info';
   static readonly memberSpaceApp: string = HttpString.appBaseUrl + '/x/v2/space';
   // 小电视空降助手公开的 SponsorBlock for Bilibili 片段接口。

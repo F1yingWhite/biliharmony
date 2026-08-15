@@ -95,6 +95,31 @@ export class LiveDanmakuInfo {
   servers: Array<LiveDanmakuServer> = [];
 }
 
+export class LiveEmoteItem {
+  emoji: string = '';
+  url: string = '';
+  width: number = 0;
+  height: number = 0;
+  unique: string = '';
+
+  static from(o: Object): LiveEmoteItem {
+    const j: Record<string, Object> = asObject(o);
+    const item: LiveEmoteItem = new LiveEmoteItem();
+    item.emoji = str(j, 'emoji', '');
+    item.url = toHttps(str(j, 'url', ''));
+    item.width = asNumber(j['width'], 0);
+    item.height = asNumber(j['height'], item.width);
+    item.unique = str(j, 'emoticon_unique', '');
+    return item;
+  }
+}
+
+export class LiveEmotePackage {
+  icon: string = '';
+  packageType: number = 0;
+  emotes: Array<LiveEmoteItem> = [];
+}
+
 export class LiveChatMessage {
   id: string = '';
   type: string = 'danmaku';
@@ -103,6 +128,7 @@ export class LiveChatMessage {
   color: number = 0xFFFFFF;
   price: number = 0;
   face: string = '';
+  emotes: Array<LiveEmoteItem> = [];
   backgroundColor: string = '#FB7299';
   timestamp: number = 0;
 
@@ -120,6 +146,11 @@ export class LiveChatMessage {
     if (info.length > 0) {
       const meta: Array<Object> = asArray(info[0]);
       if (meta.length > 3) msg.color = asNumber(meta[3], 0xFFFFFF);
+      // 独立直播表情位于 info[0][13]，内容本身通常只是 emoticon_unique。
+      if (meta.length > 13) {
+        const directEmote: LiveEmoteItem = LiveEmoteItem.from(meta[13]);
+        if (directEmote.url.length > 0) msg.emotes.push(directEmote);
+      }
       // 新版协议把可读字段收进 info[0][15]，同时兼容旧版数组。
       if (meta.length > 15) {
         const detail: Record<string, Object> = asObject(meta[15]);
@@ -131,12 +162,44 @@ export class LiveChatMessage {
           try {
             const extra: Record<string, Object> = asObject(JSON.parse(extraRaw) as Object);
             if (msg.text.length === 0) msg.text = str(extra, 'content', '');
+            const messageId: string = str(extra, 'id_str', str(extra, 'dmid', ''));
+            if (messageId.length > 0) msg.id = 'live_' + messageId;
             msg.color = asNumber(extra['font_color'], msg.color);
+            const emoteMap: Record<string, Object> = asObject(extra['emots']);
+            const emoteKeys: Array<string> = Object.keys(emoteMap);
+            for (let i: number = 0; i < emoteKeys.length; i++) {
+              const emote: LiveEmoteItem = LiveEmoteItem.from(emoteMap[emoteKeys[i]]);
+              if (emote.emoji.length === 0) emote.emoji = emoteKeys[i];
+              if (emote.url.length > 0) msg.emotes.push(emote);
+            }
           } catch (e) {
             // extra 不是合法 JSON 时继续使用旧协议字段。
           }
         }
       }
+    }
+    return msg;
+  }
+
+  static history(o: Object, index: number = 0): LiveChatMessage {
+    const raw: Record<string, Object> = asObject(o);
+    const msg: LiveChatMessage = new LiveChatMessage();
+    const fallbackId: string = str(raw, 'timeline', '') + '_' + str(raw, 'nickname', '') + '_' +
+      str(raw, 'text', '') + '_' + String(index);
+    msg.id = 'live_' + str(raw, 'id_str', str(raw, 'id', fallbackId));
+    msg.uname = str(raw, 'nickname', str(asObject(asObject(raw['user'])['base']), 'name', ''));
+    msg.text = str(raw, 'text', '');
+    const user: Record<string, Object> = asObject(asObject(raw['user'])['base']);
+    msg.face = toHttps(str(user, 'face', ''));
+    msg.color = asNumber(asObject(asObject(raw['user'])['dm_config'])['color'], 0xFFFFFF);
+    const directEmote: LiveEmoteItem = LiveEmoteItem.from(raw['emoticon']);
+    if (directEmote.url.length > 0) msg.emotes.push(directEmote);
+    const emoteMap: Record<string, Object> = asObject(raw['emots']);
+    const keys: Array<string> = Object.keys(emoteMap);
+    for (let i: number = 0; i < keys.length; i++) {
+      const emote: LiveEmoteItem = LiveEmoteItem.from(emoteMap[keys[i]]);
+      if (emote.emoji.length === 0) emote.emoji = keys[i];
+      if (emote.url.length > 0) msg.emotes.push(emote);
     }
     return msg;
   }

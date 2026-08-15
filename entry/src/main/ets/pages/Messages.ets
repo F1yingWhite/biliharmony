@@ -16,12 +16,15 @@ export struct MessagesPage {
   @State current: MessageSessionItem = new MessageSessionItem();
   @State messages: Array<PrivateMessageItem> = [];
   @State loading: boolean = false;
+  @State sessionError: string = '';
+  @State messageError: string = '';
   @State hasMore: boolean = true;
   @State sessionHasMore: boolean = true;
+  @State sessionCount: number = 0;
   @State minSeqno: number = 0;
   @State draft: string = '';
   @State sending: boolean = false;
-  @StorageProp('messageThreadOpen') @Watch('onThreadNavigationChanged') threadOpen: boolean = false;
+  @StorageProp('messageThreadOpen') threadOpen: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   private sessionsSource: BasicDataSource<MessageSessionItem> = new BasicDataSource<MessageSessionItem>();
@@ -43,11 +46,20 @@ export struct MessagesPage {
       const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
       const beginTs: number = reset || all.length === 0 ? 0 : all[all.length - 1].sessionTs;
       const data: MessageSessionPageData = await BiliApi.getMessageSessions(beginTs);
+      if (data.error.length > 0) {
+        // 失败不清空已有列表；首次加载失败时由 LoadingView 展示原因与重试。
+        if (reset) this.sessionError = data.error;
+        return;
+      }
+      this.sessionError = '';
       if (reset) {
         this.sessionsSource.reset(data.sessions);
       } else {
         this.sessionsSource.append(this.dedupSessions(data.sessions));
       }
+      // BasicDataSource 只会刷新已挂载的 LazyForEach；首屏列表尚未挂载时，
+      // 必须用 @State 切换“加载态 / 列表”外层分支。
+      this.sessionCount = this.sessionsSource.totalCount();
       this.sessionHasMore = data.hasMore;
     } finally {
       this.loading = false;
@@ -75,18 +87,10 @@ export struct MessagesPage {
     this.current = item;
     AppStorage.setOrCreate<boolean>('messageThreadOpen', true);
     this.messages = [];
+    this.messageError = '';
     this.minSeqno = 0;
     this.hasMore = true;
     await this.loadMessages(true);
-  }
-
-  onThreadNavigationChanged(): void {
-    if (!this.threadOpen && this.current.talkerId > 0) {
-      this.current = new MessageSessionItem();
-      this.messages = [];
-      this.hasMore = true;
-      this.minSeqno = 0;
-    }
   }
 
   async loadMessages(reset: boolean): Promise<void> {
@@ -96,6 +100,11 @@ export struct MessagesPage {
     try {
       const data: PrivateMessagePageData = await BiliApi.getPrivateMessages(talkerId, reset ? 0 : this.minSeqno);
       if (this.current.talkerId !== talkerId) return;
+      if (data.error.length > 0) {
+        this.messageError = data.error;
+        return;
+      }
+      this.messageError = '';
       this.messages = reset ? data.messages : this.mergeMessages(data.messages, this.messages);
       this.minSeqno = data.minSeqno > 0 ? data.minSeqno : this.minSeqno;
       this.hasMore = data.hasMore;
@@ -163,7 +172,7 @@ export struct MessagesPage {
   }
 
   goBack(): void {
-    if (this.current.talkerId > 0) {
+    if (this.threadOpen) {
       AppStorage.setOrCreate<boolean>('messageThreadOpen', false);
     } else {
       AppNavStack.pop();
@@ -263,63 +272,116 @@ export struct MessagesPage {
     .border({ width: { top: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
   }
 
-  build() {
+  @Builder
+  SessionListPage() {
     Column() {
       PageHeader({
-        title: this.current.talkerId > 0 ? this.current.name : '私信',
+        title: '私信',
         headerHeight: 50,
         padLeft: 4,
         backWidth: 40,
-        onBack: () => this.goBack(),
-        middle: this.SessionAvatar,
+        onBack: () => AppNavStack.pop(),
       })
-      if (this.current.talkerId === 0) {
-        if (this.sessionsSource.totalCount() === 0) {
-          LoadingView({ loading: this.loading, empty: !this.loading, emptyText: '暂无私信会话',
-            onRetry: () => this.loadSessions(true).catch(() => {
-            }) })
-        } else {
-          List() {
-            LazyForEach(this.sessionsSource, (item: MessageSessionItem) => {
-              ListItem() { this.SessionRow(item) }
-            }, (item: MessageSessionItem) => String(item.talkerId))
-            ListItem() {
-              LoadMoreFooter({
-                loading: this.loading,
-                hasMore: this.sessionHasMore,
-                moreText: '',
-                endText: '',
-                fixedHeight: this.loading ? 48 : 1,
-              })
-            }
-          }
-          .layoutWeight(1).padding({ left: 12, right: 12 }).scrollBar(BarState.Off)
-          .cachedCount(5)
-          .onReachEnd(() => {
-            this.loadSessions(false).catch(() => {
-            });
-          })
-        }
+      if (this.sessionCount === 0) {
+        LoadingView({ loading: this.loading, empty: !this.loading && this.sessionError.length === 0,
+          emptyText: '暂无私信会话', errorText: this.sessionError,
+          onRetry: () => this.loadSessions(true).catch(() => {
+          }) })
       } else {
         List() {
+          LazyForEach(this.sessionsSource, (item: MessageSessionItem) => {
+            ListItem() { this.SessionRow(item) }
+          }, (item: MessageSessionItem) => String(item.talkerId))
           ListItem() {
-            Text(this.loading ? '加载中…' : (this.hasMore ? '加载更早消息' : '没有更早消息了'))
-              .fontSize(11).fontColor(this.hasMore ? this.accent : '#9499A0')
-              .width('100%').textAlign(TextAlign.Center).padding(12)
-              .onClick(() => this.loadMessages(false))
+            LoadMoreFooter({
+              loading: this.loading,
+              hasMore: this.sessionHasMore,
+              moreText: '',
+              endText: '',
+              fixedHeight: this.loading ? 48 : 1,
+            })
           }
-          ForEach(this.messages, (item: PrivateMessageItem) => {
-            ListItem() { this.MessageBubble(item) }
-          }, (item: PrivateMessageItem) => String(item.seqno))
         }
         .layoutWeight(1)
-        .padding({ left: 10, right: 10 })
+        .padding({ left: 12, right: 12 })
         .scrollBar(BarState.Off)
-        this.Composer()
+        .cachedCount(5)
+        .onReachEnd(() => {
+          this.loadSessions(false).catch(() => {
+          });
+        })
       }
     }
     .width('100%')
     .height('100%')
+    .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+  }
+
+  @Builder
+  MessageThreadPage() {
+    Column() {
+      PageHeader({
+        title: this.current.name,
+        headerHeight: 50,
+        padLeft: 4,
+        backWidth: 40,
+        onBack: () => this.goBack(),
+      }) {
+        this.SessionAvatar()
+      }
+      List() {
+        ListItem() {
+          Text(this.loading ? '加载中…' : (this.messageError.length > 0 ? this.messageError + ' · 点此重试' :
+            (this.hasMore ? '加载更早消息' : '没有更早消息了')))
+            .fontSize(11).fontColor(this.messageError.length > 0 || this.hasMore ? this.accent : '#9499A0')
+            .width('100%').textAlign(TextAlign.Center).padding(12)
+            .onClick(() => {
+              if (!this.loading && (this.messageError.length > 0 || this.hasMore)) {
+                this.loadMessages(this.messages.length === 0).catch(() => {
+                });
+              }
+            })
+        }
+        ForEach(this.messages, (item: PrivateMessageItem) => {
+          ListItem() { this.MessageBubble(item) }
+        }, (item: PrivateMessageItem) => String(item.seqno))
+      }
+      .layoutWeight(1)
+      .padding({ left: 10, right: 10 })
+      .scrollBar(BarState.Off)
+      this.Composer()
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.TopStart }) {
+      Stack({ alignContent: Alignment.TopStart }) {
+        this.SessionListPage()
+      }
+      .width('100%')
+      .height('100%')
+      .translate({ x: this.threadOpen ? '-24%' : '0%' })
+      .opacity(this.threadOpen ? 0.88 : 1)
+      .hitTestBehavior(this.threadOpen ? HitTestMode.None : HitTestMode.Default)
+      .animation({ duration: 280, curve: Curve.EaseOut })
+
+      Stack({ alignContent: Alignment.TopStart }) {
+        this.MessageThreadPage()
+      }
+      .width('100%')
+      .height('100%')
+      .translate({ x: this.threadOpen ? '0%' : '100%' })
+      .zIndex(1)
+      .hitTestBehavior(this.threadOpen ? HitTestMode.Default : HitTestMode.None)
+      .shadow({ radius: 12, color: '#26000000', offsetX: -5, offsetY: 0 })
+      .animation({ duration: 280, curve: Curve.EaseOut })
+    }
+    .width('100%')
+    .height('100%')
+    .clip(true)
     .padding({ top: Immersive.statusBarHeight() })
     .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
   }

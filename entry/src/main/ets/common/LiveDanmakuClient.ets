@@ -42,11 +42,10 @@ export class LiveDanmakuClient {
           'protover': 0,
           'platform': 'web',
           'type': 2,
+          'buvid': HttpClient.getCookie('buvid3'),
           'key': info.token,
         });
         ws.send(this.packet(7, body));
-        this.onConnected(true);
-        this.startHeartbeat();
       });
       ws.on('message', (err: BusinessError, value: string | ArrayBuffer) => {
         if (err || this.socket !== ws || this.closed) return;
@@ -158,7 +157,11 @@ export class LiveDanmakuClient {
       const protocol: number = view.getUint16(offset + 6);
       const operation: number = view.getUint32(offset + 8);
       if (packetLength < headerLength || packetLength <= 0 || offset + packetLength > buffer.byteLength) break;
-      if (operation === 5 && (protocol === 0 || protocol === 1)) {
+      if (operation === 8) {
+        // WebSocket open 只代表 TCP/TLS 建立；收到 op=8 才是直播弹幕鉴权成功。
+        this.onConnected(true);
+        this.startHeartbeat();
+      } else if (operation === 5 && (protocol === 0 || protocol === 1)) {
         const bytes: Uint8Array = new Uint8Array(buffer, offset + headerLength, packetLength - headerLength);
         const text: string = util.TextDecoder.create('utf-8').decodeToString(bytes);
         this.parseJson(text);

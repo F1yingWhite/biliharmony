@@ -15,6 +15,11 @@ export interface UserSpaceParam {
   mid: number;
 }
 
+export interface RelationListParam {
+  mid: number;
+  mode: string; // following | follower
+}
+
 /** 直播间只读观看参数，列表信息用于首屏即时展示。 */
 export interface LiveRoomParam {
   roomId: number;
@@ -29,6 +34,14 @@ export interface LiveRoomParam {
 export interface ImageViewerParam {
   images: Array<string>;
   initialIndex: number;
+  /** ArkUI 原生共享元素 ID；来源图与查看器使用同一 ID 即可自动往返。 */
+  transitionId?: string;
+}
+
+/** 动态详情页参数。item 使用内存对象首屏直出，详情接口随后补全。 */
+export interface DynamicDetailParam {
+  item: Object;
+  focusComments?: boolean;
 }
 
 /** NavDestination 路由名 */
@@ -41,6 +54,8 @@ export const NAV_HISTORY: string = 'History';
 export const NAV_FAVORITES: string = 'Favorites';
 export const NAV_LIVE_ROOM: string = 'LiveRoom';
 export const NAV_IMAGE_VIEWER: string = 'ImageViewer';
+export const NAV_DYNAMIC_DETAIL: string = 'DynamicDetail';
+export const NAV_RELATION_LIST: string = 'RelationList';
 
 /** 全局唯一导航栈，由 Index 页的 Navigation 挂载 */
 export const AppNavStack: NavPathStack = new NavPathStack();

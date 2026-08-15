@@ -9,34 +9,13 @@ import { Immersive } from '../common/Immersive';
 import { formatDuration } from '../common/Utils';
 import { PlayUrlInfo, VideoQualityOption } from '../model/Models';
 import { Constants } from '../common/Constants';
-
-// 活跃弹幕（正在屏幕上运动/停留）
-class ActiveDm {
-  item: DanmakuItem;
-  x: number;
-  lane: number;
-  speed: number;
-  fixedUntil: number; // 固定弹幕消失时刻（视频秒）
-  isFixed: boolean;
-  born: number;
-  textWidth: number;
-  renderText: string;
-  renderColor: string;
-
-  constructor(item: DanmakuItem, x: number, lane: number, speed: number, fixedUntil: number, isFixed: boolean,
-    born: number, textWidth: number, renderText: string, renderColor: string) {
-    this.item = item;
-    this.x = x;
-    this.lane = lane;
-    this.speed = speed;
-    this.fixedUntil = fixedUntil;
-    this.isFixed = isFixed;
-    this.born = born;
-    this.textWidth = textWidth;
-    this.renderText = renderText;
-    this.renderColor = renderColor;
-  }
-}
+import { PlayerProgressBar } from './PlayerProgressBar';
+import { PlayerSettingsPanel } from './PlayerSettingsPanel';
+import { PlayerGestureOverlay } from './PlayerGestureOverlay';
+import { PlayerFullscreenHeader } from './PlayerFullscreenHeader';
+import { ActiveDm, colorHex, CONTROLS_GRADIENT_COLORS } from './PlayerDanmakuSupport';
+import { PlayerBottomControls } from './PlayerBottomControls';
+import { PlayerPlaybackIndicator } from './PlayerPlaybackIndicator';
 
 @Component
 export struct PlayerView {
@@ -53,6 +32,8 @@ export struct PlayerView {
   @Prop ownerName: string = '';
   @Prop ownerFace: string = '';
   @Prop liked: boolean = false;
+  @Prop coined: boolean = false;
+  @Prop favorited: boolean = false;
   @Prop @Watch('onExternalDanmakuChanged') externalDanmakuOn: boolean = true;
   @Prop localDanmakuText: string = '';
   @Prop @Watch('onLocalDanmakuRequested') localDanmakuToken: number = 0;
@@ -61,9 +42,15 @@ export struct PlayerView {
   onPlayingChange: (playing: boolean) => void = () => {};
   onResumeRequest: () => void = () => {};
   onDanmakuChange: (enabled: boolean) => void = () => {};
+  /** 横屏底栏弹幕输入：草稿与发送由业务页（VideoDetail）持有 */
+  @Prop dmDraft: string = '';
+  @Prop dmSending: boolean = false;
+  onDmDraftChange: (value: string) => void = () => {};
+  onDmSend: () => void = () => {};
   onProgress: (seconds: number) => void = () => {};
   onLike: () => void = () => {};
   onCoin: () => void = () => {};
+  onFavorite: () => void = () => {};
   onShare: () => void = () => {};
   @State playing: boolean = false;
   @State prepared: boolean = false;
@@ -76,6 +63,7 @@ export struct PlayerView {
   @State showControls: boolean = false;
   @State buffering: boolean = false;
   @State showDmSettings: boolean = false;
+  @State showMoreMenu: boolean = false;
   @State showQualitySettings: boolean = false;
   @State showSpeedSettings: boolean = false;
   @State showChapterSettings: boolean = false;
@@ -94,6 +82,14 @@ export struct PlayerView {
   @State blockColorDm: boolean = false;
   @State holdSpeedActive: boolean = false;
   @State gestureSeekPreview: number = -1;
+  @State gestureAdjustKind: string = '';
+  @State gestureAdjustPercent: number = -1;
+  @State doubleTapFeedbackVisible: boolean = false;
+  @State doubleTapFeedbackPlaying: boolean = false;
+  @State doubleTapFeedbackScale: number = 0.78;
+  @State doubleTapFeedbackOpacity: number = 0;
+  @State resumeTransitionActive: boolean = false;
+  @State onlineTotal: string = '';
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('videoFullscreenExitRequest') @Watch('onFullscreenExitRequested') fullscreenExitRequest: number = 0;
   @StorageProp('videoSeekRequestToken') @Watch('onExternalSeekRequested') seekRequestToken: number = 0;
@@ -145,6 +141,14 @@ export struct PlayerView {
   private holdPreviousRate: number = 1.0;
   private panStartTime: number = 0;
   private panGestureActive: boolean = false;
+  private panMode: string = '';
+  private panStartX: number = 0;
+  private panStartBrightness: number = 0.5;
+  private panStartVolume: number = 100;
+  private gestureBrightness: number = 0.5;
+  private gestureVolume: number = 100;
+  private lastGestureApplyMs: number = 0;
+  private onlineRequest: number = 0;
   private surfaceId: string = '';
   // 组件销毁后置位：所有跨 await 的换源/重建流程在 initPlayer 前据此放弃，避免泄漏无人释放的 AVPlayer。
   private destroyed: boolean = false;
@@ -155,6 +159,7 @@ export struct PlayerView {
   private sliderDragValue: number = 0;
   private volumeRestoreTimer: number = -1;
   private fullscreenExitTimer: number = -1;
+  private doubleTapFeedbackTimer: number = -1;
   // AVPlayer 创建本身是异步的：代次使离页/换源前发起的 createAVPlayer 结果失效并立即释放。
   private playerCreateGeneration: number = 0;
   private playerCreating: boolean = false;
@@ -179,6 +184,8 @@ export struct PlayerView {
     this.loadDanmaku();
     this.loadSponsorSegments();
     this.loadVideoChapters();
+    this.loadOnlineTotal();
+    this.loadGestureLevels();
     // 被其他 NavDestination 覆盖后 AVPlayer 已释放；返回时在原进度重建并保持暂停。
     if (this.player === null && this.surfaceId.length > 0) {
       this.shouldPlayAfterPrepare = false;
@@ -238,6 +245,7 @@ export struct PlayerView {
     this.loadDanmaku();
     this.loadSponsorSegments();
     this.loadVideoChapters();
+    this.loadOnlineTotal();
     await this.initPlayer();
   }
 
@@ -277,6 +285,7 @@ export struct PlayerView {
     this.shouldPlayAfterPrepare = false;
     this.muteImmediately();
     this.release();
+    Immersive.restoreWindowBrightness();
     // 销毁阶段写 @State 无效且高风险，只做资源清理；父组件通知保留但隔离异常。
     try {
       this.onPlayingChange(false);
@@ -319,8 +328,9 @@ export struct PlayerView {
       this.volumeRestoreTimer = -1;
       if (this.destroyed) return;
       try {
-        if (this.player === video && video !== null && this.prepared) video.setVolume(1);
-        if (this.audioPlayer === audio && audio !== null && this.audioPrepared) audio.setVolume(1);
+        const restoreVolume: number = this.gestureVolume / 100;
+        if (this.player === video && video !== null && this.prepared) video.setVolume(restoreVolume);
+        if (this.audioPlayer === audio && audio !== null && this.audioPrepared) audio.setVolume(restoreVolume);
       } catch (e) {
       }
     }, 100);
@@ -428,17 +438,20 @@ export struct PlayerView {
           this.applyVideoScaleType();
           try {
             p.setPlaybackRate(this.playbackRate);
+            p.setVolume(this.gestureVolume / 100);
           } catch (e) {
             // 某些视频解码器不支持非常用倍速，保持 1x 即可。
           }
           this.tryStartPreparedPlayers();
         } else if (state === 'playing') {
+          this.resumeTransitionActive = false;
           this.playing = true;
           this.onPlayingChange(true);
           this.scheduleControlsHide();
           this.startDmLoop();
           this.buffering = false;
         } else if (state === 'paused' || state === 'completed') {
+          this.resumeTransitionActive = false;
           this.playing = false;
           this.showControls = true;
           if (this.hideTimer >= 0) {
@@ -579,6 +592,7 @@ export struct PlayerView {
         this.audioPrepared = true;
         try {
           audio.setPlaybackRate(this.playbackRate);
+          audio.setVolume(this.gestureVolume / 100);
         } catch (e) {
           // 倍速不被音频解码器支持时，设置入口会统一回退到 1x。
         }
@@ -724,9 +738,97 @@ export struct PlayerView {
     this.gestureSeekPreview = -1;
   }
 
+  private loadGestureLevels(): void {
+    const brightness: number = Immersive.windowBrightness();
+    if (brightness >= 0) this.gestureBrightness = brightness;
+    // AVPlayer 没有启用 APP_INDIVIDUAL 模式，应用音量百分比既不控制实际声音，
+    // 还可能读回旧版本遗留的 0。播放器本地增益以字段默认值 100% 起步即可。
+  }
+
+  private applyGestureVolume(value: number): void {
+    const normalized: number = Math.max(0, Math.min(1, value / 100));
+    try {
+      // AVPlayer 默认不属于 APP_INDIVIDUAL 音量模式，setAppVolumePercentage
+      // 在部分设备上只会返回成功但不改变声音；直接设置当前视频/音频轨才可靠。
+      if (this.player !== null && this.prepared) this.player.setVolume(normalized);
+      if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.setVolume(normalized);
+    } catch (e) {
+    }
+  }
+
+  private loadOnlineTotal(): void {
+    const request: number = ++this.onlineRequest;
+    const cid: number = this.cid;
+    BiliApi.getOnlineTotal(this.aid, this.bvid, cid).then((total: string) => {
+      if (!this.destroyed && request === this.onlineRequest && this.cid === cid) this.onlineTotal = total;
+    }).catch(() => {
+      if (!this.destroyed && request === this.onlineRequest) this.onlineTotal = '';
+    });
+  }
+
+  private beginPlayerPan(event: GestureEvent): void {
+    this.beginHorizontalSeek();
+    this.panMode = '';
+    this.gestureAdjustKind = '';
+    this.gestureAdjustPercent = -1;
+    this.panStartX = event.fingerList.length > 0 ? event.fingerList[0].localX : this.canvasW / 2;
+    const brightness: number = Immersive.windowBrightness();
+    if (brightness >= 0) this.gestureBrightness = brightness;
+    this.panStartBrightness = this.gestureBrightness;
+    this.panStartVolume = this.gestureVolume;
+  }
+
+  private updatePlayerPan(event: GestureEvent): void {
+    const absX: number = Math.abs(event.offsetX);
+    const absY: number = Math.abs(event.offsetY);
+    if (this.panMode.length === 0) {
+      if (Math.max(absX, absY) < 12) return;
+      if (absX > absY * 1.15) this.panMode = 'seek';
+      else if (absY > absX * 1.15) this.panMode = this.panStartX < this.canvasW / 2 ? 'brightness' : 'volume';
+      else return;
+    }
+    if (this.panMode === 'seek') {
+      this.updateHorizontalSeek(event.offsetX);
+      return;
+    }
+    const travel: number = Math.max(180, this.canvasH * 0.72);
+    const now: number = Date.now();
+    if (this.panMode === 'brightness') {
+      const value: number = Math.max(0.02, Math.min(1, this.panStartBrightness - event.offsetY / travel));
+      this.gestureBrightness = value;
+      this.gestureAdjustKind = '亮度';
+      this.gestureAdjustPercent = Math.round(value * 100);
+      if (now - this.lastGestureApplyMs >= 16) Immersive.setWindowBrightness(value);
+    } else {
+      const value: number = Math.max(0, Math.min(100, this.panStartVolume - event.offsetY * 100 / travel));
+      this.gestureVolume = value;
+      this.gestureAdjustKind = '音量';
+      this.gestureAdjustPercent = Math.round(value);
+      this.applyGestureVolume(value);
+    }
+    if (now - this.lastGestureApplyMs >= 16) this.lastGestureApplyMs = now;
+  }
+
+  private endPlayerPan(): void {
+    if (this.panMode === 'seek') this.endHorizontalSeek();
+    else {
+      this.panGestureActive = false;
+      this.gestureSeekPreview = -1;
+    }
+    this.panMode = '';
+    this.gestureAdjustKind = '';
+    this.gestureAdjustPercent = -1;
+  }
+
   private updateHorizontalSeek(offsetX: number): void {
     if (this.duration <= 0 || Math.abs(offsetX) < 12) return;
     this.panGestureActive = true;
+    // 横滑期间主动展示底部进度条，并用预览值驱动滑块；松手后才真正 seek。
+    this.showControls = true;
+    if (this.hideTimer >= 0) {
+      clearTimeout(this.hideTimer);
+      this.hideTimer = -1;
+    }
     // 长视频提高单次拖动跨度，短视频保持精细；最终只在松手时 seek 一次。
     const secondsPerVp: number = Math.max(0.10, Math.min(0.60, this.duration / 1800));
     this.gestureSeekPreview = Math.max(0, Math.min(this.duration, this.panStartTime + offsetX * secondsPerVp));
@@ -738,6 +840,38 @@ export struct PlayerView {
     }
     this.panGestureActive = false;
     this.gestureSeekPreview = -1;
+    if (this.playing) this.scheduleControlsHide();
+  }
+
+  private progressDisplayTime(): number {
+    if (this.sliderDragging) return this.sliderDragValue;
+    if (this.gestureSeekPreview >= 0) return this.gestureSeekPreview;
+    return this.duration > 0 ? this.curTime : 0;
+  }
+
+  private handleDoubleTap(): void {
+    if (!this.prepared || this.player === null) return;
+    const willPlay: boolean = !this.playing;
+    this.doubleTapFeedbackPlaying = willPlay;
+    this.doubleTapFeedbackVisible = true;
+    this.doubleTapFeedbackScale = 0.78;
+    this.doubleTapFeedbackOpacity = 0;
+    if (this.doubleTapFeedbackTimer >= 0) clearTimeout(this.doubleTapFeedbackTimer);
+    animateTo({ duration: 120, curve: Curve.EaseOut }, () => {
+      this.doubleTapFeedbackScale = 1;
+      this.doubleTapFeedbackOpacity = 1;
+    });
+    this.togglePlay();
+    this.doubleTapFeedbackTimer = setTimeout(() => {
+      this.doubleTapFeedbackTimer = -1;
+      animateTo({ duration: 160, curve: Curve.EaseIn }, () => {
+        this.doubleTapFeedbackScale = 1.08;
+        this.doubleTapFeedbackOpacity = 0;
+      });
+      setTimeout(() => {
+        if (!this.destroyed) this.doubleTapFeedbackVisible = false;
+      }, 170);
+    }, 420);
   }
 
   qualityLabel(): string {
@@ -842,9 +976,14 @@ export struct PlayerView {
       if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.pause();
     } else {
       // 用户主动点击继续时先通知外层恢复完整播放器高度；首播/切清晰度不会误触发。
+      this.resumeTransitionActive = this.compactMode && !this.fullscreen;
       this.onResumeRequest();
-      p.play();
-      if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.play();
+      try {
+        p.play();
+        if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.play();
+      } catch (e) {
+        this.resumeTransitionActive = false;
+      }
     }
   }
 
@@ -1054,7 +1193,8 @@ export struct PlayerView {
   }
 
   toggleControls(): void {
-    if (this.showDmSettings || this.showQualitySettings || this.showSpeedSettings || this.showChapterSettings) {
+    if (this.showDmSettings || this.showQualitySettings || this.showSpeedSettings || this.showChapterSettings ||
+      this.showMoreMenu) {
       this.closeSettingPanels();
       return;
     }
@@ -1072,6 +1212,14 @@ export struct PlayerView {
     this.showQualitySettings = false;
     this.showSpeedSettings = false;
     this.showChapterSettings = false;
+    this.showMoreMenu = false;
+  }
+
+  /** 竖屏右上角 ⋮ 菜单开关；与其余设置面板互斥。 */
+  private toggleMoreMenu(): void {
+    const next: boolean = !this.showMoreMenu;
+    this.closeSettingPanels();
+    this.showMoreMenu = next;
   }
 
   /** 底部设置面板互斥开关：打开目标面板时关掉其余三个，再点一次则全部收起。 */
@@ -1090,7 +1238,7 @@ export struct PlayerView {
     this.hideTimer = setTimeout(() => {
       this.hideTimer = -1;
       if (this.playing && !this.showDmSettings && !this.showQualitySettings &&
-        !this.showSpeedSettings && !this.showChapterSettings) {
+        !this.showSpeedSettings && !this.showChapterSettings && !this.showMoreMenu) {
         this.showControls = false;
       }
     }, 3000);
@@ -1113,6 +1261,10 @@ export struct PlayerView {
     if (this.fullscreenExitTimer >= 0) {
       clearTimeout(this.fullscreenExitTimer);
       this.fullscreenExitTimer = -1;
+    }
+    if (this.doubleTapFeedbackTimer >= 0) {
+      clearTimeout(this.doubleTapFeedbackTimer);
+      this.doubleTapFeedbackTimer = -1;
     }
     this.clearSeekWatchdog();
     this.clearSeekSpinner();
@@ -1479,6 +1631,14 @@ export struct PlayerView {
     return (this.fullscreen ? 46 : 36) * this.dmFontScale;
   }
 
+  /** 收起且暂停时只保留提示文字，不在当前画面上再叠一层深色控制渐变。 */
+  private controlsGradientColors(): Array<[ResourceColor, number]> {
+    if (this.compactMode && !this.fullscreen && !this.playing) {
+      return [['#00000000', 0.0], ['#00000000', 1.0]];
+    }
+    return CONTROLS_GRADIENT_COLORS;
+  }
+
   build() {
     Stack({ alignContent: Alignment.Center }) {
       // 视频画面
@@ -1529,273 +1689,153 @@ export struct PlayerView {
           .color('#FFFFFF')
       }
 
-      if (this.holdSpeedActive || this.gestureSeekPreview >= 0) {
-        Row({ space: 7 }) {
-          Text(this.holdSpeedActive ? '»' : (this.gestureSeekPreview >= this.panStartTime ? '››' : '‹‹'))
-            .fontSize(18)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#FFFFFF')
-          Text(this.holdSpeedActive ? '2× 快速播放' :
-            formatDuration(this.gestureSeekPreview) + ' / ' + formatDuration(this.duration))
-            .fontSize(13)
-            .fontWeight(FontWeight.Medium)
-            .fontColor('#FFFFFF')
-        }
-        .padding({ left: 14, right: 14, top: 9, bottom: 9 })
-        .borderRadius(18)
-        .backgroundColor('#A6000000')
-        .backdropBlur(12)
-        .hitTestBehavior(HitTestMode.None)
-      }
-
+      PlayerGestureOverlay({
+        onlineTotal: this.onlineTotal,
+        compactMode: this.compactMode,
+        showControls: this.showControls,
+        fullscreen: this.fullscreen,
+        holdSpeedActive: this.holdSpeedActive,
+        gestureSeekPreview: this.gestureSeekPreview,
+        gestureAdjustKind: this.gestureAdjustKind,
+        gestureAdjustPercent: this.gestureAdjustPercent,
+        panStartTime: this.panStartTime,
+        duration: this.duration,
+        doubleTapVisible: this.doubleTapFeedbackVisible,
+        doubleTapPlaying: this.doubleTapFeedbackPlaying,
+        doubleTapScale: this.doubleTapFeedbackScale,
+        doubleTapOpacity: this.doubleTapFeedbackOpacity,
+      })
       // 控件层
       if ((this.showControls || (!this.playing && this.compactMode && !this.fullscreen)) && this.errorText.length === 0) {
         Column() {
           if (this.compactMode && !this.fullscreen) {
-            if (!this.playing) {
-              // 暂停收起态保留视频画面，叠加整块蒙版与居中继续播放按钮。
-              Stack({ alignContent: Alignment.Center }) {
-                Column()
-                  .width('100%')
-                  .height('100%')
-                  .backgroundColor('#73000000')
-                Column({ space: 5 }) {
-                  Stack({ alignContent: Alignment.Center }) {
-                    Circle()
-                      .width(44)
-                      .height(44)
-                      .fill('#A6000000')
-                      .stroke('#66FFFFFF')
-                      .strokeWidth(0.5)
-                    Image($r('app.media.ic_play'))
-                      .width(22)
-                      .height(22)
-                      .fillColor('#FFFFFF')
-                  }
-                  .width(48)
-                  .height(48)
-                  Text('已暂停 · 点击继续')
-                    .fontSize(10)
-                    .fontColor('#D9FFFFFF')
-                }
-              }
-              .width('100%')
-              .height('100%')
-              .onClick(() => {
-                this.togglePlay();
-              })
-            } else {
-              Blank()
-              // 播放中的收起态使用单行控制，所有按钮都限制在视频框内。
-              Row({ space: 7 }) {
+            Blank()
+            // 收起态无论播放或暂停都只使用左下角播放键，不再在画面中央重复放入口。
+            Row({ space: 7 }) {
               this.IconButton(this.playing ? $r('app.media.ic_pause') : $r('app.media.ic_play'), 16, 36, 36, '#FFFFFF', true,
                 () => {
                   this.togglePlay();
                 })
-              Text(formatDuration(this.curTime))
+              Text(formatDuration(this.progressDisplayTime()))
                 .fontSize(10)
                 .fontColor('#FFFFFF')
               this.ProgressSlider(true)
               this.IconButton($r('app.media.ic_fullscreen'), 20, 36, 36, '#FFFFFF', false, () => {
                 this.toggleFullscreen();
               })
-              }
-              .width('100%')
-              .height(44)
-              .padding({ left: 8, right: 8, bottom: 4 })
-            }
-          } else {
-            if (this.fullscreen) {
-              // 参考 B 站横屏控制层：顶部只保留身份信息与高频动作，避免画面上方完全空白。
-              Row({ space: 10 }) {
-                this.IconButton($r('app.media.ic_back'), 24, 42, 42, '#FFFFFF', false, () => {
-                  this.exitFullscreen();
-                })
-                if (this.ownerFace.length > 0) {
-                  Image(this.ownerFace)
-                    .width(30)
-                    .height(30)
-                    .borderRadius(15)
-                    .objectFit(ImageFit.Cover)
-                }
-                Column({ space: 2 }) {
-                  Text(this.videoTitle)
-                    .fontSize(16)
-                    .fontWeight(FontWeight.Medium)
-                    .fontColor('#FFFFFF')
-                    .maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  Text(this.ownerName)
-                    .fontSize(11)
-                    .fontColor('#B3FFFFFF')
-                    .maxLines(1)
-                }
-                .alignItems(HorizontalAlign.Start)
-                .layoutWeight(1)
-                this.IconButton(this.liked ? $r('app.media.ic_like_fill') : $r('app.media.ic_like'), 24, 42, 42,
-                  this.liked ? this.accent : '#FFFFFF', false, () => {
-                    this.onLike();
-                  })
-                this.IconButton($r('app.media.bilix_icon_coin'), 24, 42, 42, '#FFFFFF', false, () => {
-                  this.onCoin();
-                })
-                this.IconButton($r('app.media.bilix_icon_share'), 25, 42, 42, '#FFFFFF', false, () => {
-                  this.onShare();
-                })
-              }
-              .width('100%')
-              .height(54)
-              .padding({ left: 12, right: 18, top: 4 })
-            }
-            Blank()
-            // 中央播放按钮
-            if (!this.fullscreen) {
-              Stack({ alignContent: Alignment.Center }) {
-                Circle()
-                  .width(52)
-                  .height(52)
-                  .fill('#73000000')
-                  .stroke('#33FFFFFF')
-                  .strokeWidth(0.5)
-                  .backdropBlur(10)
-                Image(this.playing ? $r('app.media.ic_pause') : $r('app.media.ic_play'))
-                  .width(25)
-                  .height(25)
-                  .fillColor('#FFFFFF')
-              }
-              .width(52)
-              .height(52)
-              .onClick(() => {
-                this.togglePlay();
-              })
-            }
-            Blank()
-            // 底部控制条
-            Column({ space: 6 }) {
-              Row({ space: 10 }) {
-                Text(formatDuration(this.curTime))
-                  .fontSize(11)
-                  .fontColor('#FFFFFF')
-                this.ProgressSlider(false)
-                Text(formatDuration(this.duration))
-                  .fontSize(11)
-                  .fontColor('#FFFFFF')
-              }
-              .width('100%')
-              Row({ space: 8 }) {
-                if (this.fullscreen) {
-                  this.IconButton(this.playing ? $r('app.media.ic_pause') : $r('app.media.ic_play'), 25, 38, 34, '#FFFFFF',
-                    false, () => {
-                      this.togglePlay();
-                    })
-                }
-                if (this.fullscreen) {
-                  this.IconButton(this.danmakuOn ? $r('app.media.ic_danmaku_on') : $r('app.media.ic_danmaku_off'), 23, 36,
-                    32, this.danmakuOn ? '#FB7299' : '#99FFFFFF', false, () => {
-                      this.toggleDanmaku();
-                    })
-                  this.IconButton($r('app.media.ic_danmaku_settings'), 21, 34, 32, '#FFFFFF', false, () => {
-                    this.exclusiveToggle('dm');
-                  })
-                }
-                Text('空降')
-                  .fontSize(11)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor(this.sponsorSkipEnabled ? '#FFFFFF' : '#99FFFFFF')
-                  .padding({ left: 8, right: 8, top: 7, bottom: 7 })
-                  .borderRadius(14)
-                  .backgroundColor(this.sponsorSkipEnabled ? '#B3FB7299' : '#26000000')
-                  .onClick(() => {
-                    this.sponsorSkipEnabled = !this.sponsorSkipEnabled;
-                    promptAction.showToast({ message: this.sponsorSkipEnabled ? '广告空降已开启' : '广告空降已关闭' });
-                  })
-                if (this.chapters.length > 0) {
-                  Text('章节')
-                    .fontSize(11)
-                    .fontWeight(FontWeight.Medium)
-                    .fontColor('#FFFFFF')
-                    .padding({ left: 8, right: 8, top: 7, bottom: 7 })
-                    .borderRadius(14)
-                    .backgroundColor(this.showChapterSettings ? '#66FFFFFF' : '#26000000')
-                    .onClick(() => {
-                      this.exclusiveToggle('chapter');
-                    })
-                }
-                Blank()
-                Text(this.qualityLoading ? '切换中' : this.qualityLabel())
-                  .fontSize(12)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor('#FFFFFF')
-                  .padding({ left: 8, right: 8, top: 7, bottom: 7 })
-                  .borderRadius(this.fullscreen ? 0 : 14)
-                  .backgroundColor(this.fullscreen ? '#00000000' :
-                    (this.showQualitySettings ? '#66FFFFFF' : '#26000000'))
-                  .onClick(() => {
-                    this.exclusiveToggle('quality');
-                  })
-                Text(this.playbackRate === 1 ? '倍速' : this.playbackRate.toFixed(this.playbackRate % 1 === 0 ? 0 : 2) + 'x')
-                  .fontSize(12)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor('#FFFFFF')
-                  .padding({ left: 8, right: 8, top: 7, bottom: 7 })
-                  .borderRadius(this.fullscreen ? 0 : 14)
-                  .backgroundColor(this.fullscreen ? '#00000000' :
-                    (this.showSpeedSettings ? '#66FFFFFF' : '#26000000'))
-                  .onClick(() => {
-                    this.exclusiveToggle('speed');
-                  })
-                this.IconButton(this.fullscreen ? $r('app.media.ic_fullscreen_exit') : $r('app.media.ic_fullscreen'), 23,
-                  36, 32, '#FFFFFF', false, () => {
-                    this.toggleFullscreen();
-                  })
-              }
-              .width('100%')
             }
             .width('100%')
-            .padding({ left: 12, right: 12, bottom: 8 })
+            .height(44)
+            .padding({ left: 8, right: 8, bottom: 4 })
+          } else {
+            if (this.fullscreen) {
+              PlayerFullscreenHeader({
+                title: this.videoTitle,
+                ownerName: this.ownerName,
+                ownerFace: this.ownerFace,
+                liked: this.liked,
+                coined: this.coined,
+                favorited: this.favorited,
+                accent: this.accent,
+                onBack: () => this.exitFullscreen(),
+                onLike: () => this.onLike(),
+                onCoin: () => this.onCoin(),
+                onFavorite: () => this.onFavorite(),
+                onShare: () => this.onShare(),
+              })
+            } else {
+              // 竖屏右上角 ⋮：清晰度/倍速/空降/分段/弹幕设置全部收纳在这里，
+              // 底栏只保留 播放-进度-全屏，减少对画面内容的遮挡。
+              Row() {
+                Blank()
+                this.IconButton($r('app.media.ic_more'), 20, 36, 36, '#FFFFFF', false, () => {
+                  this.toggleMoreMenu();
+                })
+              }
+              .width('100%')
+              .padding({ top: 6, right: 4 })
+            }
+            Blank()
+            PlayerBottomControls({
+              fullscreen: this.fullscreen,
+              playing: this.playing,
+              danmakuOn: this.danmakuOn,
+              sponsorEnabled: this.sponsorSkipEnabled,
+              chapters: this.chapters,
+              progress: this.progressDisplayTime(),
+              duration: this.duration,
+              qualityLoading: this.qualityLoading,
+              qualityLabel: this.qualityLabel(),
+              playbackRate: this.playbackRate,
+              showQualitySettings: this.showQualitySettings,
+              showChapterSettings: this.showChapterSettings,
+              showSpeedSettings: this.showSpeedSettings,
+              dmDraft: this.dmDraft,
+              dmSending: this.dmSending,
+              onPlay: () => this.togglePlay(),
+              onDanmaku: () => this.toggleDanmaku(),
+              onDanmakuSettings: () => this.exclusiveToggle('dm'),
+              onSponsor: () => {
+                this.sponsorSkipEnabled = !this.sponsorSkipEnabled;
+                promptAction.showToast({ message: this.sponsorSkipEnabled ? '广告空降已开启' : '广告空降已关闭' });
+              },
+              onChapter: () => this.exclusiveToggle('chapter'),
+              onQuality: () => this.exclusiveToggle('quality'),
+              onSpeed: () => this.exclusiveToggle('speed'),
+              onFullscreen: () => this.toggleFullscreen(),
+              onProgressChange: (value: number, mode: SliderChangeMode) => this.onProgressSliderChange(value, mode),
+              onDmDraftChange: (value: string) => this.onDmDraftChange(value),
+              onDmSend: () => this.onDmSend(),
+            })
           }
         }
         .width('100%')
         .height('100%')
         .linearGradient({
           angle: 180,
-          colors: CONTROLS_GRADIENT_COLORS,
+          colors: this.controlsGradientColors(),
         })
       }
 
-      if (this.showControls && this.fullscreen && this.showDmSettings && this.errorText.length === 0) {
-        this.SettingsPanel(0)
+      // 竖屏 ⋮ 更多菜单：浮在播放器右上角，透明区域不拦截画面点击。
+      if (this.showControls && this.showMoreMenu && !this.fullscreen && this.errorText.length === 0) {
+        this.MoreMenuPanel()
+      }
+
+      if (this.showControls && this.showDmSettings && this.errorText.length === 0) {
+        this.SettingsPanelHost(0)
       }
 
       if (this.showControls && this.showQualitySettings && this.errorText.length === 0) {
-        this.SettingsPanel(1)
+        this.SettingsPanelHost(1)
       }
 
       if (this.showControls && this.showChapterSettings && this.errorText.length === 0) {
-        this.SettingsPanel(2)
+        this.SettingsPanelHost(2)
       }
 
       if (this.showControls && this.showSpeedSettings && this.errorText.length === 0) {
-        this.SettingsPanel(3)
+        this.SettingsPanelHost(3)
       }
     }
     .width('100%')
     .height('100%')
     .clip(true)
     .backgroundColor('#000000')
-    .onClick(() => {
-      this.toggleControls();
-    })
     .gesture(
       GestureGroup(GestureMode.Exclusive,
+        TapGesture({ count: 2 })
+          .onAction(() => this.handleDoubleTap()),
+        TapGesture({ count: 1 })
+          .onAction(() => this.toggleControls()),
         LongPressGesture({ repeat: false })
           .onAction(() => this.beginHoldSpeed())
           .onActionEnd(() => this.endHoldSpeed()),
-        PanGesture({ fingers: 1, direction: PanDirection.Horizontal, distance: 12 })
-          .onActionStart(() => this.beginHorizontalSeek())
-          .onActionUpdate((event: GestureEvent) => this.updateHorizontalSeek(event.offsetX))
-          .onActionEnd(() => this.endHorizontalSeek())
-          .onActionCancel(() => this.endHorizontalSeek())
+        PanGesture({ fingers: 1, direction: PanDirection.All, distance: 12 })
+          .onActionStart((event: GestureEvent) => this.beginPlayerPan(event))
+          .onActionUpdate((event: GestureEvent) => this.updatePlayerPan(event))
+          .onActionEnd(() => this.endPlayerPan())
+          .onActionCancel(() => this.endPlayerPan())
       )
     )
   }
@@ -1814,6 +1854,7 @@ export struct PlayerView {
       Image(icon)
         .width(iconSize)
         .height(iconSize)
+        .renderMode(ImageRenderMode.Template)
         .fillColor(fill)
     }
     .width(boxWidth)
@@ -1826,37 +1867,13 @@ export struct PlayerView {
   /** 播放进度条：compact 为收起态 InSet 样式，否则为底部控制条 OutSet 样式。 */
   @Builder
   ProgressSlider(compact: boolean) {
-    if (compact) {
-      Slider({
-        value: this.sliderDragging ? this.sliderDragValue : (this.duration > 0 ? this.curTime : 0),
-        min: 0,
-        max: this.duration > 0 ? this.duration : 1,
-        style: SliderStyle.InSet,
-      })
-        .layoutWeight(1)
-        .height(28)
-        .blockSize({ width: 10, height: 10 })
-        .blockColor('#FFFFFF')
-        .selectedColor('#FB7299')
-        .trackColor('#55FFFFFF')
-        .onChange((value: number, mode: SliderChangeMode) => {
-          this.onProgressSliderChange(value, mode);
-        })
-    } else {
-      Slider({
-        value: this.sliderDragging ? this.sliderDragValue : (this.duration > 0 ? this.curTime : 0),
-        min: 0,
-        max: this.duration > 0 ? this.duration : 1,
-        style: SliderStyle.OutSet,
-      })
-        .layoutWeight(1)
-        .blockColor('#FFFFFF')
-        .selectedColor('#FB7299')
-        .trackColor('#33FFFFFF')
-        .onChange((value: number, mode: SliderChangeMode) => {
-          this.onProgressSliderChange(value, mode);
-        })
-    }
+    PlayerProgressBar({
+      value: this.progressDisplayTime(),
+      duration: this.duration,
+      compact: compact,
+      chapters: this.chapters,
+      onChange: (value: number, mode: SliderChangeMode) => this.onProgressSliderChange(value, mode),
+    })
   }
 
   private onProgressSliderChange(value: number, mode: SliderChangeMode): void {
@@ -1874,234 +1891,103 @@ export struct PlayerView {
     }
   }
 
-  /** 底部设置面板外壳：0 弹幕 / 1 清晰度 / 2 章节 / 3 倍速，仅内容与 padding、顶部描边有差异。 */
+  /** 设置面板状态编排留在播放器；具体视觉与选项列表由独立组件负责。 */
   @Builder
-  SettingsPanel(which: number) {
-    Column({ space: which === 0 ? 2 : 8 }) {
-      if (which === 0) {
-        Row() {
-          Text('弹幕设置')
-            .fontSize(15)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#FFFFFF')
-          Blank()
-          Text('恢复默认')
-            .fontSize(11)
-            .fontColor('#CCFFFFFF')
-            .onClick(() => {
-              this.dmOpacity = 0.85;
-              this.setDmSpeed(1);
-              this.setDmFontScale(1);
-              this.setDmDensity(12);
-              this.blockScrollDm = false;
-              this.blockTopDm = false;
-              this.blockBottomDm = false;
-              this.blockColorDm = false;
-              this.applyDmFilters();
-            })
-        }
-        .width('100%')
-        this.DmSliderRow('透明度', this.dmOpacity, 0.2, 1.0, (value: number) => {
-          this.dmOpacity = value;
-        })
-        this.DmSliderRow('速度', this.dmSpeed, 0.5, 2.0, (value: number) => {
-          this.setDmSpeed(value);
-        })
-        this.DmSliderRow('字号', this.dmFontScale, 0.7, 1.5, (value: number) => {
-          this.setDmFontScale(value);
-        })
-        this.DmSliderRow('密度', this.dmDensity, 6, 30, (value: number) => {
-          this.setDmDensity(value);
-        })
-        Row({ space: 6 }) {
-          this.DmBlockChip('滚动', this.blockScrollDm, () => {
-            this.blockScrollDm = !this.blockScrollDm;
-            this.applyDmFilters();
-          })
-          this.DmBlockChip('顶部', this.blockTopDm, () => {
-            this.blockTopDm = !this.blockTopDm;
-            this.applyDmFilters();
-          })
-          this.DmBlockChip('底部', this.blockBottomDm, () => {
-            this.blockBottomDm = !this.blockBottomDm;
-            this.applyDmFilters();
-          })
-          this.DmBlockChip('彩色', this.blockColorDm, () => {
-            this.blockColorDm = !this.blockColorDm;
-            this.applyDmFilters();
-          })
-        }
-        .width('100%')
-      } else if (which === 1) {
-        Row() {
-          Text('清晰度')
-            .fontSize(14)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#FFFFFF')
-          Blank()
-          Text('灰色画质需要会员或当前片源未提供')
-            .fontSize(9)
-            .fontColor('#88FFFFFF')
-        }
-        .width('100%')
-        Flex({ wrap: FlexWrap.Wrap, direction: FlexDirection.Row, justifyContent: FlexAlign.Start }) {
-          ForEach(this.runtimeQualityOptions, (option: VideoQualityOption) => {
-            Text(option.label)
-              .fontSize(12)
-              .fontColor(option.available ? (option.qn === this.activeQuality ? '#FFFFFF' : '#CCFFFFFF') : '#66FFFFFF')
-              .padding({ left: 12, right: 12, top: 7, bottom: 7 })
-              .margin({ right: 8, bottom: 6 })
-              .borderRadius(16)
-              .backgroundColor(option.qn === this.activeQuality ? this.accent : (option.available ? '#33FFFFFF' : '#16FFFFFF'))
-              .onClick(() => {
-                if (option.available) this.changeQuality(option.qn);
-                else promptAction.showToast({ message: option.label + ' 需要相应会员权限，或当前视频未提供该轨道' });
-              })
-          }, (option: VideoQualityOption) => String(option.qn))
-        }
-        .width('100%')
-      } else if (which === 2) {
-        Text('视频章节')
-          .fontSize(14)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#FFFFFF')
-          .width('100%')
-        List({ space: 6 }) {
-          ForEach(this.chapters, (chapter: VideoChapter, index: number) => {
-            ListItem() {
-              Row({ space: 9 }) {
-                if (chapter.image.length > 0) {
-                  Image(chapter.image)
-                    .width(64)
-                    .height(36)
-                    .objectFit(ImageFit.Cover)
-                    .borderRadius(5)
-                }
-                Column({ space: 2 }) {
-                  Text(chapter.title)
-                    .fontSize(12)
-                    .fontColor(this.curTime >= chapter.from && this.curTime < chapter.to ? '#FB7299' : '#FFFFFF')
-                    .maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  Text(formatDuration(chapter.from) + ' - ' + formatDuration(chapter.to))
-                    .fontSize(10)
-                    .fontColor('#A6FFFFFF')
-                }
-                .alignItems(HorizontalAlign.Start)
-                .layoutWeight(1)
-              }
-              .width('100%')
-              .padding({ left: 8, right: 8, top: 6, bottom: 6 })
-              .borderRadius(8)
-              .backgroundColor(this.curTime >= chapter.from && this.curTime < chapter.to ? '#26FB7299' : '#1FFFFFFF')
-              .onClick(() => {
-                this.seekTo(chapter.from, true);
-                this.showChapterSettings = false;
-              })
-            }
-          }, (chapter: VideoChapter, index: number) => String(chapter.from) + '-' + String(index))
-        }
-        .width('100%')
-        .height(this.fullscreen ? 230 : 180)
-        .scrollBar(BarState.Off)
-      } else {
-        Text('播放速度')
-          .fontSize(14)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#FFFFFF')
-          .width('100%')
-        Row({ space: 7 }) {
-          this.SpeedChip('0.5x', 0.5)
-          this.SpeedChip('0.75x', 0.75)
-          this.SpeedChip('1x', 1)
-          this.SpeedChip('1.25x', 1.25)
-          this.SpeedChip('1.5x', 1.5)
-          this.SpeedChip('2x', 2)
-        }
-        .width('100%')
-      }
-    }
-    .width(this.fullscreen ? 420 : '100%')
-    .padding({
-      left: which <= 1 ? 16 : 14,
-      right: which <= 1 ? 16 : 14,
-      top: which === 0 ? 10 : 12,
-      bottom: which === 3 ? 14 : 12,
+  SettingsPanelHost(which: number) {    PlayerSettingsPanel({
+      which: which,
+      fullscreen: this.fullscreen,
+      accent: this.accent,
+      dmOpacity: this.dmOpacity,
+      dmSpeed: this.dmSpeed,
+      dmFontScale: this.dmFontScale,
+      dmDensity: this.dmDensity,
+      blockScrollDm: this.blockScrollDm,
+      blockTopDm: this.blockTopDm,
+      blockBottomDm: this.blockBottomDm,
+      blockColorDm: this.blockColorDm,
+      qualityOptions: this.runtimeQualityOptions,
+      activeQuality: this.activeQuality,
+      chapters: this.chapters,
+      currentTime: this.curTime,
+      playbackRate: this.playbackRate,
+      onResetDanmaku: () => {
+        this.dmOpacity = 0.85;
+        this.setDmSpeed(1);
+        this.setDmFontScale(1.3);
+        this.setDmDensity(18);
+        this.blockScrollDm = false;
+        this.blockTopDm = false;
+        this.blockBottomDm = false;
+        this.blockColorDm = false;
+        this.applyDmFilters();
+      },
+      onDmOpacityChange: (value: number) => this.dmOpacity = value,
+      onDmSpeedChange: (value: number) => this.setDmSpeed(value),
+      onDmFontScaleChange: (value: number) => this.setDmFontScale(value),
+      onDmDensityChange: (value: number) => this.setDmDensity(value),
+      onToggleDmBlock: (kind: string) => {
+        if (kind === 'scroll') this.blockScrollDm = !this.blockScrollDm;
+        else if (kind === 'top') this.blockTopDm = !this.blockTopDm;
+        else if (kind === 'bottom') this.blockBottomDm = !this.blockBottomDm;
+        else this.blockColorDm = !this.blockColorDm;
+        this.applyDmFilters();
+      },
+      onQualityChange: (qn: number) => this.changeQuality(qn),
+      onChapterChange: (seconds: number) => {
+        this.seekTo(seconds, true);
+        this.showChapterSettings = false;
+      },
+      onSpeedChange: (rate: number) => this.setPlaybackSpeed(rate),
     })
-    .borderRadius({ topLeft: 16, topRight: 16 })
-    .backgroundColor('#E81A1A1E')
-    .backdropBlur(24)
-    .border({ width: { top: which === 0 ? 0.5 : 0 }, color: '#33FFFFFF' })
-    .align(Alignment.Bottom)
   }
 
+  /** 竖屏 ⋮ 更多菜单：清晰度/倍速/弹幕设置/分段/空降收纳项。 */
   @Builder
-  DmSliderRow(label: string, value: number, min: number, max: number, onChange: (value: number) => void) {
-    Row({ space: 8 }) {
-      Text(label)
-        .width(38)
-        .fontSize(11)
-        .fontColor('#E6FFFFFF')
-      Slider({ value: value, min: min, max: max, step: (max - min) / 20, style: SliderStyle.InSet })
-        .layoutWeight(1)
-        .height(22)
-        .blockColor('#FFFFFF')
-        .selectedColor('#FB7299')
-        .trackColor('#40FFFFFF')
-        .onChange((next: number) => {
-          onChange(next);
+  MoreMenuPanel() {
+    Stack({ alignContent: Alignment.TopEnd }) {
+      Column({ space: 2 }) {
+        this.MoreMenuItem('清晰度', this.qualityLoading ? '切换中…' : this.qualityLabel(),
+          () => this.exclusiveToggle('quality'))
+        this.MoreMenuItem('倍速',
+          this.playbackRate === 1 ? '1.0x' : this.playbackRate.toFixed(this.playbackRate % 1 === 0 ? 0 : 2) + 'x',
+          () => this.exclusiveToggle('speed'))
+        this.MoreMenuItem('弹幕设置', '', () => this.exclusiveToggle('dm'))
+        if (this.chapters.length > 0) {
+          this.MoreMenuItem('分段视频', String(this.chapters.length) + ' 段', () => this.exclusiveToggle('chapter'))
+        }
+        this.MoreMenuItem('广告空降', this.sponsorSkipEnabled ? '已开启' : '已关闭', () => {
+          this.sponsorSkipEnabled = !this.sponsorSkipEnabled;
+          promptAction.showToast({ message: this.sponsorSkipEnabled ? '广告空降已开启' : '广告空降已关闭' });
         })
-      Text(value.toFixed(value >= 6 ? 0 : 1))
-        .width(28)
-        .textAlign(TextAlign.End)
-        .fontSize(10)
-        .fontColor('#B3FFFFFF')
+      }
+      .width(164)
+      .padding({ top: 5, bottom: 5 })
+      .backgroundColor('#F21D1E22')
+      .borderRadius(10)
+      .margin({ top: 48, right: 8 })
     }
     .width('100%')
-    .height(27)
+    .height('100%')
+    // 空白区域不拦截画面点击（透出到底层播放/隐藏控制层手势），菜单项自身可点。
+    .hitTestBehavior(HitTestMode.Transparent)
   }
 
   @Builder
-  DmBlockChip(label: string, blocked: boolean, onClick: () => void) {
-    Text(label)
-      .fontSize(11)
-      .fontColor(blocked ? '#FFFFFF' : '#CCFFFFFF')
-      .padding({ left: 9, right: 9, top: 5, bottom: 5 })
-      .borderRadius(13)
-      .backgroundColor(blocked ? '#FB7299' : '#33FFFFFF')
-      .onClick(() => {
-        onClick();
-      })
+  MoreMenuItem(label: string, value: string, onTap: () => void) {
+    Row() {
+      Text(label)
+        .fontSize(13)
+        .fontColor('#FFFFFF')
+      Blank()
+      if (value.length > 0) {
+        Text(value)
+          .fontSize(12)
+          .fontColor('#B3FFFFFF')
+      }
+    }
+    .width('100%')
+    .padding({ left: 14, right: 14, top: 10, bottom: 10 })
+    .onClick(() => onTap())
   }
 
-  @Builder
-  SpeedChip(label: string, rate: number) {
-    Text(label)
-      .layoutWeight(1)
-      .textAlign(TextAlign.Center)
-      .fontSize(11)
-      .fontColor(this.playbackRate === rate ? '#FFFFFF' : '#CCFFFFFF')
-      .padding({ top: 8, bottom: 8 })
-      .borderRadius(16)
-      .backgroundColor(this.playbackRate === rate ? '#FB7299' : '#33FFFFFF')
-      .onClick(() => {
-        this.setPlaybackSpeed(rate);
-      })
-  }
-}
-
-// 控制层上下压黑渐变（常量数组，避免每次渲染新建字面量）。
-const CONTROLS_GRADIENT_COLORS: Array<[ResourceColor, number]> =
-  [['#99000000', 0.0], ['#00000000', 0.35], ['#99000000', 1.0]];
-
-// 弹幕颜色：数字 → #RRGGBB
-function colorHex(color: number): string {
-  const r: number = (color >> 16) & 0xff;
-  const g: number = (color >> 8) & 0xff;
-  const b: number = color & 0xff;
-  const to2 = (n: number): string => {
-    const s: string = n.toString(16);
-    return s.length === 1 ? '0' + s : s;
-  };
-  return '#' + to2(r) + to2(g) + to2(b);
 }

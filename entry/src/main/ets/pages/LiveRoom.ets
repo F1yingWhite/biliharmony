@@ -1,11 +1,13 @@
-/** 直播间：仅观看直播、切换画质、查看实时弹幕与 SC。 */
-import { BiliApi } from '../api/BiliApi';
-import { LiveRoomParam } from '../common/AppRouter';
+/** 直播间：观看直播、切换画质、实时弹幕/表情与 SC。 */
+import { promptAction } from '@kit.ArkUI';
+import { ActionResult, BiliApi } from '../api/BiliApi';
+import { AppNavStack, LiveRoomParam, NAV_LOGIN } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { LiveDanmakuClient } from '../common/LiveDanmakuClient';
 import { LivePlayerView } from '../components/LivePlayerView';
 import { BackButton, BackButtonVariant } from '../components/BackButton';
-import { LiveChatMessage, LivePlayInfo, LiveRoomInfo } from '../model/LiveModels';
+import { LiveChatMessage, LiveEmoteItem, LiveEmotePackage, LivePlayInfo, LiveRoomInfo } from '../model/LiveModels';
+import { UserStore } from '../common/UserStore';
 
 @Component
 export struct LiveRoomPage {
@@ -18,6 +20,12 @@ export struct LiveRoomPage {
   @State superChats: Array<LiveChatMessage> = [];
   @State loading: boolean = true;
   @State qualityLoading: boolean = false;
+  @State draft: string = '';
+  @State sending: boolean = false;
+  @State emotePanelOpen: boolean = false;
+  @State emoteLoading: boolean = false;
+  @State emotePackages: Array<LiveEmotePackage> = [];
+  @State emotePackageIndex: number = 0;
   @State connected: boolean = false;
   @State fullscreen: boolean = false;
   @State chatTab: number = 0;
@@ -31,6 +39,9 @@ export struct LiveRoomPage {
   private flushTimer: number = -1;
   private destroyed: boolean = false;
   private lifecycleGeneration: number = 0;
+  private historyPollTimer: number = -1;
+  private lastLiveMessageAt: number = 0;
+  private knownMessageIds: Set<string> = new Set<string>();
 
   aboutToAppear(): void {
     this.destroyed = false;
@@ -45,6 +56,8 @@ export struct LiveRoomPage {
     this.client.onConnected = (value: boolean) => this.connected = value;
     this.loadRoom().catch(() => {
     });
+    this.loadEmoticons().catch(() => {
+    });
   }
 
   aboutToDisappear(): void {
@@ -55,6 +68,10 @@ export struct LiveRoomPage {
       this.flushTimer = -1;
     }
     this.pendingMsgs = [];
+    if (this.historyPollTimer >= 0) {
+      clearInterval(this.historyPollTimer);
+      this.historyPollTimer = -1;
+    }
     this.client.close();
   }
 
@@ -72,15 +89,20 @@ export struct LiveRoomPage {
         this.errorText = info !== null && info.liveStatus !== 1 ? '主播当前未开播' : '直播播放地址获取失败';
         return;
       }
-      this.playInfo = play;
       const history: Array<LiveChatMessage> = await BiliApi.getLiveDanmakuHistory(this.param.roomId);
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
+      this.knownMessageIds.clear();
+      for (let i: number = 0; i < history.length; i++) this.knownMessageIds.add(history[i].id);
       this.messages = history;
       this.chatList = history.slice().reverse().slice(0, 200);
+      this.lastLiveMessageAt = Date.now();
+      // 先建立首屏历史基线再挂播放器，避免把历史消息一次性灌入画面轨道。
+      this.playInfo = play;
       this.superChats = await BiliApi.getLiveSuperChats(this.param.roomId);
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
       this.client.connect(this.param.roomId).catch(() => {
       });
+      this.startHistoryFallback();
     } catch (e) {
       if (!this.destroyed && generation === this.lifecycleGeneration) {
         this.errorText = '直播间加载失败，请检查网络后重试';
@@ -104,8 +126,58 @@ export struct LiveRoomPage {
     }
   }
 
+  async loadEmoticons(): Promise<void> {
+    if (this.emoteLoading || this.emotePackages.length > 0) return;
+    this.emoteLoading = true;
+    try {
+      const packages: Array<LiveEmotePackage> = await BiliApi.getLiveEmoticons(this.param.roomId);
+      if (!this.destroyed) this.emotePackages = packages;
+    } finally {
+      if (!this.destroyed) this.emoteLoading = false;
+    }
+  }
+
+  private ensureLogin(): boolean {
+    if (UserStore.isLogin) return true;
+    promptAction.showToast({ message: '请先登录后发送直播弹幕' });
+    AppNavStack.pushPathByName(NAV_LOGIN, null);
+    return false;
+  }
+
+  async sendDanmaku(emote: LiveEmoteItem | null = null): Promise<void> {
+    const content: string = this.draft.trim();
+    if (this.sending || !this.ensureLogin() || (emote === null && content.length === 0)) return;
+    this.sending = true;
+    try {
+      const result: ActionResult = await BiliApi.sendLiveDanmaku(this.param.roomId, content,
+        emote === null ? '' : emote.unique);
+      if (!result.ok) {
+        promptAction.showToast({ message: result.message });
+        return;
+      }
+      const local: LiveChatMessage = new LiveChatMessage();
+      local.id = 'local_' + String(Date.now());
+      local.uname = UserStore.current?.uname ?? '我';
+      local.text = emote === null ? content : (emote.emoji.length > 0 ? emote.emoji : emote.unique);
+      if (emote !== null) local.emotes.push(emote);
+      this.knownMessageIds.add(local.id);
+      this.messages = this.messages.concat([local]);
+      this.chatList = [local].concat(this.chatList).slice(0, 200);
+      this.draft = '';
+      this.emotePanelOpen = false;
+      promptAction.showToast({ message: '弹幕发送成功' });
+    } catch (e) {
+      promptAction.showToast({ message: '弹幕发送失败，请检查网络' });
+    } finally {
+      if (!this.destroyed) this.sending = false;
+    }
+  }
+
   appendMessage(message: LiveChatMessage): void {
     if (this.destroyed) return;
+    if (this.knownMessageIds.has(message.id)) return;
+    this.knownMessageIds.add(message.id);
+    this.lastLiveMessageAt = Date.now();
     if (message.type === 'sc') {
       const nextSc: Array<LiveChatMessage> = [message].concat(this.superChats);
       this.superChats = nextSc.slice(0, 50);
@@ -116,6 +188,24 @@ export struct LiveRoomPage {
         this.flushTimer = -1;
         this.flushMessages();
       }, 220);
+    }
+  }
+
+  private startHistoryFallback(): void {
+    if (this.historyPollTimer >= 0) clearInterval(this.historyPollTimer);
+    this.historyPollTimer = setInterval(() => {
+      if (this.destroyed || Date.now() - this.lastLiveMessageAt < 8000) return;
+      this.pollRecentHistory().catch(() => {
+      });
+    }, 5000);
+  }
+
+  /** WebSocket 安静超过 8 秒时低频补拉，只追加未见 ID，不重放进房快照。 */
+  private async pollRecentHistory(): Promise<void> {
+    const history: Array<LiveChatMessage> = await BiliApi.getLiveDanmakuHistory(this.param.roomId);
+    if (this.destroyed) return;
+    for (let i: number = 0; i < history.length; i++) {
+      if (!this.knownMessageIds.has(history[i].id)) this.appendMessage(history[i]);
     }
   }
 
@@ -174,13 +264,36 @@ export struct LiveRoomPage {
         .fontColor(this.chatTab === 1 ? this.accent : (this.isDark ? '#9A9A9E' : '#777B82'))
         .onClick(() => this.chatTab = 1)
       Blank()
-      Text('仅观看')
-        .fontSize(10).fontColor(this.isDark ? '#77777C' : '#A0A3A8')
+      Text(this.connected ? '实时' : '重连中')
+        .fontSize(10).fontColor(this.connected ? '#45D483' : (this.isDark ? '#77777C' : '#A0A3A8'))
         .padding({ left: 7, right: 7, top: 3, bottom: 3 })
         .borderRadius(9).backgroundColor(this.isDark ? '#26272C' : '#EEF0F2')
     }
     .width('100%').height(42).padding({ left: 14, right: 14 })
     .alignItems(VerticalAlign.Center)
+  }
+
+  @Builder
+  ChatMessageContent(msg: LiveChatMessage) {
+    if (msg.emotes.length > 0) {
+      Flex({ wrap: FlexWrap.Wrap, direction: FlexDirection.Row, alignItems: ItemAlign.Center }) {
+        if (msg.text.length > 0 && msg.text !== msg.emotes[0].unique && msg.text !== msg.emotes[0].emoji) {
+          Text(msg.text)
+            .fontSize(13).fontColor(this.isDark ? '#E1E2E3' : '#303236').maxLines(3)
+        }
+        ForEach(msg.emotes, (emote: LiveEmoteItem) => {
+          Image(emote.url)
+            .width(emote.unique.startsWith('official_') ? 32 : 44)
+            .height(emote.unique.startsWith('official_') ? 32 : 44)
+            .objectFit(ImageFit.Contain)
+        }, (emote: LiveEmoteItem) => emote.unique + emote.url)
+      }
+      .layoutWeight(1)
+    } else {
+      Text(msg.text)
+        .fontSize(13).fontColor(this.isDark ? '#E1E2E3' : '#303236')
+        .layoutWeight(1).maxLines(3)
+    }
   }
 
   @Builder
@@ -192,9 +305,7 @@ export struct LiveRoomPage {
             Text(msg.uname.length > 0 ? msg.uname : '观众')
               .fontSize(11).fontColor(this.accent).maxLines(1)
               .constraintSize({ maxWidth: 110 })
-            Text(msg.text)
-              .fontSize(13).fontColor(this.isDark ? '#E1E2E3' : '#303236')
-              .layoutWeight(1).maxLines(3)
+            this.ChatMessageContent(msg)
           }
           .width('100%').padding({ left: 14, right: 14 })
           .alignItems(VerticalAlign.Top)
@@ -203,6 +314,90 @@ export struct LiveRoomPage {
     }
     .width('100%').layoutWeight(1).scrollBar(BarState.Off)
     .contentEndOffset(Immersive.bottomInset() + 18)
+  }
+
+  @Builder
+  LiveEmotePanel() {
+    Column() {
+      if (this.emoteLoading) {
+        Row() { LoadingProgress().width(24).height(24).color(this.accent) }
+          .width('100%').height(170).justifyContent(FlexAlign.Center)
+      } else if (this.emotePackages.length === 0) {
+        Text('暂无可发送的直播表情').fontSize(12).fontColor('#9499A0')
+          .width('100%').height(170).textAlign(TextAlign.Center)
+      } else {
+        Grid() {
+          ForEach(this.emotePackages[this.emotePackageIndex].emotes, (emote: LiveEmoteItem) => {
+            GridItem() {
+              Column({ space: 2 }) {
+                Image(emote.url).width(42).height(42).objectFit(ImageFit.Contain)
+                if (emote.emoji.length > 0) {
+                  Text(emote.emoji.replace(/^\[|\]$/g, '')).fontSize(9).fontColor('#9499A0').maxLines(1)
+                }
+              }
+              .width('100%').height('100%').justifyContent(FlexAlign.Center)
+              .onClick(() => this.sendDanmaku(emote))
+            }
+          }, (emote: LiveEmoteItem) => emote.unique)
+        }
+        .width('100%').height(170).columnsTemplate('1fr 1fr 1fr 1fr 1fr 1fr')
+        .rowsGap(4).columnsGap(2).padding({ left: 8, right: 8, top: 6 })
+        .scrollBar(BarState.Off)
+        Scroll() {
+          Row({ space: 4 }) {
+            ForEach(this.emotePackages, (pkg: LiveEmotePackage, index: number) => {
+              Row() {
+                if (pkg.icon.length > 0) Image(pkg.icon).width(28).height(28).objectFit(ImageFit.Contain)
+                else Text(String(index + 1)).fontSize(11).fontColor('#9499A0')
+              }
+              .height(36).padding({ left: 9, right: 9 }).borderRadius(8)
+              .backgroundColor(index === this.emotePackageIndex ? '#22FB7299' : '#00000000')
+              .onClick(() => this.emotePackageIndex = index)
+            }, (pkg: LiveEmotePackage, index: number) => String(pkg.packageType) + String(index))
+          }
+          .padding({ left: 8, right: 8 })
+        }
+        .width('100%').height(42).scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
+      }
+    }
+    .width('100%').height(212)
+    .backgroundColor(this.isDark ? '#232428' : '#F5F6F8')
+    .border({ width: { top: 0.5 }, color: this.isDark ? '#333333' : '#E7E9EC' })
+  }
+
+  @Builder
+  DanmakuComposer() {
+    Column() {
+      Row({ space: 7 }) {
+        TextInput({ placeholder: this.sending ? '发送中…' : '发一条直播弹幕', text: this.draft })
+          .height(38).layoutWeight(1).fontSize(13)
+          .fontColor(this.isDark ? '#FFFFFF' : '#18191C').placeholderColor('#9499A0')
+          .backgroundColor(this.isDark ? '#292A2E' : '#EEF0F2').borderRadius(19)
+          .padding({ left: 14, right: 10 }).enterKeyType(EnterKeyType.Send)
+          .onChange((value: string) => this.draft = value)
+          .onSubmit(() => this.sendDanmaku())
+        Stack({ alignContent: Alignment.Center }) {
+          Image(this.emotePanelOpen ? $r('app.media.ic_keyboard') : $r('app.media.ic_emoji'))
+            .width(23).height(23).renderMode(ImageRenderMode.Template)
+            .fillColor(this.emotePanelOpen ? this.accent : '#9499A0')
+        }
+        .width(38).height(38).borderRadius(19)
+        .onClick(() => {
+          if (!this.ensureLogin()) return;
+          this.emotePanelOpen = !this.emotePanelOpen;
+          if (this.emotePanelOpen) this.loadEmoticons().catch(() => {});
+        })
+        Button('发送').height(36).fontSize(12).fontColor('#FFFFFF')
+          .backgroundColor(this.accent).borderRadius(18)
+          .enabled(!this.sending && this.draft.trim().length > 0)
+          .opacity(!this.sending && this.draft.trim().length > 0 ? 1 : 0.45)
+          .onClick(() => this.sendDanmaku())
+      }
+      .width('100%').padding({ left: 10, right: 10, top: 7, bottom: 7 })
+      if (this.emotePanelOpen) this.LiveEmotePanel()
+    }
+    .width('100%').padding({ bottom: Immersive.bottomInset() })
+    .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
   }
 
   @Builder
@@ -264,6 +459,7 @@ export struct LiveRoomPage {
         this.ChatTabs()
         if (this.chatTab === 0) {
           this.DanmakuList()
+          this.DanmakuComposer()
         } else {
           this.SuperChatList()
         }

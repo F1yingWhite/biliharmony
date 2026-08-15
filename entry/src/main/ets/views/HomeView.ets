@@ -12,6 +12,7 @@ import { UserStore } from '../common/UserStore';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { LiveRoomItem } from '../model/LiveModels';
 import { LiveRoomCard } from '../components/LiveRoomCard';
+import { LayoutTokens } from '../common/LayoutTokens';
 
 /** 悬浮频道切换条：单独订阅 headerFade，滚动逐帧淡出时不再带动整个 HomeView 重建。 */
 @Component
@@ -40,6 +41,7 @@ export struct HomeView {
   @State visualTab: number = 0;
   @State refreshing: boolean = false;
   @State refreshStatus: RefreshStatus = RefreshStatus.Inactive;
+  @State viewportWidth: number = 360;
   @State loadingMore: boolean = false;
   // 每频道独立的分页游标 / 错误文案 / 到底标记，互不串台
   @State recIdx: number = 0;
@@ -51,10 +53,13 @@ export struct HomeView {
   @State recHasMore: boolean = true;
   @State hotHasMore: boolean = true;
   @State liveHasMore: boolean = true;
+  // BasicDataSource 本身不是响应式对象；计数负责驱动“加载态 -> LazyForEach”条件切换。
+  @State recCount: number = 0;
+  @State hotCount: number = 0;
+  @State liveCount: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
-  @StorageProp('glassLevel') glassLevel: number = 1;
   @StorageProp('loginVersion') @Watch('onLoginChanged') loginVersion: number = 0;
   private tabsController: TabsController = new TabsController();
   private recScroller: Scroller = new Scroller();
@@ -67,16 +72,25 @@ export struct HomeView {
   private recFetching: boolean = false;
   private hotFetching: boolean = false;
   private liveFetching: boolean = false;
+  private readonly refreshTriggerOffset: number = 56;
 
   async aboutToAppear(): Promise<void> {
     // 首屏必须等登录 Cookie 从 Preferences 恢复，否则会先缓存一页游客公共推荐。
-    await UserStore.ensureLoaded();
-    await this.loadRecommend(true);
+    try {
+      await UserStore.ensureLoaded();
+      await this.loadRecommend(true);
+    } catch (e) {
+      if (this.recSource.isEmpty()) this.recError = '推荐加载失败，请检查网络后重试';
+    }
   }
 
   async onLoginChanged(): Promise<void> {
-    await UserStore.ensureLoaded();
-    await this.loadRecommend(true);
+    try {
+      await UserStore.ensureLoaded();
+      await this.loadRecommend(true);
+    } catch (e) {
+      if (this.recSource.isEmpty()) this.recError = '推荐加载失败，请检查网络后重试';
+    }
   }
 
   /** 追加前按 key 去重：B 站推荐/热门可能返回已在列表中的视频，避免 LazyForEach 重复 key。 */
@@ -139,6 +153,9 @@ export struct HomeView {
       } else {
         this.recSource.append(this.dedupVideos(this.recSource, list));
       }
+      this.recCount = this.recSource.totalCount();
+    } catch (e) {
+      if (this.recSource.isEmpty()) this.recError = '推荐加载失败，请检查网络后重试';
     } finally {
       this.recFetching = false;
     }
@@ -173,6 +190,7 @@ export struct HomeView {
       } else {
         this.hotSource.append(this.dedupVideos(this.hotSource, list));
       }
+      this.hotCount = this.hotSource.totalCount();
     } finally {
       this.hotFetching = false;
     }
@@ -207,6 +225,7 @@ export struct HomeView {
       } else {
         this.liveSource.append(this.dedupLive(this.liveSource, list));
       }
+      this.liveCount = this.liveSource.totalCount();
     } finally {
       this.liveFetching = false;
     }
@@ -232,7 +251,7 @@ export struct HomeView {
   }
 
   private channelEmpty(feedTab: number): boolean {
-    return feedTab === 0 ? this.recSource.isEmpty() : (feedTab === 1 ? this.hotSource.isEmpty() : this.liveSource.isEmpty());
+    return feedTab === 0 ? this.recCount === 0 : (feedTab === 1 ? this.hotCount === 0 : this.liveCount === 0);
   }
 
   onRefresh(feedTab: number): void {
@@ -259,7 +278,7 @@ export struct HomeView {
   }
 
   @Builder
-  SubTabItem(label: string, index: number, onSwitch: () => void) {
+  SubTabItem(label: string, index: number) {
     Stack({ alignContent: Alignment.Center }) {
       Text(label)
         .fontSize(14)
@@ -272,34 +291,30 @@ export struct HomeView {
     .backgroundColor(this.visualTab === index ? (this.isDark ? '#33FB7299' : '#1FFB7299') : '#00000000')
     .animation({ duration: 180, curve: Curve.EaseOut })
     .onClick(() => {
-      onSwitch();
+      this.switchTab(index);
     })
+  }
+
+  private switchTab(index: number): void {
+    this.tabsController.changeIndex(index);
+    if (index === 0 && this.recSource.isEmpty()) {
+      this.loadRecommend(true).catch(() => {
+      });
+    } else if (index === 1 && this.hotSource.isEmpty()) {
+      this.loadHot(true).catch(() => {
+      });
+    } else if (index === 2 && this.liveSource.isEmpty()) {
+      this.loadLive(true).catch(() => {
+      });
+    }
   }
 
   @Builder
   SubTabs() {
     Row({ space: 2 }) {
-      this.SubTabItem('推荐', 0, () => {
-        this.tabsController.changeIndex(0);
-        if (this.recSource.isEmpty()) {
-          this.loadRecommend(true).catch(() => {
-          });
-        }
-      })
-      this.SubTabItem('热门', 1, () => {
-        this.tabsController.changeIndex(1);
-        if (this.hotSource.isEmpty()) {
-          this.loadHot(true).catch(() => {
-          });
-        }
-      })
-      this.SubTabItem('直播', 2, () => {
-        this.tabsController.changeIndex(2);
-        if (this.liveSource.isEmpty()) {
-          this.loadLive(true).catch(() => {
-          });
-        }
-      })
+      this.SubTabItem('推荐', 0)
+      this.SubTabItem('热门', 1)
+      this.SubTabItem('直播', 2)
     }
     .width(196)
     .height(36)
@@ -315,20 +330,21 @@ export struct HomeView {
     // 这样提示位置不再决定需要下拉多远才能触发刷新。
     Blank()
     .width('100%')
-    .height(52)
+    .height(1)
   }
 
   @Builder
   RefreshIndicator() {
     Row({ space: 8 }) {
-      LoadingProgress()
-        .width(22)
-        .height(22)
-        .color(this.accent)
-      Text(this.refreshStatus === RefreshStatus.Refresh || this.refreshing ? '正在刷新…' :
-        (this.refreshStatus === RefreshStatus.OverDrag ? '松开刷新' : '下拉刷新'))
-        .fontSize(12)
-        .fontColor(this.isDark ? '#CACACE' : '#676B72')
+      if (this.refreshStatus === RefreshStatus.Refresh || this.refreshing) {
+        LoadingProgress()
+          .width(22)
+          .height(22)
+          .color(this.accent)
+        Text('正在刷新…')
+          .fontSize(12)
+          .fontColor(this.isDark ? '#CACACE' : '#676B72')
+      }
     }
     .width('100%')
     .height(44)
@@ -337,8 +353,8 @@ export struct HomeView {
     // 搜索栏和推荐/热门频道栏下方显示，但不参与 Refresh 的下拉距离计算。
     .margin({ top: Immersive.statusBarHeight() + 88 })
     // Done 等结束态不再显示；即使系统状态回调稍晚，请求完成后也立即消失。
-    .opacity(this.refreshing || this.refreshStatus === RefreshStatus.Drag ||
-      this.refreshStatus === RefreshStatus.OverDrag ? 1 : 0)
+    .opacity(this.refreshStatus === RefreshStatus.Refresh || this.refreshing ? 1 : 0)
+    .animation({ duration: 120, curve: Curve.EaseOut })
     .hitTestBehavior(HitTestMode.None)
   }
 
@@ -380,7 +396,7 @@ export struct HomeView {
   VideoFeedList(feedTab: number) {
     List({ space: 10, scroller: feedTab === 0 ? this.recScroller : this.hotScroller }) {
       // footer 挂在 ListItemGroup 上：双列 lanes 下保持整宽居中
-      ListItemGroup({ footer: feedTab === 0 ? this.RecFooter : this.HotFooter }) {
+      ListItemGroup({ footer: this.VideoFeedFooter(feedTab) }) {
         LazyForEach(feedTab === 0 ? this.recSource : this.hotSource, (item: VideoItem) => {
           ListItem() {
             VideoCard({ video: item })
@@ -390,12 +406,15 @@ export struct HomeView {
     }
     .width('100%')
     .height('100%')
-    .lanes(2, 10)
+    .lanes(LayoutTokens.feedColumns(this.viewportWidth), 10)
     .cachedCount(3)
     // 首屏卡片默认位于搜索栏下方。这个间距属于可滚动内容，滚走后不会因头栏重新出现而顶动卡片。
     .contentStartOffset(Immersive.statusBarHeight() + 94)
     .contentEndOffset(Immersive.bottomInset() + 56)
-    .padding({ left: 10, right: 10 })
+    .padding({ left: LayoutTokens.horizontalPadding(this.viewportWidth),
+      right: LayoutTokens.horizontalPadding(this.viewportWidth) })
+    .constraintSize({ maxWidth: LayoutTokens.feedMaxWidth })
+    .alignSelf(ItemAlign.Center)
     .scrollBar(BarState.Off)
     .onScroll((offset: number) => {
       AppTheme.updateHeaderFade(offset);
@@ -424,11 +443,15 @@ export struct HomeView {
         })
       }
     }
-    .width('100%').height('100%').lanes(2, 10)
+    .width('100%').height('100%').lanes(LayoutTokens.feedColumns(this.viewportWidth), 10)
     .cachedCount(3)
     .contentStartOffset(Immersive.statusBarHeight() + 94)
     .contentEndOffset(Immersive.bottomInset() + 56)
-    .padding({ left: 10, right: 10 }).scrollBar(BarState.Off)
+    .padding({ left: LayoutTokens.horizontalPadding(this.viewportWidth),
+      right: LayoutTokens.horizontalPadding(this.viewportWidth) })
+    .constraintSize({ maxWidth: LayoutTokens.feedMaxWidth })
+    .alignSelf(ItemAlign.Center)
+    .scrollBar(BarState.Off)
     .onScroll((offset: number) => AppTheme.updateHeaderFade(offset))
     .onReachEnd(() => this.onReachEnd(2))
   }
@@ -454,10 +477,12 @@ export struct HomeView {
         if (feedTab === 2) this.LiveFeedList()
         else this.VideoFeedList(feedTab)
       }
-      .refreshOffset(48)
-      .pullDownRatio(1)
+      .refreshOffset(this.refreshTriggerOffset)
+      .pullDownRatio(undefined)
       .onStateChange((status: RefreshStatus) => {
-        if (this.tab === feedTab) this.refreshStatus = status;
+        if (this.tab === feedTab) {
+          this.refreshStatus = status;
+        }
       })
       .onRefreshing(() => this.onRefresh(feedTab))
     }
@@ -491,9 +516,15 @@ export struct HomeView {
 
       // 紧凑悬浮频道切换：与搜索栏保持同一玻璃层级，不再用实色横条截断信息流。
       // fade 订阅收敛在 FloatingSubTabs 内，滚动不触发 HomeView 本体重建。
-      FloatingSubTabs({ content: this.SubTabs })
+      FloatingSubTabs() {
+        this.SubTabs()
+      }
     }
     .width('100%')
     .layoutWeight(1)
+    .onAreaChange((oldValue: Area, newValue: Area) => {
+      const width: number = Number(newValue.width);
+      if (!Number.isNaN(width) && width > 0) this.viewportWidth = width;
+    })
   }
 }

@@ -1,6 +1,7 @@
 /**
  * 通用工具：JSON 安全访问、数字/时间格式化等
  */
+import { UIContext } from '@kit.ArkUI';
 
 // ===== JSON 安全访问辅助 =====
 // ArkTS 严格类型下，JSON.parse 返回 Object，需要显式转换后再索引
@@ -140,4 +141,17 @@ export function toHttps(url: string): string {
     return 'https://' + url.substring(7);
   }
   return url;
+}
+
+/** 读取组件在窗口中的位置并换算成 vp：[x, y, w, h]；读不到返回空数组（图片查看器"从点击处放大"用）。 */
+export function componentRectVp(uiContext: UIContext, id: string): Array<number> {
+  try {
+    const info = uiContext.getComponentUtils().getRectangleById(id);
+    const w: number = px2vp(info.size.width);
+    const h: number = px2vp(info.size.height);
+    if (w <= 0 || h <= 0) return [];
+    return [px2vp(info.windowOffset.x), px2vp(info.windowOffset.y), w, h];
+  } catch (e) {
+    return [];
+  }
 }

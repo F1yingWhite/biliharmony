@@ -3,6 +3,7 @@
  * 移植自 PiliPlus lib/http/*.dart
  */
 import { HttpClient, HttpResponse } from '../common/HttpClient';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { WbiSign } from '../common/WbiSign';
 import { appSign } from '../common/AppSign';
 import { RsaUtil } from '../common/RsaUtil';
@@ -12,17 +13,20 @@ import { asObject, asArray, asString, asNumber, asBool, str, randomString, toHtt
 import { VideoItem, VideoDetail, PlayUrlInfo, ReplyData, ReplyItem, ReplyPageData, UserInfo, UserStat, DynamicItem, DynamicPageData, HotSearchItem, UserSearchItem, SearchTypes,
   UserSpaceInfo, SpaceArcData, VideoSearchResult, UserSearchResult, VideoRelationState, HistoryVideoItem, HistoryPageData,
   FavoriteFolderItem, FavoriteFolderPageData, FavoriteVideoPageData, MessageSessionItem, MessageSessionPageData,
-  PrivateMessageItem, PrivateMessagePageData, BiliEmotePackage } from '../model/Models';
-import { LiveChatMessage, LiveDanmakuInfo, LiveDanmakuServer, LivePlayInfo, LiveQualityOption,
-  LiveRoomInfo, LiveRoomItem } from '../model/LiveModels';
+  PrivateMessageItem, PrivateMessagePageData, BiliEmotePackage, RelationUserItem, RelationUserPageData,
+  UserSpaceHeaderItem } from '../model/Models';
+import { LiveChatMessage, LiveDanmakuInfo, LiveDanmakuServer, LiveEmoteItem, LiveEmotePackage, LivePlayInfo,
+  LiveQualityOption, LiveRoomInfo, LiveRoomItem } from '../model/LiveModels';
 
 export class ActionResult {
   ok: boolean = false;
   message: string = '';
+  code: number = 0;
 
-  constructor(ok: boolean, message: string) {
+  constructor(ok: boolean, message: string, code: number = 0) {
     this.ok = ok;
     this.message = message;
+    this.code = code;
   }
 }
 
@@ -59,6 +63,7 @@ class SpaceDecorationInfo {
   light: string = '';
   dark: string = '';
   pendant: string = '';
+  collectionHeaders: Array<UserSpaceHeaderItem> = [];
 }
 
 // ===== 通用：解析 code/data =====
@@ -75,13 +80,29 @@ function getData(resp: HttpResponse): Record<string, Object> | null {
 }
 
 export class BiliApi {
+  /** 当前分 P 同时在看人数；接口失败返回空串，UI 不伪造 0。 */
+  static async getOnlineTotal(aid: number, bvid: string, cid: number): Promise<string> {
+    if (cid <= 0 || (aid <= 0 && bvid.length === 0)) return '';
+    const params: Record<string, string> = { 'cid': String(cid) };
+    if (aid > 0) params['aid'] = String(aid);
+    if (bvid.length > 0) params['bvid'] = bvid;
+    const resp: HttpResponse = await HttpClient.get(Api.onlineTotal + '?' + HttpClient.buildQuery(params),
+      Constants.webHeaders);
+    const data: Record<string, Object> | null = getData(resp);
+    return data === null ? '' : str(data, 'total', '');
+  }
+
   /** 登录用户优先请求 Web 个性化推荐；接口失败时再回退到 App 公共推荐流。 */
   static async getRecommend(idx: number): Promise<Array<VideoItem>> {
     const loggedIn: boolean = HttpClient.getCookie('SESSDATA').length > 0 &&
       HttpClient.getCookie('DedeUserID').length > 0;
     if (loggedIn) {
-      const personalized: Array<VideoItem> = await BiliApi.getRecommendWeb(idx);
-      if (personalized.length > 0) return personalized;
+      try {
+        const personalized: Array<VideoItem> = await BiliApi.getRecommendWeb(idx);
+        if (personalized.length > 0) return personalized;
+      } catch (e) {
+        // WBI key 获取或签名被风控时继续走 App 推荐，不能让首页永久停在加载态。
+      }
     }
     return BiliApi.getRecommendApp(idx);
   }
@@ -305,17 +326,70 @@ export class BiliApi {
     const source: Array<Object> = asArray(data['room']);
     const result: Array<LiveChatMessage> = [];
     for (let i: number = 0; i < source.length; i++) {
-      const raw: Record<string, Object> = asObject(source[i]);
-      const msg: LiveChatMessage = new LiveChatMessage();
-      msg.id = 'history_' + str(raw, 'id_str', String(i));
-      msg.uname = str(raw, 'nickname', '');
-      msg.text = str(raw, 'text', '');
-      const user: Record<string, Object> = asObject(asObject(raw['user'])['base']);
-      msg.face = toHttps(str(user, 'face', ''));
-      msg.color = asNumber(asObject(asObject(raw['user'])['dm_config'])['color'], 0xFFFFFF);
-      result.push(msg);
+      result.push(LiveChatMessage.history(source[i], i));
     }
     return result;
+  }
+
+  static async getLiveEmoticons(roomId: number): Promise<Array<LiveEmotePackage>> {
+    const params: Record<string, string> = { 'platform': 'pc', 'room_id': String(roomId) };
+    const resp: HttpResponse = await HttpClient.get(Api.liveEmoticons + '?' + HttpClient.buildQuery(params),
+      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://live.bilibili.com/' + String(roomId) }));
+    const data: Record<string, Object> | null = getData(resp);
+    if (data === null) return [];
+    const packages: Array<Object> = asArray(data['data']);
+    const result: Array<LiveEmotePackage> = [];
+    for (let i: number = 0; i < packages.length; i++) {
+      const raw: Record<string, Object> = asObject(packages[i]);
+      const pkg: LiveEmotePackage = new LiveEmotePackage();
+      pkg.icon = toHttps(str(raw, 'current_cover', ''));
+      pkg.packageType = asNumber(raw['pkg_type'], 0);
+      const source: Array<Object> = asArray(raw['emoticons']);
+      for (let j: number = 0; j < source.length; j++) {
+        const emote: LiveEmoteItem = LiveEmoteItem.from(source[j]);
+        if (emote.url.length > 0 && emote.unique.length > 0) pkg.emotes.push(emote);
+      }
+      if (pkg.emotes.length > 0) result.push(pkg);
+    }
+    return result;
+  }
+
+  static async sendLiveDanmaku(roomId: number, message: string, emoteUnique: string = ''): Promise<ActionResult> {
+    if (roomId <= 0 || (message.trim().length === 0 && emoteUnique.length === 0)) {
+      return new ActionResult(false, '弹幕内容不能为空');
+    }
+    return BiliApi.actionWithCsrf('登录状态缺少 CSRF，请重新登录', '发送成功', '发送失败',
+      async (csrf: string): Promise<HttpResponse> => {
+        const query: Record<string, string> = { 'web_location': '444.8' };
+        await WbiSign.encWbi(query);
+        const body: Record<string, string> = {
+          'bubble': '0',
+          'msg': emoteUnique.length > 0 ? emoteUnique : message.trim(),
+          'color': '16777215',
+          'mode': '1',
+          'fontsize': '25',
+          'rnd': String(Math.floor(Date.now() / 1000)),
+          'roomid': String(roomId),
+          'csrf': csrf,
+          'csrf_token': csrf,
+        };
+        if (emoteUnique.length > 0) {
+          body['dm_type'] = '1';
+          body['emoticonOptions'] = '[object Object]';
+        } else {
+          body['room_type'] = '0';
+          body['jumpfrom'] = '0';
+          body['reply_mid'] = '0';
+          body['reply_attr'] = '0';
+          body['replay_dmid'] = '';
+          body['statistics'] = '{"appId":100,"platform":5}';
+          body['reply_type'] = '0';
+          body['reply_uname'] = '';
+        }
+        return HttpClient.post(Api.liveSendDanmaku + '?' + HttpClient.buildQuery(query),
+          HttpClient.buildQuery(body),
+          HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://live.bilibili.com/' + String(roomId) }));
+      });
   }
 
   static async getLiveSuperChats(roomId: number): Promise<Array<LiveChatMessage>> {
@@ -406,13 +480,20 @@ export class BiliApi {
   /** 互动接口公共骨架：取 bili_jct 判空 → 发请求 → ok/code/message 统一转结果文案。 */
   private static async actionWithCsrf(csrfError: string, okMessage: string, failMessage: string,
     doRequest: (csrf: string) => Promise<HttpResponse>): Promise<ActionResult> {
+    if (HttpClient.getCookie('SESSDATA').length === 0) {
+      return new ActionResult(false, '登录状态已失效，请重新登录', -101);
+    }
     const csrf: string = HttpClient.getCookie('bili_jct');
-    if (csrf.length === 0) return new ActionResult(false, csrfError);
+    if (csrf.length === 0) return new ActionResult(false, csrfError, -111);
     const resp: HttpResponse = await doRequest(csrf);
-    if (!resp.ok) return new ActionResult(false, '网络请求失败');
+    if (!resp.ok) return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
     const json: Record<string, Object> = resp.json();
-    const ok: boolean = asNumber(json['code'], -1) === 0;
-    return new ActionResult(ok, ok ? okMessage : str(json, 'message', failMessage));
+    const code: number = asNumber(json['code'], -1);
+    const ok: boolean = code === 0;
+    const serverMessage: string = str(json, 'message', '');
+    const message: string = ok ? okMessage :
+      ((serverMessage.length > 0 && serverMessage !== '0' ? serverMessage : failMessage) + ' (' + String(code) + ')');
+    return new ActionResult(ok, message, code);
   }
 
   private static async postVideoAction(url: string, params: Record<string, string>): Promise<ActionResult> {
@@ -426,7 +507,18 @@ export class BiliApi {
   static async likeVideo(aid: number, bvid: string, like: boolean): Promise<ActionResult> {
     const params: Record<string, string> = {
       'aid': String(aid),
-      'like': like ? '1' : '2',
+      // Web 协议：1 点赞、0 取消（2 是点踩，取消点赞误用 2 会把视频踩掉）
+      'like': like ? '1' : '0',
+    };
+    if (bvid.length > 0) params['bvid'] = bvid;
+    return BiliApi.postVideoAction(Api.likeVideo, params);
+  }
+
+  /** 视频点踩/取消踩：同一 like 接口，like=2 点踩、0 取消。 */
+  static async dislikeVideo(aid: number, bvid: string, dislike: boolean): Promise<ActionResult> {
+    const params: Record<string, string> = {
+      'aid': String(aid),
+      'like': dislike ? '2' : '0',
     };
     if (bvid.length > 0) params['bvid'] = bvid;
     return BiliApi.postVideoAction(Api.likeVideo, params);
@@ -559,6 +651,27 @@ export class BiliApi {
     return BiliApi.postVideoAction(Api.replyAdd, params);
   }
 
+  static async likeReply(oid: number, type: number, rpid: number, liked: boolean): Promise<ActionResult> {
+    if (oid <= 0 || type <= 0 || rpid <= 0) return new ActionResult(false, '评论参数无效');
+    return BiliApi.postVideoAction(Api.replyLike, {
+      'oid': String(oid),
+      'type': String(type),
+      'rpid': String(rpid),
+      'action': liked ? '1' : '0',
+    });
+  }
+
+  /** 评论点踩/取消踩：action 1 踩、0 取消。 */
+  static async hateReply(oid: number, type: number, rpid: number, hate: boolean): Promise<ActionResult> {
+    if (oid <= 0 || type <= 0 || rpid <= 0) return new ActionResult(false, '评论参数无效');
+    return BiliApi.postVideoAction(Api.replyHate, {
+      'oid': String(oid),
+      'type': String(type),
+      'rpid': String(rpid),
+      'action': hate ? '1' : '0',
+    });
+  }
+
   // ===== 当前账号可用的 B 站表情包（评论/动态共用官方素材 URL） =====
   static async getUserEmotes(business: string = 'reply'): Promise<Array<BiliEmotePackage>> {
     const params: Record<string, string> = {
@@ -605,13 +718,38 @@ export class BiliApi {
     if (data === null) return result;
     const list: Array<Object> = asArray(data['list']);
     for (let i: number = 0; i < list.length; i++) result.items.push(HistoryVideoItem.from(list[i]));
-    if (result.items.length > 0) {
+    // 官方游标位于 data.cursor；不能用最后一条 aid 推导，否则第二页会重复或直接失效。
+    const cursor: Record<string, Object> = asObject(data['cursor']);
+    result.max = asNumber(cursor['max'], 0);
+    result.viewAt = asNumber(cursor['view_at'], 0);
+    if (result.items.length > 0 && result.viewAt <= 0) {
       const last: HistoryVideoItem = result.items[result.items.length - 1];
       result.max = last.video.aid;
       result.viewAt = last.viewAt;
     }
     result.hasMore = list.length >= 20;
     return result;
+  }
+
+  // ===== 单条动态详情（补齐详情页正文、表情节点与评论 subject） =====
+  static async getDynamicDetail(id: string): Promise<DynamicItem | null> {
+    if (id.length === 0) return null;
+    const params: Record<string, string> = {
+      'timezone_offset': '-480',
+      'id': id,
+      'features': Constants.dynFeatures,
+      'gaia_source': 'Athena',
+      'web_location': '333.1330',
+      'x-bili-device-req-json': '{"platform":"web","device":"pc","spmid":"333.1330"}',
+    };
+    const csrf: string = HttpClient.getCookie('bili_jct');
+    if (csrf.length > 0) params['csrf'] = csrf;
+    const resp: HttpResponse = await HttpClient.get(Api.dynamicDetail + '?' + HttpClient.buildQuery(params),
+      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://t.bilibili.com/' + id }));
+    const data: Record<string, Object> | null = getData(resp);
+    if (data === null) return null;
+    const item: Record<string, Object> = asObject(data['item']);
+    return Object.keys(item).length > 0 ? DynamicItem.from(item) : null;
   }
 
   // ===== 收藏夹 =====
@@ -733,7 +871,8 @@ export class BiliApi {
   // ===== 私信 =====
   static async getMessageSessions(beginTs: number = 0): Promise<MessageSessionPageData> {
     const params: Record<string, string> = {
-      'session_type': '4', 'group_fold': '0', 'unfollow_fold': '0', 'sort_rule': '2',
+      // 1 才是私聊主页；4 是“未关注用户”折叠会话，会导致普通私信列表为空。
+      'session_type': '1', 'group_fold': '1', 'unfollow_fold': '0', 'sort_rule': '2',
       'size': '30', 'build': '0', 'mobi_app': 'web',
     };
     if (beginTs > 0) params['begin_ts'] = String(beginTs);
@@ -742,7 +881,15 @@ export class BiliApi {
       HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
     const data: Record<string, Object> | null = getData(resp);
     const result: MessageSessionPageData = new MessageSessionPageData();
-    if (data === null) return result;
+    if (data === null) {
+      // 失败原因透出到 UI（区分网络错误与业务错误），同时留 hilog 便于定位风控/签名问题。
+      const json: Record<string, Object> = resp.json();
+      result.error = resp.ok ? str(json, 'message', '接口异常') : '网络请求失败 (' + String(resp.status) + ')';
+      hilog.warn(0x0000, 'BiliApi', 'getMessageSessions failed: status=%{public}d code=%{public}d body=%{public}s',
+        resp.status, asNumber(json['code'], -999), resp.body.substring(0, 200));
+      return result;
+    }
+    hilog.info(0x0000, 'BiliApi', 'getMessageSessions ok: sessions=%{public}d', asArray(data['session_list']).length);
     const list: Array<Object> = asArray(data['session_list']);
     const accountIds: Array<string> = [];
     for (let i: number = 0; i < list.length; i++) {
@@ -787,7 +934,17 @@ export class BiliApi {
       HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
     const data: Record<string, Object> | null = getData(resp);
     const result: PrivateMessagePageData = new PrivateMessagePageData();
-    if (data === null) return result;
+    if (data === null) {
+      const json: Record<string, Object> = resp.json();
+      const code: number = asNumber(json['code'], -999);
+      const serverMessage: string = str(json, 'message', str(json, 'msg', ''));
+      result.error = resp.ok ?
+        (serverMessage.length > 0 && serverMessage !== '0' ? serverMessage : '私信接口异常 (' + String(code) + ')') :
+        '网络请求失败 (' + String(resp.status) + ')';
+      hilog.warn(0x0000, 'BiliApi', 'getPrivateMessages failed: talker=%{public}d status=%{public}d code=%{public}d body=%{public}s',
+        talkerId, resp.status, code, resp.body.substring(0, 200));
+      return result;
+    }
     const list: Array<Object> = asArray(data['messages']);
     for (let i: number = 0; i < list.length; i++) result.messages.push(PrivateMessageItem.from(list[i]));
     result.messages.sort((a: PrivateMessageItem, b: PrivateMessageItem) => a.seqno - b.seqno);
@@ -985,6 +1142,29 @@ export class BiliApi {
     return UserStat.from(resp.json());
   }
 
+  static async getRelationUsers(mid: number, mode: string, page: number): Promise<RelationUserPageData> {
+    const result: RelationUserPageData = new RelationUserPageData();
+    if (mid <= 0) return result;
+    const params: Record<string, string> = {
+      'vmid': String(mid),
+      'pn': String(Math.max(1, page)),
+      'ps': '30',
+      'order': 'desc',
+    };
+    if (mode === 'following') params['order_type'] = 'attention';
+    const endpoint: string = mode === 'follower' ? Api.userFollowers : Api.userFollowings;
+    const resp: HttpResponse = await HttpClient.get(endpoint + '?' + HttpClient.buildQuery(params), Constants.webHeaders);
+    const data: Record<string, Object> | null = getData(resp);
+    if (data === null) return result;
+    result.total = asNumber(data['total'], 0);
+    const list: Array<Object> = asArray(data['list']);
+    for (let i: number = 0; i < list.length; i++) {
+      const item: RelationUserItem = RelationUserItem.from(list[i]);
+      if (item.mid > 0) result.users.push(item);
+    }
+    return result;
+  }
+
   // ===== 用户空间：用户信息（WBI 签名） =====
   static async getUserSpaceInfo(mid: number): Promise<UserSpaceInfo | null> {
     const decorationPromise: Promise<SpaceDecorationInfo> = BiliApi.getUserSpaceDecoration(mid);
@@ -1000,6 +1180,7 @@ export class BiliApi {
     const decoration: SpaceDecorationInfo = await decorationPromise;
     if (decoration.light.length > 0) result.topPhoto = decoration.light;
     result.topPhotoDark = decoration.dark;
+    result.collectionHeaders = decoration.collectionHeaders;
     if (result.pendant.length === 0 && decoration.pendant.length > 0) result.pendant = decoration.pendant;
     return result;
   }
@@ -1032,11 +1213,50 @@ export class BiliApi {
     result.dark = toHttps(str(images, 'night_imgurl', ''));
     const collection: Record<string, Object> = asObject(images['collection_top_simple']);
     const top: Record<string, Object> = asObject(collection['top']);
-    const imgUrls: Array<Object> = asArray(top['img_urls']);
-    if (imgUrls.length > 0) {
-      const first: Record<string, Object> = asObject(imgUrls[0]);
-      const collectionImage: string = toHttps(str(first, 'img_url', str(first, 'url', asString(imgUrls[0], ''))));
-      if (collectionImage.length > 0) result.light = collectionImage;
+    // PiliPlus 当前模型读取的是 top.result，而不是旧实现误写的 img_urls。
+    // 典藏卡每页的展示图位于 item.image.default_image；cover 是查看原图时
+    // 使用的完整封面，同时也是动画典藏卡没有静态图时的回退。
+    const collectionItems: Array<Object> = asArray(top['result']);
+    for (let i: number = 0; i < collectionItems.length; i++) {
+      const entry: Record<string, Object> = asObject(collectionItems[i]);
+      const item: Record<string, Object> = asObject(entry['item']);
+      const image: Record<string, Object> = asObject(item['image']);
+      const animation: Record<string, Object> = asObject(item['animation']);
+      const cover: string = toHttps(str(entry, 'cover', ''));
+      const firstFrame: string = toHttps(str(animation, 'animation_first_frame', ''));
+      const backup: string = toHttps(str(animation, 'animation_backup_image', ''));
+      const header: string = toHttps(str(image, 'default_image',
+        firstFrame.length > 0 ? firstFrame : (backup.length > 0 ? backup : cover)));
+      const animationUrls: Array<Object> = asArray(animation['animation_video_urls']);
+      const headerItem: UserSpaceHeaderItem = new UserSpaceHeaderItem();
+      headerItem.preview = header;
+      headerItem.fullCover = cover.length > 0 ? cover : header;
+      // width/height 是竖版原画画布，location 才是官方指定的取景区域。
+      // 静态与动画元数据必须整组读取，避免 image 宽度和 animation 高度混用。
+      const mediaMeta: Record<string, Object> = Object.keys(animation).length > 0 ? animation : image;
+      headerItem.sourceWidth = asNumber(mediaMeta['width'], 0);
+      headerItem.sourceHeight = asNumber(mediaMeta['height'], 0);
+      const locationParts: Array<string> = str(mediaMeta, 'location', '').split('-');
+      if (locationParts.length === 4 && headerItem.sourceWidth > 0 && headerItem.sourceHeight > 0) {
+        const cropX: number = Number(locationParts[0]);
+        const cropY: number = Number(locationParts[1]);
+        const cropWidth: number = Number(locationParts[2]);
+        const cropHeight: number = Number(locationParts[3]);
+        if (!Number.isNaN(cropX) && !Number.isNaN(cropY) && !Number.isNaN(cropWidth) &&
+          !Number.isNaN(cropHeight) && cropWidth > 0 && cropHeight > 0) {
+          headerItem.focusX = Math.max(0, Math.min(1, (cropX + cropWidth / 2) / headerItem.sourceWidth));
+          headerItem.focusY = Math.max(0, Math.min(1, (cropY + cropHeight / 2) / headerItem.sourceHeight));
+        }
+      } else if (headerItem.sourceHeight > headerItem.sourceWidth && headerItem.sourceWidth > 0) {
+        // 旧典藏没有 location 时优先展示原画上半部，避免人物面部被居中裁掉。
+        headerItem.focusY = 0.36;
+      }
+      if (animationUrls.length > 0) headerItem.animationUrl = toHttps(asString(animationUrls[0], ''));
+      if (headerItem.preview.length === 0 && headerItem.animationUrl.length === 0) continue;
+      result.collectionHeaders.push(headerItem);
+    }
+    if (result.collectionHeaders.length > 0) {
+      result.light = result.collectionHeaders[0].preview;
     }
     const card: Record<string, Object> = asObject(data['card']);
     const pendant: Record<string, Object> = asObject(card['pendant']);

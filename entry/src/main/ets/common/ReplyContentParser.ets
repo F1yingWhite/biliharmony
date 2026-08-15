@@ -1,4 +1,4 @@
-import { BiliEmote, ReplyItem, ReplyJump } from '../model/Models';
+import { BiliEmote, ReplyItem, ReplyJump, ReplyMention } from '../model/Models';
 
 // 模块级正则与结果缓存：列表重渲染会反复解析同一条评论，避免重复建正则与重复解析
 const BVID_REGEX: RegExp = /BV[0-9A-Za-z]{10}/;
@@ -17,6 +17,7 @@ export class ReplyRenderPart {
   seekSeconds: number = -1;
   bvid: string = '';
   aid: number = 0;
+  mentionMid: number = 0;
   key: string = '';
 }
 
@@ -56,7 +57,11 @@ function pushText(result: Array<ReplyRenderPart>, item: ReplyItem, text: string,
  */
 export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
   // key 含 rpid：不同评论正文可能相同，而片段 key 取自 rpid，混在一起会拿到错误的渲染 key
-  const cacheKey: string = String(item.rpid) + '\n' + item.content;
+  let mentionSignature: string = '';
+  for (let i: number = 0; i < item.mentions.length; i++) {
+    mentionSignature += '|' + item.mentions[i].label + ':' + String(item.mentions[i].mid);
+  }
+  const cacheKey: string = String(item.rpid) + '\n' + item.content + mentionSignature;
   const cached: Array<ReplyRenderPart> | undefined = parseCache.get(cacheKey);
   if (cached !== undefined) {
     return cached.slice();
@@ -69,6 +74,7 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
     let foundLength: number = 0;
     let foundEmote: BiliEmote | null = null;
     let foundJump: ReplyJump | null = null;
+    let foundMention: ReplyMention | null = null;
     let foundToken: string = '';
 
     for (let i: number = 0; i < item.emotes.length; i++) {
@@ -78,6 +84,7 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
         foundLength = item.emotes[i].text.length;
         foundEmote = item.emotes[i];
         foundJump = null;
+        foundMention = null;
         foundToken = '';
       }
     }
@@ -91,6 +98,18 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
         foundLength = item.jumps[i].label.length;
         foundEmote = null;
         foundJump = item.jumps[i];
+        foundMention = null;
+        foundToken = '';
+      }
+    }
+    for (let i: number = 0; i < item.mentions.length; i++) {
+      const at: number = rest.indexOf(item.mentions[i].label);
+      if (at >= 0 && at < foundAt) {
+        foundAt = at;
+        foundLength = item.mentions[i].label.length;
+        foundEmote = null;
+        foundJump = null;
+        foundMention = item.mentions[i];
         foundToken = '';
       }
     }
@@ -104,6 +123,7 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
         foundLength = trimmed.length;
         foundEmote = null;
         foundJump = null;
+        foundMention = null;
         foundToken = trimmed;
       }
     }
@@ -118,6 +138,17 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
     if (foundEmote !== null) {
       part.image = foundEmote.url;
       part.imageSize = foundEmote.size;
+    } else if (foundMention !== null) {
+      part.text = foundMention.label;
+      part.mentionMid = foundMention.mid;
+      // 接口正文常见“@用户名 : 内容”。如果冒号继续作为下一个 Text 片段，
+      // Flex 在窄屏会把冒号单独换到下一行；将它连同周边空格一起消费并绑定到 @。
+      const mentionTail: string = rest.substring(foundAt + foundLength);
+      const colonMatch: RegExpExecArray | null = /^\s*([:：])\s*/.exec(mentionTail);
+      if (colonMatch !== null) {
+        part.text += colonMatch[1];
+        foundLength += colonMatch[0].length;
+      }
     } else {
       part.text = foundJump !== null ? foundJump.label : foundToken;
       const target: string = foundJump !== null ? foundJump.url : foundToken;

@@ -4,24 +4,61 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { promptAction } from '@kit.ArkUI';
 import { systemShare } from '@kit.ShareKit';
-import { ImageViewerParam } from '../common/AppRouter';
+import { AppNavStack, ImageViewerParam } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { BackButton } from '../components/BackButton';
+import { biliImageThumbnail } from '../common/ImageUrl';
 
 @Component
 struct ZoomableImage {
   @Prop source: string = '';
+  @Prop previewSource: string = '';
+  @Prop transitionId: string = '';
   onLongPress: () => void = () => {};
   onZoomChange: (zoomed: boolean) => void = () => {};
   @State scaleValue: number = 1;
   @State offsetX: number = 0;
   @State offsetY: number = 0;
+  @State viewportWidth: number = 0;
+  @State viewportHeight: number = 0;
   private pinchBase: number = 1;
+  private pinchBaseX: number = 0;
+  private pinchBaseY: number = 0;
+  private pinchCenterX: number = 0;
+  private pinchCenterY: number = 0;
   private panBaseX: number = 0;
   private panBaseY: number = 0;
 
   private clampScale(value: number): number {
     return Math.max(1, Math.min(5, value));
+  }
+
+  private clampX(value: number, scale: number): number {
+    const limit: number = Math.max(0, this.viewportWidth * 0.5 * (scale - 1));
+    return Math.max(-limit, Math.min(limit, value));
+  }
+
+  private clampY(value: number, scale: number): number {
+    const limit: number = Math.max(0, this.viewportHeight * 0.5 * (scale - 1));
+    return Math.max(-limit, Math.min(limit, value));
+  }
+
+  /** 保持 focus 对应的图片内容缩放前后仍停在 focus 下方。 */
+  private zoomAt(targetScale: number, focusX: number, focusY: number, animated: boolean): void {
+    const nextScale: number = this.clampScale(targetScale);
+    const ratio: number = nextScale / Math.max(0.01, this.scaleValue);
+    const centeredX: number = focusX - this.viewportWidth * 0.5;
+    const centeredY: number = focusY - this.viewportHeight * 0.5;
+    const nextX: number = this.clampX(centeredX - (centeredX - this.offsetX) * ratio, nextScale);
+    const nextY: number = this.clampY(centeredY - (centeredY - this.offsetY) * ratio, nextScale);
+    const update = (): void => {
+      this.scaleValue = nextScale;
+      this.offsetX = nextX;
+      this.offsetY = nextY;
+    };
+    if (animated) animateTo({ duration: 180, curve: Curve.EaseOut }, update);
+    else update();
+    this.onZoomChange(nextScale > 1.05);
   }
 
   private resetTransform(animated: boolean): void {
@@ -38,19 +75,34 @@ struct ZoomableImage {
   build() {
     Stack({ alignContent: Alignment.Center }) {
       Image(this.source)
+        .alt(this.previewSource)
         .width('100%')
         .height('100%')
         .objectFit(ImageFit.Contain)
+        .sharedTransition(this.transitionId, { duration: 300, curve: Curve.EaseInOut })
         .scale({ x: this.scaleValue, y: this.scaleValue })
         .translate({ x: this.offsetX, y: this.offsetY })
         .gesture(
           GestureGroup(GestureMode.Parallel,
             PinchGesture({ fingers: 2 })
-              .onActionStart(() => {
+              .onActionStart((event: GestureEvent) => {
                 this.pinchBase = this.scaleValue;
+                this.pinchBaseX = this.offsetX;
+                this.pinchBaseY = this.offsetY;
+                this.pinchCenterX = event.pinchCenterX;
+                this.pinchCenterY = event.pinchCenterY;
               })
               .onActionUpdate((event: GestureEvent) => {
-                this.scaleValue = this.clampScale(this.pinchBase * event.scale);
+                const nextScale: number = this.clampScale(this.pinchBase * event.scale);
+                const ratio: number = nextScale / Math.max(0.01, this.pinchBase);
+                const startX: number = this.pinchCenterX - this.viewportWidth * 0.5;
+                const startY: number = this.pinchCenterY - this.viewportHeight * 0.5;
+                const currentX: number = event.pinchCenterX - this.viewportWidth * 0.5;
+                const currentY: number = event.pinchCenterY - this.viewportHeight * 0.5;
+                // 缩放与两指中心移动一起计算；锚点不再固定在画面中心。
+                this.offsetX = this.clampX(currentX - (startX - this.pinchBaseX) * ratio, nextScale);
+                this.offsetY = this.clampY(currentY - (startY - this.pinchBaseY) * ratio, nextScale);
+                this.scaleValue = nextScale;
                 this.onZoomChange(this.scaleValue > 1.05);
                 if (this.scaleValue <= 1.01) this.resetTransform(false);
               })
@@ -58,34 +110,45 @@ struct ZoomableImage {
                 if (this.scaleValue < 1.05) this.resetTransform(true);
               }),
             // 原始尺寸下不要截获横滑，交由外层 Swiper 切换图片。
-            PanGesture({ fingers: 1, direction: this.scaleValue > 1.05 ? PanDirection.All : PanDirection.None })
+            PanGesture({ fingers: 1, direction: this.scaleValue > 1.05 ? PanDirection.All : PanDirection.None, distance: 1 })
               .onActionStart(() => {
                 this.panBaseX = this.offsetX;
                 this.panBaseY = this.offsetY;
               })
               .onActionUpdate((event: GestureEvent) => {
                 if (this.scaleValue <= 1) return;
-                const limitX: number = 180 * (this.scaleValue - 1);
-                const limitY: number = 320 * (this.scaleValue - 1);
-                this.offsetX = Math.max(-limitX, Math.min(limitX, this.panBaseX + event.offsetX));
-                this.offsetY = Math.max(-limitY, Math.min(limitY, this.panBaseY + event.offsetY));
+                // 高倍缩放时同样的手指位移在画面上显得偏慢，做有上限的倍率补偿保持跟手。
+                const followRate: number = Math.min(1.6, 0.75 + this.scaleValue * 0.35);
+                this.offsetX = this.clampX(this.panBaseX + event.offsetX * followRate, this.scaleValue);
+                this.offsetY = this.clampY(this.panBaseY + event.offsetY * followRate, this.scaleValue);
               }),
             TapGesture({ count: 2 })
-              .onAction(() => {
+              .onAction((event: GestureEvent) => {
                 if (this.scaleValue > 1.05) this.resetTransform(true);
                 else {
-                  animateTo({ duration: 180, curve: Curve.EaseOut }, () => this.scaleValue = 2.5);
-                  this.onZoomChange(true);
+                  const finger: FingerInfo | undefined = event.fingerList.length > 0 ? event.fingerList[0] : undefined;
+                  const focusX: number = finger !== undefined ? finger.localX : this.viewportWidth * 0.5;
+                  const focusY: number = finger !== undefined ? finger.localY : this.viewportHeight * 0.5;
+                  this.zoomAt(2.5, focusX, focusY, true);
                 }
-              }),
-            LongPressGesture({ fingers: 1, repeat: false, duration: 500 })
-              .onAction(() => this.onLongPress())
+            })
           )
+        )
+        // Swiper 的横滑识别会与图片长按竞争；高优先级长按保证按住图片一定弹出操作菜单。
+        .priorityGesture(
+          LongPressGesture({ fingers: 1, repeat: false, duration: 450 })
+            .onAction(() => this.onLongPress())
         )
     }
     .width('100%')
     .height('100%')
     .clip(true)
+    .onAreaChange((oldValue: Area, newValue: Area) => {
+      const width: number = Number.parseFloat(String(newValue.width));
+      const height: number = Number.parseFloat(String(newValue.height));
+      if (Number.isFinite(width) && width > 0) this.viewportWidth = width;
+      if (Number.isFinite(height) && height > 0) this.viewportHeight = height;
+    })
   }
 }
 
@@ -96,10 +159,22 @@ export struct ImageViewerPage {
   @State saving: boolean = false;
   @State actionMenuOpen: boolean = false;
   @State currentZoomed: boolean = false;
+  @StorageProp('imageViewerCloseRequest') @Watch('onCloseRequested') closeRequest: number = 0;
+  private closing: boolean = false;
 
   aboutToAppear(): void {
     this.currentIndex = Math.max(0, Math.min(this.param.images.length - 1, this.param.initialIndex));
     Immersive.setBarIcons(true, true);
+  }
+
+  onCloseRequested(): void {
+    this.goBack();
+  }
+
+  goBack(): void {
+    if (this.closing) return;
+    this.closing = true;
+    AppNavStack.pop();
   }
 
   private currentUrl(): string {
@@ -108,11 +183,7 @@ export struct ImageViewerPage {
 
   /** 非当前页用缩略参数图（B 站 @<宽>w 后缀），滑到该页时再加载原图。 */
   private thumbUrl(url: string): string {
-    const clean: string = url.split('?')[0];
-    if (clean.indexOf('hdslb.com') < 0) {
-      return url;
-    }
-    return clean + '@640w.webp';
+    return biliImageThumbnail(url, 640);
   }
 
   private imageExtension(url: string): string {
@@ -187,43 +258,54 @@ export struct ImageViewerPage {
         .backgroundColor('#66000000')
         .onClick(() => this.actionMenuOpen = false)
       Column({ space: 8 }) {
-        Text('图片操作')
-          .fontSize(13)
-          .fontColor('#9499A0')
-          .width('100%')
-          .textAlign(TextAlign.Center)
-          .padding({ top: 6, bottom: 2 })
-        SaveButton({ icon: SaveIconStyle.FULL_FILLED, text: SaveDescription.SAVE_IMAGE,
-          buttonType: ButtonType.Normal })
-          .width('100%')
-          .height(48)
+        Text('图片')
           .fontSize(16)
-          .borderRadius(12)
-          .onClick((event: ClickEvent, result: SaveButtonOnClickResult) => {
-            this.actionMenuOpen = false;
-            if (result === SaveButtonOnClickResult.SUCCESS) this.saveCurrentImage();
-          })
-        Button('分享图片')
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#F2F2F4')
           .width('100%')
+          .padding({ left: 2, top: 2, bottom: 8 })
+        Row({ space: 12 }) {
+          SaveButton({ icon: SaveIconStyle.FULL_FILLED, text: SaveDescription.SAVE_IMAGE,
+            buttonType: ButtonType.Normal })
+            .width('48%')
+            .height(48)
+            .fontSize(14)
+            .fontColor('#F2F2F4')
+            .backgroundColor('#2A2C31')
+            .borderRadius(14)
+            .onClick((event: ClickEvent, result: SaveButtonOnClickResult) => {
+              this.actionMenuOpen = false;
+              if (result === SaveButtonOnClickResult.SUCCESS) this.saveCurrentImage();
+            })
+          Button() {
+            Row({ space: 7 }) {
+              Image($r('app.media.ic_share'))
+                .width(18)
+                .height(18)
+                .renderMode(ImageRenderMode.Template)
+                .fillColor('#F2F2F4')
+              Text('分享').fontSize(14).fontColor('#F2F2F4')
+            }
+          }
+          .width('48%')
           .height(48)
-          .fontSize(16)
-          .fontColor('#18191C')
-          .backgroundColor('#F4F5F7')
-          .borderRadius(12)
+          .backgroundColor('#2A2C31')
+          .borderRadius(14)
           .onClick(() => this.shareCurrentImage())
-        Button('取消')
+        }
+        .width('100%')
+        Text('取消')
           .width('100%')
-          .height(48)
-          .fontSize(16)
-          .fontColor('#61666D')
-          .backgroundColor('#F4F5F7')
-          .borderRadius(12)
+          .height(42)
+          .fontSize(14)
+          .fontColor('#A8ABB2')
+          .textAlign(TextAlign.Center)
           .onClick(() => this.actionMenuOpen = false)
       }
       .width('100%')
-      .padding({ left: 16, right: 16, top: 12, bottom: Immersive.bottomInset() + 12 })
+      .padding({ left: 16, right: 16, top: 16, bottom: Immersive.bottomInset() + 8 })
       .borderRadius({ topLeft: 20, topRight: 20 })
-      .backgroundColor('#FFFFFF')
+      .backgroundColor('#191A1F')
     }
     .width('100%')
     .height('100%')
@@ -231,11 +313,19 @@ export struct ImageViewerPage {
 
   build() {
     Stack({ alignContent: Alignment.Center }) {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#000000')
+
       if (this.param.images.length > 0) {
         Swiper() {
           ForEach(this.param.images, (source: string, index: number) => {
             ZoomableImage({
               source: index === this.currentIndex ? source : this.thumbUrl(source),
+              previewSource: this.thumbUrl(source),
+              transitionId: index === this.currentIndex && index === this.param.initialIndex ?
+                (this.param.transitionId ?? '') : '',
               onLongPress: () => this.actionMenuOpen = true,
               onZoomChange: (zoomed: boolean) => this.currentZoomed = zoomed,
             })
@@ -257,7 +347,8 @@ export struct ImageViewerPage {
       // 顶部只放返回键，页码固定在底部，不再悬在图片正中央。
       Column() {
         Row() {
-          BackButton({ triggerWidth: 44, triggerHeight: 44, fontSize: 34, color: '#FFFFFF', nudgeY: 0 })
+          BackButton({ triggerWidth: 44, triggerHeight: 44, fontSize: 34, color: '#FFFFFF', nudgeY: 0,
+            onBack: () => this.goBack() })
           Blank()
         }
         .width('100%')
@@ -285,7 +376,7 @@ export struct ImageViewerPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#000000')
+    .backgroundColor('#00000000')
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 }

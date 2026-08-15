@@ -13,8 +13,9 @@ export struct DecoratedAvatar {
   @Prop avatarBorderWidth: number = 0;
   @Prop avatarBorderColor: string = '#00FFFFFF';
 
-  build() {
-    Stack({ alignContent: Alignment.Center }) {
+  @Builder
+  AvatarImage() {
+    if (this.avatarBorderWidth > 0) {
       Image(this.face.length > 0 ? this.face : $r('app.media.placeholder_avatar_noface'))
         .width(this.avatarSize)
         .height(this.avatarSize)
@@ -22,6 +23,21 @@ export struct DecoratedAvatar {
         .objectFit(ImageFit.Cover)
         .border({ width: this.avatarBorderWidth, color: this.avatarBorderColor })
         .clip(true)
+    } else {
+      // ArkUI 即使收到 0 宽边框也可能在圆形裁切边缘留下半透明描边；
+      // 普通头像与带挂件头像完全不挂 border 修饰器。
+      Image(this.face.length > 0 ? this.face : $r('app.media.placeholder_avatar_noface'))
+        .width(this.avatarSize)
+        .height(this.avatarSize)
+        .borderRadius(this.avatarSize / 2)
+        .objectFit(ImageFit.Cover)
+        .clip(true)
+    }
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.Center }) {
+      this.AvatarImage()
       if (this.pendant.length > 0) {
         Image(this.pendant)
           .width(this.avatarSize * this.pendantScale)
@@ -40,6 +56,7 @@ export struct DecoratedAvatar {
 @Component
 export struct UserDecorationBanner {
   @Prop imageUrl: string = '';
+  @Prop numberPrefix: string = 'NO.';
   @Prop numberText: string = '';
   @Prop numberColor: string = '#FFFFFF';
   @Prop bannerHeight: number = 46;
@@ -61,7 +78,7 @@ export struct UserDecorationBanner {
       }
       if (this.numberText.length > 0) {
         Column({ space: 0 }) {
-          Text('No.')
+          Text(this.numberPrefix.length > 0 ? this.numberPrefix.toUpperCase() : 'NO.')
             .fontSize(6)
             .lineHeight(8)
             .fontColor(this.numberColor)
@@ -73,13 +90,12 @@ export struct UserDecorationBanner {
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
-          // 右端通常是角色/徽标图案；编号放进其左侧的独立安全区，避免覆盖装扮主体。
-          .width(42)
+          // 972:162 装扮图的最右侧 1:1 区域专门留给粉丝编号；
+          // 与背景图同高并右对齐，保持在装扮内容上层，不另加深色胶囊。
+          .width(this.bannerHeight)
+          .height(this.bannerHeight)
           .alignItems(HorizontalAlign.Center)
-          .padding({ left: 3, right: 3, top: 1, bottom: 1 })
-          .borderRadius(5)
-          .backgroundColor('#33000000')
-          .margin({ top: 6, right: 78 })
+          .justifyContent(FlexAlign.Center)
           .hitTestBehavior(HitTestMode.None)
       }
     }

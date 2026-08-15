@@ -20,7 +20,6 @@ export class AppTheme {
   static readonly MODE_DARK: string = 'dark';
   static readonly KEY_HEADER_FADE: string = 'headerFade';
   static readonly KEY_GLASS_ENABLED: string = 'glassEnabled';
-  static readonly KEY_GLASS_LEVEL: string = 'glassLevel';
   private static nativeModeApplier: ((mode: string) => void) | null = null;
 
   /** 初始化主题状态 */
@@ -29,7 +28,6 @@ export class AppTheme {
     PersistentStorage.persistProp<string>(AppTheme.KEY_ACCENT, Constants.brandPink);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_DARK, false);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_GLASS_ENABLED, true);
-    PersistentStorage.persistProp<number>(AppTheme.KEY_GLASS_LEVEL, 1);
     if (AppStorage.get<string>(AppTheme.KEY_ACCENT) === undefined) {
       AppStorage.setOrCreate<string>(AppTheme.KEY_ACCENT, Constants.brandPink);
     }
@@ -47,9 +45,6 @@ export class AppTheme {
     }
     if (AppStorage.get<boolean>(AppTheme.KEY_GLASS_ENABLED) === undefined) {
       AppStorage.setOrCreate<boolean>(AppTheme.KEY_GLASS_ENABLED, true);
-    }
-    if (AppStorage.get<number>(AppTheme.KEY_GLASS_LEVEL) === undefined) {
-      AppStorage.setOrCreate<number>(AppTheme.KEY_GLASS_LEVEL, 1);
     }
   }
 
@@ -144,7 +139,7 @@ export class AppTheme {
     return isDarkColor(AppTheme.getAccent());
   }
 
-  // ===== 模糊材质（设计规范 §3.2：可开关、可调档） =====
+  // ===== 模糊材质（设计规范 §3.2：可开关，强度跟随系统标准档） =====
 
   static isGlassEnabled(): boolean {
     const v: boolean | undefined = AppStorage.get<boolean>(AppTheme.KEY_GLASS_ENABLED);
@@ -155,41 +150,14 @@ export class AppTheme {
     AppStorage.setOrCreate<boolean>(AppTheme.KEY_GLASS_ENABLED, on);
   }
 
-  /** 模糊强度档：0 弱 / 1 标准 / 2 强 */
-  static glassLevel(): number {
-    const v: number | undefined = AppStorage.get<number>(AppTheme.KEY_GLASS_LEVEL);
-    return v ?? 1;
+  /** L2 浮层（顶栏/TabBar/搜索胶囊）模糊材质；总开关关闭时返回 undefined（backgroundBlurStyle 传 undefined 即无模糊） */
+  static floatBlur(on: boolean): BlurStyle | undefined {
+    return on ? BlurStyle.BACKGROUND_REGULAR : undefined;
   }
 
-  static setGlassLevel(level: number): void {
-    AppStorage.setOrCreate<number>(AppTheme.KEY_GLASS_LEVEL, Math.min(2, Math.max(0, level)));
-  }
-
-  /** L2 浮层（顶栏/TabBar/搜索胶囊）模糊材质，假定开关已开 */
-  static floatBlurStyle(level: number): BlurStyle {
-    switch (level) {
-      case 0:
-        return BlurStyle.BACKGROUND_THIN;
-      case 2:
-        return BlurStyle.BACKGROUND_THICK;
-      default:
-        return BlurStyle.BACKGROUND_REGULAR;
-    }
-  }
-
-  /** L3 弹层（筛选面板/菜单）模糊材质：比浮层高一档，封顶 BACKGROUND_THICK */
-  static sheetBlurStyle(level: number): BlurStyle {
-    return level >= 1 ? BlurStyle.BACKGROUND_THICK : BlurStyle.BACKGROUND_REGULAR;
-  }
-
-  /** L2 浮层模糊材质；总开关关闭时返回 undefined（backgroundBlurStyle 传 undefined 即无模糊） */
-  static floatBlur(on: boolean, level: number): BlurStyle | undefined {
-    return on ? AppTheme.floatBlurStyle(level) : undefined;
-  }
-
-  /** L3 弹层模糊材质；总开关关闭时返回 undefined */
-  static sheetBlur(on: boolean, level: number): BlurStyle | undefined {
-    return on ? AppTheme.sheetBlurStyle(level) : undefined;
+  /** L3 弹层（筛选面板/菜单）模糊材质：比浮层高一档；总开关关闭时返回 undefined */
+  static sheetBlur(on: boolean): BlurStyle | undefined {
+    return on ? BlurStyle.BACKGROUND_THICK : undefined;
   }
 
   /** L2 浮层底色：开模糊时半透明（内容透出），关模糊时退化为高不透明度实底 */
@@ -208,28 +176,16 @@ export class AppTheme {
     return isDark ? '#F5141418' : '#F5FFFFFF';
   }
 
-  /** L2 浮层沉浸光感材质档位（假定开关已开）：弱/标准/强 */
-  static floatImmersiveStyle(level: number): uiMaterial.ImmersiveStyle {
-    switch (level) {
-      case 0:
-        return uiMaterial.ImmersiveStyle.ULTRA_THIN;
-      case 2:
-        return uiMaterial.ImmersiveStyle.REGULAR;
-      default:
-        return uiMaterial.ImmersiveStyle.THIN;
-    }
-  }
-
   /**
    * L2 浮层原生沉浸光感材质（systemMaterial 用）；总开关关闭时返回 undefined（退化为 floatBg 实底）。
    * interactive 按压弹性形变 + lightEffect 触控光晕，即原生光感交互反馈。
    */
-  static floatMaterial(on: boolean, level: number): uiMaterial.ImmersiveMaterial | undefined {
+  static floatMaterial(on: boolean): uiMaterial.ImmersiveMaterial | undefined {
     if (!on) {
       return undefined;
     }
     return new uiMaterial.ImmersiveMaterial({
-      style: AppTheme.floatImmersiveStyle(level),
+      style: uiMaterial.ImmersiveStyle.THIN,
       interactive: true,
       lightEffect: { color: Color.White },
     });
