@@ -1,7 +1,7 @@
 /**
  * 视频详情页：沉浸式播放器 + 封面取色动态主题 + 简介/评论/相关
  */
-import { promptAction, display, UIContext } from '@kit.ArkUI';
+import { display, UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
 import { systemShare } from '@kit.ShareKit';
@@ -10,7 +10,7 @@ import { Immersive } from '../common/Immersive';
 import { AppNavStack, NAV_LOGIN, NAV_VIDEO_DETAIL, NAV_USER_SPACE, VideoDetailParam,
   UserSpaceParam } from '../common/AppRouter';
 import { VideoDetail, VideoItem, ReplyItem, PlayUrlInfo, VideoPage, VideoQualityOption, VideoRelationState,
-  BiliEmote, BiliEmotePackage, FavoriteFolderItem, UserStat, SpaceArcData } from '../model/Models';
+  BiliEmote, BiliEmotePackage, FavoriteFolderItem, UserStat, SpaceArcData, SubtitleTrack, UgcSeasonEpisode } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { PlayerView } from '../components/PlayerView';
 import { LoadingView } from '../components/LoadingView';
@@ -28,6 +28,7 @@ import { ReplyThreadPanel } from '../components/ReplyThreadPanel';
 import { VideoActionItem } from '../components/VideoActionItem';
 import { buildReplyTree, ReplyTreeMeta, ReplyTreeSnapshot } from '../common/ReplyTree';
 import { ReplyShareCard, makeReplyQr, sharePixelMapAsImage } from '../components/ReplyShareCard';
+import { ReplySortChips } from '../components/ReplySortChips';
 
 /** 「加载更多」底部块参数：对象字面量按引用传入，状态变化才能驱动 @Builder 刷新。 */
 interface LoadMoreFooterOptions {
@@ -47,11 +48,15 @@ export struct VideoDetailPage {
   @State playUrls: Array<string> = [];
   @State playAudioUrls: Array<string> = [];
   @State qualityOptions: Array<VideoQualityOption> = [];
+  @State subtitleTracks: Array<SubtitleTrack> = [];
   @State currentQuality: number = 0;
   @State currentCid: number = 0;
   @State currentPageIndex: number = 0;
   @State pageSwitchingCid: number = 0;
   @State playerSourceVersion: number = 0;
+  @State initialSeekSeconds: number = 0;
+  @State ugcCount: number = 0;
+  @State ugcPanelOpen: boolean = false;
   @State related: Array<VideoItem> = [];
   @State relatedLoading: boolean = false;
   @State relatedLoadError: string = '';
@@ -120,6 +125,7 @@ export struct VideoDetailPage {
   private replyScroller: Scroller = new Scroller();
   private threadScroller: Scroller = new Scroller();
   private videoProgressSeconds: number = 0;
+  private lastHeartbeatSeconds: number = -1;
   private pageSwitchRequest: number = 0;
   private relatedRecommendIdx: number = 0;
   private destroyed: boolean = false;
@@ -138,7 +144,8 @@ export struct VideoDetailPage {
   private playerCollapseRaw: number = 0;
   private replySource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();
   private threadSource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();
-  private threadAllReplies: Array<ReplyItem> = [];
+  private ugcSource: BasicDataSource<UgcSeasonEpisode> = new BasicDataSource<UgcSeasonEpisode>();
+  @State threadAllReplies: Array<ReplyItem> = [];
   private threadCollapsed: Set<number> = new Set<number>();
   // 回复详情里「回复 @xx」的昵称表，随楼层数据加载重建一次，替代逐条线性查找。
   private threadNameMap: Map<number, string> = new Map<number, string>();
@@ -216,9 +223,18 @@ export struct VideoDetailPage {
   }
 
   private minPlayerHeight(): number {
-    // 暂停后允许任何比例的视频继续收成单行恢复横幅；播放中的长屏视频仍保留
-    // 足够高度显示进度与全屏控件，避免按钮再次溢出播放器边界。
-    return this.playerPlaying ? 112 : 64;
+    // 播放与暂停共用稳定下限；112vp 能完整容纳暂停黑幕和居中继续播放提示。
+    return 112;
+  }
+
+  /** 当前分 P 时长（秒）：弹幕分段数预估用；取不到时回退详情总时长。 */
+  private currentPageDuration(): number {
+    for (let i: number = 0; i < this.detail.pages.length; i++) {
+      if (this.detail.pages[i].cid === this.currentCid && this.detail.pages[i].duration > 0) {
+        return this.detail.pages[i].duration;
+      }
+    }
+    return this.detail.duration;
   }
 
   /** 播放中仅长屏/竖向画幅收缩；暂停后任何画幅都可收成继续播放横幅。 */
@@ -259,11 +275,29 @@ export struct VideoDetailPage {
   onPlayerPlayingChange(playing: boolean): void {
     if (this.playerPlaying === playing) return;
     this.playerPlaying = playing;
+    if (playing === false) this.reportVideoHeartbeat(this.videoProgressSeconds, true);
+  }
+
+  private toast(message: string): void {
+    try {
+      this.toast(message);
+    } catch (e) {
+      // 页面销毁或窗口异常时忽略提示。
+    }
+  }
+
+  /** 播放进度心跳：播放中每 5 秒报一次；暂停/离场强制补报。未登录时 BiliApi 内部直接跳过。 */
+  private reportVideoHeartbeat(seconds: number, force: boolean = false): void {
+    if (seconds <= 0) return;
+    if (force === false && (this.playerPlaying === false || seconds - this.lastHeartbeatSeconds < 5)) return;
+    this.lastHeartbeatSeconds = seconds;
+    BiliApi.reportHeartbeat(this.detail.aid, this.detail.bvid, this.currentCid, seconds).catch(() => {
+    });
   }
 
   expandPlayerForResume(): void {
     if (this.playerCollapseRaw <= 0) return;
-    animateTo({ duration: 220, curve: Curve.EaseOut }, () => {
+    this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseOut }, () => {
       this.playerCollapseRaw = 0;
       this.playerCollapse = 0;
     });
@@ -338,6 +372,7 @@ export struct VideoDetailPage {
 
   aboutToDisappear(): void {
     this.destroyed = true;
+    this.reportVideoHeartbeat(this.videoProgressSeconds, true);
     this.timers.forEach((id: number) => {
       clearTimeout(id);
     });
@@ -433,6 +468,47 @@ export struct VideoDetailPage {
     return followers + ' 粉丝 · ' + videos + ' 视频';
   }
 
+  /** 首次播放地址：先用默认 cid 请求，若服务端返回 last_play_cid 指向其他分 P，则改拉该分 P 并续播。 */
+  private async loadInitialPlayback(detail: VideoDetail): Promise<void> {
+    const initialCid: number = detail.cid > 0 ? detail.cid : (detail.pages.length > 0 ? detail.pages[0].cid : 0);
+    let targetCid: number = initialCid;
+    this.currentCid = initialCid;
+    this.currentPageIndex = 0;
+    for (let i: number = 0; i < detail.pages.length; i++) {
+      if (detail.pages[i].cid === initialCid) {
+        this.currentPageIndex = i;
+        break;
+      }
+    }
+    let info: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, initialCid);
+    if (info === null || info.urls.length === 0 || this.destroyed) return;
+    // 多 P 视频上次停在其他分 P：直接切到该分 P 的地址，让续播位置与画面匹配。
+    if (info.lastPlayCid > 0 && info.lastPlayCid !== initialCid && detail.pages.length > 1) {
+      for (let i: number = 0; i < detail.pages.length; i++) {
+        if (detail.pages[i].cid === info.lastPlayCid) {
+          const lastInfo: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, info.lastPlayCid);
+          if (lastInfo !== null && lastInfo.urls.length > 0 && this.destroyed === false) {
+            info = lastInfo;
+            targetCid = info.lastPlayCid;
+            this.currentPageIndex = i;
+          }
+          break;
+        }
+      }
+    }
+    if (this.destroyed) return;
+    this.currentCid = targetCid;
+    this.playUrl = info.url;
+    this.playUrls = info.urls;
+    this.playAudioUrls = info.audioUrls;
+    this.qualityOptions = info.qualities;
+    this.subtitleTracks = info.subtitles;
+    this.currentQuality = info.quality;
+    // last_play_time 为毫秒；续播位置 = 上次进度。
+    this.initialSeekSeconds = Math.max(0, Math.floor(info.lastPlayTime / 1000));
+    this.lastHeartbeatSeconds = -1;
+  }
+
   private async loadInitialRelated(aid: number, bvid: string): Promise<void> {
     if (this.relatedLoading) return;
     this.relatedLoading = true;
@@ -494,6 +570,7 @@ export struct VideoDetailPage {
       this.likeCount = detail.like;
       this.coinCount = detail.coin;
       this.favoriteCount = detail.favorite;
+      this.rebuildUgcSource();
       this.loadUpStats(detail.upMid);
 
       // 封面取色仅用于本页播放区氛围光，不改全局主题色（主题色由用户自选）
@@ -503,25 +580,8 @@ export struct VideoDetailPage {
         // 取色失败仅影响氛围光，保留默认主题色。
       });
 
-      // 并行加载播放地址 / 相关 / 评论
-      const cid: number = detail.cid > 0 ? detail.cid : (detail.pages.length > 0 ? detail.pages[0].cid : 0);
-      this.currentCid = cid;
-      this.currentPageIndex = 0;
-      for (let i: number = 0; i < detail.pages.length; i++) {
-        if (detail.pages[i].cid === cid) {
-          this.currentPageIndex = i;
-          break;
-        }
-      }
-      BiliApi.getPlayUrl(detail.aid, detail.bvid, cid).then((info: PlayUrlInfo | null) => {
-        if (info !== null && !this.destroyed) {
-          this.playUrl = info.url;
-          this.playUrls = info.urls;
-          this.playAudioUrls = info.audioUrls;
-          this.qualityOptions = info.qualities;
-          this.currentQuality = info.quality;
-        }
-      }).catch(() => {
+      // 并行加载相关 / 评论；播放地址单独走续播定位逻辑。
+      this.loadInitialPlayback(detail).catch(() => {
         // 播放地址失败由占位封面的「获取播放地址失败」文案呈现。
       });
       this.loadInitialRelated(detail.aid, detail.bvid).catch(() => {
@@ -633,7 +693,7 @@ export struct VideoDetailPage {
   async actionFollow(): Promise<void> {
     if (!this.ensureLogin() || this.followLoading || this.detail.upMid <= 0) return;
     if (UserStore.current !== null && UserStore.current.mid === this.detail.upMid) {
-      promptAction.showToast({ message: '不能关注自己' });
+      this.toast('不能关注自己');
       return;
     }
     const previous: boolean = this.following;
@@ -645,14 +705,14 @@ export struct VideoDetailPage {
       if (this.destroyed) return;
       if (!result.ok) {
         this.following = previous;
-        promptAction.showToast({ message: result.message });
+        this.toast(result.message);
         return;
       }
-      promptAction.showToast({ message: next ? '关注成功' : '已取消关注' });
+      this.toast(next ? '关注成功' : '已取消关注');
     } catch (e) {
       if (!this.destroyed) {
         this.following = previous;
-        promptAction.showToast({ message: '网络异常，请稍后重试' });
+        this.toast('网络异常，请稍后重试');
       }
     } finally {
       if (!this.destroyed) this.followLoading = false;
@@ -661,7 +721,7 @@ export struct VideoDetailPage {
 
   private ensureLogin(): boolean {
     if (UserStore.isLogin) return true;
-    promptAction.showToast({ message: '请先登录后再操作' });
+    this.toast('请先登录后再操作');
     AppNavStack.pushPathByName(NAV_LOGIN, null);
     return false;
   }
@@ -682,53 +742,15 @@ export struct VideoDetailPage {
       if (!result.ok) {
         this.liked = !next;
         this.likeCount = Math.max(0, this.likeCount + (next ? -1 : 1));
-        promptAction.showToast({ message: result.message });
+        this.toast(result.message);
         return;
       }
-      promptAction.showToast({ message: next ? '点赞成功' : '已取消点赞' });
+      this.toast(next ? '点赞成功' : '已取消点赞');
     } catch (e) {
       if (!this.destroyed) {
         this.liked = !next;
         this.likeCount = Math.max(0, this.likeCount + (next ? -1 : 1));
-        promptAction.showToast({ message: '网络异常，请稍后重试' });
-      }
-    } finally {
-      if (!this.destroyed) this.actionBusy = false;
-    }
-  }
-
-  async actionDislike(): Promise<void> {
-    if (!this.ensureLogin() || this.actionBusy) return;
-    this.actionBusy = true;
-    this.likeActionVersion++;
-    const next: boolean = !this.disliked;
-    const wasLiked: boolean = this.liked;
-    // 踩同样乐观更新；点踩会顶掉已点赞（服务端行为一致）。
-    this.disliked = next;
-    if (next && this.liked) {
-      this.liked = false;
-      this.likeCount = Math.max(0, this.likeCount - 1);
-    }
-    const rollback = () => {
-      this.disliked = !next;
-      if (next && wasLiked) {
-        this.liked = true;
-        this.likeCount++;
-      }
-    };
-    try {
-      const result: ActionResult = await BiliApi.dislikeVideo(this.detail.aid, this.detail.bvid, next);
-      if (this.destroyed) return;
-      if (!result.ok) {
-        rollback();
-        promptAction.showToast({ message: result.message });
-        return;
-      }
-      promptAction.showToast({ message: next ? '已点踩' : '已取消点踩' });
-    } catch (e) {
-      if (!this.destroyed) {
-        rollback();
-        promptAction.showToast({ message: '网络异常，请稍后重试' });
+        this.toast('网络异常，请稍后重试');
       }
     } finally {
       if (!this.destroyed) this.actionBusy = false;
@@ -743,12 +765,14 @@ export struct VideoDetailPage {
     this.favorited = next;
     this.favoriteCount = Math.max(0, this.favoriteCount + (next ? 1 : -1));
     try {
-      const folders: Array<FavoriteFolderItem> = await BiliApi.getFavoriteFoldersForVideo(this.detail.aid);
+      const selfMid: number = UserStore.current !== null ? UserStore.current.mid : 0;
+      const folders: Array<FavoriteFolderItem> = await BiliApi.getFavoriteFoldersForVideo(this.detail.aid,
+        selfMid);
       if (this.destroyed) return;
       if (folders.length === 0) {
         this.favorited = !next;
         this.favoriteCount = Math.max(0, this.favoriteCount + (next ? -1 : 1));
-        promptAction.showToast({ message: '未找到可用的收藏夹' });
+        this.toast('未找到可用的收藏夹');
         return;
       }
       const selected: Array<number> = [];
@@ -763,15 +787,33 @@ export struct VideoDetailPage {
       if (!result.ok) {
         this.favorited = !next;
         this.favoriteCount = Math.max(0, this.favoriteCount + (next ? -1 : 1));
-        promptAction.showToast({ message: result.message });
+        this.toast(result.message);
         return;
       }
-      promptAction.showToast({ message: next ? '收藏成功' : '已取消收藏' });
+      this.toast(next ? '收藏成功' : '已取消收藏');
     } catch (e) {
       if (!this.destroyed) {
         this.favorited = !next;
         this.favoriteCount = Math.max(0, this.favoriteCount + (next ? -1 : 1));
-        promptAction.showToast({ message: '网络异常，请稍后重试' });
+        this.toast('网络异常，请稍后重试');
+      }
+    } finally {
+      if (!this.destroyed) this.actionBusy = false;
+    }
+  }
+
+  /** 加入稍后再看：无本地状态需要乐观更新，直接请求后按结果 toast。 */
+  async actionWatchLater(): Promise<void> {
+    if (!this.ensureLogin() || this.actionBusy) return;
+    this.actionBusy = true;
+    try {
+      const result: ActionResult = await BiliApi.addWatchLater(this.detail.aid, this.detail.bvid);
+      if (this.destroyed) return;
+      // 新代码统一走 UIContext 版 PromptAction，避开全局 promptAction 的废弃告警。
+      this.toast(result.ok ? '已加入稍后再看' : result.message);
+    } catch (e) {
+      if (!this.destroyed) {
+        this.toast('网络异常，请稍后重试');
       }
     } finally {
       if (!this.destroyed) this.actionBusy = false;
@@ -789,14 +831,17 @@ export struct VideoDetailPage {
       if (request !== this.pageSwitchRequest || this.destroyed) return;
       this.pageSwitchingCid = 0;
       if (info === null || info.urls.length === 0) {
-        promptAction.showToast({ message: '该分 P 暂时无法播放' });
+        this.toast('该分 P 暂时无法播放');
         return;
       }
       this.playUrl = info.url;
       this.playUrls = info.urls;
       this.playAudioUrls = info.audioUrls;
       this.qualityOptions = info.qualities;
+      this.subtitleTracks = info.subtitles;
       this.currentQuality = info.quality;
+      this.initialSeekSeconds = 0;
+      this.lastHeartbeatSeconds = -1;
       this.currentCid = page.cid;
       this.currentPageIndex = index;
       this.playerCollapseRaw = 0;
@@ -806,15 +851,64 @@ export struct VideoDetailPage {
     } catch (e) {
       if (request === this.pageSwitchRequest && !this.destroyed) {
         this.pageSwitchingCid = 0;
-        promptAction.showToast({ message: '网络异常，切换分 P 失败' });
+        this.toast('网络异常，切换分 P 失败');
       }
     }
+  }
+
+  private rebuildUgcSource(): void {
+    const list: Array<UgcSeasonEpisode> = [];
+    const season = this.detail.ugcSeason;
+    if (season !== null) {
+      for (let i: number = 0; i < season.sections.length; i++) {
+        const section = season.sections[i];
+        for (let j: number = 0; j < section.episodes.length; j++) {
+          const ep: UgcSeasonEpisode = section.episodes[j];
+          ep.sectionTitle = section.title;
+          list.push(ep);
+        }
+      }
+    }
+    this.ugcSource.reset(list);
+    this.ugcCount = this.ugcSource.totalCount();
+  }
+
+  private currentUgcEpisodeIndex(): number {
+    const list: Array<UgcSeasonEpisode> = this.ugcSource.getAll();
+    for (let i: number = 0; i < list.length; i++) {
+      const ep: UgcSeasonEpisode = list[i];
+      if (ep.cid === this.currentCid && ep.bvid === this.detail.bvid) return i;
+      if (ep.cid === this.currentCid && ep.aid === this.detail.aid && ep.bvid.length === 0) return i;
+    }
+    return -1;
+  }
+
+  private nextUgcEpisode(): UgcSeasonEpisode | null {
+    if (this.detail.ugcSeason === null || this.ugcCount <= 0) return null;
+    const idx: number = this.currentUgcEpisodeIndex();
+    if (idx < 0 || idx + 1 >= this.ugcCount) return null;
+    return this.ugcSource.getData(idx + 1);
+  }
+
+  private openUgcEpisode(ep: UgcSeasonEpisode): void {
+    if (ep.aid <= 0 && ep.bvid.length === 0) return;
+    if (ep.cid === this.currentCid && (ep.bvid === this.detail.bvid ||
+      (ep.bvid.length === 0 && ep.aid === this.detail.aid))) return;
+    const param: VideoDetailParam = { bvid: ep.bvid, aid: ep.aid, title: ep.title };
+    AppNavStack.replacePathByName(NAV_VIDEO_DETAIL, param);
+  }
+
+  private onPlayerEnded(): void {
+    const next: UgcSeasonEpisode | null = this.nextUgcEpisode();
+    if (next === null) return;
+    this.toast('自动连播：' + next.title);
+    this.openUgcEpisode(next);
   }
 
   openCoinSheet(): void {
     if (!this.ensureLogin()) return;
     if (this.coinCountByMe >= 2) {
-      promptAction.showToast({ message: '这个视频已经投过 2 枚硬币了' });
+      this.toast('这个视频已经投过 2 枚硬币了');
       return;
     }
     this.coinChoice = this.coinCountByMe === 1 ? 1 : 2;
@@ -854,14 +948,14 @@ export struct VideoDetailPage {
       if (this.destroyed) return;
       if (!result.ok) {
         rollback();
-        promptAction.showToast({ message: result.message });
+        this.toast(result.message);
         return;
       }
-      promptAction.showToast({ message: '投币成功' });
+      this.toast('投币成功');
     } catch (e) {
       if (!this.destroyed) {
         rollback();
-        promptAction.showToast({ message: '网络异常，请稍后重试' });
+        this.toast('网络异常，请稍后重试');
       }
     } finally {
       if (!this.destroyed) this.actionBusy = false;
@@ -871,7 +965,7 @@ export struct VideoDetailPage {
   actionShare(): void {
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
     if (context === undefined) {
-      promptAction.showToast({ message: '无法打开系统分享' });
+      this.toast('无法打开系统分享');
       return;
     }
     const url: string = 'https://www.bilibili.com/video/' + this.detail.bvid;
@@ -883,7 +977,7 @@ export struct VideoDetailPage {
     });
     const controller: systemShare.ShareController = new systemShare.ShareController(data);
     controller.show(context, { previewMode: systemShare.SharePreviewMode.DETAIL }).catch((error: Error) => {
-      promptAction.showToast({ message: '分享失败：' + error.message });
+      this.toast('分享失败：' + error.message);
     });
     if (UserStore.isLogin) {
       BiliApi.reportShare(this.detail.aid, this.detail.bvid);
@@ -990,7 +1084,7 @@ export struct VideoDetailPage {
     if (!meta.hasChildren) return;
     if (this.threadCollapsed.has(item.rpid)) this.threadCollapsed.delete(item.rpid);
     else this.threadCollapsed.add(item.rpid);
-    animateTo({ duration: 180, curve: Curve.EaseOut }, () => {
+    this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, () => {
       this.rebuildThreadTree();
     });
   }
@@ -1027,11 +1121,8 @@ export struct VideoDetailPage {
     try {
       const data = await BiliApi.getReplyReplies(this.detail.aid, 1, this.replyThreadRoot.rpid, page);
       if (this.destroyed) return;
-      if (reset) {
-        this.threadAllReplies = this.mergeUniqueReplies([], data.replies);
-      } else {
-        this.threadAllReplies = this.mergeUniqueReplies(this.threadAllReplies, data.replies);
-      }
+      // 保留 item.replies 里的预览回复：接口偶尔返回空列表时，楼中楼不会变成“有数字但没内容”。
+      this.threadAllReplies = this.mergeUniqueReplies(this.threadAllReplies, data.replies);
       this.rebuildThreadTree();
       this.threadPage = page;
       this.threadHasMore = data.hasMore;
@@ -1078,7 +1169,9 @@ export struct VideoDetailPage {
       showEmoteButton: true,
       emoteOpen: this.emotePanelOpen,
       emotePackages: this.emotePackages,
-      emotePanel: this.VideoThreadEmotePanel,
+      emotePanel: (): void => {
+        this.VideoThreadEmotePanel()
+      },
       onClose: () => this.closeReplyThread(),
       onLike: (item: ReplyItem) => this.actionReplyLike(item),
       onDislike: (item: ReplyItem) => this.actionReplyDislike(item),
@@ -1110,11 +1203,11 @@ export struct VideoDetailPage {
       const result: ActionResult = await BiliApi.addReply(this.detail.aid, 1, content, root, parent);
       if (this.destroyed) return;
       if (!result.ok) {
-        promptAction.showToast({ message: result.message });
+        this.toast(result.message);
         return;
       }
       this.replyDraft = '';
-      promptAction.showToast({ message: this.replyThreadOpen ? '回复成功' : '评论成功' });
+      this.toast(this.replyThreadOpen ? '回复成功' : '评论成功');
       if (this.replyThreadOpen) {
         this.replyTargetRpid = this.replyThreadRoot.rpid;
         this.replyTargetName = this.replyThreadRoot.uname;
@@ -1130,7 +1223,7 @@ export struct VideoDetailPage {
         await this.loadReplies(true);
       }
     } catch (e) {
-      if (!this.destroyed) promptAction.showToast({ message: '网络异常，发送失败' });
+      if (!this.destroyed) this.toast('网络异常，发送失败');
     } finally {
       if (!this.destroyed) this.replySending = false;
     }
@@ -1145,66 +1238,121 @@ export struct VideoDetailPage {
         this.currentCid, this.videoProgressSeconds, message);
       if (this.destroyed) return;
       if (!result.ok) {
-        promptAction.showToast({ message: result.message });
+        this.toast(result.message);
         return;
       }
       this.danmakuDraft = '';
       this.localDanmakuText = message;
       this.localDanmakuToken++;
       if (!this.danmakuOn) this.danmakuOn = true;
-      promptAction.showToast({ message: '弹幕发送成功' });
+      this.toast('弹幕发送成功');
     } catch (e) {
-      if (!this.destroyed) promptAction.showToast({ message: '网络异常，发送失败' });
+      if (!this.destroyed) this.toast('网络异常，发送失败');
     } finally {
       if (!this.destroyed) this.danmakuSending = false;
     }
   }
 
-  /** 评论项原地修改后通知两个 LazyForEach 数据源局部重绑（@State 版本号对懒加载列表不生效）。 */
-  private refreshReplyItem(rpid: number): void {
+  /**
+   * 只查找评论真身，不修改也不触发重建。
+   * 用于点赞/点踩前读取当前状态，避免“先空 mutate 再真实 mutate”导致 UI 闪烁两次。
+   */
+  private findReplyItem(rpid: number): ReplyItem | null {
+    const list: Array<ReplyItem> = this.replySource.getAll();
+    for (let i: number = 0; i < list.length; i++) {
+      if (list[i].rpid === rpid) return list[i];
+    }
+    for (let i: number = 0; i < this.threadAllReplies.length; i++) {
+      if (this.threadAllReplies[i].rpid === rpid) return this.threadAllReplies[i];
+    }
+    if (this.replyThreadRoot.rpid === rpid) return this.replyThreadRoot;
+    return null;
+  }
+
+  /**
+   * 评论项状态修改的统一入口。
+   * 注意：ReplyCard 的 @Prop item 是深拷贝快照，改它既不影响数据源也不会刷新 UI。
+   * 必须在数据源里的"真身"上执行修改，再克隆换引用触发 @Prop 重新同步。
+   * 同一 rpid 可能同时存在于主列表、楼中楼列表和 replyThreadRoot，逐处各改一次（它们各自渲染）。
+   */
+  private mutateReplyItem(rpid: number, mutate: (target: ReplyItem) => void): ReplyItem | null {
+    let found: ReplyItem | null = null;
     const list: Array<ReplyItem> = this.replySource.getAll();
     for (let i: number = 0; i < list.length; i++) {
       if (list[i].rpid === rpid) {
-        this.replySource.notifyItemChanged(i);
+        found = list[i];
+        mutate(list[i]);
+        const next1: ReplyItem = list[i].clone();
+        next1.rev = list[i].rev + 1;
+        this.replySource.updateItem(i, next1);
         break;
       }
     }
-    const thread: Array<ReplyItem> = this.threadSource.getAll();
-    for (let i: number = 0; i < thread.length; i++) {
-      if (thread[i].rpid === rpid) {
-        this.threadSource.notifyItemChanged(i);
+    // 回复详情 Sheet 的数据源是 threadAllReplies（透传给 ReplyThreadPanel 的 @Prop replies）。
+    // 必须在数组里替换成克隆对象并换新数组引用，子组件的 @Watch 才会重建树并刷新点赞态。
+    let threadChanged: boolean = false;
+    for (let i: number = 0; i < this.threadAllReplies.length; i++) {
+      if (this.threadAllReplies[i].rpid === rpid) {
+        if (found === null) found = this.threadAllReplies[i];
+        mutate(this.threadAllReplies[i]);
+        const next2: ReplyItem = this.threadAllReplies[i].clone();
+        next2.rev = this.threadAllReplies[i].rev + 1;
+        const nextThread: Array<ReplyItem> = this.threadAllReplies.slice();
+        nextThread[i] = next2;
+        this.threadAllReplies = nextThread;
+        threadChanged = true;
         break;
       }
+    }
+    if (threadChanged) {
+      // 同步旧的内嵌 ReplyThreadView / threadSource 路径，保持两套实现状态一致。
+      this.rebuildThreadTree();
+    }
+    if (this.replyThreadRoot.rpid === rpid) {
+      if (found === null) found = this.replyThreadRoot;
+      mutate(this.replyThreadRoot);
+      const next3: ReplyItem = this.replyThreadRoot.clone();
+      next3.rev = this.replyThreadRoot.rev + 1;
+      this.replyThreadRoot = next3;
     }
     this.replyLikeVersion++;
+    return found;
   }
 
   async actionReplyLike(item: ReplyItem): Promise<void> {
     if (!this.ensureLogin() || this.replyLikeBusy.has(item.rpid)) return;
     this.replyLikeBusy.add(item.rpid);
-    const next: boolean = !item.liked;
-    // 评论与视频操作保持一致：立即反馈主题色，接口拒绝时再精确回滚。
-    item.liked = next;
-    item.like = Math.max(0, item.like + (next ? 1 : -1));
-    // 赞踩互斥：赞上时本地同步清踩。
-    if (next && item.disliked) item.disliked = false;
-    this.refreshReplyItem(item.rpid);
+    const current: ReplyItem | null = this.findReplyItem(item.rpid);
+    if (current === null) {
+      this.replyLikeBusy.delete(item.rpid);
+      return;
+    }
+    const next: boolean = !current.liked;
+    // 乐观更新：立即反馈主题色，接口拒绝时再精确回滚。赞踩互斥：赞上时本地同步清踩。
+    this.mutateReplyItem(item.rpid, (target: ReplyItem) => {
+      target.liked = next;
+      target.like = Math.max(0, target.like + (next ? 1 : -1));
+      if (next && target.disliked) target.disliked = false;
+    });
     try {
-      const result: ActionResult = await BiliApi.likeReply(this.detail.aid, 1, item.rpid, next);
+      const result: ActionResult = await BiliApi.likeReply(item.oid > 0 ? item.oid : this.detail.aid,
+        item.type > 0 ? item.type : 1, item.rpid, next);
       if (this.destroyed) return;
       if (!result.ok) {
-        item.liked = !next;
-        item.like = Math.max(0, item.like + (next ? -1 : 1));
-        this.refreshReplyItem(item.rpid);
-        promptAction.showToast({ message: result.message });
+        this.mutateReplyItem(item.rpid, (target: ReplyItem) => {
+          target.liked = !next;
+          target.like = Math.max(0, target.like + (next ? -1 : 1));
+        });
+        this.toast(result.message);
         return;
       }
     } catch (e) {
       if (!this.destroyed) {
-        item.liked = !next;
-        item.like = Math.max(0, item.like + (next ? -1 : 1));
-        this.refreshReplyItem(item.rpid);
-        promptAction.showToast({ message: '评论点赞失败，请稍后重试' });
+        this.mutateReplyItem(item.rpid, (target: ReplyItem) => {
+          target.liked = !next;
+          target.like = Math.max(0, target.like + (next ? -1 : 1));
+        });
+        this.toast('评论点赞失败，请稍后重试');
       }
     } finally {
       this.replyLikeBusy.delete(item.rpid);
@@ -1214,35 +1362,43 @@ export struct VideoDetailPage {
   async actionReplyDislike(item: ReplyItem): Promise<void> {
     if (!this.ensureLogin() || this.replyLikeBusy.has(item.rpid)) return;
     this.replyLikeBusy.add(item.rpid);
-    const next: boolean = !item.disliked;
-    const wasLiked: boolean = item.liked;
-    // 踩赞互斥：踩上时本地同步取消赞，失败整体回滚。
-    item.disliked = next;
-    if (next && item.liked) {
-      item.liked = false;
-      item.like = Math.max(0, item.like - 1);
+    const current: ReplyItem | null = this.findReplyItem(item.rpid);
+    if (current === null) {
+      this.replyLikeBusy.delete(item.rpid);
+      return;
     }
-    this.refreshReplyItem(item.rpid);
-    const rollback = () => {
-      item.disliked = !next;
-      if (next && wasLiked) {
-        item.liked = true;
-        item.like++;
+    const next: boolean = !current.disliked;
+    const wasLiked: boolean = current.liked;
+    // 踩赞互斥：踩上时本地同步取消赞，失败整体回滚。
+    this.mutateReplyItem(item.rpid, (target: ReplyItem) => {
+      target.disliked = next;
+      if (next && target.liked) {
+        target.liked = false;
+        target.like = Math.max(0, target.like - 1);
       }
-      this.refreshReplyItem(item.rpid);
+    });
+    const rollback = () => {
+      this.mutateReplyItem(item.rpid, (target: ReplyItem) => {
+        target.disliked = !next;
+        if (next && wasLiked) {
+          target.liked = true;
+          target.like++;
+        }
+      });
     };
     try {
-      const result: ActionResult = await BiliApi.hateReply(this.detail.aid, 1, item.rpid, next);
+      const result: ActionResult = await BiliApi.hateReply(item.oid > 0 ? item.oid : this.detail.aid,
+        item.type > 0 ? item.type : 1, item.rpid, next);
       if (this.destroyed) return;
       if (!result.ok) {
         rollback();
-        promptAction.showToast({ message: result.message });
+        this.toast(result.message);
         return;
       }
     } catch (e) {
       if (!this.destroyed) {
         rollback();
-        promptAction.showToast({ message: '点踩失败，请稍后重试' });
+        this.toast('点踩失败，请稍后重试');
       }
     } finally {
       this.replyLikeBusy.delete(item.rpid);
@@ -1253,9 +1409,9 @@ export struct VideoDetailPage {
   private shareReplyAsImage(item: ReplyItem): void {
     if (this.shareCardBusy) return;
     this.shareCardBusy = true;
-    promptAction.showToast({ message: '正在生成分享图片…' });
+    this.toast('正在生成分享图片…');
     const link: string = 'https://www.bilibili.com/video/' + this.detail.bvid + '#reply' + String(item.rpid);
-    const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+    const context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
     const uiContext: UIContext = this.getUIContext();
     (async () => {
       this.shareCardItem = item;
@@ -1265,7 +1421,7 @@ export struct VideoDetailPage {
         .createFromBuilder((): void => { this.ReplyShareCardBuilder(); }, 400, true);
       await sharePixelMapAsImage(context, pixelMap, 'reply_share_' + String(item.rpid));
     })().catch(() => {
-      promptAction.showToast({ message: '分享图片生成失败，请稍后重试' });
+      this.toast('分享图片生成失败，请稍后重试');
     }).finally(() => {
       this.shareCardBusy = false;
     });
@@ -1377,14 +1533,15 @@ export struct VideoDetailPage {
         Row() {
           VideoActionItem({ icon: $r('app.media.bilix_icon_like'), value: formatCount(this.likeCount),
             active: this.liked, busy: this.actionBusy, onTap: () => this.actionLike() })
-          VideoActionItem({ icon: $r('app.media.ic_dislike'), value: '点踩',
-            active: this.disliked, busy: this.actionBusy, onTap: () => this.actionDislike() })
+          // 视频点踩已移除：B 站点踩仅 App 端协议（需 access_key），cookie 登录无法调用。
           VideoActionItem({ icon: $r('app.media.bilix_icon_coin'), value: formatCount(this.coinCount),
             active: this.coinCountByMe > 0, busy: this.actionBusy, onTap: () => this.openCoinSheet() })
           VideoActionItem({ icon: $r('app.media.bilix_icon_fav'), value: formatCount(this.favoriteCount),
             active: this.favorited, busy: this.actionBusy, onTap: () => this.actionFavorite() })
           VideoActionItem({ icon: $r('app.media.bilix_icon_share'), value: formatCount(this.detail.share),
             active: false, busy: this.actionBusy, onTap: () => this.actionShare() })
+          VideoActionItem({ icon: $r('app.media.ic_watch_later'), value: '稍后',
+            active: false, busy: this.actionBusy, onTap: () => this.actionWatchLater() })
         }
         .width('100%')
         .border({ width: { top: 0.5, bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
@@ -1419,7 +1576,7 @@ export struct VideoDetailPage {
             }
             .width('100%')
             .onClick(() => {
-              animateTo({ duration: 220, curve: Curve.EaseOut }, () => {
+              this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseOut }, () => {
                 this.descExpanded = !this.descExpanded;
               });
             })
@@ -1447,6 +1604,67 @@ export struct VideoDetailPage {
                   this.switchVideoPage(page, index);
                 })
               }, (page: VideoPage) => String(page.cid))
+            }
+            .width('100%')
+            .padding({ left: 10, right: 10 })
+            .borderRadius(8)
+            .backgroundColor(this.isDark ? '#2A2C31' : '#F6F7F8')
+          }
+          // UGC 合集选集：展示在当前简介流中，点击/连播均替换为对应稿件详情。
+          if (this.detail.ugcSeason !== null && this.detail.ugcSeason.sections.length > 0) {
+            Column() {
+              Row() {
+                Text('合集 · ' + this.detail.ugcSeason.title)
+                  .fontSize(13)
+                  .fontColor(this.isDark ? '#D0D0D0' : '#222222')
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .layoutWeight(1)
+                Text(this.ugcPanelOpen ? '收起' : '展开')
+                  .fontSize(11)
+                  .fontColor(this.accent)
+              }
+              .width('100%')
+              .padding({ top: 8, bottom: 8 })
+              .onClick(() => {
+                this.ugcPanelOpen = this.ugcPanelOpen ? false : true;
+                if (this.ugcPanelOpen) this.rebuildUgcSource();
+              })
+              if (this.ugcPanelOpen && this.ugcCount > 0) {
+                List({ space: 4 }) {
+                  LazyForEach(this.ugcSource, (ep: UgcSeasonEpisode) => {
+                    ListItem() {
+                      Row({ space: 8 }) {
+                        if (ep.cover.length > 0) {
+                          Image(ep.cover).width(72).height(42).objectFit(ImageFit.Cover).borderRadius(5)
+                        }
+                        Column({ space: 3 }) {
+                          Text(ep.sectionTitle.length > 0 ? ep.sectionTitle + ' · ' + ep.title : ep.title)
+                            .fontSize(12)
+                            .fontColor(this.isDark ? '#D0D0D0' : '#222222')
+                            .maxLines(2)
+                            .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          Text(ep.cid === this.currentCid ? '播放中' : '')
+                            .fontSize(10)
+                            .fontColor(this.accent)
+                        }
+                        .alignItems(HorizontalAlign.Start)
+                        .layoutWeight(1)
+                      }
+                      .width('100%')
+                      .padding({ top: 6, bottom: 6 })
+                      .borderRadius(6)
+                      .backgroundColor(ep.cid === this.currentCid ? colorWithAlpha(this.accent, '14') : '#00000000')
+                      .onClick(() => {
+                        this.openUgcEpisode(ep);
+                      })
+                    }
+                  }, (ep: UgcSeasonEpisode) => String(ep.id) + '_' + ep.bvid + '_' + String(ep.cid))
+                }
+                .width('100%')
+                .height(240)
+                .scrollBar(BarState.Off)
+              }
             }
             .width('100%')
             .padding({ left: 10, right: 10 })
@@ -1530,25 +1748,13 @@ export struct VideoDetailPage {
         .fontWeight(FontWeight.Bold)
         .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
       Blank()
-      Text('按热度')
-        .fontSize(12)
-        .fontWeight(this.replySortMode === 3 ? FontWeight.Bold : FontWeight.Normal)
-        .fontColor(this.replySortMode === 3 ? this.accent : '#9499A0')
-        .padding({ left: 6, right: 6, top: 6, bottom: 6 })
-        .onClick(() => {
-          this.changeReplySort(3);
-        })
-      Text('/')
-        .fontSize(11)
-        .fontColor('#C5C8CE')
-      Text('按时间')
-        .fontSize(12)
-        .fontWeight(this.replySortMode === 2 ? FontWeight.Bold : FontWeight.Normal)
-        .fontColor(this.replySortMode === 2 ? this.accent : '#9499A0')
-        .padding({ left: 6, right: 6, top: 6, bottom: 6 })
-        .onClick(() => {
-          this.changeReplySort(2);
-        })
+      // 排序切换与动态/番剧详情共用 chips 样式（最热 mode=3 / 最新 mode=2）。
+      ReplySortChips({
+        mode: this.replySortMode,
+        onChange: (mode: number) => {
+          this.changeReplySort(mode);
+        },
+      })
     }
     .width('100%')
     .height(42)
@@ -1578,7 +1784,14 @@ export struct VideoDetailPage {
 
   private emoteKeyboardHeight(): number {
     if (this.screenHeightVp <= 0) return 310;
-    return Math.min(360, Math.max(280, this.screenHeightVp * 0.36));
+    const base: number = Math.min(360, Math.max(280, this.screenHeightVp * 0.36));
+    if (this.replyThreadOpen) {
+      // 回复详情 Sheet 高度有限，表情键盘必须给顶部返回行 + 输入栏留出空间，
+      // 否则小屏/播放器展开时面板会把输入栏顶出可视区，导致键盘/表情切换按钮点不到。
+      const maxForSheet: number = this.replySheetHeight() - 160;
+      return Math.min(base, Math.max(210, maxForSheet));
+    }
+    return base;
   }
 
   @Builder
@@ -1858,6 +2071,8 @@ export struct VideoDetailPage {
       .layoutWeight(1)
     }
     .width('100%')
+    // 标题/UP 与封面上端对齐（Row 默认垂直居中会让文字偏下）
+    .alignItems(VerticalAlign.Top)
     .padding({ top: 8, bottom: 8 })
     .onClick(() => {
       const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
@@ -1869,18 +2084,18 @@ export struct VideoDetailPage {
   CompactDetailTab(label: string, index: number) {
     Column({ space: 3 }) {
       Text(label)
-        .fontSize(13)
+        .fontSize(this.visualTab === index ? 15 : 14)
         .fontWeight(this.visualTab === index ? FontWeight.Bold : FontWeight.Normal)
-        .fontColor(this.visualTab === index ? this.accent : '#9499A0')
+        .fontColor(this.visualTab === index ? (this.isDark ? '#F1F2F3' : '#18191C') : '#9499A0')
         .animation({ duration: 220, curve: Curve.EaseOut })
       Row()
-        .width(18).height(2).borderRadius(1)
+        .width(20).height(3).borderRadius(1.5)
         .backgroundColor(this.accent)
         .opacity(this.visualTab === index ? 1 : 0)
         .scale({ x: this.visualTab === index ? 1 : 0.35, y: 1 })
         .animation({ duration: 220, curve: Curve.EaseOut })
     }
-    .height(38)
+    .height(44)
     .padding({ left: 9, right: 9 })
     .justifyContent(FlexAlign.Center)
     .onClick(() => {
@@ -1899,8 +2114,8 @@ export struct VideoDetailPage {
         TextInput({ text: this.danmakuDraft,
           placeholder: this.danmakuSending ? '发送中…' : '点我发弹幕' })
           .layoutWeight(1)
-          .height(32)
-          .fontSize(12)
+          .height(36)
+          .fontSize(13)
           .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
           .placeholderColor(this.isDark ? '#8E9198' : '#9A9EA5')
           .backgroundColor('#00000000')
@@ -1911,32 +2126,40 @@ export struct VideoDetailPage {
           })
           .onSubmit(() => this.sendVideoDanmaku())
         Stack({ alignContent: Alignment.Center }) {
-          Image(this.danmakuOn ? $r('app.media.ic_danmaku_on') : $r('app.media.ic_danmaku_off'))
-            .width(23)
-            .height(23)
-            .renderMode(ImageRenderMode.Template)
-            .fillColor(this.isDark ? '#C1C4CA' : '#676B72')
+          Text('弹')
+            .width(27)
+            .height(27)
+            .fontSize(16)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.isDark ? '#C1C4CA' : '#676B72')
+            .textAlign(TextAlign.Center)
+            .border({ width: 1.5, color: this.isDark ? '#8D9199' : '#7B7F86' })
+            .borderRadius(7)
           if (this.danmakuOn) {
             Text('✓')
-              .fontSize(12)
+              .fontSize(11)
               .fontWeight(FontWeight.Bold)
               .fontColor(this.accent)
-              .position({ x: 24, y: 15 })
+              .width(14)
+              .height(14)
+              .textAlign(TextAlign.Center)
+              .backgroundColor(this.isDark ? '#292B30' : '#F5F6F7')
+              .position({ x: 27, y: 22 })
           }
         }
-        .width(42)
-        .height(32)
+        .width(44)
+        .height(36)
         .border({ width: { left: 0.5 }, color: this.isDark ? '#42444A' : '#E1E3E7' })
         .onClick(() => this.danmakuOn = !this.danmakuOn)
       }
-      .width(Math.min(150, Math.max(122, this.screenWidthVp * 0.36)))
-      .height(32)
-      .borderRadius(16)
+      .width(Math.min(168, Math.max(132, this.screenWidthVp * 0.39)))
+      .height(36)
+      .borderRadius(18)
       .border({ width: 0.5, color: this.isDark ? '#42444A' : '#E1E3E7' })
       .backgroundColor(this.isDark ? '#292B30' : '#F5F6F7')
       .clip(true)
     }
-    .width('100%').height(48)
+    .width('100%').height(56)
     .padding({ left: 6, right: 10 })
     .alignItems(VerticalAlign.Center)
     .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
@@ -2092,12 +2315,16 @@ export struct VideoDetailPage {
               videoUrls: this.playUrls,
               audioUrls: this.playAudioUrls,
               qualityOptions: this.qualityOptions,
+              subtitles: this.subtitleTracks,
               currentQuality: this.currentQuality,
               sourceVersion: this.playerSourceVersion,
+              initialSeekSeconds: this.initialSeekSeconds,
               aid: this.detail.aid,
               bvid: this.bvid,
               cid: this.currentCid,
+              videoDuration: this.currentPageDuration(),
               videoTitle: this.detail.title,
+              videoCover: this.detail.cover,
               ownerName: this.detail.upName,
               ownerFace: this.detail.upFace,
               liked: this.liked,
@@ -2107,8 +2334,13 @@ export struct VideoDetailPage {
               localDanmakuText: this.localDanmakuText,
               localDanmakuToken: this.localDanmakuToken,
               compactMode: !this.playerFullscreen && this.visiblePlayerHeight() < 176,
+              onBack: () => {
+                AppNavStack.pop();
+              },
               onFullscreenChange: (fullscreen: boolean) => {
                 this.playerFullscreen = fullscreen;
+                // 全屏时评论回复 Sheet 应随评论区一起隐藏，不能叠在视频画面上。
+                if (fullscreen) this.closeReplyThread();
               },
               onPlayingChange: (playing: boolean) => {
                 this.onPlayerPlayingChange(playing);
@@ -2129,6 +2361,10 @@ export struct VideoDetailPage {
               },
               onProgress: (seconds: number) => {
                 this.videoProgressSeconds = seconds;
+                this.reportVideoHeartbeat(seconds);
+              },
+              onEnded: () => {
+                this.onPlayerEnded();
               },
               onLike: () => {
                 this.actionLike();
@@ -2235,6 +2471,9 @@ export struct VideoDetailPage {
       showClose: false,
       radius: { topLeft: 18, topRight: 18 },
       backgroundColor: this.isDark ? '#18191C' : '#FFFFFF',
+      // 允许 Sheet 外继续与页面交互：点击视频不会误关回复；系统侧滑返回仍由
+      // NavDestination onBackPressed 拦截并关闭回复 Sheet。
+      enableOutsideInteractive: true,
     })
   }
 }

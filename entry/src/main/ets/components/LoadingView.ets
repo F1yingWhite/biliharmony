@@ -3,10 +3,12 @@
  */
 @Component
 export struct LoadingView {
-  loading: boolean = true;
-  empty: boolean = false;
-  emptyText: string = '暂无内容';
-  errorText: string = '';
+  // 必须加 @Prop：父组件状态变化时要同步刷新，否则卡在创建时的状态
+  // （例如列表清空后重新加载，会一直停留在"加载中"/空态）。
+  @Prop loading: boolean = true;
+  @Prop empty: boolean = false;
+  @Prop emptyText: string = '暂无内容';
+  @Prop errorText: string = '';
   @StorageProp('accentColor') accent: string = '#FB7299';
   onRetry: () => void = () => {
   };

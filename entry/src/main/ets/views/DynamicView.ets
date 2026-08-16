@@ -4,17 +4,18 @@
 import { DynamicItem, DynamicPageData, BiliEmote } from '../model/Models';
 import { AppNavStack, NAV_DYNAMIC_DETAIL, NAV_IMAGE_VIEWER, NAV_LIVE_ROOM, NAV_LOGIN, NAV_VIDEO_DETAIL,
   NAV_USER_SPACE, DynamicDetailParam, ImageViewerParam, LiveRoomParam, VideoDetailParam,
-  UserSpaceParam } from '../common/AppRouter';
-import { BiliApi } from '../api/BiliApi';
+  UserSpaceParam, NAV_BANGUMI_DETAIL, BangumiDetailParam } from '../common/AppRouter';
+import { ActionResult, BiliApi } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
 import { LoadingView } from '../components/LoadingView';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
-import { formatRelativeTime } from '../common/Utils';
+import { formatCount, formatRelativeTime } from '../common/Utils';
 import { Immersive } from '../common/Immersive';
 import { AppTheme } from '../common/AppTheme';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { DecoratedAvatar, UserDecorationBanner } from '../components/UserDecorations';
 import { LayoutTokens } from '../common/LayoutTokens';
+import { vibrator } from '@kit.SensorServiceKit';
 
 class DynamicContentPart {
   text: string = '';
@@ -72,13 +73,130 @@ function contentPartsOf(item: DynamicItem): Array<DynamicContentPart> {
 /** 单条动态卡片：独立 @Component，父组件状态变化不再整列表重建。 */
 @Component
 export struct DynCard {
-  @Prop item: DynamicItem = new DynamicItem();
+  @Prop @Watch('onItemChanged') item: DynamicItem = new DynamicItem();
   @Prop embedded: boolean = false;
   @Prop detailMode: boolean = false;
+  @State liked: boolean = false;
+  @State likeCount: number = 0;
+  @State forwardCount: number = 0;
+  @State actionBusy: boolean = false;
   @StorageProp('isDarkMode') isDark: boolean = false;
+  @StorageProp('accentColor') accent: string = '#FB7299';
+
+  aboutToAppear(): void {
+    this.syncFromItem();
+  }
+
+  onItemChanged(): void {
+    this.syncFromItem();
+  }
+
+  private syncFromItem(): void {
+    this.liked = this.item.liked;
+    this.likeCount = this.item.like;
+    this.forwardCount = this.item.forward;
+  }
+
+  private toast(message: string): void {
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: message });
+    } catch (e) {
+      // 组件销毁或窗口异常时忽略提示。
+    }
+  }
+
+  private decorationNumberLabel(): string {
+    const raw: string = this.item.decorationNumber.trim();
+    if (raw.length === 0) return '';
+    if (/^(no|co)\.?\s/i.test(raw)) return raw;
+    return 'NO.' + raw;
+  }
+
+  private tapVibrate(): void {
+    try {
+      vibrator.startVibration({ type: 'time', duration: 15 }, { usage: 'physicalFeedback' }).catch(() => {
+      });
+    } catch (e) {
+      // 不支持或未授权时静默忽略。
+    }
+  }
+
+  private async toggleLike(): Promise<void> {
+    if (this.actionBusy) return;
+    if (UserStore.isLogin === false) {
+      this.toast('请先登录后再点赞');
+      return;
+    }
+    if (this.item.dynId.length === 0) return;
+    const next: boolean = this.liked ? false : true;
+    const prevLiked: boolean = this.liked;
+    const prevCount: number = this.likeCount;
+    this.liked = next;
+    this.likeCount = Math.max(0, this.likeCount + (next ? 1 : -1));
+    this.item.liked = next;
+    this.item.like = this.likeCount;
+    this.actionBusy = true;
+    try {
+      const result: ActionResult = await BiliApi.likeDynamic(this.item.dynId, next);
+      if (result.ok === false) {
+        this.liked = prevLiked;
+        this.likeCount = prevCount;
+        this.item.liked = prevLiked;
+        this.item.like = prevCount;
+        this.toast(result.message);
+      } else {
+        this.toast(next ? '点赞成功' : '已取消点赞');
+      }
+    } catch (e) {
+      this.liked = prevLiked;
+      this.likeCount = prevCount;
+      this.item.liked = prevLiked;
+      this.item.like = prevCount;
+      this.toast('网络异常，请稍后重试');
+    } finally {
+      this.actionBusy = false;
+    }
+  }
+
+  private async forwardDynamic(): Promise<void> {
+    if (this.actionBusy) return;
+    if (UserStore.isLogin === false) {
+      this.toast('请先登录后再转发');
+      return;
+    }
+    if (this.item.dynId.length === 0) return;
+    this.actionBusy = true;
+    try {
+      const result: ActionResult = await BiliApi.repostDynamic(this.item.dynId);
+      if (result.ok) {
+        this.forwardCount++;
+        this.item.forward = this.forwardCount;
+        this.toast('转发成功');
+      } else {
+        this.toast(result.message);
+      }
+    } catch (e) {
+      this.toast('网络异常，请稍后重试');
+    } finally {
+      this.actionBusy = false;
+    }
+  }
 
   private shownImages(): Array<string> {
-    return this.item.images.slice(0, 9);
+    return this.item.images;
+  }
+
+  /** 图片网格高度随图片数量自适应，避免多图动态只显示前两行。 */
+  private imageGridHeightFor(images: Array<string>): number {
+    const count: number = images.length;
+    if (count <= 1) return 210;
+    if (count <= 3) return 118;
+    const rows: number = Math.ceil(count / 3);
+    return rows * 118 + (rows - 1) * 4;
+  }
+
+  private imageGridHeight(): number {
+    return this.imageGridHeightFor(this.shownImages());
   }
 
   private openDetail(focusComments: boolean = false): void {
@@ -109,6 +227,10 @@ export struct DynCard {
   private openMajor(item: DynamicItem): void {
     if (item.liveRoomId > 0) {
       this.openLive(item);
+    } else if (item.seasonId > 0 || item.epId > 0) {
+      // PGC（番剧/影视）卡片进番剧详情页；UGC 合集卡没有 season_id/epid，仍走视频详情。
+      const param: BangumiDetailParam = { seasonId: item.seasonId, epId: item.epId, title: item.title };
+      AppNavStack.pushPathByName(NAV_BANGUMI_DETAIL, param);
     } else if (item.bvid.length > 0) {
       const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
       AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
@@ -118,10 +240,13 @@ export struct DynCard {
   }
 
   private openItemImage(item: DynamicItem, index: number): void {
-    const images: Array<string> = item.images.slice(0, 9);
+    const images: Array<string> = item.images;
     const transitionId: string = 'image-viewer-dynamic-' + item.dynId + '-' + String(index);
     const viewer: ImageViewerParam = { images: images, initialIndex: index, transitionId: transitionId };
-    AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer);
+    // 一镜到底：关 Navigation 默认转场（push 第三参 false）并包 animateTo，geometryTransition 才接管动画
+    this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
+      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
+    });
   }
 
   @Builder
@@ -150,12 +275,10 @@ export struct DynCard {
       }
       if (item.images.length > 0) {
         Grid() {
-          ForEach(item.images.slice(0, 3), (src: string, index: number) => {
+          ForEach(item.images, (src: string, index: number) => {
             GridItem() {
               Image(src).width('100%').height('100%').objectFit(ImageFit.Cover).borderRadius(6)
-                .sharedTransition('image-viewer-dynamic-' + item.dynId + '-' + String(index), {
-                  duration: 300, curve: Curve.EaseInOut,
-                })
+                .geometryTransition('image-viewer-dynamic-' + item.dynId + '-' + String(index))
                 .onClick(() => {
                   this.openItemImage(item, index);
                 })
@@ -163,7 +286,7 @@ export struct DynCard {
           }, (src: string, index: number) => 'forward-' + src + String(index))
         }
         .columnsTemplate(item.images.length === 1 ? '1fr' : (item.images.length === 2 ? '1fr 1fr' : '1fr 1fr 1fr'))
-        .columnsGap(4).height(item.images.length === 1 ? 170 : 104).width('100%')
+        .columnsGap(4).height(this.imageGridHeightFor(item.images)).width('100%')
       }
       if (item.title.length > 0) {
         Row({ space: 9 }) {
@@ -192,7 +315,7 @@ export struct DynCard {
   build() {
     Column({ space: 8 }) {
       // 头部：头像 + 昵称 + 时间
-      Row({ space: 8 }) {
+      Row({ space: this.item.decorationCard.length > 0 ? 4 : 8 }) {
         DecoratedAvatar({
           face: this.item.face,
           pendant: this.item.pendant,
@@ -206,17 +329,28 @@ export struct DynCard {
               numberText: this.item.decorationNumber,
               numberColor: this.item.decorationColor.length > 0 ? this.item.decorationColor : '#FFFFFF',
               bannerHeight: 46,
+              renderNumber: false,
             })
           }
           Row({ space: 8 }) {
             Column({ space: 2 }) {
-              Text(this.item.uname)
-                .fontSize(14)
-                .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-                .fontWeight(FontWeight.Medium)
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-                .width('100%')
+              Row({ space: 4 }) {
+                Text(this.item.uname)
+                  .fontSize(14)
+                  .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+                  .fontWeight(FontWeight.Medium)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                if (this.item.decorationNumber.length > 0) {
+                  Text(this.decorationNumberLabel())
+                    .fontSize(10)
+                    .fontWeight(FontWeight.Bold)
+                    .fontColor(this.item.decorationColor.length > 0 ? this.item.decorationColor : this.accent)
+                    .maxLines(1)
+                }
+              }
+              .width('100%')
+              .alignItems(VerticalAlign.Center)
               Text(formatRelativeTime(this.item.pubtime))
                 .fontSize(11)
                 .fontColor('#9499A0')
@@ -235,7 +369,7 @@ export struct DynCard {
           .width('100%')
           .height(this.item.decorationCard.length > 0 ? 46 : 52)
           .padding({ left: this.item.decorationCard.length > 0 ? 8 : 0,
-            right: this.item.decorationCard.length > 0 ? 74 : 0 })
+            right: this.item.decorationCard.length > 0 ? 8 : 0 })
           .alignItems(VerticalAlign.Center)
         }
         .layoutWeight(1)
@@ -279,17 +413,17 @@ export struct DynCard {
                 .objectFit(ImageFit.Cover)
                 .borderRadius(6)
                 .id('dyn-img-' + this.item.dynId + '-' + String(index))
-                .sharedTransition('image-viewer-dynamic-' + this.item.dynId + '-' + String(index), {
-                  duration: 300,
-                  curve: Curve.EaseInOut,
-                })
+                .geometryTransition('image-viewer-dynamic-' + this.item.dynId + '-' + String(index))
                 .onClick(() => {
                   const viewer: ImageViewerParam = {
                     images: this.shownImages(),
                     initialIndex: index,
                     transitionId: 'image-viewer-dynamic-' + this.item.dynId + '-' + String(index),
                   };
-                  AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer);
+                  // 一镜到底：关默认转场 + animateTo，geometryTransition 接管
+                  this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
+                    AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
+                  });
                 })
             }
           }, (src: string, index: number) => src + String(index))
@@ -297,7 +431,7 @@ export struct DynCard {
         .columnsTemplate(this.item.images.length === 1 ? '1fr' : (this.item.images.length === 2 ? '1fr 1fr' : '1fr 1fr 1fr'))
         .rowsGap(4)
         .columnsGap(4)
-        .height(this.item.images.length === 1 ? 210 : (this.item.images.length <= 3 ? 118 : 236))
+        .height(this.imageGridHeight())
         .width('100%')
       }
 
@@ -340,21 +474,50 @@ export struct DynCard {
         })
       }
 
-      // 底部互动
-      Row({ space: 22 }) {
-        Text('赞 ' + this.item.like)
-          .fontSize(12)
-          .fontColor('#9499A0')
-        Text('评 ' + this.item.comment)
-          .fontSize(12)
-          .fontColor('#9499A0')
-          .padding({ top: 5, bottom: 5 })
-          .onClick(() => {
-            this.openDetail(true);
-          })
-        Text('转 ' + this.item.forward)
-          .fontSize(12)
-          .fontColor('#9499A0')
+      // 底部互动：点赞/评论/转发均可点，点赞与转发走登录态接口。
+      Row({ space: 24 }) {
+        Row({ space: 4 }) {
+          Image(this.liked ? $r('app.media.ic_like_fill') : $r('app.media.ic_like'))
+            .width(16)
+            .height(16)
+            .fillColor(this.liked ? this.accent : '#9499A0')
+          Text(this.likeCount > 0 ? formatCount(this.likeCount) : '赞')
+            .fontSize(12)
+            .fontColor(this.liked ? this.accent : '#9499A0')
+        }
+        .alignItems(VerticalAlign.Center)
+        .onClick(() => {
+          this.toggleLike().catch(() => {
+          });
+        })
+        Row({ space: 4 }) {
+          Image($r('app.media.ic_comment'))
+            .width(16)
+            .height(16)
+            .fillColor('#9499A0')
+          Text(this.item.comment > 0 ? formatCount(this.item.comment) : '评')
+            .fontSize(12)
+            .fontColor('#9499A0')
+        }
+        .alignItems(VerticalAlign.Center)
+        .padding({ top: 5, bottom: 5 })
+        .onClick(() => {
+          this.openDetail(true);
+        })
+        Row({ space: 4 }) {
+          Image($r('app.media.ic_share'))
+            .width(16)
+            .height(16)
+            .fillColor('#9499A0')
+          Text(this.forwardCount > 0 ? formatCount(this.forwardCount) : '转')
+            .fontSize(12)
+            .fontColor('#9499A0')
+        }
+        .alignItems(VerticalAlign.Center)
+        .onClick(() => {
+          this.forwardDynamic().catch(() => {
+          });
+        })
       }
       .width('100%')
     }
@@ -374,14 +537,22 @@ export struct DynamicView {
   @State loading: boolean = true;
   @State login: boolean = false;
   @State dynOffset: string = '';
+  @State dynType: string = 'all';
+  @State dynTab: number = 0;
   @State dynHasMore: boolean = true;
   @State feedLoading: boolean = false;
+  @State refreshing: boolean = false;
+  @State refreshStatus: RefreshStatus = RefreshStatus.Inactive;
   @State dynCount: number = 0;
   @State errorText: string = '';
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
+  @StorageProp('glassEnabled') glassOn: boolean = true;
+  @StorageProp('headerFade') fade: number = 0;
   @StorageProp('loginVersion') @Watch('onLoginChanged') loginVer: number = 0;
   private dynSource: BasicDataSource<DynamicItem> = new BasicDataSource<DynamicItem>();
+  private dynTabsController: TabsController = new TabsController();
+  private dynTypes: Array<string> = ['all', 'video', 'pgc', 'article'];
   private initializing: boolean = false;
 
   onLoginChanged(): void {
@@ -391,6 +562,8 @@ export struct DynamicView {
   }
 
   aboutToAppear(): void {
+    // 切到动态 Tab 时强制回到顶部状态，避免残留 fade 导致搜索栏和搜索球同时出现。
+    AppTheme.resetHeaderFade();
     this.init().catch(() => {
     });
   }
@@ -425,7 +598,7 @@ export struct DynamicView {
     try {
       const off: string = reset ? '' : this.dynOffset;
       const page: DynamicPageData = this.hostMid > 0 ?
-        await BiliApi.getUserDynamicFeed(this.hostMid, off) : await BiliApi.getDynamicFeed(off);
+        await BiliApi.getUserDynamicFeed(this.hostMid, off) : await BiliApi.getDynamicFeed(off, this.dynType);
       if (reset) {
         this.dynSource.reset(page.items);
       } else {
@@ -439,6 +612,114 @@ export struct DynamicView {
     } finally {
       this.feedLoading = false;
     }
+  }
+
+  private onRefresh(): void {
+    this.refreshing = true;
+    this.loadFeed(true)
+      .catch(() => {
+      })
+      .finally(() => {
+        this.refreshing = false;
+      });
+  }
+
+  @Builder
+  DynRefreshHeader() {
+    // 与首页同一套骨架：Refresh 内部只放一个空白占位，可见提示由外层悬浮绘制。
+    Blank()
+      .width('100%')
+      .height(1)
+  }
+
+  @Builder
+  DynRefreshIndicator() {
+    Row({ space: 8 }) {
+      if (this.refreshStatus === RefreshStatus.Refresh || this.refreshing) {
+        LoadingProgress()
+          .width(22)
+          .height(22)
+          .color(this.accent)
+        Text('正在刷新…')
+          .fontSize(12)
+          .fontColor(this.isDark ? '#CACACE' : '#676B72')
+      }
+    }
+    .width('100%')
+    .height(44)
+    .justifyContent(FlexAlign.Center)
+    .alignItems(VerticalAlign.Center)
+    // 与首页 RefreshIndicator 完全同位置。
+    .margin({ top: this.embedded ? 0 : Immersive.statusBarHeight() + 88 })
+    .opacity(this.refreshStatus === RefreshStatus.Refresh || this.refreshing ? 1 : 0)
+    .animation({ duration: 120, curve: Curve.EaseOut })
+    .hitTestBehavior(HitTestMode.None)
+  }
+
+  private tapVibrate(): void {
+    try {
+      vibrator.startVibration({ type: 'time', duration: 15 }, { usage: 'physicalFeedback' }).catch(() => {
+      });
+    } catch (e) {
+      // 不支持或未授权时静默忽略。
+    }
+  }
+
+  private changeDynType(type: string): void {
+    if (this.dynType === type || this.feedLoading) return;
+    this.dynType = type;
+    this.dynOffset = '';
+    this.dynHasMore = true;
+    this.dynSource.clear();
+    this.dynCount = 0;
+    this.errorText = '';
+    this.loadFeed(true).catch(() => {
+    });
+  }
+
+  @Builder
+  DynTypeChip(label: string, type: string) {
+    Stack({ alignContent: Alignment.Center }) {
+      Text(label)
+        .fontSize(14)
+        .fontWeight(this.dynType === type ? FontWeight.Bold : FontWeight.Normal)
+        .fontColor(this.dynType === type ? this.accent : (this.isDark ? '#A8A8AC' : '#767B82'))
+    }
+    .width(62)
+    .height(30)
+    .borderRadius(15)
+    .backgroundColor(this.dynType === type ? (this.isDark ? '#33FB7299' : '#1FFB7299') : '#00000000')
+    .animation({ duration: 180, curve: Curve.EaseOut })
+    .onClick(() => {
+      this.tapVibrate();
+      const index: number = this.dynTypes.indexOf(type);
+      if (index >= 0) {
+        this.dynTab = index;
+        this.dynTabsController.changeIndex(index);
+      }
+      this.changeDynType(type);
+    })
+  }
+
+  @Builder
+  DynTypeFilter() {
+    Row({ space: 2 }) {
+      this.DynTypeChip('全部', 'all')
+      this.DynTypeChip('视频', 'video')
+      this.DynTypeChip('番剧', 'pgc')
+      this.DynTypeChip('专栏', 'article')
+    }
+    .width(260)
+    .height(36)
+    .padding(3)
+    .borderRadius(18)
+    .backgroundColor(this.glassOn ? '#00000000' : (this.isDark ? '#D9202125' : '#E8FFFFFF'))
+    .systemMaterial(AppTheme.floatMaterial(this.glassOn))
+    .margin({ top: this.embedded ? 4 : Immersive.statusBarHeight() + 50 })
+    .opacity(1 - this.fade)
+    .translate({ y: -12 * this.fade })
+    .animation({ duration: 160, curve: Curve.EaseOut })
+    .hitTestBehavior(this.fade > 0.9 ? HitTestMode.None : HitTestMode.Default)
   }
 
   @Builder
@@ -465,25 +746,27 @@ export struct DynamicView {
     .justifyContent(FlexAlign.Center)
   }
 
-  build() {
-    Column() {
-      if (this.loading) {
-        LoadingView({ loading: true })
-          .margin({ top: 80 })
-      } else if (!this.login) {
-        this.LoginPrompt()
-      } else if (this.dynCount === 0) {
-        LoadingView({
-          loading: false,
-          empty: this.errorText.length === 0,
-          emptyText: this.hostMid > 0 ? '该用户暂时没有发布动态' : '暂时没有动态，去关注一些UP主吧',
-          errorText: this.errorText,
-          onRetry: () => {
-            this.init();
-          },
-        })
+  @Builder
+  DynBody() {
+    if (this.loading) {
+      LoadingView({ loading: true })
         .margin({ top: 80 })
-      } else {
+    } else if (!this.login) {
+      this.LoginPrompt()
+    } else if (this.dynCount === 0) {
+      LoadingView({
+        loading: this.feedLoading,
+        empty: this.feedLoading ? false : this.errorText.length === 0,
+        emptyText: this.hostMid > 0 ? '该用户暂时没有发布动态' :
+          (this.dynType === 'all' ? '暂时没有动态，去关注一些UP主吧' : '该分类下暂无动态'),
+        errorText: this.errorText,
+        onRetry: () => {
+          this.init();
+        },
+      })
+      .margin({ top: 80 })
+    } else {
+      Refresh({ refreshing: $$this.refreshing, builder: this.DynRefreshHeader() }) {
         List({ space: 10 }) {
           LazyForEach(this.dynSource, (item: DynamicItem) => {
             ListItem() {
@@ -507,9 +790,8 @@ export struct DynamicView {
         .constraintSize({ maxWidth: LayoutTokens.readingMaxWidth })
         .alignSelf(ItemAlign.Center)
         .cachedCount(3)
-        // 头栏留白使用 List 原生内容偏移，不再伪造空 ListItem，
-        // 避免短列表把空项也纳入内容高度后看起来整体下沉。
-        .contentStartOffset(this.embedded ? 4 : Immersive.statusBarHeight() + 44)
+        // 与首页对齐：非内嵌时列表从玻璃头栏下方开始，滚动时内容可直接顶到最上方。
+        .contentStartOffset(this.embedded ? 4 : Immersive.statusBarHeight() + 94)
         .contentEndOffset(this.embedded ? 16 : Immersive.bottomInset() + 56)
         .padding({ left: LayoutTokens.phonePadding, right: LayoutTokens.phonePadding })
         .scrollBar(BarState.Off)
@@ -524,10 +806,45 @@ export struct DynamicView {
           this.loadFeed(false);
         })
       }
+      .refreshOffset(56)
+      .pullDownRatio(undefined)
+      .onStateChange((status: RefreshStatus) => {
+        this.refreshStatus = status;
+      })
+      .onRefreshing(() => this.onRefresh())
+    }
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.Top }) {
+      // 动态分类 Tabs：左右滑动在 全部/视频/番剧/专栏 之间切换，与首页推荐/热门/直播一致。
+      Tabs({ index: $$this.dynTab, controller: this.dynTabsController }) {
+        TabContent() { this.DynBody() }.tabBar('')
+        TabContent() { this.DynBody() }.tabBar('')
+        TabContent() { this.DynBody() }.tabBar('')
+        TabContent() { this.DynBody() }.tabBar('')
+      }
+      .width('100%')
+      .height('100%')
+      .barHeight(0)
+      .cachedMaxCount(1, TabsCacheMode.CACHE_BOTH_SIDE)
+      .animationMode(AnimationMode.CONTENT_FIRST)
+      .animationDuration(320)
+      .animationCurve(Curve.EaseInOut)
+      .onChange((index: number) => {
+        this.dynTab = index;
+        const type: string | undefined = this.dynTypes[index];
+        if (type !== undefined && type !== this.dynType) this.changeDynType(type);
+      })
+
+      this.DynRefreshIndicator()
+
+      if (this.login && this.hostMid <= 0) {
+        this.DynTypeFilter()
+      }
     }
     .width('100%')
+    .height('100%')
     .layoutWeight(1)
-    .justifyContent(FlexAlign.Start)
-    .alignItems(HorizontalAlign.Start)
   }
 }

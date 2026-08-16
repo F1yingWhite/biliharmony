@@ -52,7 +52,7 @@ export struct DecoratedAvatar {
   }
 }
 
-/** 972:162 一类评论/动态装扮条保持原始 6:1 比例，并靠作者信息区右侧摆放。 */
+/** 972:162 一类评论/动态装扮条保持原始 6:1 比例；编号位置由业务方指定（评论靠右、动态靠左）。 */
 @Component
 export struct UserDecorationBanner {
   @Prop imageUrl: string = '';
@@ -60,6 +60,10 @@ export struct UserDecorationBanner {
   @Prop numberText: string = '';
   @Prop numberColor: string = '#FFFFFF';
   @Prop bannerHeight: number = 46;
+  /** true 编号靠左（动态页）；false 编号靠右（评论区）。 */
+  @Prop numberOnLeft: boolean = false;
+  /** false 时不在装扮图上叠加编号，由业务方自行把编号放在名字旁（动态页用）。 */
+  @Prop renderNumber: boolean = true;
 
   private normalizedNumber(): string {
     // 不同接口可能返回 "No. 000318"、"NO.000318" 或纯编号，统一只保留下行数字。
@@ -67,25 +71,26 @@ export struct UserDecorationBanner {
   }
 
   build() {
-    Stack({ alignContent: Alignment.TopEnd }) {
+    Stack({ alignContent: this.numberOnLeft ? Alignment.TopStart : Alignment.TopEnd }) {
       if (this.imageUrl.length > 0) {
         Image(this.imageUrl)
-          .width(this.bannerHeight * 6)
+          .width('100%')
           .height(this.bannerHeight)
-          .objectFit(ImageFit.Contain)
+          .objectFit(ImageFit.Cover)
           .opacity(0.96)
           .hitTestBehavior(HitTestMode.None)
       }
-      if (this.numberText.length > 0) {
+      if (this.numberText.length > 0 && this.renderNumber) {
         Column({ space: 0 }) {
           Text(this.numberPrefix.length > 0 ? this.numberPrefix.toUpperCase() : 'NO.')
-            .fontSize(6)
-            .lineHeight(8)
+            .fontSize(7)
+            .lineHeight(10)
+            .fontWeight(FontWeight.Bold)
             .fontColor(this.numberColor)
           Text(this.normalizedNumber())
-            .fontSize(8)
-            .lineHeight(10)
-            .fontWeight(FontWeight.Medium)
+            .fontSize(10)
+            .lineHeight(13)
+            .fontWeight(FontWeight.Bold)
             .fontColor(this.numberColor)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })

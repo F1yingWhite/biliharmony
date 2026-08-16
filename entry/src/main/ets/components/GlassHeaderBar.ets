@@ -2,13 +2,13 @@
  * 玻璃拟态头栏（头像 + 搜索胶囊 + 消息入口），布局对齐 B 站官方首页
  * 随列表上滑逐渐淡出，消失进状态栏；仅本组件订阅滚动淡出值，避免列表重渲染。
  */
-import { promptAction } from '@kit.ArkUI';
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, NAV_LOGIN, NAV_MESSAGES, NAV_SEARCH } from '../common/AppRouter';
 import { UserStore } from '../common/UserStore';
 import { AppTheme } from '../common/AppTheme';
 import { colorWithAlpha } from '../common/Utils';
 import { HotSearchStore } from '../common/HotSearchStore';
+import { MsgUnreadStore } from '../common/MsgUnreadStore';
 import { DecoratedAvatar } from './UserDecorations';
 
 @Component
@@ -22,6 +22,8 @@ export struct GlassHeaderBar {
   // headerFade 每帧变化，只驱动 build 中的透明度；系统栏图标改由主题变化时设置（onThemeChanged）。
   @StorageProp('headerFade') fade: number = 0;
   @StorageProp('homeHotSearch') hotSearch: string = '';
+  // 消息中心未读总数（回复/@/赞/系统），>0 时在消息入口右上角显示红色角标。
+  @StorageProp('msgUnreadTotal') msgUnread: number = 0;
   private hotTimer: number = -1;
   private hotIndex: number = 0;
   onAvatarTap: () => void = () => {
@@ -42,6 +44,9 @@ export struct GlassHeaderBar {
       HotSearchStore.publish(0);
     }).catch(() => {
       // 热搜只是头栏占位文案，网络失败不应形成未处理的 Promise rejection。
+    });
+    // 未登录时 MsgUnreadStore 内部直接清零返回，不会发起请求。
+    MsgUnreadStore.refresh().catch(() => {
     });
     this.hotTimer = setInterval(() => {
       this.hotIndex++;
@@ -124,11 +129,18 @@ export struct GlassHeaderBar {
           AppNavStack.pushPathByName(NAV_SEARCH, null);
         })
 
-        Stack() {
+        Stack({ alignContent: Alignment.TopEnd }) {
           Image($r('app.media.ic_message'))
             .width(22)
             .height(22)
             .fillColor(this.isDark ? '#E6E6E6' : '#333333')
+            .margin({ top: 9 })
+          if (this.msgUnread > 0) {
+            Text(this.msgUnread > 99 ? '99+' : String(this.msgUnread))
+              .fontSize(9).fontColor('#FFFFFF').backgroundColor('#FA4B4B')
+              .padding({ left: 4, right: 4, top: 1, bottom: 1 }).borderRadius(8)
+              .translate({ x: 10, y: 2 })
+          }
         }
         // 图形保持 22vp，实际触发区扩大为 40vp，避免只能点到图标笔画才生效。
         .width(40)
@@ -137,7 +149,7 @@ export struct GlassHeaderBar {
           if (UserStore.isLogin) {
             AppNavStack.pushPathByName(NAV_MESSAGES, null);
           } else {
-            promptAction.showToast({ message: '请先登录后查看私信' });
+            this.getUIContext().getPromptAction().showToast({ message: '请先登录后查看私信' });
             AppNavStack.pushPathByName(NAV_LOGIN, null);
           }
         })

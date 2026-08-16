@@ -1,4 +1,3 @@
-import { promptAction } from '@kit.ArkUI';
 import { AppNavStack, ImageViewerParam, NAV_IMAGE_VIEWER, NAV_USER_SPACE, NAV_VIDEO_DETAIL,
   UserSpaceParam, VideoDetailParam } from '../common/AppRouter';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
@@ -44,7 +43,7 @@ export struct ReplyCard {
       this.onNavigate(() => AppNavStack.pushPathByName(NAV_USER_SPACE, param));
     } else if (part.seekSeconds >= 0) {
       PlayerCommandBus.seek(part.seekSeconds);
-      promptAction.showToast({ message: '已空降到 ' + formatDuration(part.seekSeconds) });
+      this.getUIContext().getPromptAction().showToast({ message: '已空降到 ' + formatDuration(part.seekSeconds) });
     } else if (part.bvid.length > 0 || part.aid > 0) {
       PlayerCommandBus.stop();
       const param: VideoDetailParam = { bvid: part.bvid, aid: part.aid, title: part.text };
@@ -63,7 +62,10 @@ export struct ReplyCard {
     const originals: Array<string> = this.item.pictures.map((url: string) => biliImageOriginal(url));
     const transitionId: string = 'image-viewer-reply-' + String(this.item.rpid) + '-' + String(index);
     const viewer: ImageViewerParam = { images: originals, initialIndex: index, transitionId: transitionId };
-    this.onNavigate(() => AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer));
+    // 一镜到底：关默认转场 + animateTo，geometryTransition 接管
+    this.onNavigate(() => this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
+      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
+    }));
   }
 
   private visualDepth(): number {
@@ -119,7 +121,7 @@ export struct ReplyCard {
 
   private decorationReserve(): number {
     if (this.item.cardBackground.length === 0) return 0;
-    return this.threadDepth > 0 ? 60 : 78;
+    return this.threadDepth > 0 ? 40 : 48;
   }
 
   private replyMetaText(): string {
@@ -209,7 +211,8 @@ export struct ReplyCard {
       .height(30)
       .padding({ left: 4, right: 4 })
       .borderRadius(15)
-      .priorityGesture(TapGesture().onAction(() => this.onLike(this.item)))
+      // 不用 priorityGesture：列表行内没有需要竞争的父手势，统一用 onClick。
+      .onClick(() => this.onLike(this.item))
       Row({ space: 4 }) {
         Image($r('app.media.ic_dislike'))
           .width(16)
@@ -223,7 +226,7 @@ export struct ReplyCard {
       .height(30)
       .padding({ left: 4, right: 4 })
       .borderRadius(15)
-      .priorityGesture(TapGesture().onAction(() => this.onDislike(this.item)))
+      .onClick(() => this.onDislike(this.item))
       Row({ space: 4 }) {
         Image($r('app.media.ic_share'))
           .width(16)
@@ -237,7 +240,7 @@ export struct ReplyCard {
       .height(30)
       .padding({ left: 4, right: 4 })
       .borderRadius(15)
-      .priorityGesture(TapGesture().onAction(() => this.onShare(this.item)))
+      .onClick(() => this.onShare(this.item))
       Row({ space: 4 }) {
         Image($r('app.media.ic_comment'))
           .width(16)
@@ -251,12 +254,11 @@ export struct ReplyCard {
       .height(30)
       .padding({ left: 4, right: 4 })
       .borderRadius(15)
-      .priorityGesture(TapGesture().onAction(() => this.onSelectReply(this.item)))
+      .onClick(() => this.onSelectReply(this.item))
       Blank()
     }
     .width('100%')
     .height(32)
-    .id('reply_action_' + String(this.item.rpid) + '_' + String(this.version))
     .alignItems(VerticalAlign.Center)
   }
 
@@ -409,10 +411,7 @@ export struct ReplyCard {
                 .borderRadius(6)
                 .margin({ right: 5, bottom: 5 })
                 .id('reply-img-' + String(this.item.rpid) + '-' + String(index))
-                .sharedTransition('image-viewer-reply-' + String(this.item.rpid) + '-' + String(index), {
-                  duration: 300,
-                  curve: Curve.EaseInOut,
-                })
+                .geometryTransition('image-viewer-reply-' + String(this.item.rpid) + '-' + String(index))
                 .onClick(() => this.openPicture(index))
             }, (picture: string, index: number) => picture + String(index))
           }

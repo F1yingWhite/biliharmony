@@ -2,7 +2,6 @@
  * 用户空间页（P3）：banner 氛围头部 + 资料卡 + 投稿 Tab（排序 chips + 双列流分页）
  * 入口：搜索用户卡片 / 视频详情 UP 主条
  */
-import { promptAction } from '@kit.ArkUI';
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, ImageViewerParam, LiveRoomParam, NAV_IMAGE_VIEWER, NAV_LIVE_ROOM, NAV_LOGIN,
   NAV_RELATION_LIST, NAV_SEARCH, RelationListParam, UserSpaceParam } from '../common/AppRouter';
@@ -121,14 +120,22 @@ export struct UserSpacePage {
     }
   }
 
+  private toast(message: string): void {
+    try {
+      this.toast(message);
+    } catch (e) {
+      // 页面销毁或窗口异常时忽略提示。
+    }
+  }
+
   async toggleFollow(): Promise<void> {
     if (!UserStore.isLogin) {
-      promptAction.showToast({ message: '请先登录后再关注' });
+      this.toast('请先登录后再关注');
       AppNavStack.pushPathByName(NAV_LOGIN, null);
       return;
     }
     if (UserStore.current !== null && UserStore.current.mid === this.param.mid) {
-      promptAction.showToast({ message: '不能关注自己' });
+      this.toast('不能关注自己');
       return;
     }
     if (this.followLoading) return;
@@ -141,12 +148,12 @@ export struct UserSpacePage {
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
       if (!result.ok) {
         this.following = previous;
-        promptAction.showToast({ message: result.message });
+        this.toast(result.message);
       }
     } catch (e) {
       if (!this.destroyed && generation === this.lifecycleGeneration) {
         this.following = previous;
-        promptAction.showToast({ message: '关注操作失败，请检查网络' });
+        this.toast('关注操作失败，请检查网络');
       }
     } finally {
       if (!this.destroyed && generation === this.lifecycleGeneration) this.followLoading = false;
@@ -231,7 +238,10 @@ export struct UserSpacePage {
       initialIndex: initialIndex,
       transitionId: this.headerTransitionId(initialIndex),
     };
-    AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, param);
+    // 一镜到底：关默认转场 + animateTo，geometryTransition 接管
+    this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
+      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, param, false);
+    });
   }
 
   @Builder
@@ -241,7 +251,7 @@ export struct UserSpacePage {
       .height('100%')
       .objectFit(ImageFit.Cover)
       .draggable(false)
-      .sharedTransition(this.headerTransitionId(this.headerIndex), { duration: 300, curve: Curve.EaseInOut })
+      .geometryTransition(this.headerTransitionId(this.headerIndex))
       .onClick(() => this.openHeaderImage())
   }
 
@@ -345,7 +355,7 @@ export struct UserSpacePage {
     .height('100%')
     .clip(true)
     .id('uspace-header-media')
-    .sharedTransition(this.headerTransitionId(index), { duration: 300, curve: Curve.EaseInOut })
+    .geometryTransition(this.headerTransitionId(index))
     .onClick(() => this.openHeaderImage())
   }
 

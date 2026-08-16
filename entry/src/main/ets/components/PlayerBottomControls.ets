@@ -15,9 +15,6 @@ export struct PlayerBottomControls {
   @Prop qualityLoading: boolean = false;
   @Prop qualityLabel: string = '';
   @Prop playbackRate: number = 1;
-  @Prop showQualitySettings: boolean = false;
-  @Prop showChapterSettings: boolean = false;
-  @Prop showSpeedSettings: boolean = false;
   /** 横屏底栏中间的弹幕输入（竖屏输入在页面头栏，不走这里） */
   @Prop dmDraft: string = '';
   @Prop dmSending: boolean = false;
@@ -60,8 +57,11 @@ export struct PlayerBottomControls {
         }
         .width('100%')
         Row({ space: 8 }) {
-          this.IconButton(this.playing ? $r('app.media.ic_pause') : $r('app.media.ic_play'), 25, 38, '#FFFFFF',
-            () => this.onPlay())
+          if (this.playing) {
+            this.IconButton($r('app.media.ic_pause'), 25, 38, '#FFFFFF', () => this.onPlay())
+          } else {
+            this.IconButton($r('app.media.ic_play'), 25, 38, '#FFFFFF', () => this.onPlay())
+          }
           this.IconButton(this.danmakuOn ? $r('app.media.ic_danmaku_on') : $r('app.media.ic_danmaku_off'), 23, 36,
             this.danmakuOn ? '#FB7299' : '#99FFFFFF', () => this.onDanmaku())
           this.IconButton($r('app.media.ic_danmaku_settings'), 21, 34, '#FFFFFF', () => this.onDanmakuSettings())
@@ -92,7 +92,7 @@ export struct PlayerBottomControls {
               .fontColor('#FFFFFF')
               .padding({ left: 8, right: 8, top: 7, bottom: 7 })
               .borderRadius(14)
-              .backgroundColor(this.showChapterSettings ? '#66FFFFFF' : '#26000000')
+              .backgroundColor('#26000000')
               .onClick(() => this.onChapter())
           }
           Text(this.qualityLoading ? '切换中' : this.qualityLabel)
@@ -116,8 +116,11 @@ export struct PlayerBottomControls {
     } else {
       // 竖屏：播放/暂停钉在进度条最左、全屏钉在最右，清晰度/倍速/空降等收进右上角 ⋮ 菜单。
       Row({ space: 8 }) {
-        this.IconButton(this.playing ? $r('app.media.ic_pause') : $r('app.media.ic_play'), 22, 34, '#FFFFFF',
-          () => this.onPlay())
+        if (this.playing) {
+          this.IconButton($r('app.media.ic_pause'), 22, 34, '#FFFFFF', () => this.onPlay())
+        } else {
+          this.IconButton($r('app.media.ic_play'), 22, 34, '#FFFFFF', () => this.onPlay())
+        }
         Text(formatDuration(this.progress)).fontSize(11).fontColor('#FFFFFF')
         PlayerProgressBar({
           value: this.progress,

@@ -51,11 +51,11 @@ export struct VideoActionItem {
       // 颜色由父页乐观更新驱动（active 即时翻转）；这里只做两段式弹性反馈：
       // 选中先放大再回落，取消先缩小再回弹，两个方向都有完整动画。
       const activating: boolean = !this.active;
-      animateTo({ duration: 120, curve: Curve.EaseOut }, () => {
+      this.getUIContext().animateTo({ duration: 120, curve: Curve.EaseOut }, () => {
         this.iconScale = activating ? 1.3 : 0.78;
       });
       this.scheduleTimeout(() => {
-        animateTo({ curve: curves.springMotion(0.35, 0.6) }, () => {
+        this.getUIContext().animateTo({ curve: curves.springMotion(0.35, 0.6) }, () => {
           this.iconScale = 1;
         });
       }, 120);

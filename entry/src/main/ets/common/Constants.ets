@@ -104,8 +104,14 @@ export class Api {
   static readonly heartBeat: string = HttpString.apiBaseUrl + '/x/click-interface/web/heartbeat';
   static readonly videoRelation: string = HttpString.apiBaseUrl + '/x/web-interface/archive/relation';
   static readonly likeVideo: string = HttpString.apiBaseUrl + '/x/web-interface/archive/like';
+  static readonly dislikeVideo: string = HttpString.appBaseUrl + '/x/v2/view/dislike';
   static readonly coinVideo: string = HttpString.apiBaseUrl + '/x/web-interface/coin/add';
   static readonly shareVideo: string = HttpString.apiBaseUrl + '/x/web-interface/share/add';
+
+  // ===== 番剧/影视（PGC） =====
+  static readonly bangumiSeason: string = HttpString.apiBaseUrl + '/pgc/view/web/season';
+  static readonly bangumiFollowAdd: string = HttpString.apiBaseUrl + '/pgc/web/follow/add';
+  static readonly bangumiFollowDel: string = HttpString.apiBaseUrl + '/pgc/web/follow/del';
 
   // ===== 评论 =====
   static readonly replyList: string = HttpString.apiBaseUrl + '/x/v2/reply';
@@ -122,15 +128,36 @@ export class Api {
   static readonly ackSessionMessage: string = HttpString.tUrl + '/session_svr/v1/session_svr/update_ack';
   static readonly sendMessage: string = HttpString.tUrl + '/web_im/v1/web_im/send_msg';
 
+  // ===== 消息通知（回复我的 / @我 / 收到的赞 / 系统通知，移植自 PiliPlus lib/http/msg.dart） =====
+  static readonly msgFeedUnread: string = HttpString.apiBaseUrl + '/x/msgfeed/unread';
+  static readonly msgFeedReply: string = HttpString.apiBaseUrl + '/x/msgfeed/reply';
+  static readonly msgFeedAt: string = HttpString.apiBaseUrl + '/x/msgfeed/at';
+  static readonly msgFeedLike: string = HttpString.apiBaseUrl + '/x/msgfeed/like';
+  static readonly msgSysNotify: string = HttpString.messageBaseUrl + '/x/sys-msg/query_notify_list';
+  static readonly msgSysUpdateCursor: string = HttpString.messageBaseUrl + '/x/sys-msg/update_cursor';
+
   // ===== 历史 / 收藏 =====
   static readonly historyList: string = HttpString.apiBaseUrl + '/x/web-interface/history/cursor';
   static readonly dynamicDetail: string = HttpString.apiBaseUrl + '/x/polymer/web-dynamic/v1/detail';
   static readonly favoriteFolders: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/created/list';
   static readonly favoriteFoldersForVideo: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/created/list-all';
-  static readonly favoriteResourceDeal: string = HttpString.apiBaseUrl + '/x/v3/fav/resource/deal';
+  static readonly favoriteResourceDeal: string = HttpString.apiBaseUrl + '/x/v3/fav/resource/batch-deal';
   static readonly favoriteResources: string = HttpString.apiBaseUrl + '/x/v3/fav/resource/list';
   static readonly collectedFolders: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/collected/list';
   static readonly collectionResources: string = HttpString.apiBaseUrl + '/x/space/fav/season/list';
+
+  // ===== 稍后再看（端点与 PiliPlus lib/http/api.dart 对齐） =====
+  static readonly toviewList: string = HttpString.apiBaseUrl + '/x/v2/history/toview';
+  static readonly toviewAdd: string = HttpString.apiBaseUrl + '/x/v2/history/toview/add';
+  static readonly toviewDel: string = HttpString.apiBaseUrl + '/x/v2/history/toview/v2/dels';
+  static readonly toviewClear: string = HttpString.apiBaseUrl + '/x/v2/history/toview/clear';
+
+  // ===== 收藏夹管理（需登录 + CSRF） =====
+  static readonly favFolderAdd: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/add';
+  static readonly favFolderEdit: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/edit';
+  static readonly favFolderDel: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/del';
+  static readonly favResourceDel: string = HttpString.apiBaseUrl + '/x/v3/fav/resource/del';
+  static readonly favResourceMove: string = HttpString.apiBaseUrl + '/x/v3/fav/resource/move';
 
   // ===== 搜索 =====
   static readonly hotSearchList: string = HttpString.searchBaseUrl + '/main/hotword';
@@ -138,6 +165,12 @@ export class Api {
   static readonly searchDefault: string = HttpString.apiBaseUrl + '/x/web-interface/wbi/search/default';
   static readonly searchAll: string = HttpString.apiBaseUrl + '/x/web-interface/wbi/search/all/v2';
   static readonly searchByType: string = HttpString.apiBaseUrl + '/x/web-interface/wbi/search/type';
+
+  // ===== 排行榜 / 必看榜单（移植自 PiliPlus lib/http/video.dart） =====
+  static readonly rankAll: string = HttpString.apiBaseUrl + '/x/web-interface/ranking/v2';
+  static readonly popularSeriesOne: string = HttpString.apiBaseUrl + '/x/web-interface/popular/series/one';
+  static readonly popularSeriesList: string = HttpString.apiBaseUrl + '/x/web-interface/popular/series/list';
+  static readonly popularPrecious: string = HttpString.apiBaseUrl + '/x/web-interface/popular/precious';
 
   // ===== 用户 =====
   static readonly userInfo: string = HttpString.apiBaseUrl + '/x/web-interface/nav';
@@ -155,6 +188,8 @@ export class Api {
   // ===== 动态 =====
   static readonly followDynamic: string = HttpString.apiBaseUrl + '/x/polymer/web-dynamic/v1/feed/all';
   static readonly memberDynamic: string = HttpString.apiBaseUrl + '/x/polymer/web-dynamic/v1/feed/space';
+  static readonly thumbDynamic: string = HttpString.apiBaseUrl + '/x/dynamic/feed/dyn/thumb';
+  static readonly createDynamic: string = HttpString.apiBaseUrl + '/x/dynamic/feed/create/dyn';
 
   // ===== 登录 (TV 扫码) =====
   static readonly getTVCode: string = HttpString.passBaseUrl + '/x/passport-tv-login/qrcode/auth_code';
@@ -166,9 +201,15 @@ export class Api {
   static readonly smsSend: string = HttpString.passBaseUrl + '/x/passport-login/sms/send';
   static readonly loginBySms: string = HttpString.passBaseUrl + '/x/passport-login/login/sms';
 
-  // ===== 弹幕 (xml 协议) =====
+  // ===== 弹幕 (xml 协议兜底 + protobuf 分段) =====
   static readonly danmakuXml: string = HttpString.commentBaseUrl + '/';
+  // 网页端分段弹幕（每 6 分钟一段，DmSegMobileReply protobuf）
+  static readonly danmakuSeg: string = HttpString.apiBaseUrl + '/x/v2/dm/web/seg.so';
   static readonly sendDanmaku: string = HttpString.apiBaseUrl + '/x/v2/dm/post';
+  // 弹幕屏蔽词/正则/用户（x/dm/filter/user；type 0 关键词 / 1 正则 / 2 用户）
+  static readonly danmakuFilter: string = HttpString.apiBaseUrl + '/x/dm/filter/user';
+  static readonly danmakuFilterAdd: string = HttpString.apiBaseUrl + '/x/dm/filter/user/add';
+  static readonly danmakuFilterDel: string = HttpString.apiBaseUrl + '/x/dm/filter/user/del';
 }
 
 // app 端推荐接口参数模板

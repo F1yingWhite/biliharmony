@@ -1,5 +1,5 @@
 /** 直播间：观看直播、切换画质、实时弹幕/表情与 SC。 */
-import { promptAction } from '@kit.ArkUI';
+
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { AppNavStack, LiveRoomParam, NAV_LOGIN } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
@@ -139,7 +139,7 @@ export struct LiveRoomPage {
 
   private ensureLogin(): boolean {
     if (UserStore.isLogin) return true;
-    promptAction.showToast({ message: '请先登录后发送直播弹幕' });
+    this.getUIContext().getPromptAction().showToast({ message: '请先登录后发送直播弹幕' });
     AppNavStack.pushPathByName(NAV_LOGIN, null);
     return false;
   }
@@ -149,10 +149,9 @@ export struct LiveRoomPage {
     if (this.sending || !this.ensureLogin() || (emote === null && content.length === 0)) return;
     this.sending = true;
     try {
-      const result: ActionResult = await BiliApi.sendLiveDanmaku(this.param.roomId, content,
-        emote === null ? '' : emote.unique);
+      const result: ActionResult = await BiliApi.sendLiveDanmaku(this.param.roomId, content, emote);
       if (!result.ok) {
-        promptAction.showToast({ message: result.message });
+        this.getUIContext().getPromptAction().showToast({ message: result.message });
         return;
       }
       const local: LiveChatMessage = new LiveChatMessage();
@@ -165,9 +164,9 @@ export struct LiveRoomPage {
       this.chatList = [local].concat(this.chatList).slice(0, 200);
       this.draft = '';
       this.emotePanelOpen = false;
-      promptAction.showToast({ message: '弹幕发送成功' });
+      this.getUIContext().getPromptAction().showToast({ message: '弹幕发送成功' });
     } catch (e) {
-      promptAction.showToast({ message: '弹幕发送失败，请检查网络' });
+      this.getUIContext().getPromptAction().showToast({ message: '弹幕发送失败，请检查网络' });
     } finally {
       if (!this.destroyed) this.sending = false;
     }
@@ -273,18 +272,29 @@ export struct LiveRoomPage {
     .alignItems(VerticalAlign.Center)
   }
 
+  /** 去掉消息文本里的表情占位符，避免图片和 [xx表情] 文本同时显示。 */
+  private cleanEmoteText(msg: LiveChatMessage): string {
+    let text: string = msg.text;
+    for (let i: number = 0; i < msg.emotes.length; i++) {
+      const emote: LiveEmoteItem = msg.emotes[i];
+      if (emote.unique.length > 0) text = text.split(emote.unique).join('');
+      if (emote.emoji.length > 0 && emote.emoji !== emote.unique) text = text.split(emote.emoji).join('');
+    }
+    return text.trim();
+  }
+
   @Builder
   ChatMessageContent(msg: LiveChatMessage) {
     if (msg.emotes.length > 0) {
       Flex({ wrap: FlexWrap.Wrap, direction: FlexDirection.Row, alignItems: ItemAlign.Center }) {
-        if (msg.text.length > 0 && msg.text !== msg.emotes[0].unique && msg.text !== msg.emotes[0].emoji) {
-          Text(msg.text)
+        if (this.cleanEmoteText(msg).length > 0) {
+          Text(this.cleanEmoteText(msg))
             .fontSize(13).fontColor(this.isDark ? '#E1E2E3' : '#303236').maxLines(3)
         }
         ForEach(msg.emotes, (emote: LiveEmoteItem) => {
           Image(emote.url)
-            .width(emote.unique.startsWith('official_') ? 32 : 44)
-            .height(emote.unique.startsWith('official_') ? 32 : 44)
+            .width(emote.unique.startsWith('official_') ? 18 : 22)
+            .height(emote.unique.startsWith('official_') ? 18 : 22)
             .objectFit(ImageFit.Contain)
         }, (emote: LiveEmoteItem) => emote.unique + emote.url)
       }
@@ -308,7 +318,7 @@ export struct LiveRoomPage {
             this.ChatMessageContent(msg)
           }
           .width('100%').padding({ left: 14, right: 14 })
-          .alignItems(VerticalAlign.Top)
+          .alignItems(VerticalAlign.Center)
         }
       }, (msg: LiveChatMessage) => msg.id)
     }

@@ -52,8 +52,7 @@ export struct PlayerProgressBar {
         })
     }
     .layoutWeight(1)
-    // 小横幅只占合理比例，避免减少控制项后进度条吞掉整行剩余宽度。
-    .constraintSize({ maxWidth: this.compact ? 190 : 10000 })
+    // 由 layoutWeight 吃掉中间剩余宽度，确保紧凑态的全屏键始终贴在最右侧。
     .height(this.compact ? 20 : 36)
   }
 }

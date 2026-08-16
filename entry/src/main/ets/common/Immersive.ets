@@ -55,6 +55,17 @@ export class Immersive {
     Immersive.invalidate();
   }
 
+  /** 播放视频时保持屏幕常亮；暂停/离场时恢复。 */
+  static setKeepScreenOn(on: boolean): void {
+    const win: window.Window | null = Immersive.mainWindow;
+    if (win === null) return;
+    try {
+      win.setWindowKeepScreenOn(on);
+    } catch (e) {
+      // 部分设备/窗口阶段不支持常亮，忽略即可。
+    }
+  }
+
   /** 仅更新系统栏图标深浅（背景保持透明） */
   static setBarIcons(statusIconLight: boolean, navIconLight: boolean): void {
     const win: window.Window | null = Immersive.mainWindow;

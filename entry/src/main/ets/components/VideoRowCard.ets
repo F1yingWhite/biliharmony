@@ -70,6 +70,8 @@ export struct VideoRowCard {
       .layoutWeight(1)
     }
     .width('100%')
+    // 标题/UP 与封面上端对齐（Row 默认垂直居中会让文字偏下）
+    .alignItems(VerticalAlign.Top)
     .padding({
       left: this.compact ? 14 : 0,
       right: this.compact ? 14 : 0,

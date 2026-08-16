@@ -1,8 +1,8 @@
-/** 登录用户的观看历史与收藏夹。 */
+/** 登录用户的观看历史、稍后再看与收藏夹。 */
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, NAV_VIDEO_DETAIL, VideoDetailParam } from '../common/AppRouter';
-import { BiliApi } from '../api/BiliApi';
-import { FavoriteFolderItem, FavoriteVideoPageData, HistoryPageData, HistoryVideoItem, VideoItem } from '../model/Models';
+import { BiliApi, ActionResult } from '../api/BiliApi';
+import { FavoriteFolderItem, FavoriteVideoPageData, HistoryPageData, HistoryVideoItem, VideoItem, WatchLaterItem } from '../model/Models';
 import { UserStore } from '../common/UserStore';
 import { formatCount, formatDuration, formatRelativeTime } from '../common/Utils';
 import { LoadingView } from '../components/LoadingView';
@@ -141,6 +141,199 @@ export struct HistoryPage {
   }
 }
 
+/** 稍后再看：全量列表（最多 100 条），左滑删除单条，顶部清空。 */
+@Component
+export struct WatchLaterPage {
+  @State loading: boolean = false;
+  @State itemCount: number = 0;
+  @State errorText: string = '';
+  @StorageProp('accentColor') accent: string = '#FB7299';
+  @StorageProp('isDarkMode') isDark: boolean = false;
+  private itemsSource: BasicDataSource<WatchLaterItem> = new BasicDataSource<WatchLaterItem>();
+  private actionBusy: boolean = false;
+
+  aboutToAppear(): void {
+    this.prepareAndLoad();
+  }
+
+  /** 统一 toast：用 UIContext 版 PromptAction，避开全局 promptAction 的废弃告警。 */
+  private toast(message: string): void {
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: message });
+    } catch (e) {
+      // toast 失败不影响业务流程
+    }
+  }
+
+  private async prepareAndLoad(): Promise<void> {
+    try {
+      await UserStore.ensureLoaded();
+      if (!UserStore.isLogin) {
+        this.errorText = '登录后才能查看稍后再看';
+        return;
+      }
+      await this.load();
+    } catch (e) {
+      this.errorText = '稍后再看加载失败，请检查网络后重试';
+    }
+  }
+
+  async load(): Promise<void> {
+    if (this.loading) return;
+    this.loading = true;
+    this.errorText = '';
+    try {
+      const items: Array<WatchLaterItem> = await BiliApi.getWatchLaterList();
+      this.itemsSource.reset(items);
+      this.itemCount = items.length;
+    } catch (e) {
+      if (this.itemsSource.isEmpty()) this.errorText = '稍后再看加载失败，请检查网络后重试';
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  /** 删除单条：接口成功后本地移除并重载列表。 */
+  private async removeItem(item: WatchLaterItem): Promise<void> {
+    if (this.actionBusy) return;
+    this.actionBusy = true;
+    try {
+      const result: ActionResult = await BiliApi.delWatchLater([item.video.aid]);
+      if (!result.ok) {
+        this.toast(result.message);
+        return;
+      }
+      this.toast('已移除');
+      this.itemsSource.reset(this.itemsSource.getAll().filter((v: WatchLaterItem) => v.video.aid !== item.video.aid));
+      this.itemCount = this.itemsSource.totalCount();
+    } catch (e) {
+      this.toast('网络异常，请稍后重试');
+    } finally {
+      this.actionBusy = false;
+    }
+  }
+
+  private confirmClear(): void {
+    if (this.itemCount === 0 || this.actionBusy) return;
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '清空稍后再看',
+        message: '确定要清空全部稍后再看吗？',
+        buttons: [
+          { text: '取消', color: '#9499A0' },
+          { text: '清空', color: this.accent },
+        ],
+      }).then((dialogResult) => {
+        if (dialogResult.index === 1) {
+          this.clearAll().catch(() => {
+          });
+        }
+      });
+    } catch (e) {
+      // 弹窗失败不阻塞页面
+    }
+  }
+
+  private async clearAll(): Promise<void> {
+    if (this.actionBusy) return;
+    this.actionBusy = true;
+    try {
+      const result: ActionResult = await BiliApi.clearWatchLater();
+      if (!result.ok) {
+        this.toast(result.message);
+        return;
+      }
+      this.toast('已清空稍后再看');
+      this.itemsSource.clear();
+      this.itemCount = 0;
+    } catch (e) {
+      this.toast('网络异常，请稍后重试');
+    } finally {
+      this.actionBusy = false;
+    }
+  }
+
+  @Builder
+  ClearAction() {
+    if (this.itemCount > 0) {
+      Text('清空')
+        .fontSize(14)
+        .fontColor(this.accent)
+        .padding({ left: 12, right: 2, top: 6, bottom: 6 })
+        .onClick(() => this.confirmClear())
+    }
+  }
+
+  @Builder
+  SwipeDelete(item: WatchLaterItem) {
+    Row() {
+      Text('删除')
+        .fontSize(14)
+        .fontColor('#FFFFFF')
+    }
+    .width(72)
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor('#FB4A4A')
+    .onClick(() => {
+      this.removeItem(item).catch(() => {
+      });
+    })
+  }
+
+  build() {
+    Column() {
+      PageHeader({
+        title: '稍后再看',
+        trailing: (): void => {
+          this.ClearAction()
+        },
+      })
+      if (this.itemCount === 0) {
+        LoadingView({ loading: this.loading, empty: !this.loading && this.errorText.length === 0,
+          emptyText: '暂无稍后再看内容', errorText: this.errorText,
+          onRetry: () => this.prepareAndLoad().catch(() => {
+          }) })
+      } else {
+        List() {
+          LazyForEach(this.itemsSource, (item: WatchLaterItem) => {
+            ListItem() {
+              VideoRowCard({
+                cover: item.video.cover,
+                title: item.video.title,
+                upName: item.video.upName,
+                overlayText: item.video.duration > 0 ? formatDuration(item.video.duration) : '',
+                extraText: item.progress > 0 && item.video.duration > 0 ?
+                  '已看到 ' + formatDuration(item.progress) : formatCount(item.video.play) + ' 播放',
+                titleDarkColor: '#F2F2F4',
+                onTap: () => {
+                  const param: VideoDetailParam = { bvid: item.video.bvid, aid: item.video.aid, title: item.video.title };
+                  AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+                },
+              })
+            }
+            .swipeAction({
+              end: {
+                builder: () => {
+                  this.SwipeDelete(item)
+                },
+              },
+            })
+          }, (item: WatchLaterItem) => String(item.video.aid))
+        }
+        .layoutWeight(1)
+        .padding({ left: 12, right: 12 })
+        .cachedCount(5)
+        .scrollBar(BarState.Off)
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .padding({ top: Immersive.statusBarHeight() })
+    .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+  }
+}
+
 @Component
 export struct FavoritesPage {
   @State selected: FavoriteFolderItem = new FavoriteFolderItem();
@@ -152,11 +345,22 @@ export struct FavoritesPage {
   @State loading: boolean = false;
   @State collectionHasMore: boolean = true;
   @State collectionLoading: boolean = false;
+  // ===== 收藏夹管理状态 =====
+  @State editing: boolean = false;                 // 夹内视频编辑模式（多选）
+  @State checkedAids: Array<number> = [];          // 编辑模式勾选的视频 aid
+  @State folderDialogVisible: boolean = false;     // 新建/重命名弹窗
+  @State folderDialogIsEdit: boolean = false;
+  @State folderDialogInput: string = '';
+  @State moveSheetVisible: boolean = false;        // 移动到目标收藏夹选择弹层
+  @State moveTargets: Array<FavoriteFolderItem> = [];
+  @State actionBusy: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   private foldersSource: BasicDataSource<FavoriteFolderItem> = new BasicDataSource<FavoriteFolderItem>();
   private collectionsSource: BasicDataSource<FavoriteFolderItem> = new BasicDataSource<FavoriteFolderItem>();
   private videosSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
+  /** 重命名目标收藏夹（保留 intro/公开状态，避免重命名时被重置） */
+  private dialogFolder: FavoriteFolderItem = new FavoriteFolderItem();
 
   aboutToAppear(): void {
     this.initFavorites().catch(() => {
@@ -243,6 +447,11 @@ export struct FavoritesPage {
   }
 
   goBack(): void {
+    if (this.editing) {
+      this.editing = false;
+      this.checkedAids = [];
+      return;
+    }
     if (this.selected.id > 0) {
       this.selected = new FavoriteFolderItem();
       this.videosSource.clear();
@@ -250,6 +459,212 @@ export struct FavoritesPage {
     } else {
       AppNavStack.pop();
     }
+  }
+
+  /** 统一 toast：用 UIContext 版 PromptAction，避开全局 promptAction 的废弃告警。 */
+  private toast(message: string): void {
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: message });
+    } catch (e) {
+      // toast 失败不影响业务流程
+    }
+  }
+
+  // ===== 收藏夹管理：新建 / 重命名 / 删除 =====
+  private showFolderActions(folder: FavoriteFolderItem): void {
+    try {
+      this.getUIContext().getPromptAction().showActionMenu({
+        title: folder.title,
+        buttons: [
+          { text: '重命名', color: this.isDark ? '#E6E6E6' : '#18191C' },
+          { text: '删除收藏夹', color: '#FB4A4A' },
+        ],
+      }).then((result) => {
+        if (result.index === 0) {
+          this.openFolderDialog(true, folder);
+        } else if (result.index === 1) {
+          this.confirmDeleteFolder(folder);
+        }
+      });
+    } catch (e) {
+      // 弹窗失败不阻塞页面
+    }
+  }
+
+  private openFolderDialog(isEdit: boolean, folder?: FavoriteFolderItem): void {
+    this.folderDialogIsEdit = isEdit;
+    if (isEdit && folder !== undefined) {
+      this.dialogFolder = folder;
+      this.folderDialogInput = folder.title;
+    } else {
+      this.dialogFolder = new FavoriteFolderItem();
+      this.folderDialogInput = '';
+    }
+    this.folderDialogVisible = true;
+  }
+
+  private async submitFolderDialog(): Promise<void> {
+    const title: string = this.folderDialogInput.trim();
+    if (title.length === 0) {
+      this.toast('收藏夹名称不能为空');
+      return;
+    }
+    if (this.actionBusy) return;
+    this.actionBusy = true;
+    try {
+      const result: ActionResult = this.folderDialogIsEdit ?
+        await BiliApi.editFavoriteFolder(this.dialogFolder.id, title, this.dialogFolder.isPublic, this.dialogFolder.intro) :
+        await BiliApi.addFavoriteFolder(title);
+      this.toast(result.ok ? (this.folderDialogIsEdit ? '已重命名' : '已创建') : result.message);
+      if (result.ok) {
+        this.folderDialogVisible = false;
+        this.loadFolders(true).catch(() => {
+        });
+      }
+    } catch (e) {
+      this.toast('网络异常，请稍后重试');
+    } finally {
+      this.actionBusy = false;
+    }
+  }
+
+  private confirmDeleteFolder(folder: FavoriteFolderItem): void {
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '删除收藏夹「' + folder.title + '」',
+        message: '夹内视频不会被删除，但收藏夹本身不可恢复。确定删除吗？',
+        buttons: [
+          { text: '取消', color: '#9499A0' },
+          { text: '删除', color: '#FB4A4A' },
+        ],
+      }).then((dialogResult) => {
+        if (dialogResult.index === 1) {
+          this.deleteFolder(folder).catch(() => {
+          });
+        }
+      });
+    } catch (e) {
+      // 弹窗失败不阻塞页面
+    }
+  }
+
+  private async deleteFolder(folder: FavoriteFolderItem): Promise<void> {
+    if (this.actionBusy) return;
+    this.actionBusy = true;
+    try {
+      const result: ActionResult = await BiliApi.delFavoriteFolder([folder.id]);
+      this.toast(result.ok ? '已删除' : result.message);
+      if (result.ok) {
+        this.loadFolders(true).catch(() => {
+        });
+      }
+    } catch (e) {
+      this.toast('网络异常，请稍后重试');
+    } finally {
+      this.actionBusy = false;
+    }
+  }
+
+  // ===== 夹内视频编辑模式：多选删除 / 批量移动 =====
+  private toggleEdit(): void {
+    this.editing = !this.editing;
+    this.checkedAids = [];
+  }
+
+  private isChecked(aid: number): boolean {
+    return this.checkedAids.indexOf(aid) >= 0;
+  }
+
+  private toggleChecked(aid: number, index: number): void {
+    if (this.isChecked(aid)) {
+      this.checkedAids = this.checkedAids.filter((id: number) => id !== aid);
+    } else {
+      this.checkedAids = this.checkedAids.concat([aid]);
+    }
+    // @State 数组重赋值驱动底部操作条刷新；行本身通过 notifyItemChanged 重绑。
+    this.videosSource.notifyItemChanged(index);
+  }
+
+  private confirmDeleteChecked(): void {
+    if (this.checkedAids.length === 0) {
+      this.toast('请先选择视频');
+      return;
+    }
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '移除收藏',
+        message: '将 ' + String(this.checkedAids.length) + ' 个视频从本收藏夹移除（不会取消其他收藏夹的收藏）。',
+        buttons: [
+          { text: '取消', color: '#9499A0' },
+          { text: '移除', color: '#FB4A4A' },
+        ],
+      }).then((dialogResult) => {
+        if (dialogResult.index === 1) {
+          this.deleteChecked().catch(() => {
+          });
+        }
+      });
+    } catch (e) {
+      // 弹窗失败不阻塞页面
+    }
+  }
+
+  private async deleteChecked(): Promise<void> {
+    if (this.actionBusy) return;
+    this.actionBusy = true;
+    try {
+      const result: ActionResult = await BiliApi.delFavoriteResources(this.selected.id, this.checkedAids);
+      this.toast(result.ok ? '已移除' : result.message);
+      if (result.ok) this.removeCheckedLocally();
+    } catch (e) {
+      this.toast('网络异常，请稍后重试');
+    } finally {
+      this.actionBusy = false;
+    }
+  }
+
+  private async openMoveSheet(): Promise<void> {
+    if (this.checkedAids.length === 0) {
+      this.toast('请先选择视频');
+      return;
+    }
+    const user = UserStore.current;
+    if (user === null) return;
+    try {
+      const all: Array<FavoriteFolderItem> = await BiliApi.getAllFavoriteFolders(user.mid);
+      this.moveTargets = all.filter((f: FavoriteFolderItem) => f.id !== this.selected.id);
+      if (this.moveTargets.length === 0) {
+        this.toast('没有其他收藏夹可移动');
+        return;
+      }
+      this.moveSheetVisible = true;
+    } catch (e) {
+      this.toast('收藏夹列表加载失败，请稍后重试');
+    }
+  }
+
+  private async moveCheckedTo(target: FavoriteFolderItem): Promise<void> {
+    this.moveSheetVisible = false;
+    if (this.actionBusy) return;
+    this.actionBusy = true;
+    try {
+      const result: ActionResult = await BiliApi.moveFavoriteResources(this.selected.id, target.id, this.checkedAids);
+      this.toast(result.ok ? '已移动到「' + target.title + '」' : result.message);
+      if (result.ok) {
+        this.removeCheckedLocally();
+        this.editing = false;
+      }
+    } catch (e) {
+      this.toast('网络异常，请稍后重试');
+    } finally {
+      this.actionBusy = false;
+    }
+  }
+
+  /** 删除/移动成功后本地移除勾选项，避免整页重拉闪烁。 */
+  private removeCheckedLocally(): void {
+    this.videosSource.reset(this.videosSource.getAll().filter((v: VideoItem) => this.checkedAids.indexOf(v.aid) < 0));
+    this.checkedAids = [];
   }
 
   /** 当前列表的分页加载入口（footer 点击与触底共用） */
@@ -305,91 +720,305 @@ export struct FavoritesPage {
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
-      Image($r('app.media.ic_arrow_right')).width(18).height(18).fillColor('#B4B6BA')
+      // 自建收藏夹（收藏夹 Tab）提供管理入口；收藏集不管理
+      if (this.category === 0 && this.selected.id === 0) {
+        Image($r('app.media.ic_more'))
+          .width(20)
+          .height(20)
+          .fillColor('#B4B6BA')
+          .padding(6)
+          .onClick(() => this.showFolderActions(item))
+      } else {
+        Image($r('app.media.ic_arrow_right')).width(18).height(18).fillColor('#B4B6BA')
+      }
     }
     .width('100%')
     .padding({ top: 10, bottom: 10 })
     .onClick(() => this.openFolder(item))
   }
 
-  build() {
+  @Builder
+  FavHeaderActions() {
+    // 只有进入自建收藏夹（非合集/收藏集）才提供编辑模式
+    if (this.selected.id > 0 && this.selected.type !== 21) {
+      Text(this.editing ? '完成' : '编辑')
+        .fontSize(14)
+        .fontColor(this.accent)
+        .padding({ left: 12, right: 2, top: 6, bottom: 6 })
+        .onClick(() => this.toggleEdit())
+    }
+  }
+
+  @Builder
+  CheckCircle(checked: boolean) {
+    Stack({ alignContent: Alignment.Center }) {
+      Circle()
+        .width(18)
+        .height(18)
+        .fill(checked ? this.accent : '#00000000')
+        .border({ width: 1.5, color: checked ? this.accent : '#B4B6BA' })
+      if (checked) {
+        Text('✓')
+          .fontSize(11)
+          .fontColor('#FFFFFF')
+      }
+    }
+    .width(26)
+    .height(26)
+  }
+
+  /** 新建/重命名收藏夹弹窗（居中卡片 + 遮罩，点遮罩关闭）。 */
+  @Builder
+  FolderDialogOverlay() {
     Column() {
-      PageHeader({
-        title: this.selected.id > 0 ? this.selected.title : '我的收藏',
-        onBack: () => this.goBack(),
-      })
-      if (this.selected.id === 0) {
-        Row() {
-          Text('收藏夹')
-            .layoutWeight(1).height(42).textAlign(TextAlign.Center).fontSize(14)
-            .fontWeight(this.category === 0 ? FontWeight.Bold : FontWeight.Normal)
-            .fontColor(this.category === 0 ? this.accent : '#9499A0')
-            .onClick(() => this.category = 0)
-          Text('收藏集')
-            .layoutWeight(1).height(42).textAlign(TextAlign.Center).fontSize(14)
-            .fontWeight(this.category === 1 ? FontWeight.Bold : FontWeight.Normal)
-            .fontColor(this.category === 1 ? this.accent : '#9499A0')
-            .onClick(() => this.category = 1)
+      Column({ space: 16 }) {
+        Text(this.folderDialogIsEdit ? '重命名收藏夹' : '新建收藏夹')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+        TextInput({ placeholder: '收藏夹名称', text: this.folderDialogInput })
+          .fontSize(14)
+          .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+          .placeholderColor('#9499A0')
+          .backgroundColor(this.isDark ? '#3A3D44' : '#F0F1F3')
+          .maxLength(20)
+          .onChange((value: string) => {
+            this.folderDialogInput = value;
+          })
+        Row({ space: 12 }) {
+          Text('取消')
+            .layoutWeight(1)
+            .height(40)
+            .textAlign(TextAlign.Center)
+            .fontSize(14)
+            .fontColor('#9499A0')
+            .backgroundColor(this.isDark ? '#3A3D44' : '#F0F1F3')
+            .borderRadius(20)
+            .onClick(() => {
+              this.folderDialogVisible = false;
+            })
+          Text('确定')
+            .layoutWeight(1)
+            .height(40)
+            .textAlign(TextAlign.Center)
+            .fontSize(14)
+            .fontColor('#FFFFFF')
+            .backgroundColor(this.accent)
+            .borderRadius(20)
+            .onClick(() => {
+              this.submitFolderDialog().catch(() => {
+              });
+            })
         }
         .width('100%')
-        .border({ width: { bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
       }
-      if (this.loading && this.foldersSource.isEmpty() && this.videosSource.isEmpty()) {
-        LoadingView({ loading: true })
-      } else {
-        List() {
-          if (this.selected.id === 0) {
-            if (this.category === 0) {
-              LazyForEach(this.foldersSource, (item: FavoriteFolderItem) => {
-                ListItem() { this.FolderRow(item) }
-              }, (item: FavoriteFolderItem) => String(item.id))
-            } else {
-              LazyForEach(this.collectionsSource, (item: FavoriteFolderItem) => {
-                ListItem() { this.FolderRow(item) }
-              }, (item: FavoriteFolderItem) => 'collection-' + String(item.id))
-            }
-          } else {
-            LazyForEach(this.videosSource, (item: VideoItem) => {
-              ListItem() {
-                VideoRowCard({
-                  cover: item.cover,
-                  title: item.title,
-                  upName: item.upName,
-                  extraText: formatCount(item.play) + ' 播放',
-                  contentSpace: 7,
-                  titleDarkColor: '#FFFFFF',
-                  onTap: () => {
-                    const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
-                    AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
-                  },
-                })
-              }
-            }, (item: VideoItem) => item.bvid + String(item.aid))
-          }
-          ListItem() {
-            LoadMoreFooter({
-              loading: this.footerLoading(),
-              hasMore: this.footerHasMore(),
-              moreText: '继续加载',
-              endText: this.selected.id === 0 && this.category === 1 ? '—— 收藏集到底啦 ——' : '—— 到底啦 ——',
-              loadingText: '加载中…',
-              accentLoadingText: true,
-              padTop: 18,
-              padBottom: 18,
-              onLoadMore: () => this.loadMore(),
-            })
-          }
-        }
+      .width('78%')
+      .padding(18)
+      .borderRadius(14)
+      .backgroundColor(this.isDark ? '#2A2C31' : '#FFFFFF')
+      .onClick(() => {
+        // 吞掉卡片区域点击，避免触发遮罩关闭
+      })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor('#66000000')
+    .onClick(() => {
+      this.folderDialogVisible = false;
+    })
+  }
+
+  /** 移动到目标收藏夹的底部选择弹层。 */
+  @Builder
+  MoveSheetOverlay() {
+    Column() {
+      Blank()
         .layoutWeight(1)
-        .padding({ left: 12, right: 12 })
-        .cachedCount(5)
+        .width('100%')
+        .onClick(() => {
+          this.moveSheetVisible = false;
+        })
+      Column() {
+        Text('移动到…')
+          .fontSize(15)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+          .padding({ top: 14, bottom: 8 })
+        List() {
+          ForEach(this.moveTargets, (folder: FavoriteFolderItem) => {
+            ListItem() {
+              Row() {
+                Text(folder.title)
+                  .fontSize(14)
+                  .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+                  .layoutWeight(1)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                Text(formatCount(folder.count) + ' 个内容')
+                  .fontSize(12)
+                  .fontColor('#9499A0')
+              }
+              .width('100%')
+              .height(46)
+              .padding({ left: 18, right: 18 })
+              .onClick(() => {
+                this.moveCheckedTo(folder).catch(() => {
+                });
+              })
+            }
+          }, (folder: FavoriteFolderItem) => String(folder.id))
+        }
+        .width('100%')
+        .constraintSize({ maxHeight: 320 })
         .scrollBar(BarState.Off)
-        .onReachEnd(() => this.loadMore())
+      }
+      .width('100%')
+      .padding({ bottom: Immersive.bottomInset() + 8 })
+      .backgroundColor(this.isDark ? '#2A2C31' : '#FFFFFF')
+      .borderRadius({ topLeft: 16, topRight: 16 })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#66000000')
+  }
+
+  build() {
+    Stack() {
+      Column() {
+        PageHeader({
+          title: this.selected.id > 0 ? this.selected.title : '我的收藏',
+          onBack: () => this.goBack(),
+          trailing: (): void => {
+            this.FavHeaderActions()
+          },
+        })
+        if (this.selected.id === 0) {
+          Row() {
+            Text('收藏夹')
+              .layoutWeight(1).height(42).textAlign(TextAlign.Center).fontSize(14)
+              .fontWeight(this.category === 0 ? FontWeight.Bold : FontWeight.Normal)
+              .fontColor(this.category === 0 ? this.accent : '#9499A0')
+              .onClick(() => this.category = 0)
+            Text('收藏集')
+              .layoutWeight(1).height(42).textAlign(TextAlign.Center).fontSize(14)
+              .fontWeight(this.category === 1 ? FontWeight.Bold : FontWeight.Normal)
+              .fontColor(this.category === 1 ? this.accent : '#9499A0')
+              .onClick(() => this.category = 1)
+            // 收藏夹 Tab 顶部提供新建入口
+            if (this.category === 0) {
+              Text('＋新建')
+                .fontSize(13)
+                .fontColor(this.accent)
+                .padding({ left: 10, right: 14, top: 6, bottom: 6 })
+                .onClick(() => this.openFolderDialog(false))
+            }
+          }
+          .width('100%')
+          .border({ width: { bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
+        }
+        if (this.loading && this.foldersSource.isEmpty() && this.videosSource.isEmpty()) {
+          LoadingView({ loading: true })
+        } else {
+          List() {
+            if (this.selected.id === 0) {
+              if (this.category === 0) {
+                LazyForEach(this.foldersSource, (item: FavoriteFolderItem) => {
+                  ListItem() { this.FolderRow(item) }
+                }, (item: FavoriteFolderItem) => String(item.id))
+              } else {
+                LazyForEach(this.collectionsSource, (item: FavoriteFolderItem) => {
+                  ListItem() { this.FolderRow(item) }
+                }, (item: FavoriteFolderItem) => 'collection-' + String(item.id))
+              }
+            } else {
+              LazyForEach(this.videosSource, (item: VideoItem, index: number) => {
+                ListItem() {
+                  Row({ space: 4 }) {
+                    if (this.editing) {
+                      this.CheckCircle(this.isChecked(item.aid))
+                    }
+                    VideoRowCard({
+                      cover: item.cover,
+                      title: item.title,
+                      upName: item.upName,
+                      extraText: formatCount(item.play) + ' 播放',
+                      contentSpace: 7,
+                      titleDarkColor: '#FFFFFF',
+                      onTap: () => {
+                        if (this.editing) {
+                          this.toggleChecked(item.aid, index);
+                          return;
+                        }
+                        const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
+                        AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+                      },
+                    })
+                      .layoutWeight(1)
+                  }
+                  .width('100%')
+                }
+              }, (item: VideoItem) => item.bvid + String(item.aid))
+            }
+            ListItem() {
+              LoadMoreFooter({
+                loading: this.footerLoading(),
+                hasMore: this.footerHasMore(),
+                moreText: '继续加载',
+                endText: this.selected.id === 0 && this.category === 1 ? '—— 收藏集到底啦 ——' : '—— 到底啦 ——',
+                loadingText: '加载中…',
+                accentLoadingText: true,
+                padTop: 18,
+                padBottom: 18,
+                onLoadMore: () => this.loadMore(),
+              })
+            }
+          }
+          .layoutWeight(1)
+          .padding({ left: 12, right: 12 })
+          .cachedCount(5)
+          .scrollBar(BarState.Off)
+          .onReachEnd(() => this.loadMore())
+        }
+        // 编辑模式底部操作条：多选后删除 / 移动到别的收藏夹
+        if (this.editing && this.selected.id > 0) {
+          Row({ space: 12 }) {
+            Text(this.checkedAids.length > 0 ? '已选 ' + String(this.checkedAids.length) + ' 项' : '选择视频')
+              .fontSize(13)
+              .fontColor('#9499A0')
+              .layoutWeight(1)
+            Text('移动到…')
+              .fontSize(14)
+              .fontColor(this.checkedAids.length > 0 ? this.accent : '#B4B6BA')
+              .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+              .onClick(() => {
+                this.openMoveSheet().catch(() => {
+                });
+              })
+            Text('删除')
+              .fontSize(14)
+              .fontColor(this.checkedAids.length > 0 ? '#FB4A4A' : '#B4B6BA')
+              .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+              .onClick(() => this.confirmDeleteChecked())
+          }
+          .width('100%')
+          .padding({ left: 16, right: 16, bottom: Immersive.bottomInset() })
+          .border({ width: { top: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
+        }
+      }
+      .width('100%')
+      .height('100%')
+      .padding({ top: Immersive.statusBarHeight() })
+
+      if (this.folderDialogVisible) {
+        this.FolderDialogOverlay()
+      }
+      if (this.moveSheetVisible) {
+        this.MoveSheetOverlay()
       }
     }
     .width('100%')
     .height('100%')
-    .padding({ top: Immersive.statusBarHeight() })
     .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
   }
 }

@@ -2,7 +2,6 @@ import { common } from '@kit.AbilityKit';
 import { http } from '@kit.NetworkKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
-import { promptAction } from '@kit.ArkUI';
 import { systemShare } from '@kit.ShareKit';
 import { AppNavStack, ImageViewerParam } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
@@ -19,6 +18,7 @@ struct ZoomableImage {
   @State scaleValue: number = 1;
   @State offsetX: number = 0;
   @State offsetY: number = 0;
+  @State entranceScale: number = 1;
   @State viewportWidth: number = 0;
   @State viewportHeight: number = 0;
   private pinchBase: number = 1;
@@ -28,6 +28,17 @@ struct ZoomableImage {
   private pinchCenterY: number = 0;
   private panBaseX: number = 0;
   private panBaseY: number = 0;
+
+  aboutToAppear(): void {
+    // 评论/动态等通过 geometryTransition 进入时，额外做一次轻微放大入场；
+    // 即使共享元素动画在某些容器里失效，也不会出现“瞬间变满屏”的生硬感。
+    if (this.transitionId.length > 0) {
+      this.entranceScale = 0.8;
+      this.getUIContext().animateTo({ duration: 260, curve: Curve.EaseOut }, () => {
+        this.entranceScale = 1;
+      });
+    }
+  }
 
   private clampScale(value: number): number {
     return Math.max(1, Math.min(5, value));
@@ -56,7 +67,7 @@ struct ZoomableImage {
       this.offsetX = nextX;
       this.offsetY = nextY;
     };
-    if (animated) animateTo({ duration: 180, curve: Curve.EaseOut }, update);
+    if (animated) this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, update);
     else update();
     this.onZoomChange(nextScale > 1.05);
   }
@@ -67,7 +78,7 @@ struct ZoomableImage {
       this.offsetX = 0;
       this.offsetY = 0;
     };
-    if (animated) animateTo({ duration: 180, curve: Curve.EaseOut }, update);
+    if (animated) this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, update);
     else update();
     this.onZoomChange(false);
   }
@@ -79,8 +90,9 @@ struct ZoomableImage {
         .width('100%')
         .height('100%')
         .objectFit(ImageFit.Contain)
-        .sharedTransition(this.transitionId, { duration: 300, curve: Curve.EaseInOut })
-        .scale({ x: this.scaleValue, y: this.scaleValue })
+        // Navigation 栈下用 geometryTransition（一镜到底）；旧 sharedTransition 只对 legacy router 生效。
+        .geometryTransition(this.transitionId.length > 0 ? this.transitionId : 'image-viewer-none')
+        .scale({ x: this.scaleValue * this.entranceScale, y: this.scaleValue * this.entranceScale })
         .translate({ x: this.offsetX, y: this.offsetY })
         .gesture(
           GestureGroup(GestureMode.Parallel,
@@ -159,12 +171,23 @@ export struct ImageViewerPage {
   @State saving: boolean = false;
   @State actionMenuOpen: boolean = false;
   @State currentZoomed: boolean = false;
+  /** 黑底：首帧直接置为不透明，避免从底层白页淡入造成黑白闪烁。 */
+  @State bgOpacity: number = 1;
+  /** 每张图是否已切换为原图（默认只加载缩略图，点"查看原图"才加载原图，节约内存） */
+  @State originalFlags: Array<boolean> = [];
+  /** 原图 HEAD 体积过小视为低清图，不展示“查看原图”入口。 */
+  @State lowResFlags: Array<boolean> = [];
+  @State originalSizeText: string = '';
+  private sizeCache: Map<number, string> = new Map<number, string>();
   @StorageProp('imageViewerCloseRequest') @Watch('onCloseRequested') closeRequest: number = 0;
   private closing: boolean = false;
 
   aboutToAppear(): void {
     this.currentIndex = Math.max(0, Math.min(this.param.images.length - 1, this.param.initialIndex));
     Immersive.setBarIcons(true, true);
+    this.originalFlags = this.param.images.map(() => false);
+    this.lowResFlags = this.param.images.map(() => false);
+    this.fetchOriginalSize(this.currentIndex);
   }
 
   onCloseRequested(): void {
@@ -174,7 +197,11 @@ export struct ImageViewerPage {
   goBack(): void {
     if (this.closing) return;
     this.closing = true;
-    AppNavStack.pop();
+    // 保持黑底不先淡出，直接让 geometryTransition 把图片缩回缩略图；
+    // 如果先 fade 黑底，收缩动画会被白底/透明底盖掉，看起来像没有缩小动画。
+    this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
+      AppNavStack.pop(false);
+    });
   }
 
   private currentUrl(): string {
@@ -184,6 +211,70 @@ export struct ImageViewerPage {
   /** 非当前页用缩略参数图（B 站 @<宽>w 后缀），滑到该页时再加载原图。 */
   private thumbUrl(url: string): string {
     return biliImageThumbnail(url, 640);
+  }
+
+  /** 首屏展示用缩略图：先快速加载小图，点“查看原图”才切原图。 */
+  private previewUrl(url: string): string {
+    return biliImageThumbnail(url, 640);
+  }
+
+  private isOriginal(index: number): boolean {
+    return index >= 0 && index < this.originalFlags.length && this.originalFlags[index];
+  }
+
+  /**
+   * 生成当前 index 对应的共享元素 ID。
+   * transitionId 只携带了打开时那一张的完整 ID，多图滑动后需要按同一前缀推导出当前图片的 ID，
+   * 关闭时才能缩回当前图片对应的缩略图。
+   */
+  private transitionIdFor(index: number): string {
+    const base: string = this.param.transitionId ?? '';
+    if (base.length === 0) return '';
+    if (index === this.param.initialIndex) return base;
+    const suffix: string = '-' + String(this.param.initialIndex);
+    const prefix: string = base.endsWith(suffix) ? base.substring(0, base.length - suffix.length) : base;
+    return prefix + '-' + String(index);
+  }
+
+  /** 查看原图：仅切换当前张，其余保持中图。 */
+  private viewOriginal(): void {
+    const next: Array<boolean> = this.originalFlags.slice();
+    next[this.currentIndex] = true;
+    this.originalFlags = next;
+  }
+
+  /** HEAD 请求读 Content-Length，给"查看原图"按钮带上文件大小；失败则不显示大小。 */
+  private fetchOriginalSize(index: number): void {
+    if (index < 0 || index >= this.param.images.length) return;
+    if (this.sizeCache.has(index)) {
+      this.originalSizeText = this.sizeCache.get(index) ?? '';
+      return;
+    }
+    const request: http.HttpRequest = http.createHttp();
+    request.request(this.param.images[index], {
+      method: http.RequestMethod.HEAD,
+      header: { 'Referer': 'https://www.bilibili.com/' },
+      connectTimeout: 8000,
+      readTimeout: 8000,
+    }).then((response: http.HttpResponse) => {
+      const headers: Record<string, Object> = response.header as Record<string, Object>;
+      const lengthText: string = String(headers['content-length'] ?? '');
+      const bytes: number = Number.parseInt(lengthText);
+      let label: string = '';
+      const lowRes: boolean = Number.isFinite(bytes) && bytes > 0 && bytes < 200 * 1024;
+      if (Number.isFinite(bytes) && bytes > 0 && !lowRes) {
+        label = bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MB' : String(Math.ceil(bytes / 1024)) + ' KB';
+      }
+      this.lowResFlags[index] = lowRes;
+      this.sizeCache.set(index, label);
+      if (index === this.currentIndex) this.originalSizeText = label;
+      request.destroy();
+    }).catch(() => {
+      this.lowResFlags[index] = false;
+      this.sizeCache.set(index, '');
+      if (index === this.currentIndex) this.originalSizeText = '';
+      request.destroy();
+    });
   }
 
   private imageExtension(url: string): string {
@@ -212,7 +303,7 @@ export struct ImageViewerPage {
       if (Number(response.responseCode) < 200 || Number(response.responseCode) >= 300) {
         throw new Error('HTTP ' + response.responseCode);
       }
-      const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      const context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
       const helper: photoAccessHelper.PhotoAccessHelper = photoAccessHelper.getPhotoAccessHelper(context);
       const extension: string = this.imageExtension(url);
       const uri: string = await helper.createAsset(photoAccessHelper.PhotoType.IMAGE, extension,
@@ -223,9 +314,9 @@ export struct ImageViewerPage {
       } finally {
         fs.closeSync(file);
       }
-      promptAction.showToast({ message: '已保存到图库' });
+      this.getUIContext().getPromptAction().showToast({ message: '已保存到图库' });
     } catch (e) {
-      promptAction.showToast({ message: '保存失败，请稍后重试' });
+      this.getUIContext().getPromptAction().showToast({ message: '保存失败，请稍后重试' });
     } finally {
       request.destroy();
       this.saving = false;
@@ -236,7 +327,7 @@ export struct ImageViewerPage {
     const url: string = this.currentUrl();
     if (url.length === 0) return;
     this.actionMenuOpen = false;
-    const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+    const context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
     const data: systemShare.SharedData = new systemShare.SharedData({
       utd: 'general.hyperlink',
       title: '分享图片',
@@ -245,7 +336,7 @@ export struct ImageViewerPage {
     });
     const controller: systemShare.ShareController = new systemShare.ShareController(data);
     controller.show(context, { previewMode: systemShare.SharePreviewMode.DETAIL }).catch(() => {
-      promptAction.showToast({ message: '无法打开系统分享' });
+      this.getUIContext().getPromptAction().showToast({ message: '无法打开系统分享' });
     });
   }
 
@@ -309,6 +400,9 @@ export struct ImageViewerPage {
     }
     .width('100%')
     .height('100%')
+    .transition(TransitionEffect.asymmetric(
+      TransitionEffect.opacity(0).animation({ duration: 180, curve: Curve.EaseOut }),
+      TransitionEffect.opacity(0).animation({ duration: 150, curve: Curve.EaseIn })))
   }
 
   build() {
@@ -317,15 +411,16 @@ export struct ImageViewerPage {
         .width('100%')
         .height('100%')
         .backgroundColor('#000000')
+        .opacity(this.bgOpacity)
 
       if (this.param.images.length > 0) {
         Swiper() {
           ForEach(this.param.images, (source: string, index: number) => {
             ZoomableImage({
-              source: index === this.currentIndex ? source : this.thumbUrl(source),
+              // 默认只加载 1080w 中图，点"查看原图"后该张才换原图
+              source: this.isOriginal(index) ? source : this.previewUrl(source),
               previewSource: this.thumbUrl(source),
-              transitionId: index === this.currentIndex && index === this.param.initialIndex ?
-                (this.param.transitionId ?? '') : '',
+              transitionId: this.transitionIdFor(index),
               onLongPress: () => this.actionMenuOpen = true,
               onZoomChange: (zoomed: boolean) => this.currentZoomed = zoomed,
             })
@@ -341,6 +436,8 @@ export struct ImageViewerPage {
         .onChange((index: number) => {
           this.currentIndex = index;
           this.currentZoomed = false;
+          this.originalSizeText = this.sizeCache.get(index) ?? '';
+          this.fetchOriginalSize(index);
         })
       }
 
@@ -355,6 +452,16 @@ export struct ImageViewerPage {
         .padding({ left: 8, right: 12 })
         .margin({ top: Immersive.statusBarHeight() + 4 })
         Blank()
+        if (!this.isOriginal(this.currentIndex) && !this.lowResFlags[this.currentIndex]) {
+          Text(this.originalSizeText.length > 0 ? '查看原图 (' + this.originalSizeText + ')' : '查看原图')
+            .fontSize(13)
+            .fontColor('#FFFFFF')
+            .padding({ left: 16, right: 16, top: 8, bottom: 8 })
+            .borderRadius(18)
+            .backgroundColor('#73000000')
+            .margin({ bottom: 12 })
+            .onClick(() => this.viewOriginal())
+        }
         if (this.param.images.length > 1) {
           Text((this.currentIndex + 1) + ' / ' + this.param.images.length)
             .fontSize(13)

@@ -11,11 +11,12 @@ import { Immersive } from '../common/Immersive';
 import { AppTheme } from '../common/AppTheme';
 import { GlassHeaderBar } from '../components/GlassHeaderBar';
 import { AppNavStack, NAV_SEARCH, NAV_VIDEO_DETAIL, NAV_LOGIN, NAV_USER_SPACE, NAV_MESSAGES, NAV_HISTORY, NAV_FAVORITES,
-  NAV_LIVE_ROOM, NAV_IMAGE_VIEWER, NAV_DYNAMIC_DETAIL, VideoDetailParam, UserSpaceParam, LiveRoomParam, ImageViewerParam,
-  DynamicDetailParam, NAV_RELATION_LIST, RelationListParam } from '../common/AppRouter';
+  NAV_WATCH_LATER, NAV_LIVE_ROOM, NAV_IMAGE_VIEWER, NAV_DYNAMIC_DETAIL, VideoDetailParam, UserSpaceParam, LiveRoomParam,
+  ImageViewerParam, DynamicDetailParam, NAV_RELATION_LIST, RelationListParam, NAV_BANGUMI_DETAIL,
+  BangumiDetailParam, NAV_RANK, NAV_ARTICLE, ArticlePageParam } from '../common/AppRouter';
 import { SearchPage } from './Search';
 import { MessagesPage } from './Messages';
-import { FavoritesPage, HistoryPage } from './LibraryPages';
+import { FavoritesPage, HistoryPage, WatchLaterPage } from './LibraryPages';
 import { VideoDetailPage } from './VideoDetail';
 import { LoginPage } from './Login';
 import { UserSpacePage } from './UserSpace';
@@ -23,6 +24,9 @@ import { LiveRoomPage } from './LiveRoom';
 import { ImageViewerPage } from './ImageViewer';
 import { DynamicDetailPage } from './DynamicDetail';
 import { RelationListPage } from './RelationList';
+import { BangumiDetailPage } from './BangumiDetail';
+import { RankPage } from './RankPage';
+import { ArticlePage } from './ArticlePage';
 import { UserStore } from '../common/UserStore';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
 
@@ -76,7 +80,7 @@ struct Index {
       Immersive.setBarIcons(true, true);
       return;
     }
-    if (top === NAV_USER_SPACE) {
+    if (top === NAV_USER_SPACE || top === NAV_BANGUMI_DETAIL) {
       Immersive.setBarIcons(true, this.isDark);
       return;
     }
@@ -140,6 +144,20 @@ struct Index {
     return p;
   }
 
+  private static asBangumiDetailParam(param: Object): BangumiDetailParam | null {
+    const p: BangumiDetailParam = param as BangumiDetailParam;
+    if (p === null || p === undefined) {
+      return null;
+    }
+    if (typeof p.seasonId !== 'number' || typeof p.epId !== 'number' || typeof p.title !== 'string') {
+      return null;
+    }
+    if (p.seasonId <= 0 && p.epId <= 0) {
+      return null;
+    }
+    return p;
+  }
+
   @Builder
   InvalidParamContent() {
     Column() {
@@ -185,6 +203,11 @@ struct Index {
     } else if (name === NAV_FAVORITES) {
       NavDestination() {
         FavoritesPage()
+      }
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+    } else if (name === NAV_WATCH_LATER) {
+      NavDestination() {
+        WatchLaterPage()
       }
       .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
     } else if (name === NAV_VIDEO_DETAIL) {
@@ -242,6 +265,10 @@ struct Index {
         }
       }
       .stdDestination(() => Immersive.setBarIcons(true, true), () => this.syncBarColors())
+      // 看图页：容器背景透明，转场期间透出源页面；黑底由页面内 bgOpacity 渐显（见 ImageViewer.ets）
+      .backgroundColor('#00000000')
+      // 默认转场已由 push/pop(false) 关闭，这里用淡入淡出衬托共享元素飞行
+      .transition(TransitionEffect.OPACITY)
       .onBackPressed(() => {
         // 看图页拦截系统返回/侧滑，交给页面做"缩回缩略图"的收合动画。
         const request: number = AppStorage.get<number>('imageViewerCloseRequest') ?? 0;
@@ -264,6 +291,30 @@ struct Index {
         } else {
           this.InvalidParamContent()
         }
+      }
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+    } else if (name === NAV_BANGUMI_DETAIL) {
+      NavDestination() {
+        if (Index.asBangumiDetailParam(param) !== null) {
+          BangumiDetailPage({ param: param as BangumiDetailParam })
+        } else {
+          this.InvalidParamContent()
+        }
+      }
+      .stdDestination(() => {
+        // 顶部为封面氛围图 → 状态栏图标浅色
+        Immersive.setBarIcons(true, this.isDark);
+      }, () => {
+        this.syncBarColors();
+      })
+    } else if (name === NAV_RANK) {
+      NavDestination() {
+        RankPage()
+      }
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+    } else if (name === NAV_ARTICLE) {
+      NavDestination() {
+        ArticlePage({ param: param as ArticlePageParam })
       }
       .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
     } else if (name === NAV_LOGIN) {
@@ -333,6 +384,9 @@ struct Index {
         }
         .barHeight(52)
         .barOverlap(true)
+        // 顶层首页/动态/我的只通过底部 Dock 切换，不响应左右滑动；
+        // 左右滑动留给各页面内部的频道 Tabs（首页推荐/热门/直播，动态全部/视频/番剧）。
+        .scrollable(false)
         // 原生悬浮式 Dock 底栏 + 沉浸光感材质（API 26+；关闭玻璃时退化为实底背板）
         .barFloatingStyle({
           barSideMargin: 16,
