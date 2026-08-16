@@ -6,6 +6,8 @@ import { avSession } from '@kit.AVSessionKit';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
+import { UserStore } from '../common/UserStore';
+import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
 import { formatDuration } from '../common/Utils';
 import { PlayUrlInfo, SubtitleCue, SubtitleTrack, VideoQualityOption } from '../model/Models';
@@ -19,6 +21,12 @@ import { CONTROLS_GRADIENT_COLORS, DM_SEGMENT_SECONDS } from './PlayerDanmakuSup
 import { PlayerDanmakuEngine } from './PlayerDanmakuEngine';
 import { PlayerBottomControls } from './PlayerBottomControls';
 import { PlayerPlaybackIndicator } from './PlayerPlaybackIndicator';
+
+/** showDialog 按钮的声明类型（promptAction 的 Button 命名空间类型不便直接引用）。 */
+interface ReportButtonItem {
+  text: string;
+  color: string;
+}
 
 @Component
 export struct PlayerView {
@@ -114,6 +122,8 @@ export struct PlayerView {
   @StorageProp('videoSeekRequestToken') @Watch('onExternalSeekRequested') seekRequestToken: number = 0;
   @StorageProp('videoPlaybackStopRequest') @Watch('onPlaybackStopRequested') stopRequest: number = 0;
   @StorageLink('sponsorSkipEnabled') sponsorSkipEnabled: boolean = true;
+  /** 播完自动连播下一集（UGC 合集）；关闭后播完停在剧终画面，由用户手动选择。 */
+  @StorageLink('autoContinuePlay') autoContinuePlay: boolean = true;
   private player: media.AVPlayer | null = null;
   private audioPlayer: media.AVPlayer | null = null;
   private audioPrepared: boolean = false;
@@ -121,6 +131,10 @@ export struct PlayerView {
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
   private dmEngine: PlayerDanmakuEngine = new PlayerDanmakuEngine(this.ctx);
   private dmTick: number = -1;
+  /** 弹幕视口尺寸高频回调合并：pending 尺寸 + 尾随一次应用。 */
+  private dmResizeTimer: number = -1;
+  private dmPendingW: number = 0;
+  private dmPendingH: number = 0;
   private hideTimer: number = -1;
   private sourceIndex: number = 0;
   private retryingSource: boolean = false;
@@ -395,6 +409,48 @@ export struct PlayerView {
     }
   }
 
+  /** 弹幕举报：长按列表弹出原因选择。 */
+  private promptReportDanmaku(item: DanmakuItem): void {
+    if (UserStore.isLogin === false) {
+      this.toast('请先登录后再举报弹幕');
+      return;
+    }
+    if (item.id <= 0) {
+      this.toast('该弹幕来自兼容协议，暂不支持举报');
+      return;
+    }
+    const reasons: Array<string> = ['违法违规', '色情内容', '低俗内容', '人身攻击', '垃圾广告', '引战引流量', '其他'];
+    // showDialog 的按钮不支持 action 回调：本地 interface 承载文案与颜色，结果经 then 的 index 回读。
+    const buttons: Array<ReportButtonItem> = [];
+    for (let i: number = 0; i < reasons.length; i++) {
+      buttons.push({ text: reasons[i], color: this.isDark ? '#CCFFFFFF' : '#18191C' });
+    }
+    buttons.push({ text: '取消', color: '#9499A0' });
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '举报弹幕',
+        message: '「' + item.text.substring(0, Math.min(24, item.text.length)) + (item.text.length > 24 ? '…' : '') + '」',
+        buttons: buttons,
+      }).then((dialogResult) => {
+        const pick: number = Number(dialogResult.index);
+        // 0..6 对应原因；最后一个按钮为「取消」
+        if (pick < 0 || pick >= reasons.length) {
+          return;
+        }
+        const reasonValues: Array<number> = [1, 2, 3, 5, 6, 7, 10];
+        BiliApi.reportDanmaku(this.cid, item.id, reasonValues[pick])
+          .then((r: ActionResult) => {
+            this.toast(r.ok ? '已提交举报，感谢反馈' : r.message);
+          })
+          .catch(() => {
+            this.toast('举报失败，请稍后重试');
+          });
+      });
+    } catch (e) {
+      // 播放器销毁或窗口异常时忽略。
+    }
+  }
+
   private rebuildDmListSource(): void {
     // 面板只展示已加载弹幕的前 300 条，避免一次重排上万行。
     this.dmListSource.reset(this.dmEngine.list.slice(0, 300));
@@ -538,6 +594,10 @@ export struct PlayerView {
 
   aboutToDisappear(): void {
     this.destroyed = true;
+    if (this.dmResizeTimer >= 0) {
+      clearTimeout(this.dmResizeTimer);
+      this.dmResizeTimer = -1;
+    }
     this.invalidatePlayerCreation();
     AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
     this.endHoldSpeed();
@@ -1674,9 +1734,25 @@ export struct PlayerView {
   }
 
   private onDanmakuAreaChange(newV: Area): void {
+    // onAreaChange 在横屏/竖屏/缩放/迷你态切换期间高频触发，逐次全量重排弹幕
+    // 会瞬间拉满 CPU 并掉帧。这里把「应用新尺寸」合并到定时器尾：16ms 内只应用最后一次，
+    // 期间渲染循环仍在按旧视口画，视觉无感。
     const newW: number = newV.width as number;
     const newH: number = newV.height as number;
-    this.dmEngine.setViewport(newW, newH);
+    this.dmPendingW = newW;
+    this.dmPendingH = newH;
+    if (this.dmResizeTimer < 0) {
+      this.dmResizeTimer = setTimeout(() => {
+        this.dmResizeTimer = -1;
+        if (this.destroyed) return;
+        this.dmEngine.setViewport(this.dmPendingW, this.dmPendingH);
+        // 渲染循环运行中由下一帧自然重绘；暂停/缓冲时无循环，
+        // Canvas 可能已被尺寸变化清空，补一帧避免白屏。
+        if (this.dmTick < 0 && this.dmEngine.active.length > 0) {
+          this.dmEngine.drawFrame(false);
+        }
+      }, 16);
+    }
   }
 
   /** 暂停/缓冲时只停时钟，保留已上屏弹幕；恢复播放后从当前帧继续推进。 */
@@ -1959,6 +2035,7 @@ export struct PlayerView {
               onDanmakuSettings: () => this.openSettingsPage('dm'),
               onSponsor: () => {
                 this.sponsorSkipEnabled = !this.sponsorSkipEnabled;
+                AppTheme.persistSponsorSkip(this.sponsorSkipEnabled);
                 this.toast(this.sponsorSkipEnabled ? '广告空降已开启' : '广告空降已关闭');
               },
               onChapter: () => this.openSettingsPage('chapters'),
@@ -2000,7 +2077,7 @@ export struct PlayerView {
         TapGesture({ count: 2 })
           .onAction(() => this.handleDoubleTap()),
         TapGesture({ count: 1 })
-          .onAction(() => this.toggleControls()),
+          .onAction((event: GestureEvent) => this.handleCanvasTap(event)),
         LongPressGesture({ repeat: false })
           .onAction(() => this.beginHoldSpeed())
           .onActionEnd(() => this.endHoldSpeed()),
@@ -2011,6 +2088,21 @@ export struct PlayerView {
           .onActionCancel(() => this.endPlayerPan())
       )
     )
+  }
+
+  /** 单击播放画面：命中的弹幕优先弹举报，否则照常切换控件。 */
+  private handleCanvasTap(event: GestureEvent): void {
+    const finger: FingerInfo | undefined = event.fingerList.length > 0 ? event.fingerList[0] : undefined;
+    const x: number = finger !== undefined ? finger.localX : -1;
+    const y: number = finger !== undefined ? finger.localY : -1;
+    if (x >= 0 && y >= 0) {
+      const hit: DanmakuItem | null = this.dmEngine.hitTest(x, y);
+      if (hit !== null && hit.id > 0) {
+        this.promptReportDanmaku(hit);
+        return;
+      }
+    }
+    this.toggleControls();
   }
 
   /** 圆形图标按钮：Stack 居中 Image，可选深色圆形底。 */
@@ -2147,6 +2239,13 @@ export struct PlayerView {
                 this.showMoreMenu = false;
                 this.showSideDrawer = false;
               })
+              // 长按弹幕 → 举报菜单（需登录与 dmid；protobuf 加载的弹幕才有）
+              .gesture(
+                LongPressGesture({ repeat: false })
+                  .onAction(() => {
+                    this.promptReportDanmaku(item);
+                  })
+              )
             }
           }, (item: DanmakuItem) => String(item.time) + '_' + item.text)
         }
@@ -2154,6 +2253,7 @@ export struct PlayerView {
         .height(embedded ? 'auto' : 200)
         .layoutWeight(embedded ? 1 : 0)
         .scrollBar(BarState.Off)
+        .cachedCount(4)
       }
     }
     .width('100%')
@@ -2267,6 +2367,7 @@ export struct PlayerView {
         .height(embedded ? 'auto' : 180)
         .layoutWeight(embedded ? 1 : 0)
         .scrollBar(BarState.Off)
+        .cachedCount(4)
       }
     }
     .width('100%')
@@ -2410,6 +2511,11 @@ export struct PlayerView {
           this.MoreMenuItem($r('app.media.ic_comment'), 'CC字幕', this.subtitleOn ? this.subtitleLabel() : '关闭',
             () => this.moreSheetPage = 'subtitle')
         }
+        this.MoreToggleItem($r('app.media.ic_video_replay'), '自动连播',
+          () => this.autoContinuePlay, (next: boolean) => {
+            this.autoContinuePlay = next;
+            AppTheme.persistAutoContinue(next);
+          })
         this.SponsorMenuItem()
       }
     }
@@ -2446,6 +2552,7 @@ export struct PlayerView {
     .backgroundColor(this.isDark ? '#26272B' : '#F5F7F9')
     .onClick(() => {
       this.sponsorSkipEnabled = !this.sponsorSkipEnabled;
+      AppTheme.persistSponsorSkip(this.sponsorSkipEnabled);
       this.toast(this.sponsorSkipEnabled ? '广告空降已开启' : '广告空降已关闭');
     })
   }
@@ -2479,6 +2586,30 @@ export struct PlayerView {
     .borderRadius(12)
     .backgroundColor(this.isDark ? '#26272B' : '#F5F7F9')
     .onClick(() => onTap())
+  }
+
+  /** 带 Switch 的开关型菜单项（对齐 B 站"自动连播"设置样式）。 */
+  @Builder
+  MoreToggleItem(icon: Resource, label: string, checked: () => boolean, onChange: (next: boolean) => void) {
+    Row({ space: 12 }) {
+      Image(icon)
+        .width(22)
+        .height(22)
+        .renderMode(ImageRenderMode.Template)
+        .fillColor(this.isDark ? '#FFFFFF' : '#18191C')
+      Text(label)
+        .fontSize(15)
+        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+        .layoutWeight(1)
+      Toggle({ type: ToggleType.Switch, isOn: checked() })
+        .selectedColor(this.accent)
+        .onChange((isOn: boolean) => onChange(isOn))
+    }
+    .width('100%')
+    .height(56)
+    .padding({ left: 14, right: 12 })
+    .borderRadius(12)
+    .backgroundColor(this.isDark ? '#26272B' : '#F5F7F9')
   }
 
 }

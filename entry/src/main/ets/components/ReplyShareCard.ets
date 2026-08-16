@@ -39,10 +39,30 @@ export async function sharePixelMapAsImage(context: common.UIAbilityContext, pix
   } finally {
     fs.closeSync(file);
   }
+  // 生成 JPEG 缩略图作为分享面板的预览图（thumbnailUri 缺省时系统会用
+  // 通用图标占位，观感就是"分享的是一个 logo"）。缩略图 < 32KB 才可传给
+  // thumbnail 字段，这里用 thumbnailUri 指向缓存文件，避免尺寸限制。
+  let thumbnailUri: string = '';
+  try {
+    const thumbPacker: image.ImagePacker = image.createImagePacker();
+    const thumbBuffer: ArrayBuffer = await thumbPacker.packing(pixelMap, { format: 'image/jpeg', quality: 82 });
+    const thumbPath: string = context.cacheDir + '/' + fileName + '_thumb.jpg';
+    const thumbFile: fs.File = fs.openSync(thumbPath,
+      fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(thumbFile.fd, thumbBuffer);
+    } finally {
+      fs.closeSync(thumbFile);
+    }
+    thumbnailUri = fileUri.getUriFromPath(thumbPath);
+  } catch (e) {
+    thumbnailUri = '';
+  }
   const data: systemShare.SharedData = new systemShare.SharedData({
     utd: 'general.png',
     title: '分享评论',
     content: fileUri.getUriFromPath(path),
+    thumbnailUri,
     description: '来自哔哩哔哩的评论',
   });
   const controller: systemShare.ShareController = new systemShare.ShareController(data);
@@ -96,38 +116,38 @@ export struct ReplyShareCard {
       .width('100%')
       .alignItems(VerticalAlign.Center)
 
-      // 正文（固定白底卡片，文字恒为深色）
-      Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+      // 正文（固定白底卡片，文字恒为深色）。用 Text + Span 渲染富文本，
+      // maxLines=4 截断长评论，防止分享图被拉成超长条（对齐 B 站 App 固定比例分享图）。
+      Text() {
         ForEach(parseReplyContent(this.item), (part: ReplyRenderPart) => {
           if (part.image.length > 0) {
-            Image(part.image)
-              .width(part.imageSize > 1 ? 40 : 20)
-              .height(part.imageSize > 1 ? 40 : 20)
-              .objectFit(ImageFit.Contain)
-              .margin({ right: 2 })
+            ImageSpan(part.image)
+              .width(part.imageSize > 1 ? 30 : 16)
+              .height(part.imageSize > 1 ? 30 : 16)
+              .verticalAlign(ImageSpanAlignment.CENTER)
           } else {
-            Text(part.text)
-              .fontSize(14)
-              .lineHeight(21)
-              .constraintSize({ minHeight: 21 })
+            Span(part.text)
+              .fontSize(15)
               .fontColor(part.mentionMid > 0 || part.seekSeconds >= 0 || part.bvid.length > 0 || part.aid > 0 ?
                 '#008AC5' : '#18191C')
           }
         }, (part: ReplyRenderPart) => part.key)
       }
+      .fontSize(15)
+      .lineHeight(23)
       .width('100%')
+      .maxLines(4)
+      .textOverflow({ overflow: TextOverflow.Ellipsis })
       .margin({ top: 10 })
 
-      // 评论附图
+      // 评论附图：最多展示 1 张、88 高度，保持分享图紧凑。
       if (this.item.pictures.length > 0) {
         Row({ space: 6 }) {
-          ForEach(this.item.pictures.slice(0, 3), (url: string) => {
-            Image(url)
-              .width(96)
-              .height(96)
-              .objectFit(ImageFit.Cover)
-              .borderRadius(6)
-          }, (url: string) => url)
+          Image(this.item.pictures[0])
+            .width(88)
+            .height(88)
+            .objectFit(ImageFit.Cover)
+            .borderRadius(6)
         }
         .width('100%')
         .margin({ top: 8 })

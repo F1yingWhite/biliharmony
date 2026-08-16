@@ -77,16 +77,28 @@ export class PlayerDanmakuEngine {
     if (low < this.cursor) this.cursor++;
   }
 
+  /**
+   * 视口尺寸变化。
+   * 只更新宽高几何，不在此立即全量重绘：
+   * - 滚动弹幕的 x 由渲染循环每帧推进没有缓存概念，宽度变化自然被下一帧吸收；
+   * - 固定弹幕的横坐标在 drawFrame 中按当前 width 实时计算（width - textWidth）/2，同样无需重排；
+   * - 仅当轨道数量（由行高与可用高度决定）真正变化时才需要 clamp，避免切换/缩放过程中
+   *   onAreaChange 高频回调引发「每条弹幕重新分轨 + 整卡重绘」的 CPU 与帧率开销。
+   * 调用方负责：渲染循环运行中放任下一帧；暂停态补一次 drawFrame 避免 Canvas 清空白屏。
+   */
   setViewport(width: number, height: number): void {
     const newW: number = Math.max(1, width);
     const newH: number = Math.max(1, height);
-    if (Math.abs(newW - this.width) < 0.5 && Math.abs(newH - this.height) < 0.5) return;
+    if (Math.abs(newW - this.width) < 0.5 && Math.abs(newH - this.height) < 0.5) {
+      return;
+    }
+    const oldLanes: number = this.laneCount();
     this.width = newW;
     this.height = newH;
-    // Canvas 改尺寸会清空后备缓冲；同步重绘可避免收放播放器时出现闪空抽搐。
-    const maxLane: number = this.laneCount();
-    this.clampDanmakuLanes(maxLane);
-    this.drawFrame(false);
+    const newLanes: number = this.laneCount();
+    if (newLanes !== oldLanes) {
+      this.clampDanmakuLanes(newLanes);
+    }
   }
 
   clearActive(): void {
@@ -106,7 +118,29 @@ export class PlayerDanmakuEngine {
     this.ctx.clearRect(0, 0, this.width, this.height);
   }
 
-  /** 从当前播放头继续消费弹幕；调用方负责在 active 非空时启动/保持绘制循环。 */
+  /** 命中测试：返回包含点 (x, y) 的最后绘制的弹幕（视觉最上层优先），用于点击弹幕触发举报。 */
+  hitTest(x: number, y: number): DanmakuItem | null {
+    if (x < 0 || y < 0 || x > this.width || y > this.height) {
+      return null;
+    }
+    const fontSize: number = this.fontSize();
+    const laneH: number = this.lineHeight();
+    let hit: DanmakuItem | null = null;
+    for (let i: number = 0; i < this.active.length; i++) {
+      const dm: ActiveDm = this.active[i];
+      const top: number = dm.lane * laneH;
+      if (y < top || y > top + fontSize) continue;
+      let left: number = dm.x;
+      if (dm.isFixed) {
+        left = (this.width - dm.textWidth) / 2;
+      }
+      if (x >= left - 4 && x <= left + dm.textWidth + 4) {
+        hit = dm.item; // 越靠后的越新，走在最上层
+      }
+    }
+    return hit;
+  }
+
   spawn(now: number): void {
     if (this.enabled === false || this.list.length === 0) {
       return;

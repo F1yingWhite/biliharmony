@@ -13,7 +13,7 @@ import { BasicDataSource } from '../common/BasicDataSource';
 import { LiveRoomItem } from '../model/LiveModels';
 import { LiveRoomCard } from '../components/LiveRoomCard';
 import { LayoutTokens } from '../common/LayoutTokens';
-import { AppNavStack, NAV_RANK } from '../common/AppRouter';
+import { AppNavStack, NAV_RANK, NAV_ZONE, NAV_BANGUMI_INDEX, NAV_LIVE_ZONE } from '../common/AppRouter';
 
 /** 悬浮频道切换条：单独订阅 headerFade，滚动逐帧淡出时不再带动整个 HomeView 重建。 */
 @Component
@@ -93,6 +93,19 @@ export struct HomeView {
       await this.loadRecommend(true);
     } catch (e) {
       if (this.recSource.isEmpty()) this.recError = '推荐加载失败，请检查网络后重试';
+    }
+  }
+
+  /** 长按卡片「不感兴趣」：本地从对应信息流移除（本轮会话生效；Web 无服务端反馈接口）。 */
+  private dislikeLocal(item: VideoItem, feedTab: number): void {
+    const source: BasicDataSource<VideoItem> = feedTab === 0 ? this.recSource : this.hotSource;
+    const key: number = item.aid;
+    if (key <= 0) return;
+    source.reset(source.getAll().filter((v: VideoItem) => v.aid !== key));
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: '已不感兴趣，帮你减少了此类推荐' });
+    } catch (e) {
+      // 弹 toast 失败忽略。
     }
   }
 
@@ -412,6 +425,62 @@ export struct HomeView {
     })
   }
 
+  /** 热门频道顶部入口：分区频道（进分区排行浏览）。 */
+  @Builder
+  ZoneEntry() {
+    Row({ space: 10 }) {
+      Image($r('app.media.ic_sort'))
+        .width(18)
+        .height(18)
+        .fillColor(this.accent)
+      Text('分区频道')
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+      Blank()
+      Image($r('app.media.ic_arrow_right'))
+        .width(14)
+        .height(14)
+        .fillColor('#9499A0')
+    }
+    .width('100%')
+    .height(44)
+    .padding({ left: 14, right: 14 })
+    .borderRadius(12)
+    .backgroundColor(this.isDark ? '#212225' : '#FFFFFF')
+    .onClick(() => {
+      AppNavStack.pushPathByName(NAV_ZONE, null);
+    })
+  }
+
+  /** 热门频道顶部入口：番剧索引（类型×状态聚合浏览）。 */
+  @Builder
+  BangumiEntry() {
+    Row({ space: 10 }) {
+      Image($r('app.media.ic_favorite'))
+        .width(18)
+        .height(18)
+        .fillColor(this.accent)
+      Text('番剧索引')
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+      Blank()
+      Image($r('app.media.ic_arrow_right'))
+        .width(14)
+        .height(14)
+        .fillColor('#9499A0')
+    }
+    .width('100%')
+    .height(44)
+    .padding({ left: 14, right: 14 })
+    .borderRadius(12)
+    .backgroundColor(this.isDark ? '#212225' : '#FFFFFF')
+    .onClick(() => {
+      AppNavStack.pushPathByName(NAV_BANGUMI_INDEX, null);
+    })
+  }
+
   @Builder
   LiveFooter() {
     LoadMoreFooter({
@@ -432,12 +501,23 @@ export struct HomeView {
         ListItem() {
           this.HotRankEntry()
         }
+        ListItem() {
+          this.ZoneEntry()
+        }
+        ListItem() {
+          this.BangumiEntry()
+        }
       }
       // footer 挂在 ListItemGroup 上：双列 lanes 下保持整宽居中
       ListItemGroup({ footer: this.VideoFeedFooter(feedTab) }) {
         LazyForEach(feedTab === 0 ? this.recSource : this.hotSource, (item: VideoItem) => {
           ListItem() {
             VideoCard({ video: item })
+              // 长按卡片：不感兴趣（本地屏蔽该视频，本轮会话生效；Web 无服务端反馈接口）。
+              .gesture(
+                LongPressGesture({ repeat: false })
+                  .onAction(() => this.dislikeLocal(item, feedTab))
+              )
           }
         }, (item: VideoItem) => item.bvid.length > 0 ? item.bvid : String(item.aid) + '_' + feedTab)
       }
@@ -462,9 +542,40 @@ export struct HomeView {
     })
   }
 
+  /** 直播频道顶部入口：直播分区（按分区浏览直播间）。 */
+  @Builder
+  LiveZoneEntry() {
+    Row({ space: 10 }) {
+      Image($r('app.media.ic_live'))
+        .width(18)
+        .height(18)
+        .fillColor(this.accent)
+      Text('直播分区')
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+      Blank()
+      Image($r('app.media.ic_arrow_right'))
+        .width(14)
+        .height(14)
+        .fillColor('#9499A0')
+    }
+    .width('100%')
+    .height(44)
+    .padding({ left: 14, right: 14 })
+    .borderRadius(12)
+    .backgroundColor(this.isDark ? '#212225' : '#FFFFFF')
+    .onClick(() => {
+      AppNavStack.pushPathByName(NAV_LIVE_ZONE, null);
+    })
+  }
+
   @Builder
   LiveFeedList() {
     List({ space: 10, scroller: this.liveScroller }) {
+      ListItem() {
+        this.LiveZoneEntry()
+      }
       LazyForEach(this.liveSource, (item: LiveRoomItem) => {
         ListItem() {
           LiveRoomCard({ room: item })

@@ -229,6 +229,10 @@ export struct MessagesPage {
             .fontColor(this.isDark ? '#FFFFFF' : '#18191C').layoutWeight(1).maxLines(1)
           Text(formatRelativeTime(item.timestamp))
             .fontSize(10).fontColor('#B0B3B8')
+          Text('⋯')
+            .fontSize(12).fontColor('#9499A0')
+            .padding({ left: 8, right: 4, top: 2, bottom: 2 })
+            .priorityGesture(TapGesture().onAction(() => this.confirmRemoveSession(item)))
         }
         .width('100%')
         Text(item.preview.length > 0 ? item.preview : '暂无消息')
@@ -241,6 +245,47 @@ export struct MessagesPage {
     .width('100%')
     .padding({ top: 11, bottom: 11 })
     .onClick(() => this.openSession(item))
+    // 长按删除会话（对齐 PiliPlus 私信会话删除）
+    .gesture(
+      LongPressGesture({ repeat: false })
+        .onAction(() => this.confirmRemoveSession(item))
+    )
+  }
+
+  /** 长按删除私信会话：确认后调服务端删除，成功后本地移除该会话行。 */
+  private confirmRemoveSession(item: MessageSessionItem): void {
+    if (item.talkerId <= 0) {
+      this.getUIContext().getPromptAction().showToast({ message: '该会话不支持删除' });
+      return;
+    }
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '删除会话',
+        message: '删除后聊天记录不再显示（对方记录不受影响）。确定删除吗？',
+        buttons: [
+          { text: '取消', color: '#9499A0' },
+          { text: '删除', color: '#FB4A4A' },
+        ],
+      }).then((dialogResult) => {
+        if (Number(dialogResult.index) !== 1) return;
+        BiliApi.removeMessageSession(item.talkerId)
+          .then((r: ActionResult) => {
+            if (r.ok) {
+              this.sessionsSource.reset(
+                this.sessionsSource.getAll().filter((x: MessageSessionItem) => x.talkerId !== item.talkerId));
+              this.sessionCount = this.sessionsSource.totalCount();
+              this.getUIContext().getPromptAction().showToast({ message: '会话已删除' });
+            } else {
+              this.getUIContext().getPromptAction().showToast({ message: r.message });
+            }
+          })
+          .catch(() => {
+            this.getUIContext().getPromptAction().showToast({ message: '删除失败，请稍后重试' });
+          });
+      });
+    } catch (e) {
+      // 弹窗失败不阻塞。
+    }
   }
 
   @Builder
@@ -409,6 +454,9 @@ export struct MessagesPage {
         padLeft: 4,
         backWidth: 40,
         onBack: () => AppNavStack.pop(),
+        trailing: (): void => {
+          this.ReadAllButton()
+        },
       })
       this.MsgTabBar()
       // 已挂载的 Tab 保持存活（visibility 切换），保住列表数据与滚动位置。
@@ -443,6 +491,64 @@ export struct MessagesPage {
     .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
   }
 
+  /** 消息首页头栏「全部已读」：本地清空四类通知角标（服务端无批量已读接口，网页端同样如此）。 */
+  @Builder
+  ReadAllButton() {
+    Text('全部已读')
+      .fontSize(12)
+      .fontColor('#B0B3B8')
+      .padding({ left: 18, right: 2, top: 8, bottom: 8 })
+      .onClick(() => {
+        MsgUnreadStore.clearAll();
+        this.getUIContext().getPromptAction().showToast({ message: '已标记全部已读' });
+      })
+  }
+
+  /** 私信聊天页右上「举报」入口（对方用户）。 */
+  @Builder
+  ReportUserButton() {
+    Text('举报')
+      .fontSize(12)
+      .fontColor('#B0B3B8')
+      .padding({ left: 18, right: 2, top: 8, bottom: 8 })
+      .priorityGesture(TapGesture().onAction(() => this.reportCurrentUser()))
+  }
+
+  /** 举报当前私信对象：原因选择 → 提交。 */
+  private reportCurrentUser(): void {
+    if (this.current.talkerId <= 0) {
+      this.getUIContext().getPromptAction().showToast({ message: '会话信息不完整' });
+      return;
+    }
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '举报用户',
+        message: '举报 ' + this.current.name + ' 后由 B 站人工审核，请如实选择原因。',
+        buttons: [
+          { text: '取消', color: '#9499A0' },
+          { text: '垃圾广告', color: '#18191C' },
+          { text: '人身攻击', color: '#18191C' },
+          { text: '骚扰', color: '#18191C' },
+          { text: '其他', color: '#18191C' },
+        ],
+      }).then((dialogResult) => {
+        const pick: number = Number(dialogResult.index);
+        const reasons: Array<Array<string>> = [['', ''], ['6', '垃圾广告'], ['8', '人身攻击'], ['7', '骚扰'], ['9', '其他']];
+        if (pick <= 0 || pick >= reasons.length) return;
+        BiliApi.reportPrivateMessage(this.current.talkerId,
+          Number(reasons[pick][0]), reasons[pick][1])
+          .then((r: ActionResult) => {
+            this.getUIContext().getPromptAction().showToast({ message: r.ok ? '已提交举报，感谢反馈' : r.message });
+          })
+          .catch(() => {
+            this.getUIContext().getPromptAction().showToast({ message: '举报失败，请稍后重试' });
+          });
+      });
+    } catch (e) {
+      // 弹窗失败不阻塞。
+    }
+  }
+
   @Builder
   MessageThreadPage() {
     Column() {
@@ -455,6 +561,9 @@ export struct MessagesPage {
         // PageHeader 现有两个 @BuilderParam（middle/trailing），尾随闭包不再可用，需显式传 middle。
         middle: (): void => {
           this.SessionAvatar()
+        },
+        trailing: (): void => {
+          this.ReportUserButton()
         },
       })
       List() {

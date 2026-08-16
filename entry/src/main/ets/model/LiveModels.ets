@@ -47,6 +47,21 @@ export class LiveRoomItem {
   }
 }
 
+/** 直播一级分区。 */
+export class LiveZone {
+  id: number = 0;
+  name: string = '';
+}
+
+/** 批量查询的 UP 开播状态（room/v1/Room/get_status_info_by_uids）。 */
+export class LiveStatusItem {
+  uid: number = 0;
+  liveStatus: number = 0;      // 1 = 直播中
+  roomId: number = 0;
+  title: string = '';
+  uname: string = '';
+}
+
 /** 直播搜索（search_type=live_room）分页结果。 */
 export class LiveSearchResult {
   rooms: Array<LiveRoomItem> = [];

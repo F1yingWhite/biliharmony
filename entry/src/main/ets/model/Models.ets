@@ -1287,6 +1287,13 @@ export class UserInfo {
   }
 }
 
+/** 关注分组（关注标签）。 */
+export class FollowTagItem {
+  tagid: number = 0;
+  name: string = '';
+  count: number = 0;
+}
+
 export class UserStat {
   following: number = 0;
   follower: number = 0;
@@ -1713,6 +1720,14 @@ export const USER_ORDER_OPTIONS: Array<SearchOption> = [
   { label: '等级', value: 'level' },
 ];
 
+// 用户类型筛选（user_type 参数：0 不限 / 1 认证UP主 / 2 普通用户 / 3 认证用户，参考网页端筛选）
+export const USER_TYPE_OPTIONS: Array<SearchOption> = [
+  { label: '全部', value: '0' },
+  { label: 'UP主', value: '1' },
+  { label: '普通', value: '2' },
+  { label: '认证', value: '3' },
+];
+
 // 直播间排序（order 参数，参考 PiliPlus LiveOrderType）
 export const LIVE_ORDER_OPTIONS: Array<SearchOption> = [
   { label: '人气', value: 'online' },
@@ -1976,4 +1991,153 @@ export class PopularSeriesData {
   name: string = '';
   reminder: string = '';
   videos: Array<VideoItem> = [];
+}
+
+/** 索引列表中的单部番剧/作品（pgc/season/index/result 的 list 元素）。 */
+export class BangumiIndexItem {
+  seasonId: number = 0;
+  title: string = '';
+  /** 副标题（"携手保护独角兽岛" 等） */
+  subTitle: string = '';
+  /** 封面（竖版横版自适应，优先竖版） */
+  cover: string = '';
+  /** 更新状态描述（"更新至第18话" / 评分） */
+  indexShow: string = '';
+  /** 会员/付费角标，空串表示免费 */
+  badge: string = '';
+  score: string = '';
+  isFinish: boolean = false;
+  /** 分季类型：1番剧 2国创 3纪录片 4电影 5电视剧 */
+  seasonType: number = 1;
+  /** 今日/星期更新提示（"今天10:00更新" 等） */
+  orderP: string = '';
+  /** 海报角标色 */
+  badgeBgColor: string = '#FB7299';
+
+  static from(o: Object): BangumiIndexItem {
+    const j: Record<string, Object> = asObject(o);
+    const item: BangumiIndexItem = new BangumiIndexItem();
+    item.seasonId = asNumber(j['season_id'], 0);
+    item.title = str(j, 'title', '');
+    item.subTitle = str(j, 'subTitle', '');
+    item.cover = toHttps(str(j, 'cover', ''));
+    item.indexShow = str(j, 'index_show', '');
+    item.isFinish = asNumber(j['is_finish'], 0) === 1;
+    item.seasonType = asNumber(j['season_type'], 1);
+    item.orderP = str(j, 'order', '');
+    // score 字段可能为空字符串或缺省。
+    const score: Object = j['score'];
+    item.score = typeof score === 'string' ? score as string : str(j, 'score', '');
+    const badgeInfo: Record<string, Object> = asObject(j['badge_info']);
+    item.badge = str(badgeInfo, 'text', str(j, 'badge', ''));
+    const bg: string = str(badgeInfo, 'bg_color', '');
+    if (bg.length > 0) item.badgeBgColor = bg;
+    // cover 缺竖版时回退 first_ep.cover 或横版 cover。
+    if (item.cover.length === 0) {
+      item.cover = toHttps(str(asObject(j['first_ep']), 'cover', ''));
+    }
+    return item;
+  }
+}
+
+/** 番剧索引分页返回（pgc/season/index/result 的 data）。 */
+export class BangumiIndexPageData {
+  items: Array<BangumiIndexItem> = [];
+  hasNext: boolean = false;
+  total: number = 0;
+}
+
+/** 用户追番/追剧列表中的单部作品（pgc/web/follow/list 的 list 元素）。 */
+export class WatchLaterSeasonItem {
+  seasonId: number = 0;
+  title: string = '';
+  /** 状态描述（"已更新至第 x 话" / "已完结" 等） */
+  desc: string = '';
+  /** 封面（竖版） */
+  cover: string = '';
+  /** 追番/追剧标识，如"番剧" */
+  typeText: string = '';
+  /** 追番数等副信息 */
+  subText: string = '';
+  /** 最新剧集描述 */
+  newEpDesc: string = '';
+  followed: boolean = true;
+
+  static from(o: Object): WatchLaterSeasonItem {
+    const j: Record<string, Object> = asObject(o);
+    const item: WatchLaterSeasonItem = new WatchLaterSeasonItem();
+    item.seasonId = asNumber(j['season_id'], 0);
+    item.title = str(j, 'title', '');
+    item.desc = str(j, 'desc', '');
+    // new_ep 是对象（含 index/title/cover），不要直接 str()；优先用接口的文案字段。
+    const newEpRaw: Record<string, Object> = asObject(j['new_ep']);
+    const newEpTitle: string = str(newEpRaw, 'title', '');
+    const newEpDesc: string = str(j, 'new_ep_desc', '');
+    if (newEpDesc.length > 0) {
+      item.newEpDesc = newEpDesc;
+    } else if (newEpTitle.length > 0) {
+      item.newEpDesc = newEpTitle;
+    } else {
+      item.newEpDesc = '';
+    }
+    item.cover = toHttps(str(j, 'square_cover', str(j, 'cover', '')));
+    const seasonType: Record<string, Object> = asObject(j['season_type_name']);
+    item.typeText = str(seasonType, '', '');
+    if (item.typeText.length === 0) {
+      item.typeText = str(j, 'type_name', '');
+    }
+    const stat: Record<string, Object> = asObject(j['stat']);
+    const count: number = asNumber(stat['favorites'], 0);
+    const play: number = asNumber(stat['views'], 0);
+    item.subText = (play > 0 ? formatCount(play) + ' 播放' : '') +
+      (count > 0 ? ' · ' + formatCount(count) + ' 追番' : '');
+    return item;
+  }
+}
+
+// ===== 新番时间表（pgc/web/timeline） =====
+
+/** 时间表里的一天（date 空表示"未知日期"）。 */
+export class TimeLineDay {
+  date: string = '';
+  /** 1-7 对应 周一~周日 */
+  dayOfWeek: number = 0;
+  episodes: Array<TimeLineEpisode> = [];
+
+  weekLabel(week: Array<string>): string {
+    if (this.dayOfWeek >= 1 && this.dayOfWeek <= 7) return week[this.dayOfWeek - 1];
+    return '';
+  }
+
+  dayOfWeekLabel(): string {
+    const week: Array<string> = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+    return this.weekLabel(week);
+  }
+}
+
+/** 时间表单集播放项。 */
+export class TimeLineEpisode {
+  seasonId: number = 0;
+  seasonType: number = 1;
+  title: string = '';
+  cover: string = '';
+  /** 集数描述（"第1话" / 空） */
+  index: string = '';
+  /** 开播时间（"10:00"） */
+  pubTime: string = '';
+  /** 电视台/来源（如 "bilibili"） */
+  badge: string = '';
+
+  static from(o: Object): TimeLineEpisode {
+    const j: Record<string, Object> = asObject(o);
+    const ep: TimeLineEpisode = new TimeLineEpisode();
+    ep.seasonId = asNumber(j['season_id'], 0);
+    ep.seasonType = asNumber(j['season_type'], 1);
+    ep.title = str(j, 'title', '');
+    ep.cover = toHttps(str(j, 'cover', ''));
+    ep.index = str(j, 'index', '');
+    ep.pubTime = str(j, 'pub_time', '');
+    ep.badge = str(j, 'badge', '');
+    return ep;
+  }
 }

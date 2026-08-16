@@ -5,7 +5,7 @@
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, ImageViewerParam, LiveRoomParam, NAV_IMAGE_VIEWER, NAV_LIVE_ROOM, NAV_LOGIN,
   NAV_RELATION_LIST, NAV_SEARCH, RelationListParam, UserSpaceParam } from '../common/AppRouter';
-import { VideoItem, UserSpaceHeaderItem, UserSpaceInfo, UserStat, SpaceArcData } from '../model/Models';
+import { VideoItem, UserSpaceHeaderItem, UserSpaceInfo, UserStat, SpaceArcData, FollowTagItem } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { VideoCard } from '../components/VideoCard';
 import { LoadingView } from '../components/LoadingView';
@@ -41,6 +41,12 @@ export struct UserSpacePage {
   @State loadingMore: boolean = false;
   @State following: boolean = false;
   @State followLoading: boolean = false;
+  @State groupSheetOpen: boolean = false;
+  @State groupList: Array<FollowTagItem> = [];
+  @State groupLoading: boolean = false;
+  @State groupNewName: string = '';
+  /** 当前 UP 勾选中的分组 id 数组（空 = 默认分组）；保存时用。 */
+  @State groupChecked: Array<number> = [];
   @State spaceTab: number = 0;
   @State visualSpaceTab: number = 0;
   @State headerIndex: number = 0;
@@ -522,6 +528,28 @@ export struct UserSpacePage {
             .fontColor(this.following ? '#9499A0' : this.accent)
             .border({ width: 1, color: this.following ? '#55565B' : this.accent, radius: 5 })
             .onClick(() => this.toggleFollow())
+          Row({ space: 0 }) {
+            Text('举报')
+              .fontSize(11).fontColor('#B0B3B8')
+              .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+              .onClick(() => this.reportBlockMenu())
+            Text('·').fontSize(11).fontColor('#55565B')
+            Text('分组')
+              .fontSize(11).fontColor('#B0B3B8')
+              .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+              .priorityGesture(TapGesture().onAction(() => this.openFollowGroups()))
+            Text('·').fontSize(11).fontColor('#55565B')
+            Text('拉黑')
+              .fontSize(11).fontColor('#B0B3B8')
+              .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+              .onClick(() => this.blockUser())
+          }
+          .width('100%').justifyContent(FlexAlign.Center).margin({ top: 6 })
+        } else {
+          Text('这是你的空间')
+            .width('100%').height(36).textAlign(TextAlign.Center)
+            .fontSize(13).fontColor('#9499A0')
+            .border({ width: 1, color: '#55565B', radius: 5 })
         }
       }
       .width('100%')
@@ -531,6 +559,112 @@ export struct UserSpacePage {
     .width('100%')
     .constraintSize({ minHeight: 190 })
     .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+  }
+
+  /** 举报用户入口：选择原因 → 提交；同时提供快捷拉黑。 */
+  private reportBlockMenu(): void {
+    if (UserStore.isLogin === false) {
+      this.toast('请先登录后再操作');
+      return;
+    }
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '操作',
+        message: '对 ' + this.info.name + ' 进行什么操作？',
+        buttons: [
+          { text: '取消', color: '#9499A0' },
+          { text: '拉黑', color: '#FB4A4A' },
+          { text: '举报', color: this.accent },
+        ],
+      }).then((dialogResult) => {
+        const pick: number = Number(dialogResult.index);
+        if (pick === 1) {
+          this.blockUser();
+        } else if (pick === 2) {
+          this.reportUser();
+        }
+      });
+    } catch (e) {
+      // 弹窗失败不阻塞。
+    }
+  }
+
+  private blockUser(): void {
+    BiliApi.blockUser(this.param.mid, true).then((r: ActionResult) => {
+      this.toast(r.ok ? '已加入黑名单' : r.message);
+    }).catch(() => {
+      this.toast('操作失败，请稍后重试');
+    });
+  }
+
+  // ===== 关注分组 =====
+  private openFollowGroups(): void {
+    if (UserStore.isLogin === false) {
+      this.toast('请先登录后再使用分组功能');
+      return;
+    }
+    this.groupSheetOpen = true;
+    this.groupChecked = [];
+    this.groupLoading = true;
+    BiliApi.getFollowTags().then((tags: Array<FollowTagItem>) => {
+      this.groupList = tags;
+      this.groupLoading = false;
+    }).catch(() => {
+      this.groupList = [];
+      this.groupLoading = false;
+    });
+  }
+
+  private async createGroup(): Promise<void> {
+    const name: string = this.groupNewName.trim();
+    if (name.length === 0) {
+      this.toast('请输入分组名称');
+      return;
+    }
+    if (name.length > 15) {
+      this.toast('分组名称最多 15 个字');
+      return;
+    }
+    const tagid: number = await BiliApi.createFollowTag(name);
+    if (tagid <= 0) {
+      this.toast('创建分组失败，请检查登录状态后重试');
+      return;
+    }
+    this.groupList = this.groupList.concat([{ tagid: tagid, name: name, count: 0 }]);
+    this.groupChecked = this.groupChecked.concat([tagid]);
+    this.groupNewName = '';
+  }
+
+  private async saveGroupChecked(): Promise<void> {
+    await BiliApi.addUserToTags(this.param.mid, this.groupChecked);
+    this.groupSheetOpen = false;
+    this.toast('分组已保存');
+  }
+
+  private reportUser(): void {
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '举报用户',
+        message: '选择举报原因',
+        buttons: [
+          { text: '取消', color: '#9499A0' },
+          { text: '违法违规', color: '#18191C' },
+          { text: '垃圾广告', color: '#18191C' },
+          { text: '人身攻击', color: '#18191C' },
+        ],
+      }).then((dialogResult) => {
+        const pick: number = Number(dialogResult.index);
+        const reasons: Array<string> = ['', '1', '3', '4'];
+        if (pick <= 0 || pick >= reasons.length) return;
+        BiliApi.reportMember(this.param.mid, reasons[pick]).then((r: ActionResult) => {
+          this.toast(r.ok ? '已提交举报，感谢反馈' : r.message);
+        }).catch(() => {
+          this.toast('举报失败，请稍后重试');
+        });
+      });
+    } catch (e) {
+      // 弹窗失败不阻塞。
+    }
   }
 
   // ===== 投稿 Tab：排序 chips + 双列视频流 =====
@@ -734,6 +868,9 @@ export struct UserSpacePage {
         .backgroundColor(this.isDark ? '#18191C' : '#F6F7F8')
       }
 
+      if (this.groupSheetOpen) {
+        this.GroupSheetOverlay()
+      }
     }
     .width('100%')
     .height('100%')
@@ -745,5 +882,96 @@ export struct UserSpacePage {
       if (!Number.isNaN(width) && width > 0) this.viewportWidth = width;
       if (!Number.isNaN(height) && height > 0) this.viewportHeight = height;
     })
+  }
+
+  /** 关注分组底部面板：勾选分组（空=默认分组）+ 新建分组输入。 */
+  @Builder
+  GroupSheetOverlay() {
+    Column() {
+      Blank()
+      Column({ space: 10 }) {
+        Text('关注分组')
+          .fontSize(16).fontWeight(FontWeight.Bold)
+          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+        Text('勾选分组（取消全部 = 默认分组）。')
+          .fontSize(11).fontColor('#9499A0')
+        if (this.groupLoading) {
+          Text('加载中…').fontSize(13).fontColor('#9499A0').padding(14)
+        } else {
+          List() {
+            ForEach(this.groupList, (tag: FollowTagItem) => {
+              ListItem() {
+                Row({ space: 10 }) {
+                  Text(tag.name).fontSize(14)
+                    .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+                    .layoutWeight(1).maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  Text(String(tag.count)).fontSize(11).fontColor('#9499A0')
+                  Stack({ alignContent: Alignment.Center }) {
+                    Circle()
+                      .width(18).height(18)
+                      .fill(this.groupChecked.indexOf(tag.tagid) >= 0 ? this.accent : '#00000000')
+                      .border({ width: 1.5, color: this.groupChecked.indexOf(tag.tagid) >= 0 ? this.accent : '#B4B6BA' })
+                    if (this.groupChecked.indexOf(tag.tagid) >= 0) {
+                      Text('✓').fontSize(11).fontColor('#FFFFFF')
+                    }
+                  }
+                  .width(24).height(24)
+                }
+                .width('100%').padding({ top: 8, bottom: 8 })
+                .onClick(() => this.toggleGroupChecked(tag.tagid))
+              }
+            }, (item: FollowTagItem) => String(item.tagid))
+          }
+          .width('100%')
+          .constraintSize({ maxHeight: 300 })
+          .scrollBar(BarState.Off)
+        }
+        Row({ space: 8 }) {
+          TextInput({ placeholder: '新建分组名称', text: this.groupNewName })
+            .fontSize(13)
+            .layoutWeight(1)
+            .height(34)
+            .onChange((value: string) => this.groupNewName = value)
+          Text('新建')
+            .fontSize(13).fontColor(this.accent)
+            .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+            .onClick(() => {
+              this.createGroup().catch(() => {
+              });
+            })
+        }
+        .width('100%')
+        Row({ space: 10 }) {
+          Text('取消')
+            .fontSize(14).fontColor('#9499A0')
+            .layoutWeight(1).height(38).textAlign(TextAlign.Center)
+            .backgroundColor(this.isDark ? '#2A2C31' : '#F5F7F9').borderRadius(19)
+            .onClick(() => this.groupSheetOpen = false)
+          Text('保存')
+            .fontSize(14).fontColor('#FFFFFF').backgroundColor(this.accent)
+            .layoutWeight(1).height(38).textAlign(TextAlign.Center)
+            .borderRadius(19)
+            .onClick(() => {
+              this.saveGroupChecked().catch(() => {
+              });
+            })
+        }
+        .width('100%')
+      }
+      .width('100%')
+      .padding({ left: 16, right: 16, top: 16, bottom: Immersive.bottomInset() + 14 })
+      .backgroundColor(this.isDark ? '#1E2024' : '#FFFFFF')
+      .borderRadius({ topLeft: 14, topRight: 14 })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.End)
+    .backgroundColor('#66000000')
+  }
+
+  private toggleGroupChecked(tagid: number): void {
+    this.groupChecked = this.groupChecked.indexOf(tagid) >= 0 ?
+      this.groupChecked.filter((id: number) => id !== tagid) : this.groupChecked.concat([tagid]);
   }
 }

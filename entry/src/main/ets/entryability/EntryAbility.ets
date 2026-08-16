@@ -13,7 +13,10 @@ export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     UserStore.initPersistence(this.context);
     SearchHistoryStore.init(this.context);
-    AppTheme.init();
+    AppTheme.init(this.context);
+    AppTheme.initThemeStore(this.context).catch(() => {
+      // 主题偏好恢复失败不影响启动；PersistentStorage 默认值兜底。
+    });
     AppTheme.bindNativeModeApplier((mode: string) => this.applyNativeThemeMode(mode));
     AppTheme.applyCurrentMode();
     hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onCreate');

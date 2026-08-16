@@ -3,6 +3,7 @@
  * 封面图、底部渐变遮罩、标题文本。参数按引用（$$）传递，
  * 保证卡片 @Reusable 复用时新数据能驱动这些公共块刷新。
  */
+import { biliImageThumbnail } from '../common/ImageUrl';
 
 export interface FeedCoverParam {
   cover: string;
@@ -22,7 +23,9 @@ export interface FeedTitleParam {
 /** 16:9 封面图（圆角 12 + 占位图 + 主题占位底色） */
 @Builder
 export function FeedCoverImage($$: FeedCoverParam) {
-  Image($$.cover)
+  // 缩略图 URL（按双列卡宽 900w 出图）：信息流大批量卡片只拉几 KB~几十 KB 的 webp，
+  // 相比原图（可能 1920px+ 的 jpg/png）显著省内存与 IO；@Reusable 复用时换 URL 依旧异步加载。
+  Image($$.cover.length > 0 ? biliImageThumbnail($$.cover, 900) : $$.cover)
     .width('100%')
     .aspectRatio(16 / 9)
     .objectFit(ImageFit.Cover)
@@ -30,6 +33,8 @@ export function FeedCoverImage($$: FeedCoverParam) {
     .backgroundColor($$.isDark ? '#2A2C31' : '#E5E7EB')
     .draggable(false)
     .alt($r('app.media.placeholder_cover'))
+    // 异步图片解码：信息流滚动时避免阻塞主线程（SDK 该版本无 lazyLoading，syncLoad=false 即异步）。
+    .syncLoad(false)
 }
 
 /** 底部渐变遮罩（上透下暗，保证底部数据可读） */

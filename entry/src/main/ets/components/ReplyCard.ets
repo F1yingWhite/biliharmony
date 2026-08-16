@@ -6,6 +6,16 @@ import { formatDuration, formatRelativeTime } from '../common/Utils';
 import { ReplyItem } from '../model/Models';
 import { DecoratedAvatar, UserDecorationBanner } from './UserDecorations';
 import { biliImageOriginal, biliImageThumbnail } from '../common/ImageUrl';
+import { Haptic } from '../common/Haptic';
+import { curves } from '@kit.ArkUI';
+import { BiliApi, ActionResult } from '../api/BiliApi';
+import { UserStore } from '../common/UserStore';
+
+/** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
+interface ReportButtonItem {
+  text: string;
+  color: string;
+}
 
 /**
  * 视频评论、动态详情与回复列表共用的完整评论卡片。
@@ -32,9 +42,79 @@ export struct ReplyCard {
   onOpenThread: (item: ReplyItem) => void = () => {};
   onSelectReply: (item: ReplyItem) => void = () => {};
   onToggleThread: (item: ReplyItem) => void = () => {};
+  /** 删除自己的评论成功后由宿主移除该行/子树。 */
+  onDeleted: (item: ReplyItem) => void = () => {};
   /** Sheet 内导航由宿主先收起 Sheet，再执行实际跳转。 */
   onNavigate: (action: () => void) => void = (action: () => void) => action();
   @State measuredThreadHeight: number = 72;
+  @State likeScale: number = 1;
+  @State dislikeScale: number = 1;
+  /** 本地镜像：点赞/点踩状态的单一事实源（UI 渲染用这组值，不再依赖 @Prop item 的深拷贝同步，
+   * 修复"列表稳定 key 下数据源更新不驱动 UI 刷新"的问题）。 */
+  @State mirrorLiked: boolean = false;
+  @State mirrorDisliked: boolean = false;
+  @State mirrorLike: number = 0;
+  private destroyed: boolean = false;
+  private likeTimers: Set<number> = new Set<number>();
+
+  private toast(message: string): void {
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: message });
+    } catch (e) {
+      // 组件销毁或窗口异常时忽略提示。
+    }
+  }
+
+  aboutToAppear(): void {
+    this.destroyed = false;
+    this.syncMirrorFromItem();
+  }
+
+  private syncMirrorFromItem(): void {
+    this.mirrorLiked = this.item.liked;
+    this.mirrorDisliked = this.item.disliked;
+    this.mirrorLike = this.item.like;
+  }
+
+  aboutToDisappear(): void {
+    this.destroyed = true;
+    this.likeTimers.forEach((id: number) => clearTimeout(id));
+    this.likeTimers.clear();
+  }
+
+  private scheduleLikeTimeout(callback: () => void, delayMs: number): void {
+    const id: number = setTimeout(() => {
+      this.likeTimers.delete(id);
+      if (!this.destroyed) callback();
+    }, delayMs);
+    this.likeTimers.add(id);
+  }
+
+  /** 点赞动效：先放大再 spring 回弹；父页面负责真实状态翻转。 */
+  private playLikeAnimation(): void {
+    Haptic.tap();
+    this.getUIContext().animateTo({ duration: 110, curve: Curve.EaseOut }, () => {
+      this.likeScale = 1.28;
+    });
+    this.scheduleLikeTimeout(() => {
+      this.getUIContext().animateTo({ curve: curves.springMotion(0.4, 0.7) }, () => {
+        this.likeScale = 1;
+      });
+    }, 110);
+  }
+
+  /** 点踩动效：轻微下沉，回弹。 */
+  private playDislikeAnimation(): void {
+    Haptic.tap();
+    this.getUIContext().animateTo({ duration: 110, curve: Curve.EaseOut }, () => {
+      this.dislikeScale = 0.8;
+    });
+    this.scheduleLikeTimeout(() => {
+      this.getUIContext().animateTo({ curve: curves.springMotion(0.3, 0.7) }, () => {
+        this.dislikeScale = 1;
+      });
+    }, 110);
+  }
 
   private openPart(part: ReplyRenderPart): void {
     if (part.mentionMid > 0) {
@@ -139,6 +219,8 @@ export struct ReplyCard {
             .height(part.imageSize > 1 ? emoteSize * 2 : emoteSize)
             .objectFit(ImageFit.Contain)
             .margin({ right: 2 })
+            // 长楼列表中的表情图异步解码（syncLoad=false 即异步）。
+            .syncLoad(false)
         } else {
           Text(part.text)
             .fontSize(fontSize)
@@ -146,7 +228,7 @@ export struct ReplyCard {
             .constraintSize({ minHeight: lineHeight })
             .fontColor(part.mentionMid > 0 || part.seekSeconds >= 0 || part.bvid.length > 0 || part.aid > 0 ?
               '#008AC5' : (this.isDark ? '#F0F0F0' : '#18191C'))
-            .onClick(() => this.openPart(part))
+            .priorityGesture(TapGesture().onAction(() => this.openPart(part)))
         }
       }, (part: ReplyRenderPart) => part.key)
     }
@@ -203,30 +285,55 @@ export struct ReplyCard {
           .width(17)
           .height(17)
           .renderMode(ImageRenderMode.Template)
-          .fillColor(this.item.liked ? this.accent : '#9499A0')
-        Text(this.item.like > 0 ? String(this.item.like) : '点赞')
+          .fillColor(this.mirrorLiked ? this.accent : '#9499A0')
+          .scale({ x: this.likeScale, y: this.likeScale })
+        Text(this.mirrorLike > 0 ? String(this.mirrorLike) : '点赞')
           .fontSize(11)
-          .fontColor(this.item.liked ? this.accent : '#9499A0')
+          .fontColor(this.mirrorLiked ? this.accent : '#9499A0')
       }
       .height(30)
       .padding({ left: 4, right: 4 })
       .borderRadius(15)
-      // 不用 priorityGesture：列表行内没有需要竞争的父手势，统一用 onClick。
-      .onClick(() => this.onLike(this.item))
+      .priorityGesture(TapGesture().onAction(() => {
+        this.playLikeAnimation();
+        // priorityGesture 在 List 内优先识别，确保点击不被滚动手势/根事件抢占。
+        if (this.mirrorLiked) {
+          this.mirrorLiked = false;
+          this.mirrorLike = Math.max(0, this.mirrorLike - 1);
+        } else {
+          this.mirrorLiked = true;
+          this.mirrorLike++;
+          this.mirrorDisliked = false;
+        }
+        this.onLike(this.item);
+      }))
       Row({ space: 4 }) {
         Image($r('app.media.ic_dislike'))
           .width(16)
           .height(16)
           .renderMode(ImageRenderMode.Template)
-          .fillColor(this.item.disliked ? this.accent : '#9499A0')
+          .fillColor(this.mirrorDisliked ? this.accent : '#9499A0')
+          .scale({ x: this.dislikeScale, y: this.dislikeScale })
         Text('点踩')
           .fontSize(11)
-          .fontColor(this.item.disliked ? this.accent : '#9499A0')
+          .fontColor(this.mirrorDisliked ? this.accent : '#9499A0')
       }
       .height(30)
       .padding({ left: 4, right: 4 })
       .borderRadius(15)
-      .onClick(() => this.onDislike(this.item))
+      .priorityGesture(TapGesture().onAction(() => {
+        this.playDislikeAnimation();
+        if (this.mirrorDisliked) {
+          this.mirrorDisliked = false;
+        } else {
+          this.mirrorDisliked = true;
+          if (this.mirrorLiked) {
+            this.mirrorLiked = false;
+            this.mirrorLike = Math.max(0, this.mirrorLike - 1);
+          }
+        }
+        this.onDislike(this.item);
+      }))
       Row({ space: 4 }) {
         Image($r('app.media.ic_share'))
           .width(16)
@@ -240,7 +347,7 @@ export struct ReplyCard {
       .height(30)
       .padding({ left: 4, right: 4 })
       .borderRadius(15)
-      .onClick(() => this.onShare(this.item))
+      .priorityGesture(TapGesture().onAction(() => this.onShare(this.item)))
       Row({ space: 4 }) {
         Image($r('app.media.ic_comment'))
           .width(16)
@@ -254,12 +361,101 @@ export struct ReplyCard {
       .height(30)
       .padding({ left: 4, right: 4 })
       .borderRadius(15)
-      .onClick(() => this.onSelectReply(this.item))
+      .priorityGesture(TapGesture().onAction(() => this.onSelectReply(this.item)))
+      Row({ space: 4 }) {
+        Image($r('app.media.ic_more'))
+          .width(16)
+          .height(16)
+          .renderMode(ImageRenderMode.Template)
+          .fillColor('#9499A0')
+      }
+      .height(30)
+      .padding({ left: 4, right: 4 })
+      .borderRadius(15)
+      .priorityGesture(TapGesture().onAction(() => this.promptReport()))
       Blank()
     }
     .width('100%')
     .height(32)
     .alignItems(VerticalAlign.Center)
+  }
+
+  /** 评论操作：自己的评论可删除；他人评论走举报原因选择。 */
+  private promptReport(): void {
+    if (this.item.rpid <= 0 || this.item.oid <= 0) {
+      this.toast('评论信息不完整，暂不支持操作');
+      return;
+    }
+    const isMine: boolean = UserStore.isLogin && UserStore.current !== null && UserStore.current.mid === this.item.mid;
+    const reasons: Array<string> = ['违法违规', '色情低俗', '垃圾广告', '人身攻击', '引战引流量', '剧透', '其他'];
+    const values: Array<string> = ['21', '22', '23', '24', '25', '26', '99'];
+    const buttons: Array<ReportButtonItem> = [];
+    if (isMine) {
+      buttons.push({ text: '删除这条评论', color: '#FB4A4A' });
+    } else {
+      for (let i: number = 0; i < reasons.length; i++) {
+        buttons.push({ text: reasons[i], color: this.isDark ? '#CCFFFFFF' : '#18191C' });
+      }
+    }
+    buttons.push({ text: '取消', color: '#9499A0' });
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: isMine ? '评论管理' : '举报评论',
+        message: this.item.content.substring(0, Math.min(24, this.item.content.length)),
+        buttons: buttons,
+      }).then((dialogResult) => {
+        const pick: number = Number(dialogResult.index);
+        if (isMine) {
+          if (pick !== 0) return;
+          this.deleteOwnComment();
+          return;
+        }
+        if (pick < 0 || pick >= reasons.length) return;
+        if (UserStore.isLogin === false) {
+          this.toast('请先登录后再举报评论');
+          return;
+        }
+        BiliApi.reportReply(this.item.oid, this.item.type, this.item.rpid, values[pick])
+          .then((r: ActionResult) => {
+            this.toast(r.ok ? '已提交举报，感谢反馈' : r.message);
+          })
+          .catch(() => {
+            this.toast('举报失败，请稍后重试');
+          });
+      });
+    } catch (e) {
+      // 组件销毁或窗口异常时忽略。
+    }
+  }
+
+  /** 删除自己的评论：二次确认后调服务端删除，成功交给宿主移除该行。 */
+  private deleteOwnComment(): void {
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '删除评论',
+        message: '删除后无法恢复，确定删除这条评论吗？',
+        buttons: [
+          { text: '取消', color: '#9499A0' },
+          { text: '删除', color: '#FB4A4A' },
+        ],
+      }).then((dialogResult) => {
+        if (Number(dialogResult.index) !== 1) return;
+        BiliApi.deleteReply(this.item.oid, this.item.type, this.item.rpid)
+          .then((r: ActionResult) => {
+            if (r.ok) {
+              this.toast('评论已删除');
+              this.onDeleted(this.item);
+            } else {
+              this.toast(r.message);
+            }
+          })
+          .catch(() => {
+            this.toast('删除失败，请稍后重试');
+          });
+      });
+    } catch (e) {
+      // 弹窗失败不阻塞。
+    }
   }
 
   /** 回复树连接线：视觉采用原生评论区的实心小圆点，圆点热区可折叠子树。 */
@@ -317,7 +513,7 @@ export struct ReplyCard {
               .backgroundColor(this.accent)
               .opacity(this.threadCollapsed ? 1 : 0)
               .scale({ x: 1, y: this.threadCollapsed ? 1 : 0.1 })
-              .animation({ duration: 180, curve: Curve.EaseInOut })
+              .animation({ duration: 130, curve: Curve.EaseInOut })
           }
           .width(28)
           .height(28)
@@ -412,7 +608,9 @@ export struct ReplyCard {
                 .margin({ right: 5, bottom: 5 })
                 .id('reply-img-' + String(this.item.rpid) + '-' + String(index))
                 .geometryTransition('image-viewer-reply-' + String(this.item.rpid) + '-' + String(index))
-                .onClick(() => this.openPicture(index))
+                // 评论附图异步解码，长列表滚动不卡。
+                .syncLoad(false)
+                .priorityGesture(TapGesture().onAction(() => this.openPicture(index)))
             }, (picture: string, index: number) => picture + String(index))
           }
           .width('100%')
@@ -444,7 +642,7 @@ export struct ReplyCard {
     .width('100%')
     .padding({ top: this.threadDepth > 0 ? 0 : 12, bottom: this.threadDepth > 0 ? 0 : 12 })
     .border({ width: { bottom: this.threadDepth > 0 ? 0 : 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
-    .onClick(() => {
+    .onClick((event: ClickEvent) => {
       if (this.showPreview && this.item.count > 0) this.onOpenThread(this.item);
       else this.onSelectReply(this.item);
     })

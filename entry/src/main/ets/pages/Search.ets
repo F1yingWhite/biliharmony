@@ -9,7 +9,7 @@ import { AppNavStack, ArticlePageParam, LiveRoomParam, NAV_ARTICLE, NAV_BANGUMI_
 import {
   VideoItem, HotSearchItem, UserSearchItem, SearchOption, SearchNumOption, VideoSearchResult, UserSearchResult,
   PgcSearchItem, PgcSearchResult, ArticleSearchItem, ArticleSearchResult, SearchAllResult, SearchAllSection,
-  SearchTypes, VIDEO_ORDER_OPTIONS, USER_ORDER_OPTIONS, LIVE_ORDER_OPTIONS,
+  SearchTypes, VIDEO_ORDER_OPTIONS, USER_ORDER_OPTIONS, USER_TYPE_OPTIONS, LIVE_ORDER_OPTIONS,
   VIDEO_DURATION_OPTIONS, VIDEO_PUBTIME_OPTIONS, VIDEO_ZONE_OPTIONS
 } from '../model/Models';
 import { LiveRoomItem, LiveSearchResult } from '../model/LiveModels';
@@ -33,6 +33,7 @@ import { inputMethod } from '@kit.IMEKit';
 export struct SearchPage {
   @State keyword: string = '';
   @State hotList: Array<HotSearchItem> = [];
+  @State trendingList: Array<HotSearchItem> = [];
   @State suggests: Array<string> = [];
   // ===== 结果态 =====
   @State searching: boolean = false;
@@ -54,6 +55,7 @@ export struct SearchPage {
   @State articlePage: number = 1;
   @State videoOrder: string = 'totalrank';
   @State userOrder: string = '';
+  @State userType: number = 0;
   @State liveOrder: string = 'online';
   @State filterDuration: number = 0;         // VIDEO_DURATION_OPTIONS 下标
   @State filterPubtime: number = 0;          // VIDEO_PUBTIME_OPTIONS 下标
@@ -89,6 +91,14 @@ export struct SearchPage {
     this.history = await SearchHistoryStore.ensureLoaded();
     this.loadHotSearch().catch(() => {
     });
+    // 拉取 B 站搜索默认词作为占位（失败时保持现有占位不变）。
+    const def: string = await BiliApi.getSearchDefault();
+    if (this.destroyed || def.length === 0) {
+      return;
+    }
+    if (this.suggestedKeyword.length === 0) {
+      AppStorage.setOrCreate<string>('searchSuggestedKeyword', def);
+    }
   }
 
   aboutToDisappear(): void {
@@ -105,6 +115,13 @@ export struct SearchPage {
       return;
     }
     this.hotList = list;
+    // 趋势榜独立拉取（轻量、失败不阻塞热搜展示）。
+    BiliApi.getSearchTrending().then((trending: Array<HotSearchItem>) => {
+      if (!this.destroyed && trending.length > 0) {
+        this.trendingList = trending;
+      }
+    }).catch(() => {
+    });
   }
 
   onInput(value: string): void {
@@ -265,7 +282,7 @@ export struct SearchPage {
           this.userPage = 1;
         }
         const page: number = this.userPage;
-        const res: UserSearchResult = await BiliApi.searchUsers(kw, page, this.userOrder);
+        const res: UserSearchResult = await BiliApi.searchUsers(kw, page, this.userOrder, this.userType);
         if (this.destroyed) {
           return;
         }
@@ -458,57 +475,76 @@ export struct SearchPage {
   @Builder
   HotList() {
     Column() {
-      Row() {
-        Text('热搜榜')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-      }
-      .width('100%')
-      .padding({ left: 14, right: 14, top: 12, bottom: 8 })
-
       List() {
-        ForEach(this.hotList, (item: HotSearchItem, index: number) => {
-          ListItem() {
-            Row({ space: 10 }) {
-              Text(String(index + 1))
-                .fontSize(15)
-                .fontWeight(FontWeight.Bold)
-                .fontColor(index < 3 ? this.accent : '#9499A0')
-                .width(24)
-                .textAlign(TextAlign.Center)
-              if (item.icon.length > 0) {
-                Image(item.icon)
-                  .width(16)
-                  .height(16)
-              }
-              Text(item.showName)
-                .fontSize(14)
-                .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-                .layoutWeight(1)
-              Text(item.heatScore > 0 ? formatCount(item.heatScore) + ' 热度' : '')
-                .fontSize(11)
-                .fontColor('#9499A0')
+        ListItemGroup({ header: this.HotSectionHeader('热搜榜') }) {
+          ForEach(this.hotList, (item: HotSearchItem, index: number) => {
+            ListItem() {
+              this.HotRow(item, index)
             }
-            .width('100%')
-            .padding({ left: 14, right: 14, top: 10, bottom: 10 })
-            .onClick(() => {
-              this.keyword = item.keyword;
-              this.submitSearch();
-            })
+          }, (item: HotSearchItem) => 'hot' + item.keyword)
+        }
+        if (this.trendingList.length > 0) {
+          ListItemGroup({ header: this.HotSectionHeader('趋势榜') }) {
+            ForEach(this.trendingList, (item: HotSearchItem, index: number) => {
+              ListItem() {
+                this.HotRow(item, index)
+              }
+            }, (item: HotSearchItem) => 'trend' + item.keyword)
           }
-        }, (item: HotSearchItem) => item.keyword)
+        }
       }
       .width('100%')
-      .height('100%')
+      .layoutWeight(1)
       .constraintSize({ maxWidth: LayoutTokens.pageMaxWidth })
       .alignSelf(ItemAlign.Center)
       .scrollBar(BarState.Off)
     }
     .width('100%')
     .layoutWeight(1)
+  }
+
+  @Builder
+  HotSectionHeader(title: string) {
+    Row() {
+      Text(title)
+        .fontSize(16)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+    }
+    .width('100%')
+    .padding({ left: 14, right: 14, top: 14, bottom: 6 })
+  }
+
+  @Builder
+  HotRow(item: HotSearchItem, index: number) {
+    Row({ space: 10 }) {
+      Text(String(index + 1))
+        .fontSize(15)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(index < 3 ? this.accent : '#9499A0')
+        .width(24)
+        .textAlign(TextAlign.Center)
+      if (item.icon.length > 0) {
+        Image(item.icon)
+          .width(16)
+          .height(16)
+      }
+      Text(item.showName)
+        .fontSize(14)
+        .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .layoutWeight(1)
+      Text(item.heatScore > 0 ? formatCount(item.heatScore) + ' 热度' : '')
+        .fontSize(11)
+        .fontColor('#9499A0')
+    }
+    .width('100%')
+    .padding({ left: 14, right: 14, top: 10, bottom: 10 })
+    .onClick(() => {
+      this.keyword = item.keyword;
+      this.submitSearch();
+    })
   }
 
   @Builder
@@ -608,25 +644,44 @@ export struct SearchPage {
     .padding({ left: 12, right: 12, top: 2 })
   }
 
-  // ===== 结果态：用户排序行 =====
+  // ===== 结果态：用户类型筛选 + 排序 =====
   @Builder
   UserSortRow() {
-    Row() {
-      ForEach(USER_ORDER_OPTIONS, (opt: SearchOption) => {
-        FilterChip({
-          label: opt.label,
-          selected: this.userOrder === opt.value,
-          bottomMargin: 8,
-          onTap: () => {
-            this.userOrder = opt.value;
-            this.doSearch(true).catch(() => {
-            });
-          },
-        })
-      }, (opt: SearchOption) => opt.label)
+    Column({ space: 8 }) {
+      Row() {
+        ForEach(USER_TYPE_OPTIONS, (opt: SearchOption) => {
+          FilterChip({
+            label: opt.label,
+            selected: this.userType === Number(opt.value),
+            bottomMargin: 0,
+            onTap: () => {
+              this.userType = Number(opt.value);
+              this.doSearch(true).catch(() => {
+              });
+            },
+          })
+        }, (opt: SearchOption) => 'ut' + opt.label)
+      }
+      .width('100%')
+      .padding({ left: 12, right: 12, top: 2 })
+      Row() {
+        ForEach(USER_ORDER_OPTIONS, (opt: SearchOption) => {
+          FilterChip({
+            label: opt.label,
+            selected: this.userOrder === opt.value,
+            bottomMargin: 8,
+            onTap: () => {
+              this.userOrder = opt.value;
+              this.doSearch(true).catch(() => {
+              });
+            },
+          })
+        }, (opt: SearchOption) => opt.label)
+      }
+      .width('100%')
+      .padding({ left: 12, right: 12, top: 2 })
     }
     .width('100%')
-    .padding({ left: 12, right: 12, top: 2 })
   }
 
   // ===== 结果态：直播排序行（人气 / 最新开播） =====

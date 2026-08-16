@@ -1,7 +1,7 @@
 /**
  * 动态视图：关注动态 feed（需登录）
  */
-import { DynamicItem, DynamicPageData, BiliEmote } from '../model/Models';
+import { DynamicItem, DynamicPageData, BiliEmote, RelationUserItem, RelationUserPageData } from '../model/Models';
 import { AppNavStack, NAV_DYNAMIC_DETAIL, NAV_IMAGE_VIEWER, NAV_LIVE_ROOM, NAV_LOGIN, NAV_VIDEO_DETAIL,
   NAV_USER_SPACE, DynamicDetailParam, ImageViewerParam, LiveRoomParam, VideoDetailParam,
   UserSpaceParam, NAV_BANGUMI_DETAIL, BangumiDetailParam } from '../common/AppRouter';
@@ -10,12 +10,19 @@ import { UserStore } from '../common/UserStore';
 import { LoadingView } from '../components/LoadingView';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { formatCount, formatRelativeTime } from '../common/Utils';
+import { biliImageThumbnail } from '../common/ImageUrl';
 import { Immersive } from '../common/Immersive';
 import { AppTheme } from '../common/AppTheme';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { DecoratedAvatar, UserDecorationBanner } from '../components/UserDecorations';
 import { LayoutTokens } from '../common/LayoutTokens';
-import { vibrator } from '@kit.SensorServiceKit';
+import { Haptic } from '../common/Haptic';
+
+/** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
+interface ReportButtonItem {
+  text: string;
+  color: string;
+}
 
 class DynamicContentPart {
   text: string = '';
@@ -70,7 +77,8 @@ function contentPartsOf(item: DynamicItem): Array<DynamicContentPart> {
   return result;
 }
 
-/** 单条动态卡片：独立 @Component，父组件状态变化不再整列表重建。 */
+/** 单条动态卡片：独立 @Component，父组件状态变化不再整列表重建；@Reusable 复用滚动项。 */
+@Reusable
 @Component
 export struct DynCard {
   @Prop @Watch('onItemChanged') item: DynamicItem = new DynamicItem();
@@ -84,6 +92,16 @@ export struct DynCard {
   @StorageProp('accentColor') accent: string = '#FB7299';
 
   aboutToAppear(): void {
+    this.syncFromItem();
+  }
+
+  aboutToReuse(params: Record<string, Object>): void {
+    // 复用实例直接换数据，避免整卡重建（LazyForEach 滚动性能）。
+    const next: DynamicItem | undefined = params.item as DynamicItem | undefined;
+    if (next !== undefined) {
+      this.item = next;
+    }
+    this.actionBusy = false;
     this.syncFromItem();
   }
 
@@ -113,12 +131,7 @@ export struct DynCard {
   }
 
   private tapVibrate(): void {
-    try {
-      vibrator.startVibration({ type: 'time', duration: 15 }, { usage: 'physicalFeedback' }).catch(() => {
-      });
-    } catch (e) {
-      // 不支持或未授权时静默忽略。
-    }
+    Haptic.tap();
   }
 
   private async toggleLike(): Promise<void> {
@@ -277,7 +290,9 @@ export struct DynCard {
         Grid() {
           ForEach(item.images, (src: string, index: number) => {
             GridItem() {
-              Image(src).width('100%').height('100%').objectFit(ImageFit.Cover).borderRadius(6)
+              // 九宫格缩略图（320w webp）：动态流大批图片时避免原图占满内存。
+              Image(src.length > 0 ? biliImageThumbnail(src, 320) : src)
+                .width('100%').height('100%').objectFit(ImageFit.Cover).borderRadius(6)
                 .geometryTransition('image-viewer-dynamic-' + item.dynId + '-' + String(index))
                 .onClick(() => {
                   this.openItemImage(item, index);
@@ -291,7 +306,7 @@ export struct DynCard {
       if (item.title.length > 0) {
         Row({ space: 9 }) {
           if (item.cover.length > 0) {
-            Image(item.cover).width(112).height(68).objectFit(ImageFit.Cover).borderRadius(6)
+            Image(biliImageThumbnail(item.cover, 240)).width(112).height(68).objectFit(ImageFit.Cover).borderRadius(6)
           }
           Column({ space: 5 }) {
             Text(item.title).fontSize(13).fontColor(this.isDark ? '#E6E6E6' : '#18191C').maxLines(2)
@@ -402,12 +417,12 @@ export struct DynCard {
         this.ForwardedCard(this.item.original)
       }
 
-      // 图文/专栏动态图片卡片
+      // 图文/专栏动态图片卡片（详情态也走缩略图，内存友好；点击进 ImageViewer 时再拉原图）。
       if (this.item.images.length > 0) {
         Grid() {
           ForEach(this.shownImages(), (src: string, index: number) => {
             GridItem() {
-              Image(src)
+              Image(src.length > 0 ? biliImageThumbnail(src, 900) : src)
                 .width('100%')
                 .height('100%')
                 .objectFit(ImageFit.Cover)
@@ -518,6 +533,17 @@ export struct DynCard {
           this.forwardDynamic().catch(() => {
           });
         })
+        Row({ space: 4 }) {
+          Image($r('app.media.ic_more'))
+            .width(16)
+            .height(16)
+            .fillColor('#9499A0')
+        }
+        .alignItems(VerticalAlign.Center)
+        .padding({ top: 5, bottom: 5 })
+        .onClick(() => {
+          this.promptReportDynamic();
+        })
       }
       .width('100%')
     }
@@ -525,6 +551,44 @@ export struct DynCard {
     .padding(12)
     .borderRadius(10)
     .backgroundColor(this.isDark ? '#2A2C31' : '#FFFFFF')
+  }
+
+  /** 动态举报：原因选择弹窗（showDialog 不支持回调，用 index 回读）。 */
+  private promptReportDynamic(): void {
+    if (this.item.dynId.length === 0) {
+      this.toast('动态信息不完整，暂不支持举报');
+      return;
+    }
+    const reasons: Array<string> = ['违法违规', '色情低俗', '垃圾广告', '人身攻击', '抄袭洗稿', '其他'];
+    const buttons: Array<ReportButtonItem> = [];
+    for (let i: number = 0; i < reasons.length; i++) {
+      buttons.push({ text: reasons[i], color: this.isDark ? '#CCFFFFFF' : '#18191C' });
+    }
+    buttons.push({ text: '取消', color: '#9499A0' });
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '举报动态',
+        message: this.item.content.substring(0, Math.min(24, this.item.content.length)),
+        buttons: buttons,
+      }).then((dialogResult) => {
+        const pick: number = Number(dialogResult.index);
+        if (pick < 0 || pick >= reasons.length) return;
+        if (UserStore.isLogin === false) {
+          this.toast('请先登录后再举报动态');
+          return;
+        }
+        const reasonValues: Array<string> = ['1', '2', '6', '5', '14', '99'];
+        BiliApi.reportDynamic(this.item.dynId, reasonValues[pick])
+          .then((r: ActionResult) => {
+            this.toast(r.ok ? '已提交举报，感谢反馈' : r.message);
+          })
+          .catch(() => {
+            this.toast('举报失败，请稍后重试');
+          });
+      });
+    } catch (e) {
+      // 窗口异常忽略。
+    }
   }
 }
 
@@ -545,6 +609,17 @@ export struct DynamicView {
   @State refreshStatus: RefreshStatus = RefreshStatus.Inactive;
   @State dynCount: number = 0;
   @State errorText: string = '';
+  // 发布动态（纯文字）面板状态
+  @State showComposer: boolean = false;
+  @State composerText: string = '';
+  @State composing: boolean = false;
+  // 顶部「关注 UP 主」横滑栏：登录后拉取关注列表第一页，不阻塞动态流加载。
+  @State followed: Array<RelationUserItem> = [];
+  /** uid -> 直播间 roomId（仅直播中的 UP；由批量开播状态接口异步补充，失败不影响横滑条）。 */
+  @State liveRooms: Map<number, number> = new Map<number, number>();
+  @State followingLoaded: boolean = false;
+  private followLoading: boolean = false;
+  private liveFetching: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
@@ -582,6 +657,10 @@ export struct DynamicView {
       }
       this.login = this.hostMid > 0 || UserStore.isLogin;
       if (this.login) {
+        // 只有主页关注流展示 UP 横滑栏；用户空间内嵌版与指定用户动态都不需要。
+        if (this.hostMid <= 0 && !this.embedded) {
+          this.loadFollowStrip();
+        }
         await this.loadFeed(true);
       }
     } catch (e) {
@@ -611,6 +690,52 @@ export struct DynamicView {
       if (this.dynSource.isEmpty()) this.errorText = '动态加载失败，请检查登录状态或网络后重试';
     } finally {
       this.feedLoading = false;
+    }
+  }
+
+  /** 并行拉取关注 UP 主第一页，仅作横滑栏展示，失败静默（不影响动态主流程）。 */
+  private async loadFollowStrip(): Promise<void> {
+    if (this.followingLoaded || this.followLoading) return;
+    this.followLoading = true;
+    try {
+      await UserStore.ensureLoaded();
+      const mid: number = UserStore.current !== null ? UserStore.current.mid : 0;
+      if (mid <= 0) return;
+      const page: RelationUserPageData = await BiliApi.getRelationUsers(mid, 'following', 1);
+      if (page.users.length > 0) {
+        this.followed = page.users;
+      }
+    } catch (e) {
+      // 关注列表失败时静默隐藏横滑条。
+    } finally {
+      this.followingLoaded = true;
+      this.followLoading = false;
+      // 列表到位后异步补开播状态（直播角标）；失败静默。
+      this.refreshLiveBadges();
+    }
+  }
+
+  /** 批量查询关注 UP 的开播状态，驱动横滑栏「直播中」角标。 */
+  private async refreshLiveBadges(): Promise<void> {
+    if (this.followed.length === 0 || this.liveFetching) return;
+    this.liveFetching = true;
+    try {
+      const uids: Array<number> = [];
+      for (let i: number = 0; i < this.followed.length; i++) {
+        uids.push(this.followed[i].mid);
+      }
+      const items = await BiliApi.getLiveStatusByUids(uids);
+      const next: Map<number, number> = new Map<number, number>();
+      for (let i: number = 0; i < items.length; i++) {
+        if (items[i].liveStatus === 1 && items[i].roomId > 0) {
+          next.set(items[i].uid, items[i].roomId);
+        }
+      }
+      this.liveRooms = next;
+    } catch (e) {
+      // 开播状态失败时只少一个角标，不打扰。
+    } finally {
+      this.liveFetching = false;
     }
   }
 
@@ -657,12 +782,25 @@ export struct DynamicView {
   }
 
   private tapVibrate(): void {
-    try {
-      vibrator.startVibration({ type: 'time', duration: 15 }, { usage: 'physicalFeedback' }).catch(() => {
-      });
-    } catch (e) {
-      // 不支持或未授权时静默忽略。
-    }
+    Haptic.tap();
+  }
+
+  /** 关注栏 UP「直播中」角标点击：直达直播间。 */
+  private openLiveRoom(mid: number): void {
+    const roomId: number | undefined = this.liveRooms.get(mid);
+    if (roomId === undefined || roomId <= 0) return;
+    this.tapVibrate();
+    const followee: RelationUserItem | undefined =
+      this.followed.find((u: RelationUserItem) => u.mid === mid);
+    const param: LiveRoomParam = {
+      roomId: roomId,
+      uid: mid,
+      title: '',
+      uname: followee !== undefined ? followee.uname : '',
+      face: followee !== undefined ? followee.face : '',
+      cover: '',
+    };
+    AppNavStack.pushPathByName(NAV_LIVE_ROOM, param);
   }
 
   private changeDynType(type: string): void {
@@ -699,6 +837,72 @@ export struct DynamicView {
       }
       this.changeDynType(type);
     })
+  }
+
+  /** 顶部「关注 UP 主」横滑栏：第一条动态下展示关注对象，点击进用户空间；开播中的 UP 带红点。 */
+  @Builder
+  FollowStrip() {
+    List({ space: 14 }) {
+      ForEach(this.followed, (u: RelationUserItem) => {
+        ListItem() {
+          Column({ space: 6 }) {
+            Stack({ alignContent: Alignment.TopEnd }) {
+              Stack({ alignContent: Alignment.Center }) {
+                Image(u.face.length > 0 ? u.face : $r('app.media.placeholder_avatar_noface'))
+                  .width(46)
+                  .height(46)
+                  .borderRadius(23)
+                  .objectFit(ImageFit.Cover)
+                  .backgroundColor(this.isDark ? '#33353A' : '#EEF0F2')
+                  .syncLoad(false)
+              }
+              .width(47)
+              .height(47)
+              if (this.liveRooms.get(u.mid) !== undefined) {
+                // 直播中角标：与 B 站 App 关注栏一致，点角标直达直播间。
+                Text('直播中')
+                  .fontSize(8)
+                  .fontColor('#FFFFFF')
+                  .backgroundColor('#F53F3F')
+                  .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+                  .borderRadius(6)
+                  .margin({ right: -2, top: -2 })
+                  .priorityGesture(TapGesture().onAction(() => {
+                    this.openLiveRoom(u.mid);
+                  }))
+              }
+            }
+            .width(47)
+            .height(47)
+            Text(u.uname)
+              .fontSize(11)
+              .fontColor(this.isDark ? '#C9C9CE' : '#61666D')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .width(62)
+              .textAlign(TextAlign.Center)
+          }
+          .width(64)
+          .onClick(() => {
+            this.tapVibrate();
+            if (u.mid > 0) {
+              const param: UserSpaceParam = { mid: u.mid };
+              AppNavStack.pushPathByName(NAV_USER_SPACE, param);
+            }
+          })
+          .stateStyles({
+            pressed: { opacity: 0.6 },
+            normal: { opacity: 1 },
+          })
+        }
+      }, (u: RelationUserItem) => String(u.mid))
+    }
+    .listDirection(Axis.Horizontal)
+    .width('100%')
+    .height(84)
+    .padding({ left: 4, right: 4 })
+    .scrollBar(BarState.Off)
+    .cachedCount(4)
   }
 
   @Builder
@@ -768,6 +972,26 @@ export struct DynamicView {
     } else {
       Refresh({ refreshing: $$this.refreshing, builder: this.DynRefreshHeader() }) {
         List({ space: 10 }) {
+          if (this.followed.length > 0 && !this.embedded && this.hostMid <= 0) {
+            ListItem() {
+              Column({ space: 8 }) {
+                Row({ space: 6 }) {
+                  Text('关注')
+                    .fontSize(12)
+                    .fontColor('#9499A0')
+                  Text(this.followed.length + ' 位')
+                    .fontSize(11)
+                    .fontColor('#B0B3B8')
+                  Blank()
+                }
+                .width('100%')
+                .padding({ left: 2, right: 2 })
+                this.FollowStrip()
+              }
+              .width('100%')
+              .padding({ top: 10, bottom: 2 })
+            }
+          }
           LazyForEach(this.dynSource, (item: DynamicItem) => {
             ListItem() {
               DynCard({ item: item, embedded: this.embedded })
@@ -815,6 +1039,82 @@ export struct DynamicView {
     }
   }
 
+  /** 发布动态（纯文本）底部面板：输入 + 发布；发布成功后重载 feed。 */
+  @Builder
+  DynComposerOverlay() {
+    Stack({ alignContent: Alignment.Top }) {
+      Column().width('100%').height('100%')
+        .backgroundColor('#66000000')
+        .onClick(() => this.showComposer = false)
+      Column({ space: 12 }) {
+        Row() {
+          Text('发布动态').fontSize(16).fontWeight(FontWeight.Bold)
+            .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+          Blank()
+          Text('取消').fontSize(13).fontColor('#9499A0')
+            .onClick(() => this.showComposer = false)
+        }
+        .width('100%')
+        TextArea({ placeholder: '分享新鲜事…', text: this.composerText })
+          .width('100%')
+          .height(140)
+          .fontSize(15)
+          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+          .placeholderColor('#9499A0')
+          .backgroundColor(this.isDark ? '#26272B' : '#F3F4F6')
+          .borderRadius(10)
+          .onChange((value: string) => this.composerText = value)
+        Text(this.composerText.length + ' / 2000')
+          .width('100%').fontSize(11).fontColor('#B0B3B8').textAlign(TextAlign.End)
+        Button(this.composing ? '发布中…' : '发布')
+          .width('100%').height(42).borderRadius(21)
+          .fontSize(15).fontColor('#FFFFFF')
+          .backgroundColor(this.accent)
+          .enabled(!this.composing && this.composerText.trim().length > 0)
+          .onClick(() => this.submitDynamic())
+      }
+      .width('100%')
+      .padding({ left: 16, right: 16, top: 16, bottom: Immersive.bottomInset() + 12 })
+      .backgroundColor(this.isDark ? '#1E2024' : '#FFFFFF')
+      .borderRadius({ topLeft: 18, topRight: 18 })
+      .align(Alignment.Bottom)
+      .transition(TransitionEffect.asymmetric(
+        TransitionEffect.translate({ y: 300 }).animation({ duration: 220, curve: Curve.EaseOut }),
+        TransitionEffect.translate({ y: 300 }).animation({ duration: 180, curve: Curve.EaseIn })))
+    }
+    .width('100%').height('100%')
+    .zIndex(6)
+  }
+
+  private async submitDynamic(): Promise<void> {
+    if (this.composing) return;
+    this.composing = true;
+    try {
+      const result: ActionResult = await BiliApi.publishDynamic(this.composerText);
+      if (result.ok) {
+        this.showComposer = false;
+        this.composerText = '';
+        this.showToast('发布成功');
+        this.loadFeed(true).catch(() => {
+        });
+      } else {
+        this.showToast(result.message);
+      }
+    } catch (e) {
+      this.showToast('发布失败，请检查网络');
+    } finally {
+      this.composing = false;
+    }
+  }
+
+  private showToast(message: string): void {
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: message });
+    } catch (e) {
+      // 组件销毁或窗口异常时忽略提示。
+    }
+  }
+
   build() {
     Stack({ alignContent: Alignment.Top }) {
       // 动态分类 Tabs：左右滑动在 全部/视频/番剧/专栏 之间切换，与首页推荐/热门/直播一致。
@@ -841,6 +1141,34 @@ export struct DynamicView {
 
       if (this.login && this.hostMid <= 0) {
         this.DynTypeFilter()
+      }
+
+      // 发布动态 FAB：主页动态流右下角悬浮（非内嵌、已登录时显示）。
+      if (this.login && this.hostMid <= 0 && this.embedded === false) {
+        Stack({ alignContent: Alignment.Center }) {
+          Image($r('app.media.ic_comment'))
+            .width(22)
+            .height(22)
+            .fillColor('#FFFFFF')
+        }
+        .width(48)
+        .height(48)
+        .borderRadius(24)
+        .backgroundColor(this.accent)
+        .shadow({ radius: 12, color: '#66FB7299', offsetY: 3 })
+        .position({ x: '88%', y: '86%' })
+        .zIndex(5)
+        .onClick(() => {
+          this.showComposer = true;
+        })
+        .stateStyles({
+          pressed: { opacity: 0.85 },
+          normal: { opacity: 1 },
+        })
+      }
+
+      if (this.showComposer) {
+        this.DynComposerOverlay()
       }
     }
     .width('100%')

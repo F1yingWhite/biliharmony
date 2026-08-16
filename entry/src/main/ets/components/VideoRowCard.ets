@@ -3,7 +3,10 @@
  * compact = 搜索结果样式（130 宽封面 / 13 号标题 / 整行水平内边距）；
  * 非 compact = 历史/收藏样式（132 宽封面 / 14 号标题 / 无水平内边距）。
  * 跳转由调用方通过 onTap 注入，组件本身不感知路由参数。
+ *
+ * @Reusable：搜屏/历史/收藏/分区等 LazyForEach 长列表复用卡片，滚动时避免整卡重建。
  */
+@Reusable
 @Component
 export struct VideoRowCard {
   @Prop cover: string = '';
@@ -22,6 +25,14 @@ export struct VideoRowCard {
   };
   @StorageProp('isDarkMode') isDark: boolean = false;
 
+  aboutToReuse(params: Record<string, Object>): void {
+    // 复用实例属性同步（@Prop 自动跟随，这里承接回调引用等非常量绑定）。
+    const tap: Object | undefined = params['onTap'];
+    if (typeof tap === 'function') {
+      this.onTap = tap as () => void;
+    }
+  }
+
   build() {
     Row({ space: this.compact ? 10 : 11 }) {
       Stack({ alignContent: Alignment.BottomEnd }) {
@@ -30,6 +41,8 @@ export struct VideoRowCard {
           .height(74)
           .objectFit(ImageFit.Cover)
           .borderRadius(this.compact ? 6 : 7)
+          // 历史/收藏/搜索结果等长列表中的封面异步解码（syncLoad=false），滚动不卡。
+          .syncLoad(false)
         if (this.overlayText.length > 0) {
           Text(this.overlayText)
             .fontSize(this.compact ? 10 : 9)
@@ -80,6 +93,15 @@ export struct VideoRowCard {
     })
     .onClick(() => {
       this.onTap();
+    })
+    // 与 VideoCard 等卡片统一的按压反馈：按下轻微淡出，松开恢复。
+    .stateStyles({
+      pressed: {
+        opacity: 0.78,
+      },
+      normal: {
+        opacity: 1,
+      },
     })
   }
 }

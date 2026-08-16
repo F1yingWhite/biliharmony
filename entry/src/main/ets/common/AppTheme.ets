@@ -5,6 +5,8 @@
 import { tonalPalette, isDarkColor } from './ColorUtil';
 import { Constants } from './Constants';
 import { uiMaterial } from '@kit.ArkUI';
+import { common } from '@kit.AbilityKit';
+import { preferences } from '@kit.ArkData';
 
 export class AppTheme {
   /** 预设主题色（用户自选） */
@@ -20,10 +22,15 @@ export class AppTheme {
   static readonly MODE_DARK: string = 'dark';
   static readonly KEY_HEADER_FADE: string = 'headerFade';
   static readonly KEY_GLASS_ENABLED: string = 'glassEnabled';
+  static readonly KEY_AUTO_DARK: string = 'autoDarkEnabled';
+  static readonly KEY_AUTO_DARK_START: string = 'autoDarkStart';
+  static readonly KEY_AUTO_DARK_END: string = 'autoDarkEnd';
   private static nativeModeApplier: ((mode: string) => void) | null = null;
+  /** 显式落盘的主题偏好（PersistentStorage 只负责 AppStorage 响应式联动）。 */
+  private static themePreferences: preferences.Preferences | null = null;
 
   /** 初始化主题状态 */
-  static init(): void {
+  static init(context: common.UIAbilityContext): void {
     PersistentStorage.persistProp<string>(AppTheme.KEY_THEME_MODE, AppTheme.MODE_SYSTEM);
     PersistentStorage.persistProp<string>(AppTheme.KEY_ACCENT, Constants.brandPink);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_DARK, false);
@@ -46,9 +53,91 @@ export class AppTheme {
     if (AppStorage.get<boolean>(AppTheme.KEY_GLASS_ENABLED) === undefined) {
       AppStorage.setOrCreate<boolean>(AppTheme.KEY_GLASS_ENABLED, true);
     }
+    if (AppStorage.get<boolean>('autoContinuePlay') === undefined) {
+      AppStorage.setOrCreate<boolean>('autoContinuePlay', true);
+    }
+    if (AppStorage.get<boolean>('sponsorSkipEnabled') === undefined) {
+      AppStorage.setOrCreate<boolean>('sponsorSkipEnabled', true);
+    }
+    // 定时深色：默认关闭；时段默认 19:00 - 07:00（跨午夜）。
+    PersistentStorage.persistProp<boolean>(AppTheme.KEY_AUTO_DARK, false);
+    PersistentStorage.persistProp<string>(AppTheme.KEY_AUTO_DARK_START, '19:00');
+    PersistentStorage.persistProp<string>(AppTheme.KEY_AUTO_DARK_END, '07:00');
+    if (AppStorage.get<boolean>(AppTheme.KEY_AUTO_DARK) === undefined) {
+      AppStorage.setOrCreate<boolean>(AppTheme.KEY_AUTO_DARK, false);
+    }
+    if (AppStorage.get<string>(AppTheme.KEY_AUTO_DARK_START) === undefined) {
+      AppStorage.setOrCreate<string>(AppTheme.KEY_AUTO_DARK_START, '19:00');
+    }
+    if (AppStorage.get<string>(AppTheme.KEY_AUTO_DARK_END) === undefined) {
+      AppStorage.setOrCreate<string>(AppTheme.KEY_AUTO_DARK_END, '07:00');
+    }
   }
 
-  /** 滚动累积偏移（vp）：List.onScroll 上报的是单帧增量，需累积后计算头栏淡出 */
+  /** 显式 Preferences 落盘（与 UserStore 同机制，绕开 PersistentStorage 的启动竞态）。 */
+  static async initThemeStore(context: common.UIAbilityContext): Promise<void> {
+    try {
+      AppTheme.themePreferences = await preferences.getPreferences(context, { name: 'bili_theme_state' });
+      const mode: string = AppTheme.themePreferences.getSync(AppTheme.KEY_THEME_MODE, '') as string;
+      const dark: string = AppTheme.themePreferences.getSync(AppTheme.KEY_DARK, '') as string;
+      if (mode.length > 0) {
+        // Preferences 是权威副本：恢复后回写 AppStorage（PersistentStorage 已联动）。
+        AppStorage.setOrCreate<string>(AppTheme.KEY_THEME_MODE, mode);
+        if (mode === AppTheme.MODE_DARK) {
+          AppStorage.setOrCreate<boolean>(AppTheme.KEY_DARK, true);
+        } else if (mode === AppTheme.MODE_LIGHT) {
+          AppStorage.setOrCreate<boolean>(AppTheme.KEY_DARK, false);
+        }
+      } else if (dark.length > 0) {
+        AppStorage.setOrCreate<boolean>(AppTheme.KEY_DARK, dark === 'true');
+      }
+      // 播放器偏好同样显式恢复（自动连播、广告空降）。
+      const auto: string = AppTheme.themePreferences.getSync('autoContinuePlay', '') as string;
+      if (auto.length > 0) AppStorage.setOrCreate<boolean>('autoContinuePlay', auto === 'true');
+      const sponsor: string = AppTheme.themePreferences.getSync('sponsorSkipEnabled', '') as string;
+      if (sponsor.length > 0) AppStorage.setOrCreate<boolean>('sponsorSkipEnabled', sponsor === 'true');
+      AppTheme.applyCurrentMode();
+    } catch (e) {
+      // 恢复失败保留默认态，不影响启动。
+    }
+  }
+
+  /** 把播放器布尔偏好写入 Preferences（切换即落盘，重启还原）。 */
+  private static syncBooleanPref(key: string, value: boolean): void {
+    const store: preferences.Preferences | null = AppTheme.themePreferences;
+    if (store === null) return;
+    try {
+      store.putSync(key, value ? 'true' : 'false');
+      store.flush();
+    } catch (e) {
+      // 写盘失败只丢最后一次偏好。
+    }
+  }
+
+  /** 自动连播开关写 Preferences。 */
+  static persistAutoContinue(on: boolean): void {
+    AppTheme.syncBooleanPref('autoContinuePlay', on);
+  }
+
+  /** 广告空降开关写 Preferences。 */
+  static persistSponsorSkip(on: boolean): void {
+    AppTheme.syncBooleanPref('sponsorSkipEnabled', on);
+  }
+
+  /** 把当前主题模式写 Preferences（切换即同步落盘，重启还原）。 */
+  private static syncThemeToPrefs(mode: string, dark: boolean): void {
+    const store: preferences.Preferences | null = AppTheme.themePreferences;
+    if (store === null) return;
+    try {
+      store.putSync(AppTheme.KEY_THEME_MODE, mode);
+      store.putSync(AppTheme.KEY_DARK, dark ? 'true' : 'false');
+      store.flush();
+    } catch (e) {
+      // 写盘失败只丢最后一次偏好。
+    }
+  }
+
+  /** 滚动累积偏移（vp）：List.onScroll 上报的是单帧增量，累积后计算头栏淡出 */
   private static scrollAccum: number = 0;
 
   /** 根据滚动增量更新头部淡出程度（0..1）：正反方向都连续过渡，避免反向滚动时头栏瞬间跳回。 */
@@ -107,6 +196,9 @@ export class AppTheme {
       AppTheme.setDark(true);
     } else if (mode === AppTheme.MODE_LIGHT) {
       AppTheme.setDark(false);
+    } else if (AppTheme.isAutoDarkEnabled()) {
+      // 定时深色优先于系统明暗：跟随系统模式下按时间段自动切换明暗。
+      AppTheme.setDark(AppTheme.inAutoDarkWindow(new Date()));
     } else {
       AppTheme.setDark(AppStorage.get<boolean>(AppTheme.KEY_SYSTEM_DARK) ?? false);
     }
@@ -116,11 +208,73 @@ export class AppTheme {
     const next: string = mode === AppTheme.MODE_LIGHT || mode === AppTheme.MODE_DARK ? mode : AppTheme.MODE_SYSTEM;
     AppStorage.setOrCreate<string>(AppTheme.KEY_THEME_MODE, next);
     AppTheme.applyCurrentMode();
+    AppTheme.syncThemeToPrefs(next, next === AppTheme.MODE_DARK);
   }
 
   static updateSystemDark(dark: boolean): void {
     AppStorage.setOrCreate<boolean>(AppTheme.KEY_SYSTEM_DARK, dark);
-    if (AppTheme.getMode() === AppTheme.MODE_SYSTEM) AppTheme.setDark(dark);
+    if (AppTheme.getMode() === AppTheme.MODE_SYSTEM && !AppTheme.isAutoDarkEnabled()) {
+      AppTheme.setDark(dark);
+    }
+  }
+
+  // ===== 定时深色（跟随系统模式下按时间段强制切换） =====
+
+  static isAutoDarkEnabled(): boolean {
+    const v: boolean | undefined = AppStorage.get<boolean>(AppTheme.KEY_AUTO_DARK);
+    return v ?? false;
+  }
+
+  static setAutoDarkEnabled(on: boolean): void {
+    AppStorage.setOrCreate<boolean>(AppTheme.KEY_AUTO_DARK, on);
+    if (on && AppTheme.getMode() === AppTheme.MODE_SYSTEM) {
+      AppTheme.applyAutoDark();
+    }
+  }
+
+  static getAutoDarkStart(): string {
+    return AppStorage.get<string>(AppTheme.KEY_AUTO_DARK_START) ?? '19:00';
+  }
+
+  static getAutoDarkEnd(): string {
+    return AppStorage.get<string>(AppTheme.KEY_AUTO_DARK_END) ?? '07:00';
+  }
+
+  static setAutoDarkWindow(start: string, end: string): void {
+    AppStorage.setOrCreate<string>(AppTheme.KEY_AUTO_DARK_START, start);
+    AppStorage.setOrCreate<string>(AppTheme.KEY_AUTO_DARK_END, end);
+    if (AppTheme.isAutoDarkEnabled() && AppTheme.getMode() === AppTheme.MODE_SYSTEM) {
+      AppTheme.applyAutoDark();
+    }
+  }
+
+  /** 当前时刻（分钟数）是否落在 [start, end) 时段，支持跨午夜（start > end）。 */
+  static inAutoDarkWindow(date: Date): boolean {
+    const mins: number = date.getHours() * 60 + date.getMinutes();
+    const s: number = AppTheme.parseMinutes(AppTheme.getAutoDarkStart());
+    const e: number = AppTheme.parseMinutes(AppTheme.getAutoDarkEnd());
+    if (s === e) {
+      return false;
+    }
+    if (s < e) {
+      return mins >= s && mins < e;
+    }
+    return mins >= s || mins < e;
+  }
+
+  private static parseMinutes(hhmm: string): number {
+    const parts: Array<string> = hhmm.split(':');
+    const h: number = parts.length > 0 ? Number(parts[0]) : 0;
+    const m: number = parts.length > 1 ? Number(parts[1]) : 0;
+    return (Number.isNaN(h) ? 0 : h) * 60 + (Number.isNaN(m) ? 0 : m);
+  }
+
+  /** 依据当前时间刷新深色状态（定时开关开启且为跟随系统模式时生效），定时器周期调用。 */
+  static applyAutoDark(): void {
+    if (!AppTheme.isAutoDarkEnabled() || AppTheme.getMode() !== AppTheme.MODE_SYSTEM) {
+      return;
+    }
+    AppTheme.setDark(AppTheme.inAutoDarkWindow(new Date()));
   }
 
   /** 生成当前模式下的色调板 */

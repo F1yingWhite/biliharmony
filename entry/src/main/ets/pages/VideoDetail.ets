@@ -7,6 +7,7 @@ import { image } from '@kit.ImageKit';
 import { systemShare } from '@kit.ShareKit';
 import { inputMethod } from '@kit.IMEKit';
 import { Immersive } from '../common/Immersive';
+import { Haptic } from '../common/Haptic';
 import { AppNavStack, NAV_LOGIN, NAV_VIDEO_DETAIL, NAV_USER_SPACE, VideoDetailParam,
   UserSpaceParam } from '../common/AppRouter';
 import { VideoDetail, VideoItem, ReplyItem, PlayUrlInfo, VideoPage, VideoQualityOption, VideoRelationState,
@@ -21,6 +22,7 @@ import { DecoratedAvatar, UserDecorationBanner } from '../components/UserDecorat
 import { parseReplyContent, ReplyRenderPart } from '../common/ReplyContentParser';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
 import { BasicDataSource } from '../common/BasicDataSource';
+import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
 import { ReplyCard } from '../components/ReplyCard';
 import { ReplyComposer } from '../components/ReplyComposer';
 import { ReplyEmotePanel } from '../components/ReplyEmotePanel';
@@ -164,6 +166,25 @@ export struct VideoDetailPage {
     this.emotePanelOpen = false;
     this.replyThreadOpen = false;
     this.replyThreadAnimating = false;
+  }
+
+  /** 楼中楼里删掉一条子回复：连同其子孙一起从 threadSource 移除。 */
+  private threadRemoveReply(target: ReplyItem): void {
+    const blocked: Set<number> = new Set<number>();
+    blocked.add(target.rpid);
+    // 收集 target 的直接子回复（rootRpid=target.rpid）及更外层子孙，用深度优先收集。
+    let changed: boolean = true;
+    const all: Array<ReplyItem> = this.threadSource.getAll();
+    while (changed) {
+      changed = false;
+      for (let i: number = 0; i < all.length; i++) {
+        if (!blocked.has(all[i].rpid) && blocked.has(all[i].rootRpid)) {
+          blocked.add(all[i].rpid);
+          changed = true;
+        }
+      }
+    }
+    this.threadSource.reset(all.filter((x: ReplyItem) => !blocked.has(x.rpid)));
   }
 
   private refreshScreenSize(): void {
@@ -757,6 +778,51 @@ export struct VideoDetailPage {
     }
   }
 
+  /** 点赞按钮长按：一键三连（点赞+投一币+收藏），弹确认后执行。 */
+  private actionTriple(): void {
+    if (!this.ensureLogin() || this.actionBusy) return;
+    if (this.liked && this.coinCountByMe > 0 && this.favorited) {
+      this.toast('已三连过啦');
+      return;
+    }
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '一键三连',
+        message: '点赞 + 投 1 枚硬币 + 收藏',
+        buttons: [
+          { text: '取消', color: '#9499A0' },
+          { text: '三连', color: this.accent },
+        ],
+      }).then((dialogResult) => {
+        if (Number(dialogResult.index) !== 1) return;
+        this.doTriple();
+      });
+    } catch (e) {
+      // 弹窗失败不阻塞。
+    }
+  }
+
+  private async doTriple(): Promise<void> {
+    this.actionBusy = true;
+    try {
+      const result: ActionResult = await BiliApi.likeTriple(this.detail.aid);
+      if (this.destroyed) return;
+      if (result.ok) {
+        this.liked = true;
+        this.coinCountByMe = 1;
+        this.favorited = true;
+        this.favoriteCount = this.favoriteCount + 1;
+        this.toast('三连成功 🎉');
+      } else {
+        this.toast(result.message);
+      }
+    } catch (e) {
+      if (!this.destroyed) this.toast('三连失败，请稍后重试');
+    } finally {
+      if (!this.destroyed) this.actionBusy = false;
+    }
+  }
+
   async actionFavorite(): Promise<void> {
     if (!this.ensureLogin() || this.actionBusy) return;
     this.actionBusy = true;
@@ -800,6 +866,139 @@ export struct VideoDetailPage {
     } finally {
       if (!this.destroyed) this.actionBusy = false;
     }
+  }
+
+  // ===== 收藏夹多选：长按收藏按钮弹出夹列表勾选 =====
+  @State favPickOpen: boolean = false;
+  @State favPickFolders: Array<FavoriteFolderItem> = [];
+  @State favPickChecked: Array<number> = [];
+  @State favPickLoading: boolean = false;
+
+  /** 长按收藏：弹出多选夹弹层。 */
+  private async actionFavoritePick(): Promise<void> {
+    if (!this.ensureLogin() || this.actionBusy) return;
+    this.favPickLoading = true;
+    this.favPickOpen = true;
+    try {
+      const selfMid: number = UserStore.current !== null ? UserStore.current.mid : 0;
+      const folders: Array<FavoriteFolderItem> = await BiliApi.getFavoriteFoldersForVideo(this.detail.aid, selfMid);
+      if (this.destroyed) return;
+      this.favPickFolders = folders;
+      const checked: Array<number> = [];
+      for (let i: number = 0; i < folders.length; i++) {
+        if (folders[i].favorited) checked.push(folders[i].id);
+      }
+      this.favPickChecked = checked;
+    } catch (e) {
+      if (!this.destroyed) {
+        this.favPickOpen = false;
+        this.toast('收藏夹加载失败，请稍后重试');
+      }
+    } finally {
+      if (!this.destroyed) this.favPickLoading = false;
+    }
+  }
+
+  private toggleFavPick(id: number): void {
+    this.favPickChecked = this.favPickChecked.indexOf(id) >= 0 ?
+      this.favPickChecked.filter((x: number) => x !== id) : this.favPickChecked.concat([id]);
+  }
+
+  /** 保存多选结果：目标集合=勾选夹；原集合=夹的 favorited 状态。 */
+  private async saveFavPick(): Promise<void> {
+    if (this.actionBusy) return;
+    this.actionBusy = true;
+    try {
+      const all: Array<FavoriteFolderItem> = this.favPickFolders;
+      const prev: Array<number> = [];
+      for (let i: number = 0; i < all.length; i++) {
+        if (all[i].favorited) prev.push(all[i].id);
+      }
+      const keep: Array<number> = [];
+      for (let i: number = 0; i < this.favPickChecked.length; i++) {
+        if (prev.indexOf(this.favPickChecked[i]) < 0) keep.push(this.favPickChecked[i]);
+      }
+      const drop: Array<number> = [];
+      for (let i: number = 0; i < prev.length; i++) {
+        if (this.favPickChecked.indexOf(prev[i]) < 0) drop.push(prev[i]);
+      }
+      const result: ActionResult = await BiliApi.modifyVideoFavorite(this.detail.aid, keep, drop);
+      if (this.destroyed) return;
+      if (!result.ok) {
+        this.toast(result.message);
+        return;
+      }
+      this.favorited = this.favPickChecked.length > 0;
+      this.favPickOpen = false;
+      this.toast('收藏已更新');
+    } catch (e) {
+      if (!this.destroyed) this.toast('保存失败，请稍后重试');
+    } finally {
+      if (!this.destroyed) this.actionBusy = false;
+    }
+  }
+
+  /** 收藏夹多选弹层：底部抽屉。 */
+  @Builder
+  FavPickSheet() {
+    Column() {
+      Blank()
+      Column({ space: 10 }) {
+        Text('选择收藏夹')
+          .fontSize(16).fontWeight(FontWeight.Bold)
+          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+        if (this.favPickLoading) {
+          Text('加载中…').fontSize(13).fontColor('#9499A0').padding(14)
+        } else if (this.favPickFolders.length === 0) {
+          Text('还没有收藏夹').fontSize(12).fontColor('#9499A0').padding(14)
+        } else {
+          List() {
+            ForEach(this.favPickFolders, (f: FavoriteFolderItem) => {
+              ListItem() {
+                Row({ space: 10 }) {
+                  Text(f.title).fontSize(14)
+                    .fontColor(this.isDark ? '#FFFFFF' : '#18191C').layoutWeight(1).maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  Stack({ alignContent: Alignment.Center }) {
+                    Circle().width(18).height(18)
+                      .fill(this.favPickChecked.indexOf(f.id) >= 0 ? this.accent : '#00000000')
+                      .border({ width: 1.5, color: this.favPickChecked.indexOf(f.id) >= 0 ? this.accent : '#B4B6BA' })
+                    if (this.favPickChecked.indexOf(f.id) >= 0) {
+                      Text('✓').fontSize(11).fontColor('#FFFFFF')
+                    }
+                  }
+                  .width(24).height(24)
+                }
+                .width('100%').padding({ top: 8, bottom: 8 })
+                .onClick(() => this.toggleFavPick(f.id))
+              }
+            }, (f: FavoriteFolderItem) => String(f.id))
+          }
+          .width('100%')
+          .constraintSize({ maxHeight: 300 })
+          .scrollBar(BarState.Off)
+        }
+        Row({ space: 10 }) {
+          Text('取消').fontSize(14).fontColor('#9499A0')
+            .layoutWeight(1).height(38).textAlign(TextAlign.Center)
+            .backgroundColor(this.isDark ? '#2A2C31' : '#F5F7F9').borderRadius(19)
+            .onClick(() => this.favPickOpen = false)
+          Text('保存').fontSize(14).fontColor('#FFFFFF').backgroundColor(this.accent)
+            .layoutWeight(1).height(38).textAlign(TextAlign.Center).borderRadius(19)
+            .onClick(() => {
+              this.saveFavPick().catch(() => {
+              });
+            })
+        }
+        .width('100%')
+      }
+      .width('100%')
+      .padding({ left: 16, right: 16, top: 16, bottom: Immersive.bottomInset() + 14 })
+      .backgroundColor(this.isDark ? '#1E2024' : '#FFFFFF')
+      .borderRadius({ topLeft: 14, topRight: 14 })
+    }
+    .width('100%').height('100%').justifyContent(FlexAlign.End)
+    .backgroundColor('#66000000')
   }
 
   /** 加入稍后再看：无本地状态需要乐观更新，直接请求后按结果 toast。 */
@@ -899,10 +1098,29 @@ export struct VideoDetailPage {
   }
 
   private onPlayerEnded(): void {
+    // 尊重"自动连播"设置：关闭时停在剧终画面不跳转。
+    let autoNext: boolean = true;
+    try {
+      autoNext = AppStorage.get<boolean>('autoContinuePlay') ?? true;
+    } catch (e) {
+      autoNext = true;
+    }
+    if (!autoNext) return;
     const next: UgcSeasonEpisode | null = this.nextUgcEpisode();
-    if (next === null) return;
-    this.toast('自动连播：' + next.title);
-    this.openUgcEpisode(next);
+    if (next !== null) {
+      this.toast('自动连播：' + next.title);
+      this.openUgcEpisode(next);
+      return;
+    }
+    // 无合集下一集时自动连播「相关推荐」第一条（与 B 站网页端相同的播完行为）。
+    if (this.related.length > 0) {
+      const related: VideoItem = this.related[0];
+      if (related.aid > 0 || related.bvid.length > 0) {
+        this.toast('自动连播：' + related.title);
+        const param: VideoDetailParam = { bvid: related.bvid, aid: related.aid, title: related.title };
+        AppNavStack.replacePathByName(NAV_VIDEO_DETAIL, param);
+      }
+    }
   }
 
   openCoinSheet(): void {
@@ -1084,7 +1302,7 @@ export struct VideoDetailPage {
     if (!meta.hasChildren) return;
     if (this.threadCollapsed.has(item.rpid)) this.threadCollapsed.delete(item.rpid);
     else this.threadCollapsed.add(item.rpid);
-    this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, () => {
+    this.getUIContext().animateTo({ duration: 150, curve: Curve.EaseOut }, () => {
       this.rebuildThreadTree();
     });
   }
@@ -1179,6 +1397,9 @@ export struct VideoDetailPage {
       onSelectReply: (item: ReplyItem) => {
         this.replyTargetRpid = item.rpid;
         this.replyTargetName = item.uname;
+      },
+      onDeleted: (item: ReplyItem) => {
+        this.threadRemoveReply(item);
       },
       onLoadMore: () => {
         this.loadThreadReplies(false).catch(() => {
@@ -1319,90 +1540,34 @@ export struct VideoDetailPage {
     return found;
   }
 
+  /** 评论点赞：委托给共享实现 runReplyLike（登录检查/busy/乐观更新/失败回滚统一在一处）。 */
   async actionReplyLike(item: ReplyItem): Promise<void> {
-    if (!this.ensureLogin() || this.replyLikeBusy.has(item.rpid)) return;
-    this.replyLikeBusy.add(item.rpid);
-    const current: ReplyItem | null = this.findReplyItem(item.rpid);
-    if (current === null) {
-      this.replyLikeBusy.delete(item.rpid);
-      return;
-    }
-    const next: boolean = !current.liked;
-    // 乐观更新：立即反馈主题色，接口拒绝时再精确回滚。赞踩互斥：赞上时本地同步清踩。
-    this.mutateReplyItem(item.rpid, (target: ReplyItem) => {
-      target.liked = next;
-      target.like = Math.max(0, target.like + (next ? 1 : -1));
-      if (next && target.disliked) target.disliked = false;
-    });
-    try {
-      const result: ActionResult = await BiliApi.likeReply(item.oid > 0 ? item.oid : this.detail.aid,
-        item.type > 0 ? item.type : 1, item.rpid, next);
-      if (this.destroyed) return;
-      if (!result.ok) {
-        this.mutateReplyItem(item.rpid, (target: ReplyItem) => {
-          target.liked = !next;
-          target.like = Math.max(0, target.like + (next ? -1 : 1));
-        });
-        this.toast(result.message);
-        return;
-      }
-    } catch (e) {
-      if (!this.destroyed) {
-        this.mutateReplyItem(item.rpid, (target: ReplyItem) => {
-          target.liked = !next;
-          target.like = Math.max(0, target.like + (next ? -1 : 1));
-        });
-        this.toast('评论点赞失败，请稍后重试');
-      }
-    } finally {
-      this.replyLikeBusy.delete(item.rpid);
-    }
+    await runReplyLike(item, this.replyLikeBusy,
+      (rpid: number, mutate: (target: ReplyItem) => void) => this.mutateReplyItem(rpid, mutate),
+      this.replyReactionHooks(true));
   }
 
+  /** 评论点踩：同理走共享实现（踩赞互斥逻辑在模块内）。 */
   async actionReplyDislike(item: ReplyItem): Promise<void> {
-    if (!this.ensureLogin() || this.replyLikeBusy.has(item.rpid)) return;
-    this.replyLikeBusy.add(item.rpid);
-    const current: ReplyItem | null = this.findReplyItem(item.rpid);
-    if (current === null) {
-      this.replyLikeBusy.delete(item.rpid);
-      return;
-    }
-    const next: boolean = !current.disliked;
-    const wasLiked: boolean = current.liked;
-    // 踩赞互斥：踩上时本地同步取消赞，失败整体回滚。
-    this.mutateReplyItem(item.rpid, (target: ReplyItem) => {
-      target.disliked = next;
-      if (next && target.liked) {
-        target.liked = false;
-        target.like = Math.max(0, target.like - 1);
-      }
-    });
-    const rollback = () => {
-      this.mutateReplyItem(item.rpid, (target: ReplyItem) => {
-        target.disliked = !next;
-        if (next && wasLiked) {
-          target.liked = true;
-          target.like++;
-        }
-      });
+    await runReplyDislike(item, this.replyLikeBusy,
+      (rpid: number, mutate: (target: ReplyItem) => void) => this.mutateReplyItem(rpid, mutate),
+      this.replyReactionHooks(false));
+  }
+
+  private replyReactionHooks(isLike: boolean): ReplyReactionHooks {
+    return {
+      ensureLogin: () => {
+        if (UserStore.isLogin) return true;
+        this.toast('请先登录后再操作');
+        AppNavStack.pushPathByName(NAV_LOGIN, null);
+        return false;
+      },
+      toast: (message: string) => this.toast(message),
+      isDestroyed: () => this.destroyed,
+      resolveOid: (it: ReplyItem) => it.oid > 0 ? it.oid : this.detail.aid,
+      resolveType: (it: ReplyItem) => it.type > 0 ? it.type : 1,
+      clearDislikeOnLike: true,
     };
-    try {
-      const result: ActionResult = await BiliApi.hateReply(item.oid > 0 ? item.oid : this.detail.aid,
-        item.type > 0 ? item.type : 1, item.rpid, next);
-      if (this.destroyed) return;
-      if (!result.ok) {
-        rollback();
-        this.toast(result.message);
-        return;
-      }
-    } catch (e) {
-      if (!this.destroyed) {
-        rollback();
-        this.toast('点踩失败，请稍后重试');
-      }
-    } finally {
-      this.replyLikeBusy.delete(item.rpid);
-    }
   }
 
   /** 评论分享：离屏渲染分享卡 → 截成 PNG → 系统分享面板（对齐 B 站"评论分享成图片"）。 */
@@ -1489,6 +1654,7 @@ export struct VideoDetailPage {
             .borderRadius(15)
             .enabled(!this.followLoading)
             .onClick(() => {
+              Haptic.tap();
               this.actionFollow();
             })
         }
@@ -1532,12 +1698,14 @@ export struct VideoDetailPage {
         // 注意必须直接在 build 里创建组件：经按值传参的 @Builder 中转后参数不跟踪状态，按钮会永远停在初始颜色。
         Row() {
           VideoActionItem({ icon: $r('app.media.bilix_icon_like'), value: formatCount(this.likeCount),
-            active: this.liked, busy: this.actionBusy, onTap: () => this.actionLike() })
+            active: this.liked, busy: this.actionBusy, onTap: () => this.actionLike(),
+            onLongPress: () => this.actionTriple() })
           // 视频点踩已移除：B 站点踩仅 App 端协议（需 access_key），cookie 登录无法调用。
           VideoActionItem({ icon: $r('app.media.bilix_icon_coin'), value: formatCount(this.coinCount),
             active: this.coinCountByMe > 0, busy: this.actionBusy, onTap: () => this.openCoinSheet() })
           VideoActionItem({ icon: $r('app.media.bilix_icon_fav'), value: formatCount(this.favoriteCount),
-            active: this.favorited, busy: this.actionBusy, onTap: () => this.actionFavorite() })
+            active: this.favorited, busy: this.actionBusy, onTap: () => this.actionFavorite(),
+            onLongPress: () => this.actionFavoritePick() })
           VideoActionItem({ icon: $r('app.media.bilix_icon_share'), value: formatCount(this.detail.share),
             active: false, busy: this.actionBusy, onTap: () => this.actionShare() })
           VideoActionItem({ icon: $r('app.media.ic_watch_later'), value: '稍后',
@@ -1870,6 +2038,12 @@ export struct VideoDetailPage {
               this.replyTargetRpid = item.rpid;
               this.replyTargetName = item.uname;
             },
+            onDeleted: (item: ReplyItem) => {
+              // 楼中楼面板的根评论被删除：关闭面板并移除主列表中对应行。
+              this.closeReplyThread();
+              this.replySource.reset(this.replySource.getAll().filter((x: ReplyItem) => x.rpid !== item.rpid));
+              this.detail.reply = Math.max(0, this.detail.reply - 1);
+            },
           })
         }
         ListItem() {
@@ -1914,8 +2088,13 @@ export struct VideoDetailPage {
                 this.replyTargetName = reply.uname;
               },
               onToggleThread: (reply: ReplyItem) => this.toggleThreadBranch(reply),
+              onDeleted: (reply: ReplyItem) => {
+                this.threadRemoveReply(reply);
+              },
             })
           }
+          // 稳定 key + updateItem(onDataChange)定向刷新：key 变化会销毁重建组件导致"闪"，
+          // 因此 key 只取 rpid；点赞/点在 mutate 后经 BasicDataSource.updateItem 通知该项重渲染。
         }, (item: ReplyItem) => String(item.rpid))
         ListItem() {
           this.LoadMoreFooter({
@@ -1980,9 +2159,17 @@ export struct VideoDetailPage {
                   onLike: (reply: ReplyItem) => this.actionReplyLike(reply),
               onDislike: (reply: ReplyItem) => this.actionReplyDislike(reply),
                   onShare: (reply: ReplyItem) => this.shareReplyAsImage(reply),
+                  // 主评论列表："回复"按钮 = 打开该评论的楼中楼面板（与 B 站一致），
+                  // 面板内的"相关回复"列表再负责逐一选中/回复。
+                  onSelectReply: (reply: ReplyItem) => this.openReplyThread(reply),
                   onOpenThread: (reply: ReplyItem) => this.openReplyThread(reply),
+                  onDeleted: (reply: ReplyItem) => {
+                    this.replySource.reset(this.replySource.getAll().filter((x: ReplyItem) => x.rpid !== reply.rpid));
+                    this.detail.reply = Math.max(0, this.detail.reply - 1);
+                  },
                 })
               }
+              // 稳定 key + updateItem 定向刷新（不重建组件）。rev 进 key 会引发重建闪烁。
             }, (item: ReplyItem) => String(item.rpid))
             ListItem() {
               this.LoadMoreFooter({
@@ -2456,6 +2643,9 @@ export struct VideoDetailPage {
 
       if (this.coinSheetOpen) {
         this.CoinSheet()
+      }
+      if (this.favPickOpen) {
+        this.FavPickSheet()
       }
     }
     .width('100%')
