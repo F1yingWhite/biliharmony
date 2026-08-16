@@ -31,6 +31,9 @@ export class ActiveDm {
 export const CONTROLS_GRADIENT_COLORS: Array<[ResourceColor, number]> =
   [['#99000000', 0.0], ['#00000000', 0.35], ['#99000000', 1.0]];
 
+/** protobuf 分段弹幕的段长（秒）：与 B 站网页端一致，每 6 分钟一段。 */
+export const DM_SEGMENT_SECONDS: number = 360;
+
 /** 弹幕整数颜色转 ArkUI #RRGGBB。 */
 export function colorHex(color: number): string {
   const r: number = (color >> 16) & 0xff;

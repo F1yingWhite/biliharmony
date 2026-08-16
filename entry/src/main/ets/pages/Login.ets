@@ -2,7 +2,6 @@
  * 登录页：扫码（TV）/ 密码 / 短信验证码 三种方式
  * 密码与短信登录移植自 PiliPlus lib/pages/login/controller.dart
  */
-import { promptAction } from '@kit.ArkUI';
 import { Immersive } from '../common/Immersive';
 import { AppNavStack } from '../common/AppRouter';
 import { BiliApi, CookiePair, LoginResult, SmsSendResult, TVCodeResult } from '../api/BiliApi';
@@ -51,6 +50,14 @@ export struct LoginPage {
   private pollInflight: boolean = false;
   private loggedIn: boolean = false;
   private destroyed: boolean = false;
+
+  private toast(message: string): void {
+    try {
+      this.toast(message);
+    } catch (e) {
+      // 页面销毁或窗口异常时忽略提示。
+    }
+  }
 
   aboutToAppear(): void {
     this.destroyed = false;
@@ -139,9 +146,9 @@ export struct LoginPage {
         this.loggedIn = true;
         this.statusText = '登录成功！';
         this.statusColor = '#2FB96A';
-        await UserStore.applyLoginCookies(result.cookies);
+        await UserStore.applyLoginCookies(result.cookies, result.accessToken);
         if (this.destroyed) return;
-        promptAction.showToast({ message: '登录成功，欢迎回来' });
+        this.toast('登录成功，欢迎回来');
         this.schedulePop();
       } else if (result.code === 86039) {
         this.statusText = '二维码尚未扫描，请使用 App 扫码';
@@ -168,7 +175,7 @@ export struct LoginPage {
     }
     const name: string = this.username.trim();
     if (name.length === 0 || this.password.length === 0) {
-      promptAction.showToast({ message: '请输入账号和密码' });
+      this.toast('请输入账号和密码');
       return;
     }
     this.pwdLoading = true;
@@ -176,20 +183,20 @@ export struct LoginPage {
       const result: LoginResult = await BiliApi.loginByPassword(name, this.password);
       if (this.destroyed) return;
       if (result.code === 0 && result.cookies.length > 0) {
-        await this.finishLogin(result.cookies);
+        await this.finishLogin(result.cookies, result.accessToken);
         return;
       }
       if (result.code === 0 && result.dataStatus === 2) {
         // 风控：需手机号二次验证，v1 不做内嵌验证流程
-        promptAction.showToast({ message: '本次登录环境存在风险，需手机验证，请改用扫码登录' });
+        this.toast('本次登录环境存在风险，需手机验证，请改用扫码登录');
       } else if (result.code === -105) {
         // 触发极验滑块验证码，v1 不支持内嵌验证
-        promptAction.showToast({ message: '需要完成滑块验证，请改用扫码登录' });
+        this.toast('需要完成滑块验证，请改用扫码登录');
       } else {
-        promptAction.showToast({ message: result.message.length > 0 ? result.message : '登录失败，请检查账号密码' });
+        this.toast(result.message.length > 0 ? result.message : '登录失败，请检查账号密码');
       }
     } catch (e) {
-      if (!this.destroyed) promptAction.showToast({ message: '登录请求失败，请检查网络' });
+      if (!this.destroyed) this.toast('登录请求失败，请检查网络');
     } finally {
       this.pwdLoading = false;
     }
@@ -202,7 +209,7 @@ export struct LoginPage {
     }
     const tel: string = this.tel.trim();
     if (tel.length === 0) {
-      promptAction.showToast({ message: '请输入手机号' });
+      this.toast('请输入手机号');
       return;
     }
     this.smsSending = true;
@@ -211,16 +218,16 @@ export struct LoginPage {
       if (this.destroyed) return;
       if (result.code === 0 && result.captchaKey.length > 0) {
         this.captchaKey = result.captchaKey;
-        promptAction.showToast({ message: '验证码已发送，请查收' });
+        this.toast('验证码已发送，请查收');
         this.startSmsCountdown();
       } else if (result.needCaptcha) {
         // 触发极验滑块验证码，v1 不支持内嵌验证
-        promptAction.showToast({ message: '需要先完成滑块验证，请改用扫码登录' });
+        this.toast('需要先完成滑块验证，请改用扫码登录');
       } else {
-        promptAction.showToast({ message: result.message.length > 0 ? result.message : '发送失败，请稍后重试' });
+        this.toast(result.message.length > 0 ? result.message : '发送失败，请稍后重试');
       }
     } catch (e) {
-      if (!this.destroyed) promptAction.showToast({ message: '验证码发送失败，请检查网络' });
+      if (!this.destroyed) this.toast('验证码发送失败，请检查网络');
     } finally {
       this.smsSending = false;
     }
@@ -252,15 +259,15 @@ export struct LoginPage {
     const tel: string = this.tel.trim();
     const code: string = this.smsCode.trim();
     if (tel.length === 0) {
-      promptAction.showToast({ message: '请输入手机号' });
+      this.toast('请输入手机号');
       return;
     }
     if (this.captchaKey.length === 0) {
-      promptAction.showToast({ message: '请先点击获取验证码' });
+      this.toast('请先点击获取验证码');
       return;
     }
     if (code.length === 0) {
-      promptAction.showToast({ message: '请输入短信验证码' });
+      this.toast('请输入短信验证码');
       return;
     }
     this.smsLoading = true;
@@ -268,24 +275,24 @@ export struct LoginPage {
       const result: LoginResult = await BiliApi.loginBySms(tel, code, this.captchaKey);
       if (this.destroyed) return;
       if (result.code === 0 && result.cookies.length > 0) {
-        await this.finishLogin(result.cookies);
+        await this.finishLogin(result.cookies, result.accessToken);
         return;
       }
-      promptAction.showToast({ message: result.message.length > 0 ? result.message : '登录失败，请检查验证码' });
+      this.toast(result.message.length > 0 ? result.message : '登录失败，请检查验证码');
     } catch (e) {
-      if (!this.destroyed) promptAction.showToast({ message: '登录请求失败，请检查网络' });
+      if (!this.destroyed) this.toast('登录请求失败，请检查网络');
     } finally {
       this.smsLoading = false;
     }
   }
 
   // ===== 登录成功统一收尾：写回 cookie 并返回 =====
-  async finishLogin(cookies: Array<CookiePair>): Promise<void> {
+  async finishLogin(cookies: Array<CookiePair>, accessToken: string): Promise<void> {
     this.stopPoll();
     this.loggedIn = true;
-    await UserStore.applyLoginCookies(cookies);
+    await UserStore.applyLoginCookies(cookies, accessToken);
     if (this.destroyed) return;
-    promptAction.showToast({ message: '登录成功，欢迎回来' });
+    this.toast('登录成功，欢迎回来');
     this.schedulePop();
   }
 
@@ -298,6 +305,7 @@ export struct LoginPage {
       .padding({ left: 20, right: 20, top: 8, bottom: 8 })
       .borderRadius(18)
       .backgroundColor(this.tab === index ? this.accent : (this.isDark ? '#2F3136' : '#FFFFFF'))
+      .animation({ duration: 180, curve: Curve.EaseOut })
       .onClick(() => {
         this.tab = index;
         // 扫码轮询只在扫码 tab 运行；切回时若二维码仍有效则恢复

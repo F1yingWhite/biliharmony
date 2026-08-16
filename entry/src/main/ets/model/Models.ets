@@ -211,6 +211,81 @@ export class VideoPage {
   }
 }
 
+// ===== UGC 合集（view 接口的 ugc_season 字段，与 PiliPlus UgcSeason 对齐） =====
+export class UgcSeasonEpisode {
+  id: number = 0;
+  aid: number = 0;
+  cid: number = 0;
+  bvid: string = '';
+  title: string = '';
+  cover: string = '';
+  badge: string = '';
+  /** 由页面展开合集列表时填充，不在 API 返回中。 */
+  sectionTitle: string = '';
+
+  static from(o: Object): UgcSeasonEpisode {
+    const j: Record<string, Object> = asObject(o);
+    const e: UgcSeasonEpisode = new UgcSeasonEpisode();
+    e.id = asNumber(j['id'], 0);
+    e.aid = asNumber(j['aid'], 0);
+    e.cid = asNumber(j['cid'], 0);
+    e.bvid = str(j, 'bvid', '');
+    e.title = str(j, 'title', '');
+    e.cover = toHttps(str(j, 'cover', ''));
+    const arc: Record<string, Object> = asObject(j['arc']);
+    if (e.cover.length === 0) e.cover = toHttps(str(arc, 'pic', ''));
+    if (e.aid <= 0) e.aid = asNumber(arc['aid'], 0);
+    if (e.bvid.length === 0) e.bvid = str(arc, 'bvid', '');
+    e.badge = str(j, 'badge', '');
+    return e;
+  }
+}
+
+export class UgcSeasonSection {
+  seasonId: number = 0;
+  id: number = 0;
+  title: string = '';
+  type: number = 0;
+  episodes: Array<UgcSeasonEpisode> = [];
+
+  static from(o: Object): UgcSeasonSection {
+    const j: Record<string, Object> = asObject(o);
+    const s: UgcSeasonSection = new UgcSeasonSection();
+    s.seasonId = asNumber(j['season_id'], 0);
+    s.id = asNumber(j['id'], 0);
+    s.title = str(j, 'title', '');
+    s.type = asNumber(j['type'], 0);
+    const eps: Array<Object> = asArray(j['episodes']);
+    for (let i: number = 0; i < eps.length; i++) {
+      const ep: UgcSeasonEpisode = UgcSeasonEpisode.from(eps[i]);
+      if (ep.aid > 0 || ep.bvid.length > 0) s.episodes.push(ep);
+    }
+    return s;
+  }
+}
+
+export class UgcSeason {
+  id: number = 0;
+  title: string = '';
+  cover: string = '';
+  mid: number = 0;
+  sections: Array<UgcSeasonSection> = [];
+
+  static from(o: Object): UgcSeason {
+    const j: Record<string, Object> = asObject(o);
+    const u: UgcSeason = new UgcSeason();
+    u.id = asNumber(j['id'], 0);
+    u.title = str(j, 'title', '');
+    u.cover = toHttps(str(j, 'cover', ''));
+    u.mid = asNumber(j['mid'], 0);
+    const sections: Array<Object> = asArray(j['sections']);
+    for (let i: number = 0; i < sections.length; i++) {
+      u.sections.push(UgcSeasonSection.from(sections[i]));
+    }
+    return u;
+  }
+}
+
 export class VideoDetail {
   aid: number = 0;
   bvid: string = '';
@@ -236,6 +311,7 @@ export class VideoDetail {
   share: number = 0;
   reply: number = 0;
   pages: Array<VideoPage> = [];
+  ugcSeason: UgcSeason | null = null;
 
   static from(o: Object): VideoDetail {
     const j: Record<string, Object> = asObject(o);
@@ -270,6 +346,10 @@ export class VideoDetail {
     for (let i: number = 0; i < pagesArr.length; i++) {
       d.pages.push(VideoPage.from(pagesArr[i]));
     }
+    const ugcSeasonObj: Record<string, Object> = asObject(j['ugc_season']);
+    if (Object.keys(ugcSeasonObj).length > 0) {
+      d.ugcSeason = UgcSeason.from(ugcSeasonObj);
+    }
     // 少数稿件只在分 P 中返回画面尺寸，优先用当前 cid，否则取第一 P。
     if ((d.width <= 0 || d.height <= 0) && d.pages.length > 0) {
       let selected: VideoPage = d.pages[0];
@@ -285,6 +365,38 @@ export class VideoDetail {
 }
 
 // ===== 播放地址 =====
+/** CC 字幕轨（playurl 的 subtitle.subtitles 项） */
+export class SubtitleTrack {
+  lan: string = '';
+  lanDoc: string = '';
+  url: string = '';
+
+  static from(o: Object): SubtitleTrack {
+    const j: Record<string, Object> = asObject(o);
+    const t: SubtitleTrack = new SubtitleTrack();
+    t.lan = str(j, 'lan', '');
+    t.lanDoc = str(j, 'lan_doc', '');
+    t.url = toHttps(str(j, 'subtitle_url', ''));
+    return t;
+  }
+}
+
+/** CC 字幕单条内容（B 站 subtitle_url 返回 JSON 的 body 项） */
+export class SubtitleCue {
+  from: number = 0;
+  to: number = 0;
+  content: string = '';
+
+  static from(o: Object): SubtitleCue {
+    const j: Record<string, Object> = asObject(o);
+    const c: SubtitleCue = new SubtitleCue();
+    c.from = asNumber(j['from'], 0);
+    c.to = asNumber(j['to'], 0);
+    c.content = str(j, 'content', '');
+    return c;
+  }
+}
+
 export class PlayUrlInfo {
   url: string = '';
   urls: Array<string> = [];
@@ -293,7 +405,12 @@ export class PlayUrlInfo {
   isDash: boolean = false;
   quality: number = 0;
   format: string = '';
+  /** 上次观看到达的毫秒数（web 播放地址协议 last_play_time，0 表示无历史进度）。 */
+  lastPlayTime: number = 0;
+  /** 上次观看的分 P cid（0 表示无记录；用于多 P 视频续播定位）。 */
+  lastPlayCid: number = 0;
   qualities: Array<VideoQualityOption> = [];
+  subtitles: Array<SubtitleTrack> = [];
 
   static fromPlayUrl(o: Object, requestedQuality: number = 127): PlayUrlInfo {
     const j: Record<string, Object> = asObject(o);
@@ -304,6 +421,16 @@ export class PlayUrlInfo {
     const info: PlayUrlInfo = new PlayUrlInfo();
     info.quality = asNumber(j['quality'], 0);
     info.format = str(j, 'format', '');
+    info.lastPlayTime = asNumber(j['last_play_time'], 0);
+    info.lastPlayCid = asNumber(j['last_play_cid'], 0);
+    const subtitleWrap: Record<string, Object> = asObject(j['subtitle']);
+    const subtitleList: Array<Object> = asArray(subtitleWrap['subtitles']);
+    for (let i: number = 0; i < subtitleList.length; i++) {
+      const track: SubtitleTrack = SubtitleTrack.from(subtitleList[i]);
+      if (track.url.length > 0 && info.subtitles.findIndex((s: SubtitleTrack) => s.lan === track.lan) < 0) {
+        info.subtitles.push(track);
+      }
+    }
     const acceptQuality: Array<Object> = asArray(j['accept_quality']);
     const acceptDescription: Array<Object> = asArray(j['accept_description']);
     const supportFormats: Array<Object> = asArray(j['support_formats']);
@@ -517,6 +644,31 @@ export class HistoryPageData {
   hasMore: boolean = false;
 }
 
+// ===== 稍后再看 =====
+export class WatchLaterItem {
+  video: VideoItem = new VideoItem();
+  progress: number = 0;
+
+  static from(o: Object): WatchLaterItem {
+    const j: Record<string, Object> = asObject(o);
+    const owner: Record<string, Object> = asObject(j['owner']);
+    const stat: Record<string, Object> = asObject(j['stat']);
+    const item: WatchLaterItem = new WatchLaterItem();
+    item.video.aid = asNumber(j['aid'], 0);
+    item.video.bvid = str(j, 'bvid', '');
+    item.video.cid = asNumber(j['cid'], 0);
+    item.video.title = str(j, 'title', '');
+    item.video.cover = toHttps(str(j, 'pic', ''));
+    item.video.upName = str(owner, 'name', '');
+    item.video.upMid = asNumber(owner['mid'], 0);
+    item.video.duration = asNumber(j['duration'], 0);
+    item.video.pubdate = asNumber(j['pubdate'], 0);
+    item.video.play = asNumber(stat['view'], 0);
+    item.progress = asNumber(j['progress'], 0);
+    return item;
+  }
+}
+
 // ===== 收藏夹 =====
 export class FavoriteFolderItem {
   id: number = 0;
@@ -620,6 +772,18 @@ export class MessageSessionItem {
     item.unread = asNumber(j['unread_count'], 0) + asNumber(j['biz_msg_unread_count'], 0);
     return item;
   }
+
+  clone(): MessageSessionItem {
+    const next: MessageSessionItem = new MessageSessionItem();
+    next.talkerId = this.talkerId;
+    next.name = this.name;
+    next.avatar = this.avatar;
+    next.preview = this.preview;
+    next.timestamp = this.timestamp;
+    next.unread = this.unread;
+    next.sessionTs = this.sessionTs;
+    return next;
+  }
 }
 
 export class MessageSessionPageData {
@@ -636,6 +800,13 @@ export class PrivateMessageItem {
   timestamp: number = 0;
   seqno: number = 0;
   type: number = 1;
+  /** 富文本/视频推荐卡片字段；普通文本消息为空。 */
+  richTitle: string = '';
+  richCover: string = '';
+  richUrl: string = '';
+  richBvid: string = '';
+  richAid: number = 0;
+  richDesc: string = '';
 
   static from(o: Object): PrivateMessageItem {
     const j: Record<string, Object> = asObject(o);
@@ -643,7 +814,19 @@ export class PrivateMessageItem {
     item.senderId = asNumber(j['sender_uid'], 0);
     item.receiverId = asNumber(j['receiver_id'], 0);
     item.type = asNumber(j['msg_type'], 1);
-    item.text = messageContentText(str(j, 'content', ''), item.type);
+    const raw: string = str(j, 'content', '');
+    item.text = messageContentText(raw, item.type);
+    try {
+      const content: Record<string, Object> = asObject(JSON.parse(raw) as Object);
+      item.richTitle = str(content, 'title', str(content, 'content', ''));
+      item.richCover = toHttps(str(content, 'cover', str(content, 'pic', '')));
+      item.richUrl = str(content, 'url', '');
+      item.richBvid = str(content, 'bvid', '');
+      item.richAid = asNumber(content['aid'], 0);
+      item.richDesc = str(content, 'description', str(content, 'desc', ''));
+    } catch (e) {
+      // 普通文本消息没有 JSON 富文本字段。
+    }
     item.timestamp = asNumber(j['timestamp'], 0);
     item.seqno = asNumber(j['msg_seqno'], 0);
     return item;
@@ -656,6 +839,150 @@ export class PrivateMessagePageData {
   minSeqno: number = 0;
   /** 加载失败原因；空串表示请求成功，避免失败被 UI 误判成空会话。 */
   error: string = '';
+}
+
+// ===== 消息通知（回复我的 / @我 / 收到的赞 / 系统通知），字段对齐 PiliPlus lib/models_new/msg =====
+export class MsgNotifyItem {
+  id: number = 0;
+  /** 触发用户 mid；系统通知为 0 */
+  mid: number = 0;
+  nickname: string = '';
+  avatar: string = '';
+  /** 动作描述（如「 赞了我的视频」「 在评论中@了我」），紧跟昵称展示 */
+  action: string = '';
+  /** 通知正文：回复内容 / @ 内容 / 被赞内容标题 / 系统通知正文 */
+  text: string = '';
+  /** 来源内容摘要（被回复的评论 / 系统通知标题），列表中以引用样式展示 */
+  source: string = '';
+  timestamp: number = 0;
+  /** 系统通知接口直接返回格式化时间文本，优先于 timestamp 展示 */
+  timeText: string = '';
+  /** 右侧缩略图（@我 / 收到的赞） */
+  image: string = '';
+  nativeUri: string = '';
+  /** 从 nativeUri 解析出的视频目标；aid 与 bvid 均为空时点击不跳转 */
+  aid: number = 0;
+  bvid: string = '';
+  /** 系统通知分页游标：纳秒级 int64，超出 number 精度按字符串保存 */
+  sysCursor: string = '';
+
+  static fromReply(o: Object): MsgNotifyItem {
+    const j: Record<string, Object> = asObject(o);
+    const user: Record<string, Object> = asObject(j['user']);
+    const item: Record<string, Object> = asObject(j['item']);
+    const out: MsgNotifyItem = new MsgNotifyItem();
+    out.id = asNumber(j['id'], 0);
+    out.mid = asNumber(user['mid'], 0);
+    out.nickname = str(user, 'nickname', '');
+    out.avatar = toHttps(str(user, 'avatar', ''));
+    const counts: number = asNumber(j['counts'], 1);
+    const multi: string = asNumber(j['is_multi'], 0) === 1 ? ' 等人' : '';
+    out.action = multi + ' 对我的' + str(item, 'business', '内容') + '发布了' + String(counts) + '条评论';
+    out.text = str(item, 'source_content', '');
+    const target: string = str(item, 'target_reply_content', '');
+    const root: string = str(item, 'root_reply_content', '');
+    out.source = target.length > 0 ? target : root;
+    out.timestamp = asNumber(j['reply_time'], 0);
+    out.nativeUri = str(item, 'native_uri', '');
+    fillNotifyVideoTarget(out);
+    return out;
+  }
+
+  static fromAt(o: Object): MsgNotifyItem {
+    const j: Record<string, Object> = asObject(o);
+    const user: Record<string, Object> = asObject(j['user']);
+    const item: Record<string, Object> = asObject(j['item']);
+    const out: MsgNotifyItem = new MsgNotifyItem();
+    out.id = asNumber(j['id'], 0);
+    out.mid = asNumber(user['mid'], 0);
+    out.nickname = str(user, 'nickname', '');
+    out.avatar = toHttps(str(user, 'avatar', ''));
+    out.action = ' 在' + str(item, 'business', '内容') + '中@了我';
+    out.text = str(item, 'source_content', '');
+    out.image = toHttps(str(item, 'image', ''));
+    out.timestamp = asNumber(j['at_time'], 0);
+    out.nativeUri = str(item, 'native_uri', '');
+    fillNotifyVideoTarget(out);
+    return out;
+  }
+
+  static fromLike(o: Object): MsgNotifyItem {
+    const j: Record<string, Object> = asObject(o);
+    const item: Record<string, Object> = asObject(j['item']);
+    const users: Array<Object> = asArray(j['users']);
+    const out: MsgNotifyItem = new MsgNotifyItem();
+    out.id = asNumber(j['id'], 0);
+    if (users.length > 0) {
+      const first: Record<string, Object> = asObject(users[0]);
+      out.mid = asNumber(first['mid'], 0);
+      out.nickname = str(first, 'nickname', '');
+      out.avatar = toHttps(str(first, 'avatar', ''));
+    }
+    const counts: number = asNumber(j['counts'], users.length);
+    out.action = (counts > 1 ? ' 等' + String(counts) + '人' : '') + ' 赞了我的' + str(item, 'business', '内容');
+    out.text = str(item, 'title', '');
+    out.image = toHttps(str(item, 'image', ''));
+    out.timestamp = asNumber(j['like_time'], 0);
+    out.nativeUri = str(item, 'native_uri', '');
+    fillNotifyVideoTarget(out);
+    return out;
+  }
+
+  static fromSys(o: Object, cursor: string): MsgNotifyItem {
+    const j: Record<string, Object> = asObject(o);
+    const out: MsgNotifyItem = new MsgNotifyItem();
+    out.id = asNumber(j['id'], 0);
+    out.nickname = '系统通知';
+    out.source = str(j, 'title', '');
+    let content: string = str(j, 'content', '');
+    // content 可能是 JSON（{"web":"..."}），对齐 PiliPlus 取 web 字段。
+    if (content.startsWith('{')) {
+      try {
+        content = str(asObject(JSON.parse(content) as Object), 'web', content);
+      } catch (e) {
+      }
+    }
+    out.text = content;
+    out.timeText = str(j, 'time_at', '');
+    out.sysCursor = cursor;
+    return out;
+  }
+}
+
+/** 从通知的 bilibili:// 原生链接解析视频目标，用于点击跳详情；解析不出则不跳。 */
+function fillNotifyVideoTarget(item: MsgNotifyItem): void {
+  if (item.nativeUri.length === 0) return;
+  const bv: RegExpMatchArray | null = item.nativeUri.match(/BV[0-9A-Za-z]{10}/);
+  if (bv !== null) {
+    item.bvid = bv[0];
+    return;
+  }
+  const av: RegExpMatchArray | null = item.nativeUri.match(/(?:video|av)\/(\d{3,})/);
+  if (av !== null) item.aid = Number(av[1]);
+}
+
+export class MsgNotifyPageData {
+  items: Array<MsgNotifyItem> = [];
+  hasMore: boolean = false;
+  /** cursor.id / time 为 int64，按字符串透传避免 JSON.parse 丢失精度 */
+  cursorId: string = '';
+  cursorTime: string = '';
+  /** 系统通知下一页游标（纳秒字符串） */
+  sysCursor: string = '';
+  /** 加载失败原因；空串表示请求成功 */
+  error: string = '';
+}
+
+/** 消息中心各分类未读数（/x/msgfeed/unread）。 */
+export class MsgFeedUnread {
+  reply: number = 0;
+  at: number = 0;
+  like: number = 0;
+  sysMsg: number = 0;
+
+  total(): number {
+    return this.reply + this.at + this.like + this.sysMsg;
+  }
 }
 
 function messageContentText(raw: string, type: number): string {
@@ -685,6 +1012,10 @@ export class ReplyMention {
 
 export class ReplyItem {
   rpid: number = 0;
+  /** 评论所属对象 id（视频=aid，动态=comment_id） */
+  oid: number = 0;
+  /** 评论所属对象类型（视频=1，动态见 comment_type） */
+  type: number = 1;
   rootRpid: number = 0;
   parentRpid: number = 0;
   dialogRpid: number = 0;
@@ -711,6 +1042,44 @@ export class ReplyItem {
   mentions: Array<ReplyMention> = [];
   pictures: Array<string> = [];
   replies: Array<ReplyItem> = [];
+  /** 本地修订号：乐观更新克隆时 +1，LazyForEach 键包含它才能让同 rpid 的卡片真正重渲染。 */
+  rev: number = 0;
+
+  /** 浅克隆：乐观更新后换对象引用，驱动 @Prop 子组件重新同步（同引用不会触发更新）。 */
+  clone(): ReplyItem {
+    const r: ReplyItem = new ReplyItem();
+    r.rpid = this.rpid;
+    r.oid = this.oid;
+    r.type = this.type;
+    r.rootRpid = this.rootRpid;
+    r.parentRpid = this.parentRpid;
+    r.dialogRpid = this.dialogRpid;
+    r.mid = this.mid;
+    r.uname = this.uname;
+    r.avatar = this.avatar;
+    r.content = this.content;
+    r.like = this.like;
+    r.liked = this.liked;
+    r.disliked = this.disliked;
+    r.ctime = this.ctime;
+    r.count = this.count;
+    r.level = this.level;
+    r.location = this.location;
+    r.pendant = this.pendant;
+    r.nameplate = this.nameplate;
+    r.nameColor = this.nameColor;
+    r.cardBackground = this.cardBackground;
+    r.cardNumberPrefix = this.cardNumberPrefix;
+    r.cardNumber = this.cardNumber;
+    r.cardNumberColor = this.cardNumberColor;
+    r.emotes = this.emotes;
+    r.jumps = this.jumps;
+    r.mentions = this.mentions;
+    r.pictures = this.pictures;
+    r.replies = this.replies;
+    r.rev = this.rev;
+    return r;
+  }
 
   static from(o: Object): ReplyItem {
     const j: Record<string, Object> = asObject(o);
@@ -718,6 +1087,8 @@ export class ReplyItem {
     const content: Record<string, Object> = asObject(j['content']);
     const r: ReplyItem = new ReplyItem();
     r.rpid = asNumber(j['rpid'], 0);
+    r.oid = asNumber(j['oid'], 0);
+    r.type = asNumber(j['type'], 1);
     r.rootRpid = asNumber(j['root'], 0);
     r.parentRpid = asNumber(j['parent'], 0);
     r.dialogRpid = asNumber(j['dialog'], 0);
@@ -972,6 +1343,7 @@ export class DynamicItem {
   aid: number = 0;
   cid: number = 0;
   like: number = 0;
+  liked: boolean = false;
   comment: number = 0;
   forward: number = 0;
   pubtime: number = 0;
@@ -989,6 +1361,9 @@ export class DynamicItem {
   liveRoomId: number = 0;
   liveUid: number = 0;
   liveStatus: number = 0;
+  /** PGC（番剧/影视）卡片的季 ID 与单集 ID；UGC 合集卡没有这两个字段，保持 0。 */
+  seasonId: number = 0;
+  epId: number = 0;
   original: DynamicItem | null = null;
 
   static from(o: Object): DynamicItem {
@@ -1022,6 +1397,7 @@ export class DynamicItem {
     const commentStat: Record<string, Object> = asObject(stat['comment']);
     const forwardStat: Record<string, Object> = asObject(stat['forward']);
     d.like = asNumber(likeStat['count'], asNumber(stat['like'], 0));
+    d.liked = asBool(likeStat['status'], false);
     d.comment = asNumber(commentStat['count'], asNumber(stat['comment'], 0));
     d.forward = asNumber(forwardStat['count'], asNumber(stat['forward'], 0));
     // 图文动态内容
@@ -1054,6 +1430,9 @@ export class DynamicItem {
     d.bvid = str(card, 'bvid', '');
     d.aid = asNumber(card['aid'], asNumber(card['id'], 0));
     d.cid = asNumber(card['cid'], 0);
+    // PGC 卡片带 season_id/epid（参考 PiliPlus DynamicArchiveModel），用于跳番剧详情页。
+    d.seasonId = asNumber(card['season_id'], 0);
+    d.epId = asNumber(card['epid'], asNumber(card['ep_id'], 0));
     d.subtitle = str(card, 'sub_title', str(card, 'desc', str(card, 'label', str(card, 'desc_first', ''))));
     d.liveRoomId = asNumber(card['room_id'], asNumber(card['roomid'], 0));
     d.liveUid = asNumber(card['uid'], 0);
@@ -1137,6 +1516,147 @@ export class DynamicPageData {
   hasMore: boolean = false;
 }
 
+// ===== 番剧/影视（PGC）详情，移植自 PiliPlus models_new/pgc/pgc_info_model =====
+/** PGC 单集（pgc/view/web/season 的 episodes 项） */
+export class BangumiEpisode {
+  epId: number = 0;
+  aid: number = 0;
+  bvid: string = '';
+  cid: number = 0;
+  /** 集数标签（"1"、"PV1" 等） */
+  title: string = '';
+  /** 单集标题 */
+  longTitle: string = '';
+  cover: string = '';
+  /** PGC 接口时长单位为毫秒，入库统一转成秒 */
+  duration: number = 0;
+  /** 会员/付费等角标，空串表示免费 */
+  badge: string = '';
+
+  static from(o: Object): BangumiEpisode {
+    const j: Record<string, Object> = asObject(o);
+    const e: BangumiEpisode = new BangumiEpisode();
+    e.epId = asNumber(j['ep_id'], asNumber(j['id'], 0));
+    e.aid = asNumber(j['aid'], 0);
+    e.bvid = str(j, 'bvid', '');
+    e.cid = asNumber(j['cid'], 0);
+    e.title = str(j, 'title', '');
+    e.longTitle = str(j, 'long_title', '');
+    e.cover = toHttps(str(j, 'cover', ''));
+    e.duration = Math.floor(asNumber(j['duration'], 0) / 1000);
+    e.badge = str(j, 'badge', '');
+    return e;
+  }
+}
+
+/** PGC 季详情；注意 pgc/view/web/season 的数据主体在 result 而非 data。 */
+export class BangumiSeason {
+  seasonId: number = 0;
+  title: string = '';
+  /** 副标题（"更新至第x话" 等） */
+  subtitle: string = '';
+  /** 横版封面，用于顶部氛围背景 */
+  cover: string = '';
+  /** 竖版海报，缺 square_cover 时回退横版封面 */
+  poster: string = '';
+  /** 简介 */
+  evaluate: string = '';
+  actors: string = '';
+  areas: string = '';
+  styles: string = '';
+  pubTimeShow: string = '';
+  /** 最新一集更新状态（new_ep.desc） */
+  newEpDesc: string = '';
+  ratingScore: number = 0;
+  ratingCount: number = 0;
+  views: number = 0;
+  /** 追番数 */
+  favorites: number = 0;
+  danmakus: number = 0;
+  reply: number = 0;
+  total: number = 0;
+  /** 登录用户追番状态（user_status.follow） */
+  followed: boolean = false;
+  episodes: Array<BangumiEpisode> = [];
+  /** 相关番剧推荐（season 接口返回的 related_seasons） */
+  relatedSeasons: Array<BangumiSeason> = [];
+
+  static from(o: Object): BangumiSeason {
+    const j: Record<string, Object> = asObject(o);
+    const s: BangumiSeason = new BangumiSeason();
+    s.seasonId = asNumber(j['season_id'], 0);
+    s.title = str(j, 'title', '');
+    s.subtitle = str(j, 'subtitle', '');
+    s.cover = toHttps(str(j, 'cover', ''));
+    s.poster = toHttps(str(j, 'square_cover', ''));
+    if (s.poster.length === 0) {
+      s.poster = s.cover;
+    }
+    s.evaluate = str(j, 'evaluate', '');
+    s.actors = str(j, 'actors', '');
+    const areas: Array<Object> = asArray(j['areas']);
+    const areaNames: Array<string> = [];
+    for (let i: number = 0; i < areas.length; i++) {
+      const name: string = str(areas[i], 'name', '');
+      if (name.length > 0) {
+        areaNames.push(name);
+      }
+    }
+    s.areas = areaNames.join(' · ');
+    // styles 新老接口分别是字符串数组与 {id,name} 对象数组，两种都要兼容。
+    const stylesArr: Array<Object> = asArray(j['styles']);
+    const styleNames: Array<string> = [];
+    for (let i: number = 0; i < stylesArr.length; i++) {
+      const item: Object = stylesArr[i];
+      const name: string = typeof item === 'string' ? item as string : str(item, 'name', '');
+      if (name.length > 0) {
+        styleNames.push(name);
+      }
+    }
+    s.styles = styleNames.join(' · ');
+    const publish: Record<string, Object> = asObject(j['publish']);
+    s.pubTimeShow = str(publish, 'pub_time_show', '');
+    const newEp: Record<string, Object> = asObject(j['new_ep']);
+    s.newEpDesc = str(newEp, 'desc', '');
+    const rating: Record<string, Object> = asObject(j['rating']);
+    s.ratingScore = asNumber(rating['score'], 0);
+    s.ratingCount = asNumber(rating['count'], 0);
+    const stat: Record<string, Object> = asObject(j['stat']);
+    s.views = asNumber(stat['views'], 0);
+    s.favorites = asNumber(stat['favorites'], 0);
+    s.danmakus = asNumber(stat['danmakus'], 0);
+    s.reply = asNumber(stat['reply'], 0);
+    s.total = asNumber(j['total'], 0);
+    const userStatus: Record<string, Object> = asObject(j['user_status']);
+    s.followed = asNumber(userStatus['follow'], 0) === 1;
+    let episodes: Array<Object> = asArray(j['episodes']);
+    if (episodes.length === 0) {
+      // 部分接口把选集放在 ep_list 或 episodes 的兼容字段里。
+      episodes = asArray(j['ep_list']);
+    }
+    for (let i: number = 0; i < episodes.length; i++) {
+      const ep: BangumiEpisode = BangumiEpisode.from(episodes[i]);
+      if (ep.epId > 0) {
+        s.episodes.push(ep);
+      }
+    }
+    const related: Array<Object> = asArray(j['related_seasons']);
+    for (let i: number = 0; i < related.length; i++) {
+      const raw: Record<string, Object> = asObject(related[i]);
+      const item: BangumiSeason = new BangumiSeason();
+      item.seasonId = asNumber(raw['season_id'], 0);
+      item.title = str(raw, 'title', '');
+      item.cover = toHttps(str(raw, 'cover', ''));
+      item.subtitle = str(asObject(raw['new_ep']), 'desc', '');
+      item.total = asNumber(raw['total'], 0);
+      if (item.seasonId > 0) {
+        s.relatedSeasons.push(item);
+      }
+    }
+    return s;
+  }
+}
+
 // ===== 热搜 =====
 export class HotSearchItem {
   keyword: string = '';
@@ -1191,6 +1711,12 @@ export const USER_ORDER_OPTIONS: Array<SearchOption> = [
   { label: '默认', value: '' },
   { label: '粉丝数', value: 'fans' },
   { label: '等级', value: 'level' },
+];
+
+// 直播间排序（order 参数，参考 PiliPlus LiveOrderType）
+export const LIVE_ORDER_OPTIONS: Array<SearchOption> = [
+  { label: '人气', value: 'online' },
+  { label: '最新开播', value: 'live_time' },
 ];
 
 // 视频时长筛选（duration 参数）
@@ -1330,4 +1856,124 @@ export class UserSearchItem {
     u.liveRoomId = asNumber(j['room_id'], asNumber(j['roomid'], 0));
     return u;
   }
+}
+
+// ===== 番剧/影视搜索（media_bangumi / media_ft，参考 PiliPlus SearchPgcItemModel） =====
+export class PgcSearchItem {
+  seasonId: number = 0;
+  title: string = '';
+  cover: string = '';
+  areas: string = '';
+  styles: string = '';
+  desc: string = '';
+  score: number = 0;
+  /** 连载状态，如「已完结」「更新至第12话」 */
+  indexShow: string = '';
+  /** 类型角标，如「番剧」「电影」 */
+  seasonTypeName: string = '';
+
+  static from(o: Object): PgcSearchItem {
+    const j: Record<string, Object> = asObject(o);
+    const item: PgcSearchItem = new PgcSearchItem();
+    item.seasonId = asNumber(j['season_id'], 0);
+    // 搜索标题可能带高亮 <em> 标签，去除
+    item.title = str(j, 'title', '').replace(/<[^>]*>/g, '');
+    item.cover = toHttps(str(j, 'cover', ''));
+    item.areas = str(j, 'areas', '');
+    item.styles = str(j, 'styles', '');
+    item.desc = str(j, 'desc', '').replace(/<[^>]*>/g, '');
+    item.indexShow = str(j, 'index_show', '');
+    item.seasonTypeName = str(j, 'season_type_name', '');
+    const mediaScore: Record<string, Object> = asObject(j['media_score']);
+    item.score = asNumber(mediaScore['score'], 0);
+    return item;
+  }
+
+  /** 评分文案，无评分时为空串 */
+  scoreText(): string {
+    return this.score > 0 ? this.score.toFixed(1) + '分' : '';
+  }
+}
+
+export class PgcSearchResult {
+  items: Array<PgcSearchItem> = [];
+  numResults: number = 0;
+}
+
+// ===== 直播搜索（live_room）结果包装，条目解析见 LiveModels.LiveRoomItem.fromSearch =====
+// ===== 专栏搜索（article，参考 PiliPlus SearchArticleItemModel） =====
+export class ArticleSearchItem {
+  id: number = 0;
+  title: string = '';
+  desc: string = '';
+  cover: string = '';
+  mid: number = 0;
+  upName: string = '';
+  view: number = 0;
+  reply: number = 0;
+  like: number = 0;
+  categoryName: string = '';
+
+  static from(o: Object): ArticleSearchItem {
+    const j: Record<string, Object> = asObject(o);
+    const item: ArticleSearchItem = new ArticleSearchItem();
+    item.id = asNumber(j['id'], 0);
+    item.title = str(j, 'title', '').replace(/<[^>]*>/g, '');
+    item.desc = str(j, 'desc', '').replace(/<[^>]*>/g, '');
+    const imageUrls: Array<Object> = asArray(j['image_urls']);
+    if (imageUrls.length > 0) {
+      item.cover = toHttps(asString(imageUrls[0], ''));
+    }
+    item.mid = asNumber(j['mid'], 0);
+    // 文章搜索多数时候不返回昵称，保留 author/uname 兜底
+    item.upName = str(j, 'author', str(j, 'uname', '')).replace(/<[^>]*>/g, '');
+    item.view = asNumber(j['view'], 0);
+    item.reply = asNumber(j['reply'], 0);
+    item.like = asNumber(j['like'], 0);
+    item.categoryName = str(j, 'category_name', '');
+    return item;
+  }
+}
+
+export class ArticleSearchResult {
+  articles: Array<ArticleSearchItem> = [];
+  numResults: number = 0;
+}
+
+// ===== 综合搜索（all/v2）聚合结果：按 result_type 分区，仅第一页包含番剧/用户分区 =====
+export class SearchAllSection {
+  /** video / bili_user / media_bangumi / media_ft */
+  type: string = '';
+  videos: Array<VideoItem> = [];
+  users: Array<UserSearchItem> = [];
+  pgc: Array<PgcSearchItem> = [];
+}
+
+export class SearchAllResult {
+  sections: Array<SearchAllSection> = [];
+  /** 各分类结果总数徽标（data.pageinfo），key 为 result_type */
+  totals: Map<string, number> = new Map<string, number>();
+}
+
+// ===== 排行榜 / 必看榜单 =====
+/** popular/series/list 项：每周必看期号 */
+export class PopularSeriesItem {
+  number: number = 0;
+  name: string = '';
+
+  static from(o: Object): PopularSeriesItem {
+    const j: Record<string, Object> = asObject(o);
+    const item: PopularSeriesItem = new PopularSeriesItem();
+    item.number = asNumber(j['number'], 0);
+    item.name = str(j, 'name', '');
+    return item;
+  }
+}
+
+/** popular/series/one 结果：期次信息 + 视频列表 */
+export class PopularSeriesData {
+  label: string = '';
+  name: string = '';
+  reminder: string = '';
+  videos: Array<VideoItem> = [];
 }

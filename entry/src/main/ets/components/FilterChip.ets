@@ -21,6 +21,7 @@ export struct FilterChip {
       .backgroundColor(this.selected ? this.accent : (this.isDark ? '#2E3136' : '#ECEEF0'))
       .borderRadius(14)
       .margin({ right: 8, bottom: this.bottomMargin })
+      .animation({ duration: 180, curve: Curve.EaseOut })
       .onClick(() => {
         this.onTap();
       })

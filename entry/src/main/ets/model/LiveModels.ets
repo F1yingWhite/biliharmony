@@ -28,6 +28,29 @@ export class LiveRoomItem {
     if (item.watched.length === 0 && item.online > 0) item.watched = formatCount(item.online) + '人气';
     return item;
   }
+
+  /** 搜索结果（wbi/search/type live_room）的直播间字段与推荐流不同，单独解析。 */
+  static fromSearch(o: Object): LiveRoomItem {
+    const j: Record<string, Object> = asObject(o);
+    const item: LiveRoomItem = new LiveRoomItem();
+    item.roomId = asNumber(j['roomid'], asNumber(j['room_id'], 0));
+    item.uid = asNumber(j['uid'], 0);
+    // 搜索标题可能带高亮 <em> 标签，去除
+    item.title = str(j, 'title', '').replace(/<[^>]*>/g, '');
+    item.uname = str(j, 'uname', '');
+    item.face = toHttps(str(j, 'uface', str(j, 'face', '')));
+    item.cover = toHttps(str(j, 'cover', str(j, 'user_cover', '')));
+    item.areaName = str(j, 'cate_name', str(j, 'area_name', ''));
+    item.online = asNumber(j['online'], 0);
+    if (item.online > 0) item.watched = formatCount(item.online) + '人气';
+    return item;
+  }
+}
+
+/** 直播搜索（search_type=live_room）分页结果。 */
+export class LiveSearchResult {
+  rooms: Array<LiveRoomItem> = [];
+  numResults: number = 0;
 }
 
 export class LiveQualityOption {

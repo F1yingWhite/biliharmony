@@ -6,14 +6,18 @@ import { Immersive } from '../common/Immersive';
 import { PageHeader } from '../components/PageHeader';
 import { DynCard } from '../views/DynamicView';
 import { UserStore } from '../common/UserStore';
-import { promptAction, UIContext } from '@kit.ArkUI';
+import { UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
 import { ReplyCard } from '../components/ReplyCard';
 import { ReplyComposer } from '../components/ReplyComposer';
 import { ReplyThreadPanel } from '../components/ReplyThreadPanel';
 import { ReplyShareCard, makeReplyQr, sharePixelMapAsImage } from '../components/ReplyShareCard';
+import { ReplySortChips } from '../components/ReplySortChips';
 import { LayoutTokens } from '../common/LayoutTokens';
+import {
+  ReplyCloneResult, ReplyReactionHooks, mutateReplyInArray, mutatedReplyClone, runReplyDislike, runReplyLike
+} from '../common/ReplyMutation';
 
 @Component
 export struct DynamicDetailPage {
@@ -25,6 +29,7 @@ export struct DynamicDetailPage {
   @State repliesLoading: boolean = false;
   @State repliesFailed: boolean = false;
   @State repliesHasMore: boolean = true;
+  @State replySortMode: number = 3; // 3 最热，2 最新
   @State replyVersion: number = 0;
   @State replyDraft: string = '';
   @State replySending: boolean = false;
@@ -48,6 +53,14 @@ export struct DynamicDetailPage {
   private shareCardItem: ReplyItem = new ReplyItem();
   private shareCardQr: image.PixelMap | null = null;
   private shareCardBusy: boolean = false;
+
+  private toast(message: string): void {
+    try {
+      this.toast(message);
+    } catch (e) {
+      // 页面销毁或窗口异常时忽略提示。
+    }
+  }
 
   aboutToAppear(): void {
     this.destroyed = false;
@@ -89,7 +102,7 @@ export struct DynamicDetailPage {
     if (reset) this.repliesFailed = false;
     try {
       const data: ReplyData = await BiliApi.getReplies(this.item.commentId, this.item.commentType,
-        reset ? '' : this.replyCursor, 3);
+        reset ? '' : this.replyCursor, this.replySortMode);
       if (this.destroyed) return;
       this.replies = reset ? data.replies : this.replies.concat(data.replies);
       this.replyCursor = data.cursor;
@@ -107,82 +120,78 @@ export struct DynamicDetailPage {
     }
   }
 
-  private async likeReply(item: ReplyItem): Promise<void> {
-    if (!UserStore.isLogin) {
-      promptAction.showToast({ message: '请先登录后再点赞' });
-      AppNavStack.pushPathByName(NAV_LOGIN, null);
-      return;
+  /** 切换评论排序：清空列表与游标，重新拉第一页。 */
+  private changeReplySort(mode: number): void {
+    if (this.replySortMode === mode || this.repliesLoading) return;
+    this.replySortMode = mode;
+    this.replyCursor = '';
+    this.repliesHasMore = true;
+    this.replies = [];
+    this.loadReplies(true).catch(() => {
+    });
+  }
+
+  /**
+   * 评论项状态修改统一入口：ReplyCard 的 @Prop item 是深拷贝快照，改它不生效。
+   * 必须在数据源"真身"上修改，克隆换引用（rev+1 进入列表键）驱动重渲染。
+   * 核心 mutate/克隆逻辑在 ReplyMutation 模块，这里只负责把克隆写回本页 @State。
+   */
+  private mutateReplyItem(rpid: number, mutate: (target: ReplyItem) => void): ReplyItem | null {
+    let found: ReplyItem | null = null;
+    const main: ReplyCloneResult | null = mutateReplyInArray(this.replies, rpid, mutate);
+    if (main !== null) {
+      found = main.clone;
+      this.replies[main.index] = main.clone;
+      this.replies = this.replies.slice();
     }
-    if (this.replyLikeBusy.has(item.rpid)) return;
-    this.replyLikeBusy.add(item.rpid);
-    const next: boolean = !item.liked;
-    item.liked = next;
-    item.like = Math.max(0, item.like + (next ? 1 : -1));
+    const thread: ReplyCloneResult | null = mutateReplyInArray(this.threadReplies, rpid, mutate);
+    if (thread !== null) {
+      if (found === null) found = thread.clone;
+      this.threadReplies[thread.index] = thread.clone;
+      this.threadReplies = this.threadReplies.slice();
+    }
+    if (this.threadRoot.rpid === rpid) {
+      const next: ReplyItem = mutatedReplyClone(this.threadRoot, mutate);
+      if (found === null) found = next;
+      this.threadRoot = next;
+    }
     this.replyVersion++;
-    try {
-      const result: ActionResult = await BiliApi.likeReply(this.item.commentId, this.item.commentType, item.rpid, next);
-      if (!this.destroyed && !result.ok) {
-        item.liked = !next;
-        item.like = Math.max(0, item.like + (next ? -1 : 1));
-        this.replyVersion++;
-        promptAction.showToast({ message: result.message });
-      }
-    } catch (e) {
-      if (!this.destroyed) {
-        item.liked = !next;
-        item.like = Math.max(0, item.like + (next ? -1 : 1));
-        this.replyVersion++;
-        promptAction.showToast({ message: '评论点赞失败，请稍后重试' });
-      }
-    } finally {
-      this.replyLikeBusy.delete(item.rpid);
-    }
+    return found;
+  }
+
+  private ensureReplyLogin(isLike: boolean): boolean {
+    if (UserStore.isLogin) return true;
+    this.toast(isLike ? '请先登录后再点赞' : '请先登录后再操作');
+    AppNavStack.pushPathByName(NAV_LOGIN, null);
+    return false;
+  }
+
+  private replyReactionHooks(isLike: boolean): ReplyReactionHooks {
+    return {
+      ensureLogin: () => this.ensureReplyLogin(isLike),
+      toast: (message: string) => this.toast(message),
+      isDestroyed: () => this.destroyed,
+      resolveOid: (item: ReplyItem) => item.oid > 0 ? item.oid : this.item.commentId,
+      resolveType: (item: ReplyItem) => item.type > 0 ? item.type : this.item.commentType,
+      clearDislikeOnLike: false,
+    };
+  }
+
+  private async likeReply(item: ReplyItem): Promise<void> {
+    await runReplyLike(item, this.replyLikeBusy,
+      (rpid: number, mutate: (target: ReplyItem) => void) => this.mutateReplyItem(rpid, mutate),
+      this.replyReactionHooks(true));
   }
 
   private async dislikeReply(item: ReplyItem): Promise<void> {
-    if (!UserStore.isLogin) {
-      promptAction.showToast({ message: '请先登录后再操作' });
-      AppNavStack.pushPathByName(NAV_LOGIN, null);
-      return;
-    }
-    if (this.replyLikeBusy.has(item.rpid)) return;
-    this.replyLikeBusy.add(item.rpid);
-    const next: boolean = !item.disliked;
-    const wasLiked: boolean = item.liked;
-    // 踩赞互斥：踩上时本地同步取消赞，失败整体回滚。
-    item.disliked = next;
-    if (next && item.liked) {
-      item.liked = false;
-      item.like = Math.max(0, item.like - 1);
-    }
-    this.replyVersion++;
-    const rollback = () => {
-      item.disliked = !next;
-      if (next && wasLiked) {
-        item.liked = true;
-        item.like++;
-      }
-      this.replyVersion++;
-    };
-    try {
-      const result: ActionResult = await BiliApi.hateReply(this.item.commentId, this.item.commentType, item.rpid, next);
-      if (!this.destroyed && !result.ok) {
-        rollback();
-        promptAction.showToast({ message: result.message });
-      }
-    } catch (e) {
-      if (!this.destroyed) {
-        rollback();
-        promptAction.showToast({ message: '点踩失败，请稍后重试' });
-      }
-    } finally {
-      this.replyLikeBusy.delete(item.rpid);
-    }
+    await runReplyDislike(item, this.replyLikeBusy,
+      (rpid: number, mutate: (target: ReplyItem) => void) => this.mutateReplyItem(rpid, mutate),
+      this.replyReactionHooks(false));
   }
 
   private openReplyThread(root: ReplyItem): void {
     this.threadRoot = root;
-    this.threadReplies = [];
+    this.threadReplies = root.replies.slice();
     this.threadPage = 0;
     this.threadHasMore = true;
     this.threadTargetRpid = root.rpid;
@@ -201,11 +210,14 @@ export struct DynamicDetailPage {
       const result: ReplyPageData = await BiliApi.getReplyReplies(this.item.commentId, this.item.commentType,
         this.threadRoot.rpid, page);
       if (this.destroyed || !this.threadOpen) return;
-      this.threadReplies = reset ? result.replies : this.threadReplies.concat(result.replies);
+      const next: Array<ReplyItem> = reset ?
+        (result.replies.length > 0 ? result.replies : this.threadReplies) :
+        this.threadReplies.concat(result.replies);
+      this.threadReplies = next;
       this.threadPage = page;
       this.threadHasMore = result.hasMore;
     } catch (e) {
-      if (!this.destroyed) promptAction.showToast({ message: '回复加载失败，请稍后重试' });
+      if (!this.destroyed) this.toast('回复加载失败，请稍后重试');
     } finally {
       if (!this.destroyed) this.threadLoading = false;
     }
@@ -221,7 +233,7 @@ export struct DynamicDetailPage {
         this.threadRoot.rpid, parent);
       if (this.destroyed) return;
       if (!result.ok) {
-        promptAction.showToast({ message: result.message });
+        this.toast(result.message);
         return;
       }
       this.threadDraft = '';
@@ -242,9 +254,9 @@ export struct DynamicDetailPage {
   private shareReplyAsImage(item: ReplyItem): void {
     if (this.shareCardBusy) return;
     this.shareCardBusy = true;
-    promptAction.showToast({ message: '正在生成分享图片…' });
+    this.toast('正在生成分享图片…');
     const link: string = 'https://t.bilibili.com/' + this.item.dynId + '#reply' + String(item.rpid);
-    const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+    const context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
     const uiContext: UIContext = this.getUIContext();
     (async () => {
       this.shareCardItem = item;
@@ -254,7 +266,7 @@ export struct DynamicDetailPage {
         .createFromBuilder((): void => { this.ReplyShareCardBuilder(); }, 400, true);
       await sharePixelMapAsImage(context, pixelMap, 'reply_share_' + String(item.rpid));
     })().catch(() => {
-      promptAction.showToast({ message: '分享图片生成失败，请稍后重试' });
+      this.toast('分享图片生成失败，请稍后重试');
     }).finally(() => {
       this.shareCardBusy = false;
     });
@@ -308,7 +320,7 @@ export struct DynamicDetailPage {
     const message: string = this.replyDraft.trim();
     if (message.length === 0 || this.replySending) return;
     if (!UserStore.isLogin) {
-      promptAction.showToast({ message: '请先登录后再评论' });
+      this.toast('请先登录后再评论');
       AppNavStack.pushPathByName(NAV_LOGIN, null);
       return;
     }
@@ -317,16 +329,16 @@ export struct DynamicDetailPage {
       const result: ActionResult = await BiliApi.addReply(this.item.commentId, this.item.commentType, message);
       if (this.destroyed) return;
       if (!result.ok) {
-        promptAction.showToast({ message: result.message });
+        this.toast(result.message);
         return;
       }
       this.replyDraft = '';
-      promptAction.showToast({ message: '评论成功' });
+      this.toast('评论成功');
       this.replyCursor = '';
       this.repliesHasMore = true;
       await this.loadReplies(true);
     } catch (e) {
-      if (!this.destroyed) promptAction.showToast({ message: '网络异常，发送失败' });
+      if (!this.destroyed) this.toast('网络异常，发送失败');
     } finally {
       if (!this.destroyed) this.replySending = false;
     }
@@ -353,13 +365,22 @@ export struct DynamicDetailPage {
               .onClick(() => this.loadDetail().catch(() => {
               }))
           }
-          Text('相关回复共 ' + this.item.comment + ' 条')
-            .fontSize(13)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.isDark ? '#D8D8DC' : '#61666D')
-            .width('100%')
-            .padding({ top: 10, bottom: 10 })
-            .border({ width: { top: 0.5 }, color: this.isDark ? '#36383D' : '#E7E9EC' })
+          Row() {
+            Text('相关回复共 ' + this.item.comment + ' 条')
+              .fontSize(13)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.isDark ? '#D8D8DC' : '#61666D')
+            Blank()
+            ReplySortChips({
+              mode: this.replySortMode,
+              onChange: (mode: number) => {
+                this.changeReplySort(mode);
+              },
+            })
+          }
+          .width('100%')
+          .padding({ top: 10, bottom: 10 })
+          .border({ width: { top: 0.5 }, color: this.isDark ? '#36383D' : '#E7E9EC' })
           if (this.repliesLoading && this.replies.length === 0) {
             LoadingProgress().width(24).height(24).color('#FB7299').margin({ top: 18, bottom: 18 })
           } else if (this.repliesFailed) {
@@ -384,7 +405,7 @@ export struct DynamicDetailPage {
                 onShare: (item: ReplyItem) => this.shareReplyAsImage(item),
                 onOpenThread: (item: ReplyItem) => this.openReplyThread(item),
               })
-            }, (reply: ReplyItem) => String(reply.rpid))
+            }, (reply: ReplyItem) => String(reply.rpid) + '_' + String(reply.rev))
             if (this.repliesHasMore) {
               Text(this.repliesLoading ? '加载中…' : '加载更多评论')
                 .width('100%').height(46).textAlign(TextAlign.Center).fontSize(12).fontColor('#9499A0')

@@ -3,7 +3,7 @@
  * + 圆角分组功能列表；功能逻辑（深色模式/沉浸光感/主题色/退出登录/关于）不变
  */
 import { promptAction } from '@kit.ArkUI';
-import { AppNavStack, NAV_FAVORITES, NAV_HISTORY, NAV_LOGIN, NAV_RELATION_LIST, NAV_USER_SPACE,
+import { AppNavStack, NAV_FAVORITES, NAV_HISTORY, NAV_LOGIN, NAV_RELATION_LIST, NAV_USER_SPACE, NAV_WATCH_LATER,
   RelationListParam, UserSpaceParam } from '../common/AppRouter';
 import { UserInfo, UserStat } from '../model/Models';
 import { BiliApi } from '../api/BiliApi';
@@ -249,6 +249,13 @@ export struct MineView {
 
         this.GroupDivider()
 
+        this.MenuRow($r('app.media.ic_watch_later'), '稍后再看', () => {
+          if (UserStore.isLogin) AppNavStack.pushPathByName(NAV_WATCH_LATER, null);
+          else AppNavStack.pushPathByName(NAV_LOGIN, null);
+        })
+
+        this.GroupDivider()
+
         this.MenuRow($r('app.media.ic_favorite'), '我的收藏', () => {
           if (UserStore.isLogin) AppNavStack.pushPathByName(NAV_FAVORITES, null);
           else AppNavStack.pushPathByName(NAV_LOGIN, null);
@@ -375,7 +382,7 @@ export struct MineView {
             }).finally(() => {
               this.user = new UserInfo();
               this.stat = new UserStat();
-              promptAction.showToast({ message: '已退出登录' });
+              this.getUIContext().getPromptAction().showToast({ message: '已退出登录' });
             });
           })
         }

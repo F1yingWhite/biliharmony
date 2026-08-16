@@ -38,10 +38,23 @@ export interface ImageViewerParam {
   transitionId?: string;
 }
 
+/** 番剧/影视（PGC）详情页跳转参数；seasonId 与 epId 至少一个有效 */
+export interface BangumiDetailParam {
+  seasonId: number;
+  epId: number;
+  title: string;
+}
+
 /** 动态详情页参数。item 使用内存对象首屏直出，详情接口随后补全。 */
 export interface DynamicDetailParam {
   item: Object;
   focusComments?: boolean;
+}
+
+/** 专栏阅读页参数。 */
+export interface ArticlePageParam {
+  id: number;
+  title: string;
 }
 
 /** NavDestination 路由名 */
@@ -52,10 +65,14 @@ export const NAV_USER_SPACE: string = 'UserSpace';
 export const NAV_MESSAGES: string = 'Messages';
 export const NAV_HISTORY: string = 'History';
 export const NAV_FAVORITES: string = 'Favorites';
+export const NAV_WATCH_LATER: string = 'WatchLater';
 export const NAV_LIVE_ROOM: string = 'LiveRoom';
 export const NAV_IMAGE_VIEWER: string = 'ImageViewer';
 export const NAV_DYNAMIC_DETAIL: string = 'DynamicDetail';
 export const NAV_RELATION_LIST: string = 'RelationList';
+export const NAV_BANGUMI_DETAIL: string = 'BangumiDetail';
+export const NAV_RANK: string = 'Rank';
+export const NAV_ARTICLE: string = 'Article';
 
 /** 全局唯一导航栈，由 Index 页的 Navigation 挂载 */
 export const AppNavStack: NavPathStack = new NavPathStack();

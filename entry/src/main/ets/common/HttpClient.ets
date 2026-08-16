@@ -43,6 +43,8 @@ export class HttpResponse {
 
 export class HttpClient {
   private static cookieJar: Record<string, string> = {};
+  // App 端互动接口（如视频点踩）使用 access_key，不能混入 Web Cookie 头。
+  private static appAccessToken: string = '';
   private static initialized: boolean = false;
   private static buvidReady: boolean = false;
   private static buvidFetching: boolean = false;
@@ -55,6 +57,14 @@ export class HttpClient {
   static getCookie(name: string): string {
     HttpClient.ensureInit();
     return HttpClient.cookieJar[name] ?? '';
+  }
+
+  static getAppAccessToken(): string {
+    return HttpClient.appAccessToken;
+  }
+
+  static setAppAccessToken(value: string): void {
+    HttpClient.appAccessToken = value;
   }
 
   private static ensureInit(): void {
@@ -290,6 +300,17 @@ export class HttpClient {
     const resp: http.HttpResponse | null =
       await HttpClient.execute(url, http.RequestMethod.GET, http.HttpDataType.ARRAY_BUFFER, extraHeaders);
     return resp === null ? new ArrayBuffer(0) : resp.result as ArrayBuffer;
+  }
+
+  /** 下载二进制数据并校验 HTTP 状态（弹幕分段等需要区分失败以回退的场景）；失败返回 null */
+  static async getBinary(url: string, extraHeaders?: Record<string, string>): Promise<ArrayBuffer | null> {
+    HttpClient.ensureInit();
+    const resp: http.HttpResponse | null =
+      await HttpClient.execute(url, http.RequestMethod.GET, http.HttpDataType.ARRAY_BUFFER, extraHeaders);
+    if (resp === null || resp.responseCode < 200 || resp.responseCode >= 300) {
+      return null;
+    }
+    return resp.result as ArrayBuffer;
   }
 
   /** 构造 query string */

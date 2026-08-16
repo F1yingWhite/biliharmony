@@ -13,6 +13,7 @@ import { BasicDataSource } from '../common/BasicDataSource';
 import { LiveRoomItem } from '../model/LiveModels';
 import { LiveRoomCard } from '../components/LiveRoomCard';
 import { LayoutTokens } from '../common/LayoutTokens';
+import { AppNavStack, NAV_RANK } from '../common/AppRouter';
 
 /** 悬浮频道切换条：单独订阅 headerFade，滚动逐帧淡出时不再带动整个 HomeView 重建。 */
 @Component
@@ -23,9 +24,9 @@ struct FloatingSubTabs {
   build() {
     Row() {
       this.content()
-      Blank()
     }
     .width('100%')
+    .justifyContent(FlexAlign.Center)
     .padding({ left: 10, right: 10 })
     .margin({ top: Immersive.statusBarHeight() + 50 })
     .opacity(1 - this.fade)
@@ -75,6 +76,8 @@ export struct HomeView {
   private readonly refreshTriggerOffset: number = 56;
 
   async aboutToAppear(): Promise<void> {
+    // 切到首页 Tab 时强制回到顶部状态，避免残留 fade 导致搜索栏和搜索球同时出现。
+    AppTheme.resetHeaderFade();
     // 首屏必须等登录 Cookie 从 Preferences 恢复，否则会先缓存一页游客公共推荐。
     try {
       await UserStore.ensureLoaded();
@@ -320,7 +323,8 @@ export struct HomeView {
     .height(36)
     .padding(3)
     .borderRadius(18)
-    .backgroundColor(this.isDark ? '#D9202125' : '#E8FFFFFF')
+    .backgroundColor(this.glassOn ? '#00000000' : (this.isDark ? '#D9202125' : '#E8FFFFFF'))
+    .systemMaterial(AppTheme.floatMaterial(this.glassOn))
     .alignItems(VerticalAlign.Center)
   }
 
@@ -380,6 +384,34 @@ export struct HomeView {
     this.VideoFeedFooter(1)
   }
 
+  /** 热门频道顶部的排行榜入口：全站排行 / 每周必看 / 入站必刷。 */
+  @Builder
+  HotRankEntry() {
+    Row({ space: 10 }) {
+      Image($r('app.media.ic_hot'))
+        .width(18)
+        .height(18)
+        .fillColor(this.accent)
+      Text('排行榜')
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+      Blank()
+      Image($r('app.media.ic_arrow_right'))
+        .width(14)
+        .height(14)
+        .fillColor('#9499A0')
+    }
+    .width('100%')
+    .height(44)
+    .padding({ left: 14, right: 14 })
+    .borderRadius(12)
+    .backgroundColor(this.isDark ? '#212225' : '#FFFFFF')
+    .onClick(() => {
+      AppNavStack.pushPathByName(NAV_RANK, null);
+    })
+  }
+
   @Builder
   LiveFooter() {
     LoadMoreFooter({
@@ -395,6 +427,12 @@ export struct HomeView {
   @Builder
   VideoFeedList(feedTab: number) {
     List({ space: 10, scroller: feedTab === 0 ? this.recScroller : this.hotScroller }) {
+      // 热门频道首个卡片为排行榜入口，随列表一起滚动。
+      if (feedTab === 1) {
+        ListItem() {
+          this.HotRankEntry()
+        }
+      }
       // footer 挂在 ListItemGroup 上：双列 lanes 下保持整宽居中
       ListItemGroup({ footer: this.VideoFeedFooter(feedTab) }) {
         LazyForEach(feedTab === 0 ? this.recSource : this.hotSource, (item: VideoItem) => {
@@ -510,6 +548,17 @@ export struct HomeView {
       .onChange((index: number) => {
         this.tab = index;
         this.visualTab = index;
+        // 滑动切换时也要触发懒加载，避免热门/直播切过去是空白，必须再点一次才能出来。
+        if (index === 0 && this.recSource.isEmpty()) {
+          this.loadRecommend(true).catch(() => {
+          });
+        } else if (index === 1 && this.hotSource.isEmpty()) {
+          this.loadHot(true).catch(() => {
+          });
+        } else if (index === 2 && this.liveSource.isEmpty()) {
+          this.loadLive(true).catch(() => {
+          });
+        }
       })
 
       this.RefreshIndicator()

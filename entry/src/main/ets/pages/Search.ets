@@ -1,26 +1,33 @@
 /**
  * 搜索页：热搜榜 / 搜索建议 / 搜索结果
- * 结果态：视频 | 用户 二级 Tab + 排序 chips + 视频筛选面板（search/type 接口）
+ * 结果态：综合 | 视频 | 番剧 | 影视 | 直播 | 专栏 | 用户 二级 Tab
+ * （综合走 search/all/v2 分区混排，其余走 search/type；视频带排序 chips + 筛选面板）
  */
 import { Immersive } from '../common/Immersive';
-import { AppNavStack, LiveRoomParam, NAV_LIVE_ROOM, NAV_VIDEO_DETAIL, NAV_USER_SPACE, VideoDetailParam,
-  UserSpaceParam } from '../common/AppRouter';
+import { AppNavStack, ArticlePageParam, LiveRoomParam, NAV_ARTICLE, NAV_BANGUMI_DETAIL, NAV_LIVE_ROOM,
+  NAV_VIDEO_DETAIL, NAV_USER_SPACE, BangumiDetailParam, VideoDetailParam, UserSpaceParam } from '../common/AppRouter';
 import {
   VideoItem, HotSearchItem, UserSearchItem, SearchOption, SearchNumOption, VideoSearchResult, UserSearchResult,
-  VIDEO_ORDER_OPTIONS, USER_ORDER_OPTIONS, VIDEO_DURATION_OPTIONS, VIDEO_PUBTIME_OPTIONS, VIDEO_ZONE_OPTIONS
+  PgcSearchItem, PgcSearchResult, ArticleSearchItem, ArticleSearchResult, SearchAllResult, SearchAllSection,
+  SearchTypes, VIDEO_ORDER_OPTIONS, USER_ORDER_OPTIONS, LIVE_ORDER_OPTIONS,
+  VIDEO_DURATION_OPTIONS, VIDEO_PUBTIME_OPTIONS, VIDEO_ZONE_OPTIONS
 } from '../model/Models';
+import { LiveRoomItem, LiveSearchResult } from '../model/LiveModels';
 import { BiliApi } from '../api/BiliApi';
 import { LoadingView } from '../components/LoadingView';
 import { BackButton } from '../components/BackButton';
 import { FilterChip } from '../components/FilterChip';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { VideoRowCard } from '../components/VideoRowCard';
+import { VideoCard } from '../components/VideoCard';
+import { LiveRoomCard } from '../components/LiveRoomCard';
 import { formatCount } from '../common/Utils';
 import { AppTheme } from '../common/AppTheme';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { HotSearchStore } from '../common/HotSearchStore';
 import { SearchHistoryStore } from '../common/SearchHistoryStore';
 import { LayoutTokens } from '../common/LayoutTokens';
+import { inputMethod } from '@kit.IMEKit';
 
 @Component
 export struct SearchPage {
@@ -29,15 +36,25 @@ export struct SearchPage {
   @State suggests: Array<string> = [];
   // ===== 结果态 =====
   @State searching: boolean = false;
-  @State searchTab: number = 0;              // 0 视频 1 用户
+  @State searchTab: number = 0;              // 0 综合 1 视频 2 番剧 3 影视 4 直播 5 专栏 6 用户
   @State videoTotal: number = -1;            // numResults 总数徽标，-1 未加载
   @State userTotal: number = -1;
+  @State bangumiTotal: number = -1;
+  @State ftTotal: number = -1;
+  @State liveTotal: number = -1;
+  @State articleTotal: number = -1;
   @State loading: boolean = false;
   @State loadingMore: boolean = false;
+  @State allPage: number = 1;
   @State videoPage: number = 1;
   @State userPage: number = 1;
+  @State bangumiPage: number = 1;
+  @State ftPage: number = 1;
+  @State livePage: number = 1;
+  @State articlePage: number = 1;
   @State videoOrder: string = 'totalrank';
   @State userOrder: string = '';
+  @State liveOrder: string = 'online';
   @State filterDuration: number = 0;         // VIDEO_DURATION_OPTIONS 下标
   @State filterPubtime: number = 0;          // VIDEO_PUBTIME_OPTIONS 下标
   @State filterTids: number = 0;             // 分区 id，0 不限
@@ -47,12 +64,18 @@ export struct SearchPage {
   @State tmpTids: number = 0;
   @State showSuggest: boolean = false;
   @State history: Array<string> = [];
+  // 综合 Tab 分区列表（all/v2 聚合结果，整体替换触发刷新）
+  @State allSections: Array<SearchAllSection> = [];
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
   @StorageProp('searchSuggestedKeyword') suggestedKeyword: string = '';
   private resultsSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
   private userSource: BasicDataSource<UserSearchItem> = new BasicDataSource<UserSearchItem>();
+  private bangumiSource: BasicDataSource<PgcSearchItem> = new BasicDataSource<PgcSearchItem>();
+  private ftSource: BasicDataSource<PgcSearchItem> = new BasicDataSource<PgcSearchItem>();
+  private liveSource: BasicDataSource<LiveRoomItem> = new BasicDataSource<LiveRoomItem>();
+  private articleSource: BasicDataSource<ArticleSearchItem> = new BasicDataSource<ArticleSearchItem>();
   // 搜索建议：300ms 防抖 + 请求序号（慢响应乱序到达时丢弃旧结果）
   private suggestTimer: number = -1;
   private suggestSeq: number = 0;
@@ -113,6 +136,13 @@ export struct SearchPage {
     this.showSuggest = s.length > 0;
   }
 
+  private loadMoreSearch(): void {
+    if (this.loadingMore === false && this.searchInflight === false) {
+      this.doSearch(false).catch(() => {
+      });
+    }
+  }
+
   async doSearch(reset: boolean): Promise<void> {
     const kw: string = this.keyword.trim();
     if (kw.length === 0) {
@@ -132,6 +162,23 @@ export struct SearchPage {
     }
     try {
       if (this.searchTab === 0) {
+        // 综合：聚合分区混排；page>1 只返回视频分区，追加进已有视频分区
+        if (reset) {
+          this.allPage = 1;
+        }
+        const page: number = this.allPage;
+        const res: SearchAllResult = await BiliApi.searchAll(kw, page);
+        if (this.destroyed) {
+          return;
+        }
+        if (reset) {
+          this.allSections = res.sections;
+        } else {
+          this.allSections = this.mergeAllSections(this.allSections, res.sections);
+        }
+        this.applyAllTotals(res.totals);
+        this.allPage = page + 1;
+      } else if (this.searchTab === 1) {
         if (reset) {
           this.videoPage = 1;
         }
@@ -153,6 +200,66 @@ export struct SearchPage {
         }
         this.videoTotal = res.numResults;
         this.videoPage = page + 1;
+      } else if (this.searchTab === 2 || this.searchTab === 3) {
+        // 番剧 / 影视：同一接口不同 search_type
+        const isBangumi: boolean = this.searchTab === 2;
+        if (reset) {
+          if (isBangumi) {
+            this.bangumiPage = 1;
+          } else {
+            this.ftPage = 1;
+          }
+        }
+        const page: number = isBangumi ? this.bangumiPage : this.ftPage;
+        const res: PgcSearchResult = await BiliApi.searchMedia(kw,
+          isBangumi ? SearchTypes.mediaBangumi : SearchTypes.mediaFt, page);
+        if (this.destroyed) {
+          return;
+        }
+        if (reset) {
+          this.mediaSource(isBangumi).reset(res.items);
+        } else {
+          this.mediaSource(isBangumi).append(res.items);
+        }
+        if (isBangumi) {
+          this.bangumiTotal = res.numResults;
+          this.bangumiPage = page + 1;
+        } else {
+          this.ftTotal = res.numResults;
+          this.ftPage = page + 1;
+        }
+      } else if (this.searchTab === 4) {
+        if (reset) {
+          this.livePage = 1;
+        }
+        const page: number = this.livePage;
+        const res: LiveSearchResult = await BiliApi.searchLiveRooms(kw, page, this.liveOrder);
+        if (this.destroyed) {
+          return;
+        }
+        if (reset) {
+          this.liveSource.reset(res.rooms);
+        } else {
+          this.liveSource.append(res.rooms);
+        }
+        this.liveTotal = res.numResults;
+        this.livePage = page + 1;
+      } else if (this.searchTab === 5) {
+        if (reset) {
+          this.articlePage = 1;
+        }
+        const page: number = this.articlePage;
+        const res: ArticleSearchResult = await BiliApi.searchArticles(kw, page);
+        if (this.destroyed) {
+          return;
+        }
+        if (reset) {
+          this.articleSource.reset(res.articles);
+        } else {
+          this.articleSource.append(res.articles);
+        }
+        this.articleTotal = res.numResults;
+        this.articlePage = page + 1;
       } else {
         if (reset) {
           this.userPage = 1;
@@ -182,14 +289,95 @@ export struct SearchPage {
     }
   }
 
-  // 新关键词搜索：回到视频 Tab 重新加载
+  /** 综合搜索翻页合并：后续页只含视频分区，并入现有视频分区（新建数组触发 @State 刷新）。 */
+  private mergeAllSections(current: Array<SearchAllSection>,
+    incoming: Array<SearchAllSection>): Array<SearchAllSection> {
+    let videoIncoming: SearchAllSection | null = null;
+    for (let i: number = 0; i < incoming.length; i++) {
+      if (incoming[i].type === SearchTypes.video) {
+        videoIncoming = incoming[i];
+      }
+    }
+    if (videoIncoming === null) {
+      return current;
+    }
+    const out: Array<SearchAllSection> = [];
+    let merged: boolean = false;
+    const videos: Array<VideoItem> = (videoIncoming as SearchAllSection).videos;
+    for (let i: number = 0; i < current.length; i++) {
+      const section: SearchAllSection = current[i];
+      if (section.type === SearchTypes.video) {
+        const ns: SearchAllSection = new SearchAllSection();
+        ns.type = section.type;
+        ns.videos = section.videos.concat(videos);
+        out.push(ns);
+        merged = true;
+      } else {
+        out.push(section);
+      }
+    }
+    if (!merged) {
+      out.push(videoIncoming);
+    }
+    return out;
+  }
+
+  /** all/v2 的 pageinfo 提供各分类结果总数，同步到对应 Tab 徽标。 */
+  private applyAllTotals(totals: Map<string, number>): void {
+    const video: number | undefined = totals.get(SearchTypes.video);
+    if (video !== undefined) {
+      this.videoTotal = video;
+    }
+    const user: number | undefined = totals.get(SearchTypes.biliUser);
+    if (user !== undefined) {
+      this.userTotal = user;
+    }
+    const bangumi: number | undefined = totals.get(SearchTypes.mediaBangumi);
+    if (bangumi !== undefined) {
+      this.bangumiTotal = bangumi;
+    }
+    const ft: number | undefined = totals.get(SearchTypes.mediaFt);
+    if (ft !== undefined) {
+      this.ftTotal = ft;
+    }
+    const live: number | undefined = totals.get(SearchTypes.liveRoom);
+    if (live !== undefined) {
+      this.liveTotal = live;
+    }
+    const article: number | undefined = totals.get(SearchTypes.article);
+    if (article !== undefined) {
+      this.articleTotal = article;
+    }
+  }
+
+  private mediaSource(isBangumi: boolean): BasicDataSource<PgcSearchItem> {
+    return isBangumi ? this.bangumiSource : this.ftSource;
+  }
+
+  // 新关键词搜索：清空各分类缓存与徽标，回到综合 Tab 重新加载
   submitSearch(): void {
     const kw: string = this.keyword.trim();
     if (kw.length === 0 && this.suggestedKeyword.length > 0) {
       this.keyword = this.suggestedKeyword;
     }
     if (this.keyword.trim().length === 0) return;
+    // 结果页露出前收起输入法，避免键盘遮挡半屏结果列表。
+    inputMethod.getController().hideTextInput().catch(() => {
+    });
     this.history = SearchHistoryStore.add(this.keyword);
+    this.resultsSource.clear();
+    this.userSource.clear();
+    this.bangumiSource.clear();
+    this.ftSource.clear();
+    this.liveSource.clear();
+    this.articleSource.clear();
+    this.allSections = [];
+    this.videoTotal = -1;
+    this.userTotal = -1;
+    this.bangumiTotal = -1;
+    this.ftTotal = -1;
+    this.liveTotal = -1;
+    this.articleTotal = -1;
     this.searchTab = 0;
     this.doSearch(true).catch(() => {
     });
@@ -249,10 +437,15 @@ export struct SearchPage {
   onTabChanged(index: number): void {
     this.searchTab = index;
     // 切到未加载过的 Tab 时拉取首屏
-    if (index === 0 && this.resultsSource.isEmpty()) {
-      this.doSearch(true).catch(() => {
-      });
-    } else if (index === 1 && this.userSource.isEmpty()) {
+    const needLoad: boolean =
+      (index === 0 && this.allSections.length === 0) ||
+      (index === 1 && this.resultsSource.isEmpty()) ||
+      (index === 2 && this.bangumiSource.isEmpty()) ||
+      (index === 3 && this.ftSource.isEmpty()) ||
+      (index === 4 && this.liveSource.isEmpty()) ||
+      (index === 5 && this.articleSource.isEmpty()) ||
+      (index === 6 && this.userSource.isEmpty());
+    if (needLoad) {
       this.doSearch(true).catch(() => {
       });
     }
@@ -362,7 +555,8 @@ export struct SearchPage {
         .borderRadius(1.5)
         .backgroundColor(this.searchTab === index ? this.accent : '#00000000')
     }
-    .padding({ left: 18, right: 18, top: 6 })
+    .padding({ left: 13, right: 13, top: 6 })
+    .animation({ duration: 180, curve: Curve.EaseOut })
   }
 
   // ===== 结果态：视频排序行（5 个排序 chips + 右侧筛选按钮） =====
@@ -430,6 +624,27 @@ export struct SearchPage {
           },
         })
       }, (opt: SearchOption) => opt.label)
+    }
+    .width('100%')
+    .padding({ left: 12, right: 12, top: 2 })
+  }
+
+  // ===== 结果态：直播排序行（人气 / 最新开播） =====
+  @Builder
+  LiveSortRow() {
+    Row() {
+      ForEach(LIVE_ORDER_OPTIONS, (opt: SearchOption) => {
+        FilterChip({
+          label: opt.label,
+          selected: this.liveOrder === opt.value,
+          bottomMargin: 8,
+          onTap: () => {
+            this.liveOrder = opt.value;
+            this.doSearch(true).catch(() => {
+            });
+          },
+        })
+      }, (opt: SearchOption) => opt.value)
     }
     .width('100%')
     .padding({ left: 12, right: 12, top: 2 })
@@ -631,13 +846,11 @@ export struct SearchPage {
             LoadMoreFooter({
               loading: this.loadingMore,
               hasMore: true,
-              moreText: '加载更多',
-              fontSize: 13,
-              padTop: 12,
-              padBottom: 20,
+              moreText: this.loadingMore ? '' : '上滑加载更多',
+              endText: '',
+              fixedHeight: 44,
               onLoadMore: () => {
-                this.doSearch(false).catch(() => {
-                });
+                this.loadMoreSearch();
               },
             })
           }
@@ -646,6 +859,9 @@ export struct SearchPage {
         .height('100%')
         .cachedCount(5)
         .scrollBar(BarState.Off)
+        .onReachEnd(() => {
+          this.loadMoreSearch();
+        })
       }
     }
     .width('100%')
@@ -680,13 +896,11 @@ export struct SearchPage {
             LoadMoreFooter({
               loading: this.loadingMore,
               hasMore: true,
-              moreText: '加载更多',
-              fontSize: 13,
-              padTop: 12,
-              padBottom: 20,
+              moreText: this.loadingMore ? '' : '上滑加载更多',
+              endText: '',
+              fixedHeight: 44,
               onLoadMore: () => {
-                this.doSearch(false).catch(() => {
-                });
+                this.loadMoreSearch();
               },
             })
           }
@@ -695,6 +909,399 @@ export struct SearchPage {
         .height('100%')
         .cachedCount(5)
         .scrollBar(BarState.Off)
+        .onReachEnd(() => {
+          this.loadMoreSearch();
+        })
+      }
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  // ===== 结果态：番剧/影视卡片（番剧 Tab、影视 Tab、综合分区共用） =====
+  @Builder
+  PgcRow(item: PgcSearchItem) {
+    Row({ space: 10 }) {
+      Stack({ alignContent: Alignment.TopStart }) {
+        Image(item.cover)
+          .width(84)
+          .height(112)
+          .objectFit(ImageFit.Cover)
+        if (item.seasonTypeName.length > 0) {
+          Text(item.seasonTypeName)
+            .fontSize(9)
+            .fontColor('#FFFFFF')
+            .backgroundColor(this.accent)
+            .padding({ left: 5, right: 5, top: 2, bottom: 2 })
+            .borderRadius({ topLeft: 6, bottomRight: 6 })
+        }
+      }
+      .width(84)
+      .height(112)
+      .clip(true)
+      .borderRadius(6)
+      Column({ space: 5 }) {
+        Text(item.title)
+          .fontSize(14)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Row({ space: 6 }) {
+          if (item.scoreText().length > 0) {
+            Text(item.scoreText())
+              .fontSize(11)
+              .fontColor(this.accent)
+          }
+          if (item.indexShow.length > 0) {
+            Text(item.indexShow)
+              .fontSize(11)
+              .fontColor('#9499A0')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+        }
+        .width('100%')
+        if (item.areas.length > 0 || item.styles.length > 0) {
+          Text((item.areas.length > 0 ? item.areas : '') +
+            (item.areas.length > 0 && item.styles.length > 0 ? ' · ' : '') + item.styles)
+            .fontSize(11)
+            .fontColor('#9499A0')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        if (item.desc.length > 0) {
+          Text(item.desc)
+            .fontSize(11)
+            .fontColor('#B0B3B8')
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+    }
+    .width('100%')
+    .padding({ left: 14, right: 14, top: 8, bottom: 8 })
+    .onClick(() => {
+      const param: BangumiDetailParam = { seasonId: item.seasonId, epId: 0, title: item.title };
+      AppNavStack.pushPathByName(NAV_BANGUMI_DETAIL, param);
+    })
+  }
+
+  // ===== 结果态：番剧/影视 Tab 内容（isBangumi 区分 search_type 与数据源） =====
+  @Builder
+  MediaResultTab(isBangumi: boolean, emptyText: string) {
+    Column() {
+      if (this.loading) {
+        LoadingView({ loading: true })
+      } else if (this.mediaSource(isBangumi).totalCount() === 0) {
+        LoadingView({
+          loading: false,
+          empty: true,
+          emptyText: emptyText,
+          onRetry: () => {
+            this.doSearch(true).catch(() => {
+            });
+          },
+        })
+      } else {
+        List() {
+          LazyForEach(this.mediaSource(isBangumi), (item: PgcSearchItem) => {
+            ListItem() {
+              this.PgcRow(item)
+            }
+          }, (item: PgcSearchItem) => String(item.seasonId))
+          ListItem() {
+            LoadMoreFooter({
+              loading: this.loadingMore,
+              hasMore: true,
+              moreText: this.loadingMore ? '' : '上滑加载更多',
+              endText: '',
+              fixedHeight: 44,
+              onLoadMore: () => {
+                this.loadMoreSearch();
+              },
+            })
+          }
+        }
+        .width('100%')
+        .height('100%')
+        .cachedCount(5)
+        .scrollBar(BarState.Off)
+        .onReachEnd(() => {
+          this.loadMoreSearch();
+        })
+      }
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  // ===== 结果态：直播 Tab 内容（双列直播间卡片 + 排序 chips） =====
+  @Builder
+  LiveResultTab() {
+    Column() {
+      this.LiveSortRow()
+      if (this.loading) {
+        LoadingView({ loading: true })
+      } else if (this.liveSource.totalCount() === 0) {
+        LoadingView({
+          loading: false,
+          empty: true,
+          emptyText: '没有找到相关直播间',
+          onRetry: () => {
+            this.doSearch(true).catch(() => {
+            });
+          },
+        })
+      } else {
+        List({ space: 10 }) {
+          LazyForEach(this.liveSource, (item: LiveRoomItem) => {
+            ListItem() {
+              LiveRoomCard({ room: item })
+            }
+          }, (item: LiveRoomItem) => String(item.roomId))
+          ListItem() {
+            LoadMoreFooter({
+              loading: this.loadingMore,
+              hasMore: true,
+              moreText: this.loadingMore ? '' : '上滑加载更多',
+              endText: '',
+              fixedHeight: 44,
+              onLoadMore: () => {
+                this.loadMoreSearch();
+              },
+            })
+          }
+        }
+        .width('100%')
+        .height('100%')
+        .lanes(2, 10)
+        .padding({ left: 12, right: 12 })
+        .cachedCount(5)
+        .scrollBar(BarState.Off)
+        .onReachEnd(() => {
+          this.loadMoreSearch();
+        })
+      }
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  // ===== 结果态：专栏卡片（应用内 Web 阅读页） =====
+  private openArticle(item: ArticleSearchItem): void {
+    const param: ArticlePageParam = { id: item.id, title: item.title };
+    AppNavStack.pushPathByName(NAV_ARTICLE, param);
+  }
+
+  @Builder
+  ArticleRow(item: ArticleSearchItem) {
+    Row({ space: 10 }) {
+      Column({ space: 5 }) {
+        Text(item.title)
+          .fontSize(13)
+          .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .lineHeight(17)
+        if (item.desc.length > 0) {
+          Text(item.desc)
+            .fontSize(11)
+            .fontColor('#9499A0')
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        Text((item.upName.length > 0 ? item.upName + ' · ' : '') +
+          formatCount(item.view) + '阅读 · ' + formatCount(item.reply) + '评论')
+          .fontSize(11)
+          .fontColor('#B0B3B8')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      if (item.cover.length > 0) {
+        Image(item.cover)
+          .width(110)
+          .height(74)
+          .objectFit(ImageFit.Cover)
+          .borderRadius(6)
+      }
+    }
+    .width('100%')
+    .padding({ left: 14, right: 14, top: 9, bottom: 9 })
+    .onClick(() => {
+      this.openArticle(item);
+    })
+  }
+
+  // ===== 结果态：专栏 Tab 内容 =====
+  @Builder
+  ArticleResultTab() {
+    Column() {
+      if (this.loading) {
+        LoadingView({ loading: true })
+      } else if (this.articleSource.totalCount() === 0) {
+        LoadingView({
+          loading: false,
+          empty: true,
+          emptyText: '没有找到相关专栏',
+          onRetry: () => {
+            this.doSearch(true).catch(() => {
+            });
+          },
+        })
+      } else {
+        List() {
+          LazyForEach(this.articleSource, (item: ArticleSearchItem) => {
+            ListItem() {
+              this.ArticleRow(item)
+            }
+          }, (item: ArticleSearchItem) => String(item.id))
+          ListItem() {
+            LoadMoreFooter({
+              loading: this.loadingMore,
+              hasMore: true,
+              moreText: this.loadingMore ? '' : '上滑加载更多',
+              endText: '',
+              fixedHeight: 44,
+              onLoadMore: () => {
+                this.loadMoreSearch();
+              },
+            })
+          }
+        }
+        .width('100%')
+        .height('100%')
+        .cachedCount(5)
+        .scrollBar(BarState.Off)
+        .onReachEnd(() => {
+          this.loadMoreSearch();
+        })
+      }
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  // ===== 结果态：综合 Tab 分区小标题 =====
+  @Builder
+  AllSectionHeader(type: string) {
+    Text(type === SearchTypes.video ? '视频' :
+      (type === SearchTypes.biliUser ? '用户' : (type === SearchTypes.mediaBangumi ? '番剧' : '影视')))
+      .fontSize(14)
+      .fontWeight(FontWeight.Bold)
+      .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+      .width('100%')
+      .padding({ left: 14, right: 14, top: 10, bottom: 4 })
+  }
+
+  // ===== 结果态：综合 Tab 用户分区（横滑行，跳用户空间） =====
+  @Builder
+  AllUserRow(section: SearchAllSection) {
+    Scroll() {
+      Row({ space: 16 }) {
+        ForEach(section.users, (user: UserSearchItem) => {
+          Column({ space: 6 }) {
+            Image(user.face.length > 0 ? user.face : $r('app.media.placeholder_avatar_noface'))
+              .width(52)
+              .height(52)
+              .borderRadius(26)
+              .objectFit(ImageFit.Cover)
+            Text(user.uname)
+              .fontSize(12)
+              .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .constraintSize({ maxWidth: 72 })
+          }
+          .width(72)
+          .onClick(() => {
+            this.openUserSpace(user);
+          })
+        }, (user: UserSearchItem) => String(user.mid))
+      }
+      .padding({ left: 14, right: 14, top: 4, bottom: 10 })
+    }
+    .scrollable(ScrollDirection.Horizontal)
+    .scrollBar(BarState.Off)
+    .width('100%')
+  }
+
+  // ===== 结果态：综合 Tab 视频分区（双列卡片流） =====
+  @Builder
+  AllVideoGrid(section: SearchAllSection) {
+    Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
+      ForEach(section.videos, (item: VideoItem) => {
+        Column() {
+          VideoCard({ video: item })
+        }
+        .width('48.5%')
+      }, (item: VideoItem) => item.bvid + String(item.aid))
+    }
+    .width('100%')
+    .padding({ left: 12, right: 12 })
+  }
+
+  // ===== 结果态：综合 Tab 内容（番剧/影视分区 + 用户横滑行 + 视频双列流） =====
+  @Builder
+  AllResultTab() {
+    Column() {
+      if (this.loading) {
+        LoadingView({ loading: true })
+      } else if (this.allSections.length === 0) {
+        LoadingView({
+          loading: false,
+          empty: true,
+          emptyText: '没有找到相关内容',
+          onRetry: () => {
+            this.doSearch(true).catch(() => {
+            });
+          },
+        })
+      } else {
+        List() {
+          ForEach(this.allSections, (section: SearchAllSection) => {
+            ListItemGroup({ header: this.AllSectionHeader(section.type) }) {
+              if (section.type === SearchTypes.biliUser) {
+                ListItem() {
+                  this.AllUserRow(section)
+                }
+              } else if (section.type === SearchTypes.mediaBangumi || section.type === SearchTypes.mediaFt) {
+                ForEach(section.pgc, (item: PgcSearchItem) => {
+                  ListItem() {
+                    this.PgcRow(item)
+                  }
+                }, (item: PgcSearchItem) => String(item.seasonId))
+              } else if (section.type === SearchTypes.video) {
+                ListItem() {
+                  this.AllVideoGrid(section)
+                }
+              }
+            }
+          }, (section: SearchAllSection) => section.type)
+          ListItem() {
+            LoadMoreFooter({
+              loading: this.loadingMore,
+              hasMore: true,
+              moreText: this.loadingMore ? '' : '上滑加载更多',
+              endText: '',
+              fixedHeight: 44,
+              onLoadMore: () => {
+                this.loadMoreSearch();
+              },
+            })
+          }
+        }
+        .width('100%')
+        .height('100%')
+        .cachedCount(5)
+        .scrollBar(BarState.Off)
+        .onReachEnd(() => {
+          this.loadMoreSearch();
+        })
       }
     }
     .width('100%')
@@ -744,17 +1351,38 @@ export struct SearchPage {
         .padding({ left: 10, right: 12, top: Immersive.statusBarHeight() + 6, bottom: 8 })
 
         if (this.searching) {
-          // 结果态：视频 | 用户 二级 Tab
+          // 结果态：综合 | 视频 | 番剧 | 影视 | 直播 | 专栏 | 用户 二级 Tab
           Tabs({ barPosition: BarPosition.Start, index: $$this.searchTab }) {
+            TabContent() {
+              this.AllResultTab()
+            }
+            .tabBar(this.ResultTabBar(0, '综合'))
             TabContent() {
               this.VideoResultTab()
             }
-            .tabBar(this.ResultTabBar(0, this.videoTotal >= 0 ? '视频 ' + formatCount(this.videoTotal) : '视频'))
+            .tabBar(this.ResultTabBar(1, this.videoTotal >= 0 ? '视频 ' + formatCount(this.videoTotal) : '视频'))
+            TabContent() {
+              this.MediaResultTab(true, '没有找到相关番剧')
+            }
+            .tabBar(this.ResultTabBar(2, this.bangumiTotal >= 0 ? '番剧 ' + formatCount(this.bangumiTotal) : '番剧'))
+            TabContent() {
+              this.MediaResultTab(false, '没有找到相关影视')
+            }
+            .tabBar(this.ResultTabBar(3, this.ftTotal >= 0 ? '影视 ' + formatCount(this.ftTotal) : '影视'))
+            TabContent() {
+              this.LiveResultTab()
+            }
+            .tabBar(this.ResultTabBar(4, this.liveTotal >= 0 ? '直播 ' + formatCount(this.liveTotal) : '直播'))
+            TabContent() {
+              this.ArticleResultTab()
+            }
+            .tabBar(this.ResultTabBar(5, this.articleTotal >= 0 ? '专栏 ' + formatCount(this.articleTotal) : '专栏'))
             TabContent() {
               this.UserResultTab()
             }
-            .tabBar(this.ResultTabBar(1, this.userTotal >= 0 ? '用户 ' + formatCount(this.userTotal) : '用户'))
+            .tabBar(this.ResultTabBar(6, this.userTotal >= 0 ? '用户 ' + formatCount(this.userTotal) : '用户'))
           }
+          .barMode(BarMode.Scrollable)
           .barHeight(40)
           .divider(null)
           .animationDuration(200)

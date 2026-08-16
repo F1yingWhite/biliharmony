@@ -82,7 +82,7 @@ export struct ReplyThreadPanel {
     if (!meta.hasChildren) return;
     if (this.collapsed.has(item.rpid)) this.collapsed.delete(item.rpid);
     else this.collapsed.add(item.rpid);
-    animateTo({ duration: 240, curve: Curve.EaseInOut }, () => this.rebuildTree());
+    this.getUIContext().animateTo({ duration: 240, curve: Curve.EaseInOut }, () => this.rebuildTree());
   }
 
   build() {

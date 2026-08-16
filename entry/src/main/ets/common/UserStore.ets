@@ -9,6 +9,7 @@ import { preferences } from '@kit.ArkData';
 
 export class UserStore {
   private static readonly COOKIE_STORAGE_KEY: string = 'loginCookieJar';
+  private static readonly ACCESS_TOKEN_STORAGE_KEY: string = 'loginAccessToken';
   private static readonly AUTH_PREFERENCES_NAME: string = 'bili_auth_state';
   private static user: UserInfo | null = null;
   private static loaded: boolean = false;
@@ -26,32 +27,43 @@ export class UserStore {
   /** 必须在页面创建前调用：恢复上次登录 Cookie，避免重启后清晰度和个性装扮退回游客态。 */
   static initPersistence(context: common.UIAbilityContext): void {
     PersistentStorage.persistProp<string>(UserStore.COOKIE_STORAGE_KEY, '');
+    PersistentStorage.persistProp<string>(UserStore.ACCESS_TOKEN_STORAGE_KEY, '');
     PersistentStorage.persistProp<string>('userAvatar', '');
     PersistentStorage.persistProp<string>('userPendant', '');
     const raw: string = AppStorage.get<string>(UserStore.COOKIE_STORAGE_KEY) ?? '';
+    const accessToken: string = AppStorage.get<string>(UserStore.ACCESS_TOKEN_STORAGE_KEY) ?? '';
     HttpClient.importCookieJson(raw);
-    UserStore.persistenceReady = UserStore.restoreCookies(context, raw);
+    HttpClient.setAppAccessToken(accessToken);
+    UserStore.persistenceReady = UserStore.restoreAuth(context, raw, accessToken);
   }
 
   /**
    * Preferences 是登录态的权威副本；PersistentStorage 仅保留给页面响应式状态。
    * 启动请求必须等待这里完成，防止 nav/playurl 先以游客身份发出。
    */
-  private static async restoreCookies(context: common.UIAbilityContext, legacyRaw: string): Promise<void> {
+  private static async restoreAuth(context: common.UIAbilityContext, legacyRaw: string,
+    legacyAccessToken: string): Promise<void> {
     try {
       const store: preferences.Preferences = await preferences.getPreferences(context, {
         name: UserStore.AUTH_PREFERENCES_NAME,
       });
       UserStore.authPreferences = store;
       const diskRaw: string = store.getSync(UserStore.COOKIE_STORAGE_KEY, '') as string;
+      const diskAccessToken: string = store.getSync(UserStore.ACCESS_TOKEN_STORAGE_KEY, '') as string;
       const effectiveRaw: string = diskRaw.length > 0 ? diskRaw : legacyRaw;
+      const effectiveAccessToken: string = diskAccessToken.length > 0 ? diskAccessToken : legacyAccessToken;
       HttpClient.importCookieJson(effectiveRaw);
+      HttpClient.setAppAccessToken(effectiveAccessToken);
 
       // 从旧版 PersistentStorage 无损迁移到显式落盘的 Preferences。
       if (diskRaw.length === 0 && legacyRaw.length > 0) {
         store.putSync(UserStore.COOKIE_STORAGE_KEY, legacyRaw);
-        await store.flush();
       }
+      if (diskAccessToken.length === 0 && legacyAccessToken.length > 0) {
+        store.putSync(UserStore.ACCESS_TOKEN_STORAGE_KEY, legacyAccessToken);
+      }
+      if ((diskRaw.length === 0 && legacyRaw.length > 0) ||
+        (diskAccessToken.length === 0 && legacyAccessToken.length > 0)) await store.flush();
     } catch (e) {
       // Preferences 不可用时仍可沿用已导入的旧缓存，不阻断应用启动。
     }
@@ -69,6 +81,15 @@ export class UserStore {
     if (UserStore.authPreferences !== null) {
       UserStore.authPreferences.putSync(UserStore.COOKIE_STORAGE_KEY, raw);
       // 必须等 flush 完成，防止安装/重启杀进程时 Cookie 仍只在内存。
+      await UserStore.authPreferences.flush();
+    }
+  }
+
+  private static async persistAccessToken(value: string): Promise<void> {
+    AppStorage.setOrCreate<string>(UserStore.ACCESS_TOKEN_STORAGE_KEY, value);
+    await UserStore.waitForPersistence();
+    if (UserStore.authPreferences !== null) {
+      UserStore.authPreferences.putSync(UserStore.ACCESS_TOKEN_STORAGE_KEY, value);
       await UserStore.authPreferences.flush();
     }
   }
@@ -100,11 +121,13 @@ export class UserStore {
   }
 
   /** 写入登录 cookie 并刷新状态；广播 loginVersion 让各页面重载（Tabs 保活的视图不会再次 aboutToAppear） */
-  static async applyLoginCookies(cookies: Array<CookiePair>): Promise<void> {
+  static async applyLoginCookies(cookies: Array<CookiePair>, accessToken: string = ''): Promise<void> {
     for (let i: number = 0; i < cookies.length; i++) {
       HttpClient.setCookie(cookies[i].name, cookies[i].value);
     }
+    HttpClient.setAppAccessToken(accessToken);
     await UserStore.persistCookies(HttpClient.exportCookieJson());
+    await UserStore.persistAccessToken(accessToken);
     await UserStore.refresh();
     AppStorage.setOrCreate<number>('loginVersion', Date.now());
   }
@@ -115,7 +138,9 @@ export class UserStore {
     HttpClient.removeCookie('bili_jct');
     HttpClient.removeCookie('DedeUserID');
     HttpClient.removeCookie('DedeUserID__ckMd5');
+    HttpClient.setAppAccessToken('');
     await UserStore.persistCookies('');
+    await UserStore.persistAccessToken('');
     UserStore.user = null;
     UserStore.loaded = false;
     AppStorage.setOrCreate<string>('userAvatar', '');

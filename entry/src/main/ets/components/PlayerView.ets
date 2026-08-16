@@ -2,18 +2,21 @@
  * 播放器组件：AVPlayer + XComponent 渲染 + Canvas 弹幕引擎 + 手势控制
  */
 import { media } from '@kit.MediaKit';
+import { avSession } from '@kit.AVSessionKit';
+import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { promptAction } from '@kit.ArkUI';
-import { BiliApi, DanmakuItem, SponsorSegment, VideoChapter } from '../api/BiliApi';
+import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
 import { Immersive } from '../common/Immersive';
 import { formatDuration } from '../common/Utils';
-import { PlayUrlInfo, VideoQualityOption } from '../model/Models';
+import { PlayUrlInfo, SubtitleCue, SubtitleTrack, VideoQualityOption } from '../model/Models';
 import { Constants } from '../common/Constants';
+import { BasicDataSource } from '../common/BasicDataSource';
 import { PlayerProgressBar } from './PlayerProgressBar';
 import { PlayerSettingsPanel } from './PlayerSettingsPanel';
 import { PlayerGestureOverlay } from './PlayerGestureOverlay';
 import { PlayerFullscreenHeader } from './PlayerFullscreenHeader';
-import { ActiveDm, colorHex, CONTROLS_GRADIENT_COLORS } from './PlayerDanmakuSupport';
+import { CONTROLS_GRADIENT_COLORS, DM_SEGMENT_SECONDS } from './PlayerDanmakuSupport';
+import { PlayerDanmakuEngine } from './PlayerDanmakuEngine';
 import { PlayerBottomControls } from './PlayerBottomControls';
 import { PlayerPlaybackIndicator } from './PlayerPlaybackIndicator';
 
@@ -23,12 +26,18 @@ export struct PlayerView {
   @Prop videoUrls: Array<string> = [];
   @Prop audioUrls: Array<string> = [];
   @Prop @Watch('onQualityOptionsChanged') qualityOptions: Array<VideoQualityOption> = [];
+  @Prop @Watch('onSubtitlesChanged') subtitles: Array<SubtitleTrack> = [];
   @Prop currentQuality: number = 0;
   @Prop @Watch('onSourceVersionChanged') sourceVersion: number = 0;
+  /** 初始续播位置（秒）；首帧 prepared 后自动 seek 到该位置。 */
+  @Prop initialSeekSeconds: number = 0;
   @Prop aid: number = 0;
   @Prop bvid: string = '';
   @Prop cid: number = 0;
+  /** 视频时长（秒，业务页详情数据）：弹幕分段数预估用；0 表示未知，由播放器 durationUpdate 兜底。 */
+  @Prop videoDuration: number = 0;
   @Prop videoTitle: string = '';
+  @Prop videoCover: string = '';
   @Prop ownerName: string = '';
   @Prop ownerFace: string = '';
   @Prop liked: boolean = false;
@@ -38,6 +47,7 @@ export struct PlayerView {
   @Prop localDanmakuText: string = '';
   @Prop @Watch('onLocalDanmakuRequested') localDanmakuToken: number = 0;
   @Prop @Watch('onCompactModeChanged') compactMode: boolean = false;
+  onBack: () => void = () => {};
   onFullscreenChange: (fullscreen: boolean) => void = () => {};
   onPlayingChange: (playing: boolean) => void = () => {};
   onResumeRequest: () => void = () => {};
@@ -48,6 +58,7 @@ export struct PlayerView {
   onDmDraftChange: (value: string) => void = () => {};
   onDmSend: () => void = () => {};
   onProgress: (seconds: number) => void = () => {};
+  onEnded: () => void = () => {};
   onLike: () => void = () => {};
   onCoin: () => void = () => {};
   onFavorite: () => void = () => {};
@@ -62,18 +73,25 @@ export struct PlayerView {
   // 进入播放页直接展示纯画面；用户点画面或暂停时再唤出控制层。
   @State showControls: boolean = false;
   @State buffering: boolean = false;
-  @State showDmSettings: boolean = false;
-  @State showMoreMenu: boolean = false;
-  @State showQualitySettings: boolean = false;
-  @State showSpeedSettings: boolean = false;
-  @State showChapterSettings: boolean = false;
+  @State showMoreMenu: boolean = false;      // 竖屏：底部 Sheet 设置面板
+  @State showSideDrawer: boolean = false;    // 横屏：右侧抽屉设置面板
+  @State moreSheetPage: string = 'menu';     // Sheet/抽屉共用的子页状态
+  @State subtitleOn: boolean = false;
+  @State subtitleIndex: number = -1;
+  @State subtitleText: string = '';
+  @State subtitleLoading: boolean = false;
+  @State dmFilterRulesCount: number = 0;
+  @State dmFilterLoading: boolean = false;
+  @State dmFilterDraft: string = '';
+  @State dmFilterType: number = 0;
+  @State dmListCount: number = 0;
   @State chapters: Array<VideoChapter> = [];
   @State activeQuality: number = 0;
   @State qualityLoading: boolean = false;
   @State playbackRate: number = 1.0;
   @State dmOpacity: number = 0.85;
   @State dmSpeed: number = 1.0;
-  // 当前 1.0 在手机上仍明显小于 B 站默认观感，默认整体放大 1.3 倍。
+  // 默认 1.3 对齐 B 站弹幕观感；设置面板可在 0.7~1.8 间调节。
   @State dmFontScale: number = 1.3;
   @State dmDensity: number = 18;
   @State blockScrollDm: boolean = false;
@@ -91,6 +109,7 @@ export struct PlayerView {
   @State resumeTransitionActive: boolean = false;
   @State onlineTotal: string = '';
   @StorageProp('accentColor') accent: string = '#FB7299';
+  @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('videoFullscreenExitRequest') @Watch('onFullscreenExitRequested') fullscreenExitRequest: number = 0;
   @StorageProp('videoSeekRequestToken') @Watch('onExternalSeekRequested') seekRequestToken: number = 0;
   @StorageProp('videoPlaybackStopRequest') @Watch('onPlaybackStopRequested') stopRequest: number = 0;
@@ -100,21 +119,9 @@ export struct PlayerView {
   private audioPrepared: boolean = false;
   private xcController: XComponentController = new XComponentController();
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
-  private dmList: Array<DanmakuItem> = [];
-  private active: Array<ActiveDm> = [];
+  private dmEngine: PlayerDanmakuEngine = new PlayerDanmakuEngine(this.ctx);
   private dmTick: number = -1;
-  private dmLastDrawMs: number = 0;
-  private dmLastPlayerTime: number = 0;
-  private dmCursor: number = 0;
-  private nextScrollLane: number = 0;
-  private nextTopLane: number = 0;
-  private nextBottomLane: number = 0;
-  private canvasW: number = 1;
-  private canvasH: number = 1;
-  private lastSpawnTime: number = -1;
   private hideTimer: number = -1;
-  private textWidthCache: Map<string, number> = new Map<string, number>();
-  private colorCache: Map<number, string> = new Map<number, string>();
   private sourceIndex: number = 0;
   private retryingSource: boolean = false;
   private runtimeSources: Array<string> = [];
@@ -123,6 +130,14 @@ export struct PlayerView {
   private lastAudioSyncBucket: number = -1;
   private sponsorSegments: Array<SponsorSegment> = [];
   private lastSponsorUuid: string = '';
+  private subtitleCues: Array<SubtitleCue> = [];
+  private subtitleBusy: boolean = false;
+  private subtitleRequestSeq: number = 0;
+  private avSession: avSession.AVSession | null = null;
+  private avSessionActive: boolean = false;
+  private avSessionBusy: boolean = false;
+  private dmListSource: BasicDataSource<DanmakuItem> = new BasicDataSource<DanmakuItem>();
+  private dmFilterRuleSource: BasicDataSource<DmFilterRule> = new BasicDataSource<DmFilterRule>();
   private runtimeQualityOptions: Array<VideoQualityOption> = [];
   private resumeAfterPrepare: number = -1;
   private shouldPlayAfterPrepare: boolean = true;
@@ -155,8 +170,8 @@ export struct PlayerView {
   // 高精度播放头（秒）：弹幕引擎与恢复定位使用；@State curTime 只做秒级 UI 刷新。
   private playheadSec: number = 0;
   // 拖动进度条期间滑块以拖动值为准，避免 timeUpdate 回写 curTime 把滑块拽回。
-  private sliderDragging: boolean = false;
-  private sliderDragValue: number = 0;
+  @State sliderDragging: boolean = false;
+  @State sliderDragValue: number = 0;
   private volumeRestoreTimer: number = -1;
   private fullscreenExitTimer: number = -1;
   private doubleTapFeedbackTimer: number = -1;
@@ -165,8 +180,10 @@ export struct PlayerView {
   private playerCreating: boolean = false;
   // 已加载弹幕对应的 cid，避免 aboutToAppear 与换源触发的并发/重复加载。
   private dmLoadedCid: number = -1;
-  // drawFrame 双缓冲，避免每帧分配 keep 数组。
-  private activeBack: Array<ActiveDm> = [];
+  // 弹幕分段加载状态（0 基段号）；分段首段失败时 dmSegFallback 置位，整体回退 XML 整段接口。
+  private dmSegLoaded: Set<number> = new Set<number>();
+  private dmSegLoading: Set<number> = new Set<number>();
+  private dmSegFallback: boolean = false;
 
   aboutToAppear(): void {
     // 被其他 NavDestination 覆盖时 aboutToDisappear 已置位；返回同一实例需恢复。
@@ -181,6 +198,15 @@ export struct PlayerView {
       this.activeQuality = this.currentQuality;
     }
     this.danmakuOn = this.externalDanmakuOn;
+    this.dmEngine.enabled = this.danmakuOn;
+    Immersive.setKeepScreenOn(false);
+    this.ensureAVSession();
+    if (this.initialSeekSeconds > 0) {
+      this.resumeAfterPrepare = this.initialSeekSeconds;
+      this.shouldPlayAfterPrepare = true;
+      this.curTime = this.initialSeekSeconds;
+      this.playheadSec = this.initialSeekSeconds;
+    }
     this.loadDanmaku();
     this.loadSponsorSegments();
     this.loadVideoChapters();
@@ -196,6 +222,246 @@ export struct PlayerView {
 
   onQualityOptionsChanged(): void {
     if (this.qualityOptions.length > 0) this.runtimeQualityOptions = this.qualityOptions;
+  }
+
+  private async ensureAVSession(): Promise<void> {
+    if (this.avSessionActive || this.avSessionBusy) return;
+    this.avSessionBusy = true;
+    try {
+      const context: common.UIAbilityContext | undefined =
+        this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+      if (context === undefined) return;
+      this.avSession = await avSession.createAVSession(context, 'BiliHaromny', 'video');
+      this.avSession.on('play', () => {
+        if (this.playing === false) this.togglePlay();
+      });
+      this.avSession.on('pause', () => {
+        if (this.playing) this.togglePlay();
+      });
+      this.avSession.on('seek', (time: number) => {
+        this.seekTo(time / 1000, true);
+      });
+      await this.avSession.activate();
+      this.avSessionActive = true;
+      this.updateAVSessionMetadata();
+      this.updateAVSessionPlaybackState();
+    } catch (e) {
+      this.avSession = null;
+    } finally {
+      this.avSessionBusy = false;
+    }
+  }
+
+  private updateAVSessionMetadata(): void {
+    const session: avSession.AVSession | null = this.avSession;
+    if (session === null || this.avSessionActive === false) return;
+    const metadata: avSession.AVMetadata = {
+      assetId: this.bvid.length > 0 ? this.bvid : String(this.aid),
+      title: this.videoTitle,
+      artist: this.ownerName,
+      mediaImage: this.videoCover.length > 0 ? this.videoCover : this.ownerFace,
+      duration: this.duration > 0 ? Math.floor(this.duration * 1000) : undefined,
+    };
+    session.setAVMetadata(metadata).catch(() => {
+    });
+  }
+
+  private updateAVSessionPlaybackState(): void {
+    const session: avSession.AVSession | null = this.avSession;
+    if (session === null || this.avSessionActive === false) return;
+    const state: avSession.AVPlaybackState = {
+      state: this.playing ? avSession.PlaybackState.PLAYBACK_STATE_PLAY :
+        avSession.PlaybackState.PLAYBACK_STATE_PAUSE,
+      speed: this.playbackRate,
+      position: {
+        elapsedTime: Math.floor(this.curTime * 1000),
+        updateTime: Date.now(),
+      },
+    };
+    session.setAVPlaybackState(state).catch(() => {
+    });
+  }
+
+  private deactivateAVSession(): void {
+    const session: avSession.AVSession | null = this.avSession;
+    if (session !== null && this.avSessionActive) {
+      try {
+        session.deactivate().catch(() => {
+        });
+      } catch (e) {
+      }
+    }
+    this.avSession = null;
+    this.avSessionActive = false;
+  }
+
+  onSubtitlesChanged(): void {
+    if (this.subtitles.length === 0) {
+      this.subtitleIndex = -1;
+      this.subtitleOn = false;
+      this.subtitleText = '';
+      this.subtitleCues = [];
+      return;
+    }
+    if (this.subtitleIndex < 0 || this.subtitleIndex >= this.subtitles.length) {
+      this.subtitleIndex = 0;
+    }
+    this.loadSubtitleTrack(this.subtitleIndex);
+  }
+
+  private subtitleLabel(): string {
+    if (this.subtitleIndex < 0 || this.subtitleIndex >= this.subtitles.length) return '关闭';
+    return this.subtitles[this.subtitleIndex].lanDoc.length > 0 ?
+      this.subtitles[this.subtitleIndex].lanDoc : this.subtitles[this.subtitleIndex].lan;
+  }
+
+  private async loadSubtitleTrack(index: number): Promise<void> {
+    if (index < 0 || index >= this.subtitles.length) {
+      this.subtitleCues = [];
+      this.subtitleText = '';
+      return;
+    }
+    const track: SubtitleTrack = this.subtitles[index];
+    this.subtitleLoading = true;
+    const seq: number = ++this.subtitleRequestSeq;
+    try {
+      const cues: Array<SubtitleCue> = await BiliApi.getSubtitleCues(track.url);
+      if (seq !== this.subtitleRequestSeq || this.subtitleIndex !== index) return;
+      this.subtitleCues = cues;
+      this.updateSubtitle(this.playheadSec);
+    } catch (e) {
+      if (seq === this.subtitleRequestSeq) {
+        this.subtitleCues = [];
+        this.subtitleText = '';
+      }
+    } finally {
+      if (seq === this.subtitleRequestSeq) this.subtitleLoading = false;
+    }
+  }
+
+  /** 二分查找当前秒数命中的 CC 字幕行，内容未变不写状态。 */
+  private updateSubtitle(timeSec: number): void {
+    const nextText: string = this.matchSubtitleText(timeSec);
+    if (nextText !== this.subtitleText) {
+      this.subtitleText = nextText;
+    }
+  }
+
+  private matchSubtitleText(timeSec: number): string {
+    if (this.subtitleOn === false || this.subtitleCues.length === 0) return '';
+    let lo: number = 0;
+    let hi: number = this.subtitleCues.length - 1;
+    let hit: number = -1;
+    while (lo <= hi) {
+      const mid: number = Math.floor((lo + hi) / 2);
+      const cue: SubtitleCue = this.subtitleCues[mid];
+      if (timeSec < cue.from) {
+        hi = mid - 1;
+      } else if (timeSec >= cue.to) {
+        lo = mid + 1;
+      } else {
+        hit = mid;
+        break;
+      }
+    }
+    if (hit < 0) {
+      // 前后两条字幕之间的间隙不显示；拖回开头也不显示上一句。
+      return '';
+    }
+    return this.subtitleCues[hit].content;
+  }
+
+  private changeSubtitle(index: number): void {
+    if (this.subtitleLoading && index === this.subtitleIndex) return;
+    this.subtitleIndex = index;
+    if (index < 0) {
+      this.subtitleOn = false;
+      this.subtitleText = '';
+      this.subtitleCues = [];
+      this.closeSettingPanels();
+      return;
+    }
+    this.subtitleOn = true;
+    this.subtitleText = '';
+    this.loadSubtitleTrack(index);
+    this.closeSettingPanels();
+  }
+
+  private toast(message: string): void {
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: message });
+    } catch (e) {
+      // 播放器销毁或窗口异常时忽略提示，避免二次崩溃。
+    }
+  }
+
+  private rebuildDmListSource(): void {
+    // 面板只展示已加载弹幕的前 300 条，避免一次重排上万行。
+    this.dmListSource.reset(this.dmEngine.list.slice(0, 300));
+    this.dmListCount = this.dmListSource.totalCount();
+  }
+
+  /** 弹幕列表：切到「更多功能」Sheet 内嵌子页，不再从播放器上弹层。 */
+  private openDanmakuList(): void {
+    this.rebuildDmListSource();
+    this.moreSheetPage = 'danmakuList';
+  }
+
+  private async loadDmFilterRules(): Promise<void> {
+    if (this.dmFilterLoading) return;
+    this.dmFilterLoading = true;
+    try {
+      const rules: Array<DmFilterRule> = await BiliApi.getDanmakuFilter();
+      this.dmFilterRuleSource.reset(rules);
+      this.dmFilterRulesCount = this.dmFilterRuleSource.totalCount();
+    } catch (e) {
+      this.dmFilterRuleSource.reset([]);
+      this.dmFilterRulesCount = 0;
+    } finally {
+      this.dmFilterLoading = false;
+    }
+  }
+
+  /** 屏蔽管理：切到「更多功能」Sheet 内嵌子页，不再从播放器上弹层。 */
+  private openDanmakuFilter(): void {
+    this.dmFilterDraft = '';
+    this.dmFilterType = 0;
+    this.moreSheetPage = 'dmFilter';
+    this.loadDmFilterRules().catch(() => {
+    });
+  }
+
+  private dmFilterTypeLabel(type: number): string {
+    if (type === 0) return '关键词';
+    if (type === 1) return '正则';
+    return '用户';
+  }
+
+  private async submitDmFilterRule(): Promise<void> {
+    if (this.dmFilterDraft.trim().length === 0) {
+      this.toast('请输入屏蔽内容');
+      return;
+    }
+    const result: ActionResult = await BiliApi.addDanmakuFilter(this.dmFilterType, this.dmFilterDraft);
+    if (result.ok) {
+      this.toast('已添加');
+      this.dmFilterDraft = '';
+      this.loadDmFilterRules().catch(() => {
+      });
+    } else {
+      this.toast(result.message);
+    }
+  }
+
+  private async deleteDmFilterRule(id: number): Promise<void> {
+    const result: ActionResult = await BiliApi.delDanmakuFilter([id]);
+    if (result.ok) {
+      this.toast('已删除');
+      this.loadDmFilterRules().catch(() => {
+      });
+    } else {
+      this.toast(result.message);
+    }
   }
 
   async onSourceVersionChanged(): Promise<void> {
@@ -220,9 +486,12 @@ export struct PlayerView {
     this.runtimeAudioSources = this.audioUrls;
     this.runtimeQualityOptions = this.qualityOptions;
     this.activeQuality = this.currentQuality;
+    this.subtitleText = '';
+    this.subtitleCues = [];
+    this.subtitleRequestSeq++;
     this.stopDmLoop(true);
-    this.dmList = [];
-    this.active = [];
+    this.dmEngine.list = [];
+    this.dmEngine.cursor = 0;
     this.onPlayingChange(false);
     if (oldPlayer !== null) {
       try {
@@ -257,16 +526,7 @@ export struct PlayerView {
     const text: string = this.localDanmakuText.trim();
     if (text.length === 0) return;
     const item: DanmakuItem = new DanmakuItem(this.playheadSec, 1, 0xFFFFFF, text);
-    // dmList 按 time 有序（二分查找依赖），本地弹幕也必须落在有序位置而非游标处。
-    let low: number = 0;
-    let high: number = this.dmList.length;
-    while (low < high) {
-      const middle: number = Math.floor((low + high) / 2);
-      if (this.dmList[middle].time <= item.time) low = middle + 1;
-      else high = middle;
-    }
-    this.dmList.splice(low, 0, item);
-    if (low < this.dmCursor) this.dmCursor++;
+    this.dmEngine.insertLocal(item);
     this.spawnDanmaku(this.playheadSec);
   }
 
@@ -320,7 +580,7 @@ export struct PlayerView {
     }
     this.playing = false;
     this.showControls = true;
-    this.stopDmLoop(false);
+    this.pauseDmLoop();
     this.onPlayingChange(false);
     // pause 完成后恢复音量；播放器仍保持暂停，返回点击继续时声音正常。
     if (this.volumeRestoreTimer >= 0) clearTimeout(this.volumeRestoreTimer);
@@ -378,7 +638,7 @@ export struct PlayerView {
       if (now >= segment.start && now < segment.end - 0.08 && this.lastSponsorUuid !== segment.uuid) {
         this.lastSponsorUuid = segment.uuid;
         this.seekTo(segment.end + 0.05, true);
-        promptAction.showToast({ message: segment.category === 'sponsor' ? '已跳过赞助广告' : '已跳过推广片段' });
+        this.toast(segment.category === 'sponsor' ? '已跳过赞助广告' : '已跳过推广片段');
         return true;
       }
     }
@@ -390,16 +650,78 @@ export struct PlayerView {
     const cid: number = this.cid;
     if (this.dmLoadedCid === cid) return;
     this.dmLoadedCid = cid;
+    this.dmSegLoaded.clear();
+    this.dmSegLoading.clear();
+    this.dmSegFallback = false;
+    this.dmSegLoading.add(0);
     try {
-      const list: Array<DanmakuItem> = await BiliApi.getDanmaku(cid);
+      // 优先 protobuf 分段接口（每 6 分钟一段）；首段失败才回退 XML 整段。
+      const first: Array<DanmakuItem> | null = await BiliApi.getDanmakuSeg(cid, this.aid, 1);
       if (this.destroyed || this.dmLoadedCid !== cid) return;
-      list.sort((a: DanmakuItem, b: DanmakuItem) => a.time - b.time);
-      this.dmList = list;
-      this.syncDanmakuCursor(this.playheadSec);
-      this.lastSpawnTime = -1;
+      if (first === null) {
+        this.dmSegFallback = true;
+        const list: Array<DanmakuItem> = await BiliApi.getDanmaku(cid);
+        if (this.destroyed || this.dmLoadedCid !== cid) return;
+        list.sort((a: DanmakuItem, b: DanmakuItem) => a.time - b.time);
+        this.dmEngine.lastPlayerTime = this.playheadSec;
+        this.dmEngine.setList(list);
+        return;
+      }
+      this.dmSegLoaded.add(0);
+      this.mergeDanmakuSegment(first);
+      // 首屏并行预取第 2 段；时长未知时不限制段数，空段兜底。
+      const total: number = this.danmakuSegmentTotal();
+      if (total !== 1) {
+        this.ensureDanmakuSegment(1);
+      }
     } catch (e) {
       // 失败后允许下一次进入/换源重新请求，而不是把 cid 永久标记为已加载。
       if (!this.destroyed && this.dmLoadedCid === cid) this.dmLoadedCid = -1;
+    } finally {
+      this.dmSegLoading.delete(0);
+    }
+  }
+
+  /** 弹幕分段总数：时长未知时返回 0，表示不限制段数（靠空段响应兜底）。 */
+  private danmakuSegmentTotal(): number {
+    const d: number = this.videoDuration > 0 ? this.videoDuration : this.duration;
+    return d > 0 ? Math.ceil(d / DM_SEGMENT_SECONDS) : 0;
+  }
+
+  /** 分段弹幕合入全局有序列表；游标重定位到播放头之后，避免重放已喷出的弹幕。 */
+  private mergeDanmakuSegment(items: Array<DanmakuItem>): void {
+    this.dmEngine.lastPlayerTime = this.playheadSec;
+    this.dmEngine.appendSorted(items);
+  }
+
+  /** 拉取指定分段（0 基）；已加载/加载中自动去重，失败不标记，播放头再次经过时重试。 */
+  private ensureDanmakuSegment(index: number): void {
+    if (this.dmSegFallback || this.cid <= 0 || index < 0) return;
+    const total: number = this.danmakuSegmentTotal();
+    if (total > 0 && index >= total) return;
+    if (this.dmSegLoaded.has(index) || this.dmSegLoading.has(index)) return;
+    this.dmSegLoading.add(index);
+    const cid: number = this.cid;
+    BiliApi.getDanmakuSeg(cid, this.aid, index + 1)
+      .then((items: Array<DanmakuItem> | null) => {
+        this.dmSegLoading.delete(index);
+        if (this.destroyed || this.dmLoadedCid !== cid) return;
+        if (items === null) return;
+        this.dmSegLoaded.add(index);
+        this.mergeDanmakuSegment(items);
+      })
+      .catch(() => {
+        this.dmSegLoading.delete(index);
+      });
+  }
+
+  /** 播放头推进时的分段预取：进入新段或逼近段尾（提前 30 秒）时拉取下一段。 */
+  private prefetchDanmakuSegments(now: number): void {
+    if (this.dmSegFallback || this.cid <= 0 || this.dmLoadedCid !== this.cid) return;
+    const current: number = Math.floor(now / DM_SEGMENT_SECONDS);
+    this.ensureDanmakuSegment(current);
+    if (now + 30 >= (current + 1) * DM_SEGMENT_SECONDS) {
+      this.ensureDanmakuSegment(current + 1);
     }
   }
 
@@ -450,6 +772,9 @@ export struct PlayerView {
           this.scheduleControlsHide();
           this.startDmLoop();
           this.buffering = false;
+          this.ensureAVSession();
+          this.updateAVSessionPlaybackState();
+          Immersive.setKeepScreenOn(true);
         } else if (state === 'paused' || state === 'completed') {
           this.resumeTransitionActive = false;
           this.playing = false;
@@ -459,7 +784,12 @@ export struct PlayerView {
             this.hideTimer = -1;
           }
           this.onPlayingChange(false);
-          this.stopDmLoop(false);
+          this.pauseDmLoop();
+          this.updateAVSessionPlaybackState();
+          Immersive.setKeepScreenOn(false);
+          if (state === 'completed') {
+            this.onEnded();
+          }
         }
       });
       p.on('error', (err: BusinessError) => {
@@ -472,15 +802,18 @@ export struct PlayerView {
         if (this.player !== p) return;
         // AVPlayer 上报毫秒，播放器 UI/弹幕内部统一使用秒。
         const nextTime: number = t / 1000;
-        if (this.dmLastPlayerTime > 0 && (nextTime < this.dmLastPlayerTime - 0.5 || nextTime > this.dmLastPlayerTime + 2.5)) {
+        if (this.dmEngine.lastPlayerTime > 0 && (nextTime < this.dmEngine.lastPlayerTime - 0.5 || nextTime > this.dmEngine.lastPlayerTime + 2.5)) {
           this.resetDanmakuAt(nextTime);
         }
-        this.dmLastPlayerTime = nextTime;
+        this.dmEngine.lastPlayerTime = nextTime;
         this.playheadSec = nextTime;
         // 控制层只需秒级刷新，避免 250ms 一次的 @State 写入驱动整棵控制子树重建。
         if (Math.floor(nextTime) !== Math.floor(this.curTime)) this.curTime = nextTime;
         this.onProgress(nextTime);
+        this.updateSubtitle(nextTime);
         this.spawnDanmaku(nextTime);
+        // 弹幕分段预取：进入新段或逼近段尾时拉取下一段（XML 兜底模式下为空操作）。
+        this.prefetchDanmakuSegments(nextTime);
         if (this.maybeSkipSponsor(nextTime)) return;
         const audio: media.AVPlayer | null = this.audioPlayer;
         // 双 DASH 轨只在明显失步时兜底校时；原先每 5 秒、220ms 阈值会制造周期性顿挫。
@@ -493,12 +826,13 @@ export struct PlayerView {
       });
       p.on('durationUpdate', (d: number) => {
         this.duration = d / 1000;
+        this.updateAVSessionMetadata();
       });
       p.on('bufferingUpdate', (infoType: media.BufferingInfoType, value: number) => {
         if (infoType === media.BufferingInfoType.BUFFERING_START) {
           // seek 的短暂缓冲由延迟提示管理，快速定位不闪 loading。
           if (!this.seekInFlight) this.buffering = true;
-          this.stopDmLoop(false);
+          this.pauseDmLoop();
         } else if (infoType === media.BufferingInfoType.BUFFERING_END) {
           // seek 尚未完成音轨对齐时不能提前隐藏 loading 或恢复弹幕时钟。
           if (!this.seekInFlight) {
@@ -638,7 +972,7 @@ export struct PlayerView {
 
   async changeQuality(qn: number): Promise<void> {
     if (this.qualityLoading || qn === this.activeQuality) {
-      this.showQualitySettings = false;
+      this.closeSettingPanels();
       return;
     }
     this.qualityLoading = true;
@@ -665,7 +999,7 @@ export struct PlayerView {
       this.prepared = false;
       this.playing = false;
       this.buffering = true;
-      this.showQualitySettings = false;
+      this.closeSettingPanels();
       this.stopDmLoop(false);
       if (oldPlayer !== null) {
         try {
@@ -695,7 +1029,7 @@ export struct PlayerView {
 
   setPlaybackSpeed(rate: number): void {
     this.playbackRate = rate;
-    this.showSpeedSettings = false;
+    this.closeSettingPanels();
     const p: media.AVPlayer | null = this.player;
     if (p !== null && this.prepared) {
       try {
@@ -771,7 +1105,7 @@ export struct PlayerView {
     this.panMode = '';
     this.gestureAdjustKind = '';
     this.gestureAdjustPercent = -1;
-    this.panStartX = event.fingerList.length > 0 ? event.fingerList[0].localX : this.canvasW / 2;
+    this.panStartX = event.fingerList.length > 0 ? event.fingerList[0].localX : this.dmEngine.width / 2;
     const brightness: number = Immersive.windowBrightness();
     if (brightness >= 0) this.gestureBrightness = brightness;
     this.panStartBrightness = this.gestureBrightness;
@@ -784,14 +1118,14 @@ export struct PlayerView {
     if (this.panMode.length === 0) {
       if (Math.max(absX, absY) < 12) return;
       if (absX > absY * 1.15) this.panMode = 'seek';
-      else if (absY > absX * 1.15) this.panMode = this.panStartX < this.canvasW / 2 ? 'brightness' : 'volume';
+      else if (absY > absX * 1.15) this.panMode = this.panStartX < this.dmEngine.width / 2 ? 'brightness' : 'volume';
       else return;
     }
     if (this.panMode === 'seek') {
       this.updateHorizontalSeek(event.offsetX);
       return;
     }
-    const travel: number = Math.max(180, this.canvasH * 0.72);
+    const travel: number = Math.max(180, this.dmEngine.height * 0.72);
     const now: number = Date.now();
     if (this.panMode === 'brightness') {
       const value: number = Math.max(0.02, Math.min(1, this.panStartBrightness - event.offsetY / travel));
@@ -857,14 +1191,14 @@ export struct PlayerView {
     this.doubleTapFeedbackScale = 0.78;
     this.doubleTapFeedbackOpacity = 0;
     if (this.doubleTapFeedbackTimer >= 0) clearTimeout(this.doubleTapFeedbackTimer);
-    animateTo({ duration: 120, curve: Curve.EaseOut }, () => {
+    this.getUIContext().animateTo({ duration: 120, curve: Curve.EaseOut }, () => {
       this.doubleTapFeedbackScale = 1;
       this.doubleTapFeedbackOpacity = 1;
     });
     this.togglePlay();
     this.doubleTapFeedbackTimer = setTimeout(() => {
       this.doubleTapFeedbackTimer = -1;
-      animateTo({ duration: 160, curve: Curve.EaseIn }, () => {
+      this.getUIContext().animateTo({ duration: 160, curve: Curve.EaseIn }, () => {
         this.doubleTapFeedbackScale = 1.08;
         this.doubleTapFeedbackOpacity = 0;
       });
@@ -972,8 +1306,16 @@ export struct PlayerView {
       return;
     }
     if (this.playing) {
-      p.pause();
-      if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.pause();
+      try {
+        p.pause();
+        if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.pause();
+        // AVPlayer 状态回调可能滞后一帧以上；点击后立即刷新按钮，回调再做最终校准。
+        this.playing = false;
+        this.showControls = true;
+        this.onPlayingChange(false);
+      } catch (e) {
+        // 底层状态不允许暂停时保持原 UI，等待 stateChange 校准。
+      }
     } else {
       // 用户主动点击继续时先通知外层恢复完整播放器高度；首播/切清晰度不会误触发。
       this.resumeTransitionActive = this.compactMode && !this.fullscreen;
@@ -981,6 +1323,9 @@ export struct PlayerView {
       try {
         p.play();
         if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.play();
+        this.playing = true;
+        this.onPlayingChange(true);
+        this.scheduleControlsHide();
       } catch (e) {
         this.resumeTransitionActive = false;
       }
@@ -998,6 +1343,8 @@ export struct PlayerView {
     this.playheadSec = clamped;
     this.curTime = clamped;
     this.onProgress(clamped);
+    this.updateSubtitle(clamped);
+    this.updateAVSessionPlaybackState();
     this.pendingSeekMs = targetMs;
     this.pendingSeekPrecise = precise;
     this.seekResumePlaying = this.seekResumePlaying || this.playing;
@@ -1154,6 +1501,7 @@ export struct PlayerView {
       this.exitFullscreen();
     } else {
       this.fullscreen = true;
+      this.dmEngine.fullscreen = true;
       this.restartDmLoopForViewport();
       AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', true);
       this.applyVideoScaleType();
@@ -1168,7 +1516,8 @@ export struct PlayerView {
       return;
     }
     this.fullscreen = false;
-    this.showDmSettings = false;
+    this.dmEngine.fullscreen = false;
+    this.showSideDrawer = false;
     this.restartDmLoopForViewport();
     this.applyVideoScaleType();
     // 先恢复竖屏，待窗口尺寸稳定后再恢复详情布局，避免短暂套用横屏宽度。
@@ -1193,8 +1542,7 @@ export struct PlayerView {
   }
 
   toggleControls(): void {
-    if (this.showDmSettings || this.showQualitySettings || this.showSpeedSettings || this.showChapterSettings ||
-      this.showMoreMenu) {
+    if (this.showMoreMenu || this.showSideDrawer) {
       this.closeSettingPanels();
       return;
     }
@@ -1208,37 +1556,41 @@ export struct PlayerView {
   }
 
   private closeSettingPanels(): void {
-    this.showDmSettings = false;
-    this.showQualitySettings = false;
-    this.showSpeedSettings = false;
-    this.showChapterSettings = false;
     this.showMoreMenu = false;
+    this.showSideDrawer = false;
   }
 
-  /** 竖屏右上角 ⋮ 菜单开关；与其余设置面板互斥。 */
+  /** 设置面板开关：竖屏弹底部 Sheet，横屏弹右侧抽屉；再点一次收起。 */
   private toggleMoreMenu(): void {
-    const next: boolean = !this.showMoreMenu;
-    this.closeSettingPanels();
-    this.showMoreMenu = next;
+    if (this.fullscreen) {
+      const next: boolean = !this.showSideDrawer;
+      this.closeSettingPanels();
+      this.showSideDrawer = next;
+      if (next) this.moreSheetPage = 'menu';
+    } else {
+      const next: boolean = !this.showMoreMenu;
+      this.closeSettingPanels();
+      this.showMoreMenu = next;
+      if (next) this.moreSheetPage = 'menu';
+    }
   }
 
-  /** 底部设置面板互斥开关：打开目标面板时关掉其余三个，再点一次则全部收起。 */
-  private exclusiveToggle(which: string): void {
-    const next: boolean = !(which === 'dm' ? this.showDmSettings : which === 'quality' ? this.showQualitySettings :
-      which === 'speed' ? this.showSpeedSettings : this.showChapterSettings);
+  /** 打开指定设置子页：竖屏走底部 Sheet，横屏走右侧抽屉。 */
+  private openSettingsPage(page: string): void {
     this.closeSettingPanels();
-    if (which === 'dm') this.showDmSettings = next;
-    else if (which === 'quality') this.showQualitySettings = next;
-    else if (which === 'speed') this.showSpeedSettings = next;
-    else this.showChapterSettings = next;
+    this.moreSheetPage = page;
+    if (this.fullscreen) {
+      this.showSideDrawer = true;
+    } else {
+      this.showMoreMenu = true;
+    }
   }
 
   private scheduleControlsHide(): void {
     if (this.hideTimer >= 0) clearTimeout(this.hideTimer);
     this.hideTimer = setTimeout(() => {
       this.hideTimer = -1;
-      if (this.playing && !this.showDmSettings && !this.showQualitySettings &&
-        !this.showSpeedSettings && !this.showChapterSettings && !this.showMoreMenu) {
+      if (this.playing && !this.showMoreMenu && !this.showSideDrawer) {
         this.showControls = false;
       }
     }, 3000);
@@ -1272,8 +1624,9 @@ export struct PlayerView {
     this.seekInFlight = false;
     this.seekResumePlaying = false;
     this.stopDmLoop(true);
-    this.textWidthCache.clear();
-    this.colorCache.clear();
+    this.dmEngine.clearCaches();
+    Immersive.setKeepScreenOn(false);
+    this.deactivateAVSession();
     const p: media.AVPlayer | null = this.player;
     if (p !== null) {
       this.player = null;
@@ -1297,202 +1650,24 @@ export struct PlayerView {
   // ===== 弹幕引擎 =====
 
   spawnDanmaku(now: number): void {
-    if (!this.danmakuOn || this.dmList.length === 0) {
-      return;
-    }
-    // 数量同时受用户密度、实际轨道数和 Canvas 性能上限约束。
-    const maxActive: number = this.maxActiveDanmaku();
-    const spawnBudget: number = this.fullscreen ? 8 : 5;
-    let spawned: number = 0;
-    while (this.dmCursor < this.dmList.length && this.dmList[this.dmCursor].time <= now + 0.1 && spawned < spawnBudget) {
-      const item: DanmakuItem = this.dmList[this.dmCursor];
-      this.dmCursor++;
-      spawned++;
-      const isTop: boolean = item.mode === 5;
-      const isBottom: boolean = item.mode === 4;
-      const isScroll: boolean = !isTop && !isBottom;
-      if ((isScroll && this.blockScrollDm) || (isTop && this.blockTopDm) ||
-        (isBottom && this.blockBottomDm) || (this.blockColorDm && item.color !== 16777215)) {
-        continue;
-      }
-      if (this.active.length >= maxActive) {
-        continue;
-      }
-      const renderText: string = item.text.length > 80 ? item.text.substring(0, 79) + '…' : item.text;
-      const textW: number = this.measureText(renderText);
-      const renderColor: string = this.dmColor(item.color);
-      if (item.mode === 4 || item.mode === 5) {
-        // 固定弹幕：顶部/底部居中，停留 4 秒
-        const fixedLane: number = this.allocFixedLane(item.mode);
-        if (fixedLane < 0) continue;
-        this.active.push(new ActiveDm(item, -1, fixedLane, 0, now + 4, true, now, textW, renderText, renderColor));
-      } else {
-        // 所有弹幕保持近似相同的过屏时间；长文本虽然速度更快，但分轨时会预判追尾。
-        const spawnX: number = this.canvasW + Math.max(10, this.dmFontSize() * 0.3);
-        const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / Math.max(0.5, this.dmSpeed);
-        const speed: number = (spawnX + textW) / travelSeconds;
-        const lane: number = this.allocLane(spawnX, speed);
-        if (lane < 0) continue;
-        this.active.push(new ActiveDm(item, spawnX, lane, speed, 0, false, now, textW, renderText, renderColor));
-      }
-    }
-    if (this.active.length > 0) this.startDmLoop();
+    this.dmEngine.spawn(now);
+    if (this.dmEngine.active.length > 0) this.startDmLoop();
   }
 
-  private dmLineHeight(): number {
-    // 旧实现固定加 10，字号越大空隙越夸张；现在只保留 3vp 防描边相碰。
-    return this.dmFontSize() + 3;
-  }
-
-  private dmLaneCount(): number {
-    // 弹幕只覆盖画面上方约 86%，给进度条/字幕留出底部安全区。
-    const usableHeight: number = Math.max(this.dmLineHeight(), this.canvasH * 0.86);
-    return Math.max(1, Math.floor(usableHeight / this.dmLineHeight()));
-  }
-
-  private maxActiveDanmaku(): number {
-    const byDensity: number = this.fullscreen ? this.dmDensity * 2 : this.dmDensity;
-    const byLane: number = this.dmLaneCount() * 4;
-    return Math.max(3, Math.min(this.fullscreen ? 48 : 28, byDensity, byLane));
-  }
-
-  private laneSafeForScroll(lane: number, spawnX: number, newSpeed: number): boolean {
-    const minimumGap: number = Math.max(18, this.dmFontSize() * 0.62);
-    for (let i: number = 0; i < this.active.length; i++) {
-      const current: ActiveDm = this.active[i];
-      if (current.lane !== lane) continue;
-      // 固定弹幕仍占据同一条视觉轨道，滚动弹幕不能从它下面穿过。
-      if (current.isFixed) return false;
-      const currentTail: number = current.x + current.textWidth;
-      if (currentTail + minimumGap > spawnX) return false;
-      if (newSpeed > current.speed + 0.01) {
-        const catchSeconds: number = (spawnX - currentTail - minimumGap) / (newSpeed - current.speed);
-        const currentExitSeconds: number = Math.max(0, (currentTail + minimumGap) / Math.max(1, current.speed));
-        if (catchSeconds < currentExitSeconds) return false;
-      }
-    }
-    return true;
-  }
-
-  allocLane(spawnX: number, speed: number): number {
-    const laneCount: number = this.dmLaneCount();
-    for (let offset: number = 0; offset < laneCount; offset++) {
-      const lane: number = (this.nextScrollLane + offset) % laneCount;
-      if (this.laneSafeForScroll(lane, spawnX, speed)) {
-        this.nextScrollLane = (lane + 1) % laneCount;
-        return lane;
-      }
-    }
-    return -1;
-  }
-
-  allocFixedLane(mode: number): number {
-    const laneCount: number = this.dmLaneCount();
-    const candidateCount: number = Math.max(1, Math.min(3, laneCount));
-    const start: number = mode === 5 ? this.nextTopLane : this.nextBottomLane;
-    for (let offset: number = 0; offset < candidateCount; offset++) {
-      const relative: number = (start + offset) % candidateCount;
-      const lane: number = mode === 5 ? relative : laneCount - 1 - relative;
-      let available: boolean = true;
-      for (let i: number = 0; i < this.active.length; i++) {
-        // 顶部、底部和滚动弹幕共用视觉轨道，彻底避免模式间互相覆盖。
-        if (this.active[i].lane === lane) {
-          available = false;
-          break;
-        }
-      }
-      if (available) {
-        if (mode === 5) this.nextTopLane = (relative + 1) % candidateCount;
-        else this.nextBottomLane = (relative + 1) % candidateCount;
-        return lane;
-      }
-    }
-    return -1;
-  }
-
-  measureText(text: string): number {
-    const size: number = this.dmFontSize();
-    const key: string = String(Math.round(size * 10)) + ':' + text;
-    const cached: number | undefined = this.textWidthCache.get(key);
-    if (cached !== undefined) return cached;
-    this.ctx.font = '600 ' + size + 'px sans-serif';
-    const w: number = this.ctx.measureText(text).width;
-    const result: number = Math.max(20, w);
-    if (this.textWidthCache.size > 512) {
-      // 整体清空会造成短时间内大量重复测量；改为淘汰最早插入的一半（Map 迭代序即插入序）。
-      let evict: number = 256;
-      for (const oldest of this.textWidthCache.keys()) {
-        if (evict <= 0) break;
-        this.textWidthCache.delete(oldest);
-        evict--;
-      }
-    }
-    this.textWidthCache.set(key, result);
-    return result;
-  }
-
-  dmColor(color: number): string {
-    const cached: string | undefined = this.colorCache.get(color);
-    if (cached !== undefined) return cached;
-    const result: string = colorHex(color);
-    this.colorCache.set(color, result);
-    return result;
-  }
-
-  drawFrame(advance: boolean = true): void {
-    this.ctx.clearRect(0, 0, this.canvasW, this.canvasH);
-    const now: number = this.playheadSec;
-    const fontSize: number = this.dmFontSize();
-    const laneH: number = this.dmLineHeight();
-    // 双缓冲原地复用，避免每帧分配 keep 数组带来的 GC 压力。
-    const keep: Array<ActiveDm> = this.activeBack;
-    keep.length = 0;
-    const drawMs: number = Date.now();
-    const deltaSec: number = advance ?
-      (this.dmLastDrawMs > 0 ? Math.min(0.12, Math.max(0.012, (drawMs - this.dmLastDrawMs) / 1000)) : 0.033) : 0;
-    if (advance) this.dmLastDrawMs = drawMs;
-    this.ctx.globalAlpha = this.dmOpacity;
-    this.ctx.font = '600 ' + fontSize + 'px sans-serif';
-    this.ctx.strokeStyle = '#B3000000';
-    this.ctx.lineWidth = this.fullscreen ? 2.5 : 2;
-    for (let i: number = 0; i < this.active.length; i++) {
-      const dm: ActiveDm = this.active[i];
-      if (dm.isFixed) {
-        if (now > dm.fixedUntil) {
-          continue;
-        }
-        this.ctx.fillStyle = dm.renderColor;
-        const x: number = (this.canvasW - dm.textWidth) / 2;
-        const y: number = dm.lane * laneH + fontSize;
-        this.ctx.strokeText(dm.renderText, x, y);
-        this.ctx.fillText(dm.renderText, x, y);
-        keep.push(dm);
-      } else {
-        dm.x -= dm.speed * deltaSec;
-        if (dm.x + dm.textWidth < -10) {
-          continue;
-        }
-        this.ctx.fillStyle = dm.renderColor;
-        const y: number = dm.lane * laneH + fontSize;
-        this.ctx.strokeText(dm.renderText, dm.x, y);
-        this.ctx.fillText(dm.renderText, dm.x, y);
-        keep.push(dm);
-      }
-    }
-    this.ctx.globalAlpha = 1;
-    this.activeBack = this.active;
-    this.active = keep;
-    if (this.active.length === 0) this.stopDmLoop(false);
+  /** 统一绘制入口：画布上已经没有活动弹幕时顺带停掉定时器。 */
+  private renderDanmakuFrame(advance: boolean = true): void {
+    this.dmEngine.drawFrame(advance);
+    if (this.dmEngine.active.length === 0) this.stopDmLoop(false);
   }
 
   startDmLoop(): void {
-    if (this.dmTick >= 0 || !this.danmakuOn || this.active.length === 0) {
+    if (this.dmTick >= 0 || !this.danmakuOn || this.dmEngine.active.length === 0) {
       return;
     }
-    this.dmLastDrawMs = Date.now();
+    this.dmEngine.lastDrawMs = Date.now();
     this.dmTick = setInterval(() => {
-      if (this.playing && this.danmakuOn && this.active.length > 0) {
-        this.drawFrame();
+      if (this.playing && this.danmakuOn && this.dmEngine.active.length > 0) {
+        this.renderDanmakuFrame();
       }
     // 仅在存在活动弹幕时运行：普通 30fps、全屏 40fps，兼顾连续性与功耗。
     }, this.fullscreen ? 25 : 33);
@@ -1501,18 +1676,16 @@ export struct PlayerView {
   private onDanmakuAreaChange(newV: Area): void {
     const newW: number = newV.width as number;
     const newH: number = newV.height as number;
-    if (Math.abs(newW - this.canvasW) < 0.5 && Math.abs(newH - this.canvasH) < 0.5) return;
-    this.canvasW = Math.max(1, newW);
-    this.canvasH = Math.max(1, newH);
+    this.dmEngine.setViewport(newW, newH);
+  }
 
-    // Canvas 改尺寸会清空后备缓冲；同步重绘可避免收放播放器时出现闪空抽搐。
-    const maxLane: number = this.dmLaneCount();
-    const keep: Array<ActiveDm> = [];
-    for (let i: number = 0; i < this.active.length; i++) {
-      if (this.active[i].lane < maxLane) keep.push(this.active[i]);
+  /** 暂停/缓冲时只停时钟，保留已上屏弹幕；恢复播放后从当前帧继续推进。 */
+  private pauseDmLoop(): void {
+    if (this.dmTick >= 0) {
+      clearInterval(this.dmTick);
+      this.dmTick = -1;
     }
-    this.active = keep;
-    this.drawFrame(false);
+    this.dmEngine.lastDrawMs = 0;
   }
 
   stopDmLoop(clearActive: boolean): void {
@@ -1520,14 +1693,12 @@ export struct PlayerView {
       clearInterval(this.dmTick);
       this.dmTick = -1;
     }
-    this.dmLastDrawMs = 0;
+    this.dmEngine.lastDrawMs = 0;
     if (clearActive) {
-      this.active = [];
-      this.nextScrollLane = 0;
-      this.nextTopLane = 0;
-      this.nextBottomLane = 0;
+      this.dmEngine.clearActive();
+    } else {
+      this.dmEngine.clearCanvas();
     }
-    this.ctx.clearRect(0, 0, this.canvasW, this.canvasH);
   }
 
   toggleDanmaku(): void {
@@ -1537,13 +1708,12 @@ export struct PlayerView {
   private setDanmakuEnabled(enabled: boolean, notify: boolean): void {
     if (this.danmakuOn === enabled) return;
     this.danmakuOn = enabled;
+    this.dmEngine.enabled = enabled;
     if (!enabled) {
       this.stopDmLoop(true);
     } else {
       // 重新开启时从当前播放位置继续，不补画已经错过的一大批弹幕。
-      while (this.dmCursor < this.dmList.length && this.dmList[this.dmCursor].time < this.playheadSec - 0.2) {
-        this.dmCursor++;
-      }
+      this.dmEngine.syncCursor(this.playheadSec - 0.08);
       this.spawnDanmaku(this.playheadSec);
     }
     if (notify) this.onDanmakuChange(enabled);
@@ -1552,91 +1722,45 @@ export struct PlayerView {
   restartDmLoopForViewport(): void {
     const shouldRestart: boolean = this.dmTick >= 0;
     this.stopDmLoop(false);
-    this.textWidthCache.clear();
+    this.dmEngine.clearCaches();
     // 横竖屏字号和轨道数不同，切换时立即重排，避免旋转后沿用旧坐标产生抽搐。
     this.setDmFontScale(this.dmFontScale);
-    if (shouldRestart || (this.playing && this.active.length > 0)) this.startDmLoop();
+    if (shouldRestart || (this.playing && this.dmEngine.active.length > 0)) this.startDmLoop();
   }
 
   resetDanmakuAt(time: number): void {
     this.stopDmLoop(true);
-    this.syncDanmakuCursor(time);
-    this.dmLastPlayerTime = time;
+    this.dmEngine.resetAt(time);
+  }
+
+  setDmOpacity(value: number): void {
+    this.dmOpacity = value;
+    this.dmEngine.opacity = value;
   }
 
   setDmSpeed(value: number): void {
-    this.dmSpeed = value;
-    for (let i: number = 0; i < this.active.length; i++) {
-      const dm: ActiveDm = this.active[i];
-      if (!dm.isFixed) {
-        const spawnInset: number = Math.max(10, this.dmFontSize() * 0.3);
-        const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / Math.max(0.5, value);
-        dm.speed = (this.canvasW + spawnInset + dm.textWidth) / travelSeconds;
-      }
-    }
+    this.dmEngine.setSpeed(value);
   }
 
   setDmFontScale(value: number): void {
-    this.dmFontScale = value;
-    this.textWidthCache.clear();
-    for (let i: number = 0; i < this.active.length; i++) {
-      const dm: ActiveDm = this.active[i];
-      dm.textWidth = this.measureText(dm.renderText);
-      if (!dm.isFixed) {
-        const spawnInset: number = Math.max(10, this.dmFontSize() * 0.3);
-        const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / Math.max(0.5, this.dmSpeed);
-        dm.speed = (this.canvasW + spawnInset + dm.textWidth) / travelSeconds;
-      }
-    }
-    const laneCount: number = this.dmLaneCount();
-    this.active = this.active.filter((dm: ActiveDm) => dm.lane < laneCount);
-    this.drawFrame(false);
+    this.dmEngine.setFontScale(value);
   }
 
   setDmDensity(value: number): void {
-    this.dmDensity = Math.round(value);
-    const maxActive: number = this.maxActiveDanmaku();
-    if (this.active.length > maxActive) this.active = this.active.slice(0, maxActive);
+    this.dmEngine.setDensity(value);
   }
 
   applyDmFilters(): void {
-    const keep: Array<ActiveDm> = [];
-    for (let i: number = 0; i < this.active.length; i++) {
-      const dm: ActiveDm = this.active[i];
-      const isTop: boolean = dm.item.mode === 5;
-      const isBottom: boolean = dm.item.mode === 4;
-      const isScroll: boolean = !isTop && !isBottom;
-      if ((isScroll && this.blockScrollDm) || (isTop && this.blockTopDm) ||
-        (isBottom && this.blockBottomDm) || (this.blockColorDm && dm.item.color !== 16777215)) continue;
-      keep.push(dm);
-    }
-    this.active = keep;
-    if (this.active.length === 0) this.stopDmLoop(false);
+    this.dmEngine.blockScrollDm = this.blockScrollDm;
+    this.dmEngine.blockTopDm = this.blockTopDm;
+    this.dmEngine.blockBottomDm = this.blockBottomDm;
+    this.dmEngine.blockColorDm = this.blockColorDm;
+    this.dmEngine.applyFilters();
+    if (this.dmEngine.active.length === 0) this.stopDmLoop(false);
   }
 
   syncDanmakuCursor(time: number): void {
-    let low: number = 0;
-    let high: number = this.dmList.length;
-    const threshold: number = Math.max(0, time - 0.12);
-    while (low < high) {
-      const middle: number = Math.floor((low + high) / 2);
-      if (this.dmList[middle].time < threshold) low = middle + 1;
-      else high = middle;
-    }
-    this.dmCursor = low;
-  }
-
-  /** 默认字号进一步增大；行高单独由 dmLineHeight 控制，不再用大间距假装字号。 */
-  private dmFontSize(): number {
-    return (this.fullscreen ? 46 : 36) * this.dmFontScale;
-  }
-
-  /** 收起且暂停时只保留提示文字，不在当前画面上再叠一层深色控制渐变。 */
-  private controlsGradientColors(): Array<[ResourceColor, number]> {
-    if (this.compactMode && !this.fullscreen && !this.playing) {
-      return [['#00000000', 0.0], ['#00000000', 1.0]];
-    }
-    return CONTROLS_GRADIENT_COLORS;
+    this.dmEngine.syncCursor(time);
   }
 
   build() {
@@ -1663,15 +1787,30 @@ export struct PlayerView {
           this.onDanmakuAreaChange(newV);
         })
 
+      // CC 字幕层：底部黑底白字，开关与轨道选择见设置面板/更多菜单。
+      if (this.subtitleOn && this.subtitleText.length > 0) {
+        Text(this.subtitleText)
+          .fontSize(15)
+          .fontColor(this.sheetTitleColor())
+          .backgroundColor('#66000000')
+          .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+          .borderRadius(4)
+          .margin({ bottom: 96 })
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .textAlign(TextAlign.Center)
+          .align(Alignment.Bottom)
+      }
+
       // 错误遮罩
       if (this.errorText.length > 0) {
         Column({ space: 8 }) {
           Text('⚠')
             .fontSize(30)
-            .fontColor('#FFFFFF')
+            .fontColor(this.sheetTitleColor())
           Text(this.errorText)
             .fontSize(13)
-            .fontColor('#FFFFFF')
+            .fontColor(this.sheetTitleColor())
             .maxLines(3)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
@@ -1709,24 +1848,70 @@ export struct PlayerView {
       if ((this.showControls || (!this.playing && this.compactMode && !this.fullscreen)) && this.errorText.length === 0) {
         Column() {
           if (this.compactMode && !this.fullscreen) {
-            Blank()
-            // 收起态无论播放或暂停都只使用左下角播放键，不再在画面中央重复放入口。
-            Row({ space: 7 }) {
-              this.IconButton(this.playing ? $r('app.media.ic_pause') : $r('app.media.ic_play'), 16, 36, 36, '#FFFFFF', true,
-                () => {
-                  this.togglePlay();
-                })
-              Text(formatDuration(this.progressDisplayTime()))
-                .fontSize(10)
-                .fontColor('#FFFFFF')
-              this.ProgressSlider(true)
-              this.IconButton($r('app.media.ic_fullscreen'), 20, 36, 36, '#FFFFFF', false, () => {
-                this.toggleFullscreen();
-              })
+            if (!this.playing) {
+              // 参考官方客户端暂停最小化蒙版：深色横幅，返回/立即播放/更多三段布局。
+              Stack({ alignContent: Alignment.Center }) {
+                Column()
+                  .width('100%')
+                  .height('100%')
+                  .backgroundColor('#A30B0C10')
+                Row() {
+                  this.IconButton($r('app.media.ic_back'), 24, 42, 42, '#F2FFFFFF', false, () => {
+                    this.onBack();
+                  })
+                  Blank()
+                  Row({ space: 9 }) {
+                    Image($r('app.media.ic_video_replay'))
+                      .width(31)
+                      .height(31)
+                      .renderMode(ImageRenderMode.Template)
+                      .fillColor('#F2FFFFFF')
+                    Text('立即播放')
+                      .fontSize(18)
+                      .fontWeight(FontWeight.Medium)
+                      .fontColor('#F2FFFFFF')
+                  }
+                  .height(48)
+                  .padding({ left: 8, right: 8 })
+                  .alignItems(VerticalAlign.Center)
+                  .onClick(() => {
+                    this.togglePlay();
+                  })
+                  Blank()
+                  this.IconButton($r('app.media.ic_more'), 22, 42, 42, '#F2FFFFFF', false, () => {
+                    this.toggleMoreMenu();
+                  })
+                }
+                .width('100%')
+                .height('100%')
+                .padding({ left: 6, right: 6 })
+                .alignItems(VerticalAlign.Center)
+              }
+              .width('100%')
+              .height('100%')
+            } else {
+              // 播放中的收起态保留单行进度控制。
+              Column() {
+                Blank()
+                Row({ space: 7 }) {
+                  this.IconButton($r('app.media.ic_pause'), 16, 36, 36, '#FFFFFF', true, () => {
+                    this.togglePlay();
+                  })
+                  Text(formatDuration(this.progressDisplayTime()))
+                    .fontSize(10)
+                    .fontColor(this.sheetTitleColor())
+                  this.ProgressSlider(true)
+                  this.IconButton($r('app.media.ic_fullscreen'), 20, 36, 36, '#FFFFFF', false, () => {
+                    this.toggleFullscreen();
+                  })
+                }
+                .width('100%')
+                .height(44)
+                .padding({ left: 8, right: 8, bottom: 4 })
+              }
+              .width('100%')
+              .height('100%')
             }
-            .width('100%')
-            .height(44)
-            .padding({ left: 8, right: 8, bottom: 4 })
           } else {
             if (this.fullscreen) {
               PlayerFullscreenHeader({
@@ -1767,21 +1952,18 @@ export struct PlayerView {
               qualityLoading: this.qualityLoading,
               qualityLabel: this.qualityLabel(),
               playbackRate: this.playbackRate,
-              showQualitySettings: this.showQualitySettings,
-              showChapterSettings: this.showChapterSettings,
-              showSpeedSettings: this.showSpeedSettings,
               dmDraft: this.dmDraft,
               dmSending: this.dmSending,
               onPlay: () => this.togglePlay(),
               onDanmaku: () => this.toggleDanmaku(),
-              onDanmakuSettings: () => this.exclusiveToggle('dm'),
+              onDanmakuSettings: () => this.openSettingsPage('dm'),
               onSponsor: () => {
                 this.sponsorSkipEnabled = !this.sponsorSkipEnabled;
-                promptAction.showToast({ message: this.sponsorSkipEnabled ? '广告空降已开启' : '广告空降已关闭' });
+                this.toast(this.sponsorSkipEnabled ? '广告空降已开启' : '广告空降已关闭');
               },
-              onChapter: () => this.exclusiveToggle('chapter'),
-              onQuality: () => this.exclusiveToggle('quality'),
-              onSpeed: () => this.exclusiveToggle('speed'),
+              onChapter: () => this.openSettingsPage('chapters'),
+              onQuality: () => this.openSettingsPage('quality'),
+              onSpeed: () => this.openSettingsPage('speed'),
               onFullscreen: () => this.toggleFullscreen(),
               onProgressChange: (value: number, mode: SliderChangeMode) => this.onProgressSliderChange(value, mode),
               onDmDraftChange: (value: string) => this.onDmDraftChange(value),
@@ -1793,35 +1975,26 @@ export struct PlayerView {
         .height('100%')
         .linearGradient({
           angle: 180,
-          colors: this.controlsGradientColors(),
+          colors: CONTROLS_GRADIENT_COLORS,
         })
       }
 
-      // 竖屏 ⋮ 更多菜单：浮在播放器右上角，透明区域不拦截画面点击。
-      if (this.showControls && this.showMoreMenu && !this.fullscreen && this.errorText.length === 0) {
-        this.MoreMenuPanel()
-      }
-
-      if (this.showControls && this.showDmSettings && this.errorText.length === 0) {
-        this.SettingsPanelHost(0)
-      }
-
-      if (this.showControls && this.showQualitySettings && this.errorText.length === 0) {
-        this.SettingsPanelHost(1)
-      }
-
-      if (this.showControls && this.showChapterSettings && this.errorText.length === 0) {
-        this.SettingsPanelHost(2)
-      }
-
-      if (this.showControls && this.showSpeedSettings && this.errorText.length === 0) {
-        this.SettingsPanelHost(3)
+      // 横屏设置抽屉：从右侧滑入，点左侧空白收起；竖屏设置走 bindSheet（见下方 showMoreMenu）。
+      if (this.fullscreen && this.showSideDrawer && this.errorText.length === 0) {
+        this.SideSettingsDrawer()
       }
     }
     .width('100%')
     .height('100%')
     .clip(true)
     .backgroundColor('#000000')
+    .bindSheet($$this.showMoreMenu, this.MoreMenuSheetContent(), {
+      height: 600,
+      dragBar: false,
+      showClose: false,
+      radius: { topLeft: 18, topRight: 18 },
+      backgroundColor: this.isDark ? '#18191C' : '#FFFFFF',
+    })
     .gesture(
       GestureGroup(GestureMode.Exclusive,
         TapGesture({ count: 2 })
@@ -1886,16 +2059,238 @@ export struct PlayerView {
     } else {
       this.sliderDragging = false;
       if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
-        this.seekTo(value);
+        this.seekTo(value, true);
       }
     }
   }
 
-  /** 设置面板状态编排留在播放器；具体视觉与选项列表由独立组件负责。 */
+  /** 横屏右侧设置抽屉：复用「更多功能」Sheet 的菜单与子页内容，点左侧空白收起。 */
   @Builder
-  SettingsPanelHost(which: number) {    PlayerSettingsPanel({
+  SideSettingsDrawer() {
+    Row() {
+      Blank()
+        .layoutWeight(1)
+        .height('100%')
+        .onClick(() => {
+          this.showSideDrawer = false;
+          this.moreSheetPage = 'menu';
+        })
+      Column() {
+        this.MoreMenuSheetContent()
+      }
+      .width(320)
+      .height('100%')
+      .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+      .shadow({ radius: 24, color: '#40000000', offsetX: -6, offsetY: 0 })
+    }
+    .width('100%')
+    .height('100%')
+    .transition(TransitionEffect.asymmetric(
+      TransitionEffect.opacity(0).combine(TransitionEffect.translate({ x: 320 }))
+        .animation({ duration: 220, curve: Curve.EaseOut }),
+      TransitionEffect.opacity(0).combine(TransitionEffect.translate({ x: 320 }))
+        .animation({ duration: 160, curve: Curve.EaseIn })))
+  }
+
+  /** 竖屏 ⋮ 更多菜单：清晰度/倍速/弹幕设置/分段/空降收纳项。 */
+  private sheetTitleColor(): string {
+    return this.isDark ? '#FFFFFF' : '#18191C';
+  }
+
+  private sheetSubColor(): string {
+    return this.isDark ? '#B3FFFFFF' : '#5A5F66';
+  }
+
+  private sheetRowBg(): string {
+    return this.isDark ? '#26272B' : '#F5F7F9';
+  }
+
+  @Builder
+  DanmakuListPanel(embedded: boolean = false) {
+    Column({ space: 8 }) {
+      Row() {
+        Text('弹幕列表').fontSize(15).fontWeight(FontWeight.Bold).fontColor(this.sheetTitleColor())
+        Blank()
+        Text(this.dmListCount > 0 ? '已加载 ' + String(this.dmListCount) + ' 条' : '暂无弹幕')
+          .fontSize(11)
+          .fontColor(this.sheetSubColor())
+      }
+      .width('100%')
+      if (this.dmListCount === 0) {
+        Text('播放后这里会列出已加载的弹幕')
+          .fontSize(12)
+          .fontColor(this.sheetSubColor())
+          .width('100%')
+          .textAlign(TextAlign.Center)
+          .padding({ top: 20, bottom: 20 })
+      } else {
+        List({ space: 4 }) {
+          LazyForEach(this.dmListSource, (item: DanmakuItem) => {
+            ListItem() {
+              Row({ space: 8 }) {
+                Text(formatDuration(item.time))
+                  .fontSize(11)
+                  .fontColor(this.accent)
+                Text(item.text)
+                  .fontSize(12)
+                  .fontColor(this.sheetTitleColor())
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .layoutWeight(1)
+              }
+              .width('100%')
+              .padding({ left: 8, right: 8, top: 7, bottom: 7 })
+              .borderRadius(6)
+              .backgroundColor(this.sheetRowBg())
+              .onClick(() => {
+                this.seekTo(item.time, true);
+                this.showMoreMenu = false;
+                this.showSideDrawer = false;
+              })
+            }
+          }, (item: DanmakuItem) => String(item.time) + '_' + item.text)
+        }
+        .width('100%')
+        .height(embedded ? 'auto' : 200)
+        .layoutWeight(embedded ? 1 : 0)
+        .scrollBar(BarState.Off)
+      }
+    }
+    .width('100%')
+    .height(embedded ? '100%' : 'auto')
+    .padding({ left: 16, right: 16, top: 12, bottom: 14 })
+    .borderRadius(embedded ? 0 : { topLeft: 16, topRight: 16 })
+    .backgroundColor(embedded ? '#00000000' : (this.isDark ? '#18191C' : '#FFFFFF'))
+    .backdropBlur(embedded ? 0 : 24)
+    .border(embedded ? { width: 0 } : { width: { top: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
+    .align(embedded ? Alignment.Top : Alignment.Bottom)
+    .transition(embedded ? TransitionEffect.IDENTITY :
+      TransitionEffect.asymmetric(
+        TransitionEffect.opacity(0).combine(TransitionEffect.translate({ y: 24 }))
+          .animation({ duration: 200, curve: Curve.EaseOut }),
+        TransitionEffect.opacity(0).animation({ duration: 150, curve: Curve.EaseIn })))
+  }
+
+  @Builder
+  DmFilterPanel(embedded: boolean = false) {
+    Column({ space: 8 }) {
+      Row() {
+        Text('弹幕屏蔽管理').fontSize(15).fontWeight(FontWeight.Bold).fontColor(this.sheetTitleColor())
+        Blank()
+        Text(this.dmFilterLoading ? '加载中…' : '')
+          .fontSize(11)
+          .fontColor(this.sheetSubColor())
+      }
+      .width('100%')
+      Row({ space: 6 }) {
+        Text('关键词').fontSize(11)
+          .fontColor(this.dmFilterType === 0 ? '#FFFFFF' : this.sheetSubColor())
+          .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+          .borderRadius(13)
+          .backgroundColor(this.dmFilterType === 0 ? this.accent : this.sheetRowBg())
+          .onClick(() => this.dmFilterType = 0)
+        Text('正则').fontSize(11)
+          .fontColor(this.dmFilterType === 1 ? '#FFFFFF' : this.sheetSubColor())
+          .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+          .borderRadius(13)
+          .backgroundColor(this.dmFilterType === 1 ? this.accent : this.sheetRowBg())
+          .onClick(() => this.dmFilterType = 1)
+        Text('用户').fontSize(11)
+          .fontColor(this.dmFilterType === 2 ? '#FFFFFF' : this.sheetSubColor())
+          .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+          .borderRadius(13)
+          .backgroundColor(this.dmFilterType === 2 ? this.accent : this.sheetRowBg())
+          .onClick(() => this.dmFilterType = 2)
+      }
+      .width('100%')
+      Row({ space: 6 }) {
+        TextInput({ text: this.dmFilterDraft, placeholder: '输入后点添加' })
+          .layoutWeight(1)
+          .height(32)
+          .fontSize(12)
+          .fontColor(this.sheetTitleColor())
+          .placeholderColor(this.sheetSubColor())
+          .backgroundColor(this.sheetRowBg())
+          .borderRadius(15)
+          .padding({ left: 12, right: 12 })
+          .onChange((value: string) => this.dmFilterDraft = value)
+        Text('添加').fontSize(12).fontColor('#FFFFFF')
+          .padding({ left: 14, right: 14, top: 7, bottom: 7 })
+          .borderRadius(15)
+          .backgroundColor(this.accent)
+          .onClick(() => {
+            this.submitDmFilterRule().catch(() => {
+            });
+          })
+      }
+      .width('100%')
+      if (this.dmFilterRulesCount === 0) {
+        Text(this.dmFilterLoading ? '加载中…' : '暂无屏蔽规则')
+          .fontSize(12)
+          .fontColor(this.sheetSubColor())
+          .width('100%')
+          .textAlign(TextAlign.Center)
+          .padding({ top: 18, bottom: 18 })
+      } else {
+        List({ space: 4 }) {
+          LazyForEach(this.dmFilterRuleSource, (rule: DmFilterRule) => {
+            ListItem() {
+              Row({ space: 8 }) {
+                Text(this.dmFilterTypeLabel(rule.type))
+                  .fontSize(10)
+                  .fontColor(this.accent)
+                  .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+                  .borderRadius(4)
+                  .backgroundColor('#26FB7299')
+                Text(rule.filter)
+                  .fontSize(12)
+                  .fontColor(this.sheetTitleColor())
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .layoutWeight(1)
+                Text('删除')
+                  .fontSize(11)
+                  .fontColor('#FF6B6B')
+                  .onClick(() => {
+                    this.deleteDmFilterRule(rule.id).catch(() => {
+                    });
+                  })
+              }
+              .width('100%')
+              .padding({ left: 8, right: 8, top: 7, bottom: 7 })
+              .borderRadius(6)
+              .backgroundColor(this.sheetRowBg())
+            }
+          }, (rule: DmFilterRule) => String(rule.id))
+        }
+        .width('100%')
+        .height(embedded ? 'auto' : 180)
+        .layoutWeight(embedded ? 1 : 0)
+        .scrollBar(BarState.Off)
+      }
+    }
+    .width('100%')
+    .height(embedded ? '100%' : 'auto')
+    .padding({ left: 16, right: 16, top: 12, bottom: 14 })
+    .borderRadius(embedded ? 0 : { topLeft: 16, topRight: 16 })
+    .backgroundColor(embedded ? '#00000000' : (this.isDark ? '#18191C' : '#FFFFFF'))
+    .backdropBlur(embedded ? 0 : 24)
+    .border(embedded ? { width: 0 } : { width: { top: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
+    .align(embedded ? Alignment.Top : Alignment.Bottom)
+    .transition(embedded ? TransitionEffect.IDENTITY :
+      TransitionEffect.asymmetric(
+        TransitionEffect.opacity(0).combine(TransitionEffect.translate({ y: 24 }))
+          .animation({ duration: 200, curve: Curve.EaseOut }),
+        TransitionEffect.opacity(0).animation({ duration: 150, curve: Curve.EaseIn })))
+  }
+
+  /** 更多功能 Sheet 内嵌管理页：复用 PlayerSettingsPanel 的内容与回调，但去掉播放器内弹层的半透明灰底。 */
+  @Builder
+  EmbeddedSettingsPanel(which: number) {
+    PlayerSettingsPanel({
       which: which,
       fullscreen: this.fullscreen,
+      embedded: true,
       accent: this.accent,
       dmOpacity: this.dmOpacity,
       dmSpeed: this.dmSpeed,
@@ -1910,8 +2305,12 @@ export struct PlayerView {
       chapters: this.chapters,
       currentTime: this.curTime,
       playbackRate: this.playbackRate,
+      subtitles: this.subtitles,
+      subtitleIndex: this.subtitleIndex,
+      subtitleOn: this.subtitleOn,
+      onSubtitleChange: (index: number) => this.changeSubtitle(index),
       onResetDanmaku: () => {
-        this.dmOpacity = 0.85;
+        this.setDmOpacity(0.85);
         this.setDmSpeed(1);
         this.setDmFontScale(1.3);
         this.setDmDensity(18);
@@ -1921,7 +2320,7 @@ export struct PlayerView {
         this.blockColorDm = false;
         this.applyDmFilters();
       },
-      onDmOpacityChange: (value: number) => this.dmOpacity = value,
+      onDmOpacityChange: (value: number) => this.setDmOpacity(value),
       onDmSpeedChange: (value: number) => this.setDmSpeed(value),
       onDmFontScaleChange: (value: number) => this.setDmFontScale(value),
       onDmDensityChange: (value: number) => this.setDmDensity(value),
@@ -1935,58 +2334,150 @@ export struct PlayerView {
       onQualityChange: (qn: number) => this.changeQuality(qn),
       onChapterChange: (seconds: number) => {
         this.seekTo(seconds, true);
-        this.showChapterSettings = false;
+        this.closeSettingPanels();
       },
       onSpeedChange: (rate: number) => this.setPlaybackSpeed(rate),
     })
   }
 
-  /** 竖屏 ⋮ 更多菜单：清晰度/倍速/弹幕设置/分段/空降收纳项。 */
   @Builder
-  MoreMenuPanel() {
-    Stack({ alignContent: Alignment.TopEnd }) {
-      Column({ space: 2 }) {
-        this.MoreMenuItem('清晰度', this.qualityLoading ? '切换中…' : this.qualityLabel(),
-          () => this.exclusiveToggle('quality'))
-        this.MoreMenuItem('倍速',
-          this.playbackRate === 1 ? '1.0x' : this.playbackRate.toFixed(this.playbackRate % 1 === 0 ? 0 : 2) + 'x',
-          () => this.exclusiveToggle('speed'))
-        this.MoreMenuItem('弹幕设置', '', () => this.exclusiveToggle('dm'))
-        if (this.chapters.length > 0) {
-          this.MoreMenuItem('分段视频', String(this.chapters.length) + ' 段', () => this.exclusiveToggle('chapter'))
+  MoreMenuSheetContent() {
+    Column({ space: 4 }) {
+      if (this.moreSheetPage !== 'menu') {
+        Row({ space: 8 }) {
+          Image($r('app.media.ic_back'))
+            .width(24)
+            .height(24)
+            .renderMode(ImageRenderMode.Template)
+            .fillColor(this.isDark ? '#FFFFFF' : '#18191C')
+          Text('返回')
+            .fontSize(15)
+            .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+          Blank()
         }
-        this.MoreMenuItem('广告空降', this.sponsorSkipEnabled ? '已开启' : '已关闭', () => {
-          this.sponsorSkipEnabled = !this.sponsorSkipEnabled;
-          promptAction.showToast({ message: this.sponsorSkipEnabled ? '广告空降已开启' : '广告空降已关闭' });
+        .width('100%')
+        .padding({ left: 8, right: 8, top: 4, bottom: 10 })
+        .onClick(() => {
+          this.moreSheetPage = 'menu';
         })
+        Column() {
+          if (this.moreSheetPage === 'quality') this.EmbeddedSettingsPanel(1)
+          else if (this.moreSheetPage === 'speed') this.EmbeddedSettingsPanel(3)
+          else if (this.moreSheetPage === 'dm') this.EmbeddedSettingsPanel(0)
+          else if (this.moreSheetPage === 'chapters') this.EmbeddedSettingsPanel(2)
+          else if (this.moreSheetPage === 'subtitle') this.EmbeddedSettingsPanel(4)
+          else if (this.moreSheetPage === 'danmakuList') this.DanmakuListPanel(true)
+          else if (this.moreSheetPage === 'dmFilter') this.DmFilterPanel(true)
+        }
+        .layoutWeight(1)
+      } else {
+        Row() {
+          Text('更多功能')
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+          Blank()
+          Text('点击空白处关闭')
+            .fontSize(11)
+            .fontColor(this.isDark ? '#C8C8CC' : '#9499A0')
+          Image($r('app.media.ic_close'))
+            .width(22)
+            .height(22)
+            .renderMode(ImageRenderMode.Template)
+            .fillColor(this.isDark ? '#FFFFFF' : '#18191C')
+            .margin({ left: 8 })
+            .onClick(() => {
+              this.toggleMoreMenu();
+            })
+        }
+        .width('100%')
+        .padding({ left: 8, right: 8, top: 4, bottom: 10 })
+
+        this.MoreMenuItem($r('app.media.ic_play'), '清晰度', this.qualityLoading ? '切换中…' : this.qualityLabel(),
+          () => this.moreSheetPage = 'quality')
+        this.MoreMenuItem($r('app.media.ic_video_replay'), '倍速',
+          this.playbackRate === 1 ? '1.0x' : this.playbackRate.toFixed(this.playbackRate % 1 === 0 ? 0 : 2) + 'x',
+          () => this.moreSheetPage = 'speed')
+        this.MoreMenuItem($r('app.media.ic_danmaku_settings'), '弹幕设置', '', () => this.moreSheetPage = 'dm')
+        this.MoreMenuItem($r('app.media.ic_danmaku_on'), '弹幕列表',
+          this.dmEngine.list.length > 0 ? String(this.dmEngine.list.length) + ' 条' : '', () => this.openDanmakuList())
+        this.MoreMenuItem($r('app.media.ic_filter'), '屏蔽管理', '', () => this.openDanmakuFilter())
+        if (this.chapters.length > 0) {
+          this.MoreMenuItem($r('app.media.ic_sort'), '分段视频', String(this.chapters.length) + ' 段',
+            () => this.moreSheetPage = 'chapters')
+        }
+        if (this.subtitles.length > 0) {
+          this.MoreMenuItem($r('app.media.ic_comment'), 'CC字幕', this.subtitleOn ? this.subtitleLabel() : '关闭',
+            () => this.moreSheetPage = 'subtitle')
+        }
+        this.SponsorMenuItem()
       }
-      .width(164)
-      .padding({ top: 5, bottom: 5 })
-      .backgroundColor('#F21D1E22')
-      .borderRadius(10)
-      .margin({ top: 48, right: 8 })
     }
     .width('100%')
     .height('100%')
-    // 空白区域不拦截画面点击（透出到底层播放/隐藏控制层手势），菜单项自身可点。
-    .hitTestBehavior(HitTestMode.Transparent)
+    .padding({ left: 16, right: 16, top: 14, bottom: 14 })
+    .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+  }
+  @Builder
+  SponsorMenuItem() {
+    Row({ space: 12 }) {
+      Image($r('app.media.ic_hot'))
+        .width(22)
+        .height(22)
+        .renderMode(ImageRenderMode.Template)
+        .fillColor(this.isDark ? '#FFFFFF' : '#18191C')
+      Text('广告空降')
+        .fontSize(15)
+        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+      Blank()
+      Text(this.sponsorSkipEnabled ? '已开启' : '已关闭')
+        .fontSize(12)
+        .fontColor(this.isDark ? '#B3FFFFFF' : '#9499A0')
+      Image($r('app.media.ic_arrow_right'))
+        .width(18)
+        .height(18)
+        .renderMode(ImageRenderMode.Template)
+        .fillColor(this.isDark ? '#8AFFFFFF' : '#8A8A8E')
+    }
+    .width('100%')
+    .height(56)
+    .padding({ left: 14, right: 12 })
+    .borderRadius(12)
+    .backgroundColor(this.isDark ? '#26272B' : '#F5F7F9')
+    .onClick(() => {
+      this.sponsorSkipEnabled = !this.sponsorSkipEnabled;
+      this.toast(this.sponsorSkipEnabled ? '广告空降已开启' : '广告空降已关闭');
+    })
   }
 
   @Builder
-  MoreMenuItem(label: string, value: string, onTap: () => void) {
-    Row() {
+  MoreMenuItem(icon: Resource, label: string, value: string, onTap: () => void) {
+    Row({ space: 12 }) {
+      Image(icon)
+        .width(22)
+        .height(22)
+        .renderMode(ImageRenderMode.Template)
+        .fillColor(this.isDark ? '#FFFFFF' : '#18191C')
       Text(label)
-        .fontSize(13)
-        .fontColor('#FFFFFF')
+        .fontSize(15)
+        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
       Blank()
       if (value.length > 0) {
         Text(value)
           .fontSize(12)
-          .fontColor('#B3FFFFFF')
+          .fontColor(this.isDark ? '#B3FFFFFF' : '#9499A0')
       }
+      Image($r('app.media.ic_arrow_right'))
+        .width(18)
+        .height(18)
+        .renderMode(ImageRenderMode.Template)
+        .fillColor(this.isDark ? '#8AFFFFFF' : '#8A8A8E')
     }
     .width('100%')
-    .padding({ left: 14, right: 14, top: 10, bottom: 10 })
+    .height(56)
+    .padding({ left: 14, right: 12 })
+    .borderRadius(12)
+    .backgroundColor(this.isDark ? '#26272B' : '#F5F7F9')
     .onClick(() => onTap())
   }
 

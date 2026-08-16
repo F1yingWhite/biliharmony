@@ -18,6 +18,8 @@ export struct PageHeader {
   };
   /** 返回键与标题之间的可选内容（如会话头像） */
   @BuilderParam middle: () => void = this.emptyMiddle;
+  /** 标题右侧的可选操作区（清空 / 编辑等文字按钮） */
+  @BuilderParam trailing: () => void = this.emptyMiddle;
   @StorageProp('isDarkMode') isDark: boolean = false;
 
   @Builder
@@ -39,6 +41,7 @@ export struct PageHeader {
         .fontWeight(FontWeight.Bold)
         .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
       Blank()
+      this.trailing()
     }
     .width('100%')
     .height(this.headerHeight)

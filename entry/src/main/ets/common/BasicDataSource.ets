@@ -51,6 +51,16 @@ export class BasicDataSource<T> implements IDataSource {
     });
   }
 
+  /**
+   * 替换某一项并通知刷新。@Prop 对同引用对象不会重新同步，
+   * 原地修改模型字段后必须换成新对象引用，子组件才能拿到新值。
+   */
+  public updateItem(index: number, item: T): void {
+    if (index < 0 || index >= this.items.length) return;
+    this.items[index] = item;
+    this.notifyItemChanged(index);
+  }
+
   /** 尾部追加（分页加载） */
   public append(items: Array<T>): void {
     if (items.length === 0) {
