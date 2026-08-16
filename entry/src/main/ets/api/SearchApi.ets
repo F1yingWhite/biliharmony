@@ -27,6 +27,22 @@ export class SearchApi {
     return result;
   }
 
+  // ===== 搜索趋势榜（x/v2/search/trending/ranking；keyword 可直接搜索） =====
+  static async getSearchTrending(): Promise<Array<HotSearchItem>> {
+    const resp: HttpResponse = await HttpClient.get(Api.searchTrending, Constants.webHeaders);
+    if (!resp.ok) {
+      return [];
+    }
+    const json: Record<string, Object> = resp.json();
+    const data: Record<string, Object> = asObject(json['data']);
+    const list: Array<Object> = asArray(data['list']);
+    const result: Array<HotSearchItem> = [];
+    for (let i: number = 0; i < list.length; i++) {
+      result.push(HotSearchItem.from(list[i]));
+    }
+    return result;
+  }
+
   // ===== 搜索（综合，取视频结果） =====
   static async search(keyword: string, page: number): Promise<Array<VideoItem>> {
     const params: Record<string, string> = {
@@ -162,11 +178,15 @@ export class SearchApi {
     return result;
   }
 
-  // ===== 用户搜索（order: ''/fans/level，v1 固定降序 order_sort=0） =====
-  static async searchUsers(keyword: string, page: number, order: string): Promise<UserSearchResult> {
+  // ===== 用户搜索（order: ''/fans/level；userType: 0 不限 1 认证UP主 2 普通用户 3 认证用户） =====
+  static async searchUsers(keyword: string, page: number, order: string,
+    userType: number = 0): Promise<UserSearchResult> {
     const extra: Record<string, string> = {};
     if (order.length > 0) {
       extra['order_sort'] = '0';
+    }
+    if (userType > 0) {
+      extra['user_type'] = String(userType);
     }
     const result: UserSearchResult = new UserSearchResult();
     const data: Record<string, Object> | null = await SearchApi.searchByType(keyword, SearchTypes.biliUser, page, order, extra);
@@ -316,6 +336,26 @@ export class SearchApi {
       result.push(VideoItem.fromHotItem(list[i]));
     }
     return result;
+  }
+
+  // ===== 搜索默认词（B 站首页搜索框的兜底占位词） =====
+  static async getSearchDefault(): Promise<string> {
+    try {
+      const params: Record<string, string> = {};
+      await WbiSign.encWbi(params);
+      const resp: HttpResponse = await HttpClient.get(
+        Api.searchDefault + '?' + HttpClient.buildQuery(params), Constants.webHeaders);
+      const data: Record<string, Object> | null = getData(resp);
+      if (data === null) return '';
+      // 实测返回结构：data.show_name 是字符串（如 "脱缰凯KK"），name 冗余同值。
+      const direct: string = asString(data['show_name'], '');
+      if (direct.length > 0) return direct;
+      const show: Record<string, Object> = asObject(data['show_name']);
+      const val: string = asString(show['value'], '');
+      return val.length > 0 ? val : '';
+    } catch (e) {
+      return '';
+    }
   }
 
   // ===== 搜索建议 =====

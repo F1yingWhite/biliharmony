@@ -45,6 +45,15 @@ export class MsgUnreadStore {
     MsgUnreadStore.publish();
   }
 
+  /** 全部已读：本地清空所有通知分类角标（B 站无批量已读接口）。 */
+  static clearAll(): void {
+    MsgUnreadStore.unread.reply = 0;
+    MsgUnreadStore.unread.at = 0;
+    MsgUnreadStore.unread.like = 0;
+    MsgUnreadStore.unread.sysMsg = 0;
+    MsgUnreadStore.publish();
+  }
+
   private static publish(): void {
     AppStorage.setOrCreate<number>('msgUnreadTotal', MsgUnreadStore.unread.total());
   }

@@ -15,7 +15,15 @@ export function asArray(v: Object | null | undefined): Array<Object> {
 }
 
 export function asString(v: Object | null | undefined, def: string = ''): string {
-  return (v === null || v === undefined) ? def : String(v);
+  if (v === null || v === undefined) {
+    return def;
+  }
+  // 防御：对象/数组被 String() 会变成 "[object Object]"，应返回默认值而非污染 UI。
+  if (typeof v === 'object') {
+    return def;
+  }
+  const s: string = String(v);
+  return s === '[object Object]' || s === '[object Array]' ? def : s;
 }
 
 export function asNumber(v: Object | null | undefined, def: number = 0): number {

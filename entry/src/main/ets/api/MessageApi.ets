@@ -65,6 +65,55 @@ export class MessageApi {
     }
   }
 
+  /** 私信（api.vc.bilibili.com/x/bplus/im/report/add；biz_code=4 私信场景）。 */
+  static async reportImMessage(accusedUid: number, reasonType: number, reasonDesc: string): Promise<ActionResult> {
+    if (accusedUid <= 0) return new ActionResult(false, '用户信息无效');
+    return actionWithCsrf('登录状态缺少 CSRF', '已提交举报，感谢反馈', '举报失败',
+      async (csrf: string): Promise<HttpResponse> => {
+        const params: Record<string, string> = {
+          'biz_code': '4',
+          'accused_uid': String(accusedUid),
+          'object_id': String(accusedUid),
+          'reason_type': String(reasonType),
+          'reason_desc': reasonDesc,
+          'module': '604',
+          'comment': '{}',
+          'extra': '{}',
+          'csrf': csrf,
+        };
+        return HttpClient.post(Api.sessionReportIm + '?' + HttpClient.buildQuery(params),
+          HttpClient.buildQuery({}),
+          HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+      });
+  }
+
+  /** 删除私信会话（api.vc.bilibili.com 域，需 WBI 签名 + csrf）。 */
+  static async removeSession(talkerId: number): Promise<ActionResult> {
+    if (talkerId <= 0) return new ActionResult(false, '会话参数无效');
+    if (HttpClient.getCookie('SESSDATA').length === 0) {
+      return new ActionResult(false, '登录状态已失效，请重新登录', -101);
+    }
+    const csrf: string = HttpClient.getCookie('bili_jct');
+    if (csrf.length === 0) return new ActionResult(false, '登录状态缺少 CSRF，请重新登录', -111);
+    const params: Record<string, string> = {
+      'talker_id': String(talkerId),
+      'session_type': '1',
+      'build': '0',
+      'mobi_app': 'web',
+      'csrf_token': csrf,
+      'csrf': csrf,
+    };
+    await WbiSign.encWbi(params);
+    const resp: HttpResponse = await HttpClient.post(Api.sessionRemove + '?' + HttpClient.buildQuery(params),
+      HttpClient.buildQuery({}),
+      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+    if (!resp.ok) return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
+    const json: Record<string, Object> = resp.json();
+    const code: number = Number(json['code'] ?? -1);
+    const ok: boolean = code === 0;
+    return new ActionResult(ok, ok ? '会话已删除' : (String(json['message'] ?? '删除失败') + ' (' + String(code) + ')'), code);
+  }
+
   static async getPrivateMessages(talkerId: number, beginSeqno: number = 0): Promise<PrivateMessagePageData> {
     const params: Record<string, string> = {
       'talker_id': String(talkerId), 'session_type': '1', 'size': '30', 'sender_device_id': '1',
@@ -246,5 +295,35 @@ export class MessageApi {
         return HttpClient.get(Api.msgSysUpdateCursor + '?' + HttpClient.buildQuery(params),
           HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
       });
-}
+  }
+
+  /** 删除单条通知（回复/@/赞）：tp 0=赞 1=回复 2=@，id 为通知 id。删除成功需调用方本地移除该行。 */
+  static async delNotify(kind: string, id: number): Promise<ActionResult> {
+    if (id <= 0) return new ActionResult(false, '通知参数无效');
+    const tp: number = kind === 'at' ? 2 : (kind === 'reply' ? 1 : 0);
+    return actionWithCsrf('登录状态缺少 CSRF', '已删除', '删除失败',
+      async (csrf: string): Promise<HttpResponse> => {
+        const params: Record<string, string> = {
+          'tp': String(tp), 'id': String(id), 'build': '0', 'mobi_app': 'web', 'csrf': csrf,
+        };
+        return HttpClient.post(Api.xMsgNotifyDel + '?' + HttpClient.buildQuery(params),
+          HttpClient.buildQuery({}),
+          HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+      });
+  }
+
+  /** 删除系统通知：ids 为通知 id 数组（type=4，对齐 PiliPlus delSysMsg）。 */
+  static async delSysNotify(ids: Array<number>): Promise<ActionResult> {
+    if (ids.length === 0) return new ActionResult(false, '通知参数无效');
+    return actionWithCsrf('登录状态缺少 CSRF', '已删除', '删除失败',
+      async (csrf: string): Promise<HttpResponse> => {
+        const params: Record<string, string> = {
+          'ids': ids.map((id: number) => String(id)).join(','),
+          'station_ids': '', 'type': '4', 'mobi_app': 'web', 'csrf': csrf,
+        };
+        return HttpClient.post(Api.xSysNotifyDel + '?' + HttpClient.buildQuery(params),
+          HttpClient.buildQuery({}),
+          HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+      });
+  }
 }

@@ -92,6 +92,11 @@ export struct VideoCard {
       .width('100%')
       .clip(true)
       .borderRadius(12)
+      // 淡色细边框增强卡片边缘感：浅色模式淡黑、深色模式淡白（透明度低，不压过封面）。
+      .border({
+        width: 0.6,
+        color: this.isDark ? '#26FFFFFF' : '#1C000000',
+      })
       .shadow({ radius: 12, color: this.isDark ? '#59000000' : '#1F000000', offsetX: 0, offsetY: 4 })
 
       // 标题

@@ -181,6 +181,8 @@ export struct ImageViewerPage {
   private sizeCache: Map<number, string> = new Map<number, string>();
   @StorageProp('imageViewerCloseRequest') @Watch('onCloseRequested') closeRequest: number = 0;
   private closing: boolean = false;
+  /** 低于此体积（3MB）的图片直接加载原图，不再先缩略图后手动“查看原图”。 */
+  private static readonly ORIGINAL_SIZE_THRESHOLD: number = 3 * 1024 * 1024;
 
   aboutToAppear(): void {
     this.currentIndex = Math.max(0, Math.min(this.param.images.length - 1, this.param.initialIndex));
@@ -261,11 +263,19 @@ export struct ImageViewerPage {
       const lengthText: string = String(headers['content-length'] ?? '');
       const bytes: number = Number.parseInt(lengthText);
       let label: string = '';
+      // 3MB 以下的图片打开即加载原图：体积小，先缩略图再手动换原图反而闪一次。
+      const autoOriginal: boolean = Number.isFinite(bytes) && bytes > 0 &&
+        bytes < ImageViewerPage.ORIGINAL_SIZE_THRESHOLD;
       const lowRes: boolean = Number.isFinite(bytes) && bytes > 0 && bytes < 200 * 1024;
       if (Number.isFinite(bytes) && bytes > 0 && !lowRes) {
         label = bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MB' : String(Math.ceil(bytes / 1024)) + ' KB';
       }
       this.lowResFlags[index] = lowRes;
+      if (autoOriginal && !this.originalFlags[index]) {
+        const next: Array<boolean> = this.originalFlags.slice();
+        next[index] = true;
+        this.originalFlags = next;
+      }
       this.sizeCache.set(index, label);
       if (index === this.currentIndex) this.originalSizeText = label;
       request.destroy();

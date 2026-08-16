@@ -2,6 +2,7 @@
  * 全局导航：Navigation 根（pages/Index）持有唯一 NavPathStack，
  * 全应用统一通过 AppNavStack 跳转（替代旧版 @kit.ArkUI router）。
  */
+import { FavoriteFolderItem } from '../model/Models';
 
 /** 视频详情页跳转参数 */
 export interface VideoDetailParam {
@@ -28,6 +29,11 @@ export interface LiveRoomParam {
   uname: string;
   face: string;
   cover: string;
+}
+
+/** 收藏夹排序页参数：待排序的自建收藏夹（已去除默认收藏夹）。 */
+export interface FavSortParam {
+  folders: Array<FavoriteFolderItem>;
 }
 
 /** 全屏图片查看参数 */
@@ -73,6 +79,13 @@ export const NAV_RELATION_LIST: string = 'RelationList';
 export const NAV_BANGUMI_DETAIL: string = 'BangumiDetail';
 export const NAV_RANK: string = 'Rank';
 export const NAV_ARTICLE: string = 'Article';
+export const NAV_BANGUMI_LIST: string = 'BangumiList';
+export const NAV_BANGUMI_INDEX: string = 'BangumiIndex';
+export const NAV_ZONE: string = 'Zone';
+export const NAV_BLACK_LIST: string = 'BlackList';
+export const NAV_LIVE_ZONE: string = 'LiveZone';
+export const NAV_FAV_SORT: string = 'FavSort';
+export const NAV_BANGUMI_TIMELINE: string = 'BangumiTimeline';
 
 /** 全局唯一导航栈，由 Index 页的 Navigation 挂载 */
 export const AppNavStack: NavPathStack = new NavPathStack();

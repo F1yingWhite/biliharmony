@@ -28,6 +28,7 @@ export struct ReplyThreadPanel {
   onDislike: (item: ReplyItem) => void = () => {};
   onShare: (item: ReplyItem) => void = () => {};
   onSelectReply: (item: ReplyItem) => void = () => {};
+  onDeleted: (item: ReplyItem) => void = () => {};
   onLoadMore: () => void = () => {};
   onDraftChange: (value: string) => void = () => {};
   onSend: () => void = () => {};
@@ -82,7 +83,7 @@ export struct ReplyThreadPanel {
     if (!meta.hasChildren) return;
     if (this.collapsed.has(item.rpid)) this.collapsed.delete(item.rpid);
     else this.collapsed.add(item.rpid);
-    this.getUIContext().animateTo({ duration: 240, curve: Curve.EaseInOut }, () => this.rebuildTree());
+    this.getUIContext().animateTo({ duration: 150, curve: Curve.EaseInOut }, () => this.rebuildTree());
   }
 
   build() {
@@ -115,6 +116,7 @@ export struct ReplyThreadPanel {
             onDislike: (item: ReplyItem) => this.onDislike(item),
             onShare: (item: ReplyItem) => this.onShare(item),
             onSelectReply: (item: ReplyItem) => this.onSelectReply(item),
+            onDeleted: (item: ReplyItem) => this.onDeleted(item),
             onNavigate: (action: () => void) => this.onNavigate(action),
           })
         }
@@ -149,20 +151,12 @@ export struct ReplyThreadPanel {
               onShare: (reply: ReplyItem) => this.onShare(reply),
               onSelectReply: (reply: ReplyItem) => this.onSelectReply(reply),
               onToggleThread: (reply: ReplyItem) => this.toggleBranch(reply),
+              onDeleted: (reply: ReplyItem) => this.onDeleted(reply),
               onNavigate: (action: () => void) => this.onNavigate(action),
             })
           }
-          // 以子回复顶边（也就是父节点下方）为锨点展开/收回，
-          // 不再使用看起来像从屏幕底部顶上来的平移。
-          .transition(TransitionEffect.asymmetric(
-            TransitionEffect.opacity(0)
-              .combine(TransitionEffect.scale({ x: 1, y: 0.82, centerX: '50%', centerY: '0%' }))
-              .combine(TransitionEffect.translate({ y: -4 }))
-              .animation({ duration: 220, curve: Curve.EaseOut }),
-            TransitionEffect.opacity(0)
-              .combine(TransitionEffect.scale({ x: 1, y: 0.82, centerX: '50%', centerY: '0%' }))
-              .combine(TransitionEffect.translate({ y: -4 }))
-              .animation({ duration: 180, curve: Curve.EaseIn })))
+          // 列表以稳定 rpid 为 key：点赞/点踩由 ReplyCard 内部镜像即时翻转，
+          // 不做 key 重建（重建会导致"闪一下"）。**不要改成 rev key**
         }, (item: ReplyItem) => String(item.rpid))
         ListItem() {
           Row() {

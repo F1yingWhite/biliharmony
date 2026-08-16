@@ -13,10 +13,19 @@ import { GlassHeaderBar } from '../components/GlassHeaderBar';
 import { AppNavStack, NAV_SEARCH, NAV_VIDEO_DETAIL, NAV_LOGIN, NAV_USER_SPACE, NAV_MESSAGES, NAV_HISTORY, NAV_FAVORITES,
   NAV_WATCH_LATER, NAV_LIVE_ROOM, NAV_IMAGE_VIEWER, NAV_DYNAMIC_DETAIL, VideoDetailParam, UserSpaceParam, LiveRoomParam,
   ImageViewerParam, DynamicDetailParam, NAV_RELATION_LIST, RelationListParam, NAV_BANGUMI_DETAIL,
-  BangumiDetailParam, NAV_RANK, NAV_ARTICLE, ArticlePageParam } from '../common/AppRouter';
+  BangumiDetailParam, NAV_RANK, NAV_ARTICLE, ArticlePageParam, NAV_BANGUMI_LIST, NAV_BANGUMI_INDEX, NAV_ZONE,
+  NAV_BLACK_LIST, NAV_LIVE_ZONE, NAV_FAV_SORT, NAV_BANGUMI_TIMELINE } from '../common/AppRouter';
 import { SearchPage } from './Search';
+import { FavSortParam } from '../common/AppRouter';
 import { MessagesPage } from './Messages';
 import { FavoritesPage, HistoryPage, WatchLaterPage } from './LibraryPages';
+import { BangumiListPage } from './BangumiListPage';
+import { BangumiIndexPage } from './BangumiIndexPage';
+import { BangumiTimelinePage } from './BangumiTimelinePage';
+import { ZoneChannelPage } from './ZoneChannelPage';
+import { BlackListPage } from './BlackListPage';
+import { LiveZonePage } from './LiveZonePage';
+import { FavoriteFolderSortPage } from './FavoriteFolderSortPage';
 import { VideoDetailPage } from './VideoDetail';
 import { LoginPage } from './Login';
 import { UserSpacePage } from './UserSpace';
@@ -317,6 +326,41 @@ struct Index {
         ArticlePage({ param: param as ArticlePageParam })
       }
       .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+    } else if (name === NAV_BANGUMI_LIST) {
+      NavDestination() {
+        BangumiListPage()
+      }
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+    } else if (name === NAV_BANGUMI_INDEX) {
+      NavDestination() {
+        BangumiIndexPage()
+      }
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+    } else if (name === NAV_BANGUMI_TIMELINE) {
+      NavDestination() {
+        BangumiTimelinePage()
+      }
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+    } else if (name === NAV_ZONE) {
+      NavDestination() {
+        ZoneChannelPage()
+      }
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+    } else if (name === NAV_BLACK_LIST) {
+      NavDestination() {
+        BlackListPage()
+      }
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+    } else if (name === NAV_LIVE_ZONE) {
+      NavDestination() {
+        LiveZonePage()
+      }
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+    } else if (name === NAV_FAV_SORT) {
+      NavDestination() {
+        FavoriteFolderSortPage({ param: (param as FavSortParam) })
+      }
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
     } else if (name === NAV_LOGIN) {
       NavDestination() {
         LoginPage()
@@ -393,8 +437,9 @@ struct Index {
           barBottomMargin: 16,
           systemMaterial: AppTheme.floatMaterial(this.glassOn),
         })
-        // 深色模式给原生玻璃叠一层深色吸收底，避免系统材质在 Dock 上泛成白雾。
-        .barBackgroundColor(this.glassOn ? (this.isDark ? '#B315161A' : '#00000000') : AppTheme.floatBg(this.isDark, false))
+        // 深色模式给原生玻璃叠一层深色吸收底：透明度必须足够高才能压住
+        // 系统材质在深色下的白雾（实测 ~70% 仍泛白，Dock 整条变浅灰）。
+        .barBackgroundColor(this.glassOn ? (this.isDark ? '#EA15161A' : '#00000000') : AppTheme.floatBg(this.isDark, false))
         .onChange(() => {
           AppTheme.resetHeaderFade();
         })

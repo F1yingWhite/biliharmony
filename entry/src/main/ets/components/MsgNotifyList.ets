@@ -155,6 +155,52 @@ export struct MsgNotifyList {
     .width('100%')
     .padding({ top: 11, bottom: 11 })
     .onClick(() => this.openItem(item))
+    // 长按删除单条通知（本地移除 + 服务端删除；系统通知走另一通道）
+    .gesture(
+      LongPressGesture({ repeat: false })
+        .onAction(() => this.confirmDelete(item))
+    )
+  }
+
+  /** 长按删除通知：确定后调用服务端删除，成功后本地移除该行。 */
+  private confirmDelete(item: MsgNotifyItem): void {
+    if (item.id <= 0) {
+      this.getUIContext().getPromptAction().showToast({ message: '该通知不支持删除' });
+      return;
+    }
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '删除通知',
+        message: '删除后将无法恢复，确定删除这条通知吗？',
+        buttons: [
+          { text: '取消', color: '#9499A0' },
+          { text: '删除', color: '#FB4A4A' },
+        ],
+      }).then((dialogResult) => {
+        if (Number(dialogResult.index) !== 1) return;
+        this.deleteItem(item);
+      });
+    } catch (e) {
+      // 弹窗失败不阻塞。
+    }
+  }
+
+  private async deleteItem(item: MsgNotifyItem): Promise<void> {
+    try {
+      const result = this.tab === 'sys' ?
+        await BiliApi.delSysNotify([item.id]) : await BiliApi.delNotify(this.tab, item.id);
+      if (result.ok) {
+        // 本地移除该行（按 id 过滤重建数组触发刷新）。
+        const all: Array<MsgNotifyItem> = this.source.getAll();
+        this.source.reset(all.filter((x: MsgNotifyItem) => x.id !== item.id));
+        this.itemCount = this.source.totalCount();
+        this.getUIContext().getPromptAction().showToast({ message: '已删除' });
+      } else {
+        this.getUIContext().getPromptAction().showToast({ message: result.message });
+      }
+    } catch (e) {
+      this.getUIContext().getPromptAction().showToast({ message: '删除失败，请稍后重试' });
+    }
   }
 
   build() {

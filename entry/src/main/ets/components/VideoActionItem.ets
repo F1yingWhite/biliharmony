@@ -1,4 +1,5 @@
 import { curves } from '@kit.ArkUI';
+import { Haptic } from '../common/Haptic';
 
 /** 视频点赞/投币/收藏/分享共用的主题色与弹性反馈按钮。 */
 @Component
@@ -8,6 +9,8 @@ export struct VideoActionItem {
   @Prop active: boolean = false;
   @Prop busy: boolean = false;
   onTap: () => void = () => {};
+  /** 长按触发附加操作（如点赞按钮长按弹「三连」）；为空则不挂手势。 */
+  onLongPress: (() => void) | null = null;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @State iconScale: number = 1;
@@ -48,6 +51,7 @@ export struct VideoActionItem {
     .padding({ top: 8, bottom: 8 })
     .onClick(() => {
       if (this.busy) return;
+      Haptic.tap();
       // 颜色由父页乐观更新驱动（active 即时翻转）；这里只做两段式弹性反馈：
       // 选中先放大再回落，取消先缩小再回弹，两个方向都有完整动画。
       const activating: boolean = !this.active;
@@ -61,5 +65,13 @@ export struct VideoActionItem {
       }, 120);
       this.onTap();
     })
+    .gesture(
+      this.onLongPress !== null ?
+        LongPressGesture({ repeat: false }).onAction(() => {
+          if (this.busy) return;
+          Haptic.tap();
+          this.onLongPress!();
+        }) : LongPressGesture({ repeat: false })
+    )
   }
 }

@@ -8,6 +8,7 @@ import { ArticlePageParam } from '../common/AppRouter';
 export struct ArticlePage {
   param: ArticlePageParam = { id: 0, title: '' };
   private controller: webview.WebviewController = new webview.WebviewController();
+  @StorageProp('isDarkMode') isDark: boolean = false;
 
   build() {
     Column() {
@@ -31,6 +32,6 @@ export struct ArticlePage {
     .width('100%')
     .height('100%')
     .padding({ top: Immersive.statusBarHeight() })
-    .backgroundColor('#FFFFFF')
+    .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
   }
 }

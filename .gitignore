@@ -27,3 +27,7 @@
 /PiliPlus/.flutter-plugins*
 /PiliPlus/android/.gradle
 /PiliPlus/android/local.properties
+
+# 本地测试临时目录
+/tool/
+/dist/

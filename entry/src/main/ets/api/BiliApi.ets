@@ -16,9 +16,10 @@ import { VideoItem, VideoDetail, PlayUrlInfo, ReplyData, ReplyItem, ReplyPageDat
   PrivateMessageItem, PrivateMessagePageData, BiliEmotePackage, RelationUserItem, RelationUserPageData,
   UserSpaceHeaderItem, BangumiSeason, MsgNotifyItem, MsgNotifyPageData, MsgFeedUnread, WatchLaterItem,
   PgcSearchItem, PgcSearchResult, ArticleSearchItem, ArticleSearchResult, SearchAllResult, SearchAllSection,
-  PopularSeriesItem, PopularSeriesData, SubtitleCue, SubtitleTrack } from '../model/Models';
+  PopularSeriesItem, PopularSeriesData, SubtitleCue, SubtitleTrack, WatchLaterSeasonItem,
+  BangumiIndexItem, BangumiIndexPageData, FollowTagItem, TimeLineDay, TimeLineEpisode } from '../model/Models';
 import { LiveChatMessage, LiveDanmakuInfo, LiveDanmakuServer, LiveEmoteItem, LiveEmotePackage, LivePlayInfo,
-  LiveQualityOption, LiveRoomInfo, LiveRoomItem, LiveSearchResult } from '../model/LiveModels';
+  LiveQualityOption, LiveRoomInfo, LiveRoomItem, LiveSearchResult, LiveStatusItem, LiveZone } from '../model/LiveModels';
 import { parseDanmakuSegment, ProtoDanmaku } from '../common/DanmakuProto';
 import { CommentApi } from './CommentApi';
 import { DynamicApi } from './DynamicApi';
@@ -64,12 +65,15 @@ export class DanmakuItem {
   mode: number = 1;    // 1-3 滚动, 4 底部, 5 顶部
   color: number = 0xFFFFFF;
   text: string = '';
+  /** 弹幕 id（dmid），protobuf 分段来源有值，弹幕举报用；XML 兜底无此字段为 0 */
+  id: number = 0;
 
-  constructor(time: number, mode: number, color: number, text: string) {
+  constructor(time: number, mode: number, color: number, text: string, id: number = 0) {
     this.time = time;
     this.mode = mode;
     this.color = color;
     this.text = text;
+    this.id = id;
   }
 }
 
@@ -136,6 +140,18 @@ export class BiliApi {
   // ===== 直播（委托 LiveApi） =====
   static async getLiveRooms(page: number, pageSize: number = 20): Promise<Array<LiveRoomItem>> {
     return LiveApi.getLiveRooms(page, pageSize);
+  }
+
+  static async getLiveZones(): Promise<Array<LiveZone>> {
+    return LiveApi.getLiveZones();
+  }
+
+  static async getLiveZoneRooms(zoneId: number, page: number, pageSize: number = 20): Promise<Array<LiveRoomItem>> {
+    return LiveApi.getLiveZoneRooms(zoneId, page, pageSize);
+  }
+
+  static async getLiveStatusByUids(uids: Array<number>): Promise<Array<LiveStatusItem>> {
+    return LiveApi.getLiveStatusByUids(uids);
   }
 
   static async getLiveRoomInfo(roomId: number, uid: number = 0): Promise<LiveRoomInfo | null> {
@@ -291,6 +307,20 @@ export class BiliApi {
     return BiliApi.postVideoAction(Api.likeVideo, params);
   }
 
+  /** 一键三连（点赞+投一币+收藏）：web_normal 协议，返回 0 表示成功（data 有 like/coin/fav 计数）。 */
+  static async likeTriple(aid: number): Promise<ActionResult> {
+    if (aid <= 0) return new ActionResult(false, '参数无效');
+    return BiliApi.postVideoAction(Api.likeTriple, {
+      'aid': String(aid),
+      'eab_x': '2',
+      'ramval': '0',
+      'source': 'web_normal',
+      'ga': '1',
+      'spmid': '333.788.0.0',
+      'statistics': '{"appId":100,"platform":5}',
+    });
+  }
+
   /** 视频点踩只有 App 端协议；dislike=0 点踩、1 取消。 */
   static async dislikeVideo(aid: number, bvid: string, dislike: boolean): Promise<ActionResult> {
     const accessToken: string = HttpClient.getAppAccessToken();
@@ -415,6 +445,19 @@ export class BiliApi {
     return BiliApi.postVideoAction(Api.sendDanmaku, params);
   }
 
+  /** 弹幕举报（需登录；reason 参考: 1 违法违规 2 色情 3 低俗 5 人身攻击 6 垃圾广告 7 引战 10 其他） */
+  static async reportDanmaku(cid: number, dmid: number, reason: number): Promise<ActionResult> {
+    if (cid <= 0 || dmid <= 0) {
+      return new ActionResult(false, '弹幕数据不完整，当前分段弹幕暂不支持举报');
+    }
+    return BiliApi.postVideoAction(Api.reportDanmaku, {
+      'cid': String(cid),
+      'dmid': String(dmid),
+      'reason': String(reason),
+      'type': '1',
+    });
+  }
+
   // ===== 番剧/影视（PGC）详情：season_id 与 ep_id 二选一；该接口数据主体在 result 而非 data =====
   static async getBangumiSeason(seasonId: number, epId: number): Promise<BangumiSeason | null> {
     if (seasonId <= 0 && epId <= 0) {
@@ -452,6 +495,88 @@ export class BiliApi {
     });
   }
 
+  // ===== 我的追番列表（需登录；space/bangumi/follow/list：type 1番剧 / 2国创·影视，vmid 由页面层传） =====
+  static async getBangumiFollowList(type: number, page: number, mid: number): Promise<Array<WatchLaterSeasonItem>> {
+    if (mid <= 0) return [];
+    const params: Record<string, string> = {
+      'vmid': String(mid),
+      'type': String(type),
+      'follow_status': '0',
+      'pn': String(Math.max(1, page)),
+    };
+    const resp: HttpResponse = await HttpClient.get(
+      Api.bangumiFollowList + '?' + HttpClient.buildQuery(params), Constants.webHeaders);
+    const data: Record<string, Object> | null = getData(resp);
+    if (data === null) {
+      return [];
+    }
+    const items: Array<Object> = asArray(data['list']);
+    const out: Array<WatchLaterSeasonItem> = [];
+    for (let i: number = 0; i < items.length; i++) {
+      out.push(WatchLaterSeasonItem.from(items[i]));
+    }
+    return out;
+  }
+
+  // ===== 番剧索引（season_type: 1番剧 2国创 4电影 5电视剧 3纪录片；isFinish: -1全部 0连载 1完结） =====
+  static async getBangumiIndex(seasonType: number, isFinish: number, page: number,
+    order: number = 0): Promise<BangumiIndexPageData> {
+    const result: BangumiIndexPageData = new BangumiIndexPageData();
+    const params: Record<string, string> = {
+      'season_id': '-1', 'area': '-1', 'is_finish': String(isFinish),
+      'copyright': '-1', 'season_status': '-1', 'year': '-1', 'style_id': '-1',
+      'order': String(order), 'st': '1', 'sort': '0',
+      'page': String(Math.max(1, page)), 'season_type': String(seasonType),
+      'pagesize': '20', 'type': '1',
+    };
+    // PGC 索引接口需要带 referer 的浏览器 UA。
+    const headers: Record<string, string> = HttpClient.merge(Constants.webHeaders, {
+      'Referer': 'https://www.bilibili.com/anime/',
+    });
+    const resp: HttpResponse = await HttpClient.get(Api.bangumiIndex + '?' + HttpClient.buildQuery(params), headers);
+    const data: Record<string, Object> | null = getData(resp);
+    if (data === null) {
+      return result;
+    }
+    result.hasNext = asBool(data['has_next'], false);
+    result.total = asNumber(data['total'], 0);
+    const list: Array<Object> = asArray(data['list']);
+    for (let i: number = 0; i < list.length; i++) {
+      const item: BangumiIndexItem = BangumiIndexItem.from(asObject(list[i]));
+      if (item.seasonId > 0) {
+        result.items.push(item);
+      }
+    }
+    return result;
+  }
+
+  /** 新番时间表：番剧(types=1)/国创(types=4) 前后 before/after 天的排播。 */
+  static async getPgcTimeline(types: number, before: number, after: number): Promise<Array<TimeLineDay>> {
+    const out: Array<TimeLineDay> = [];
+    const params: Record<string, string> = {
+      'types': String(types),
+      'before': String(before),
+      'after': String(after),
+    };
+    const resp: HttpResponse = await HttpClient.get(Api.pgcTimeline + '?' + HttpClient.buildQuery(params),
+      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://www.bilibili.com/anime/timeline/' }));
+    const json: Record<string, Object> = resp.json();
+    if (asNumber(json['code'], -1) !== 0) return out;
+    const result: Array<Object> = asArray(json['result']);
+    for (let i: number = 0; i < result.length; i++) {
+      const dayRaw: Record<string, Object> = asObject(result[i]);
+      const day: TimeLineDay = new TimeLineDay();
+      day.date = str(dayRaw, 'date', '');
+      day.dayOfWeek = asNumber(dayRaw['day_of_week'], 0);
+      const eps: Array<Object> = asArray(dayRaw['episodes']);
+      for (let j: number = 0; j < eps.length; j++) {
+        day.episodes.push(TimeLineEpisode.from(eps[j]));
+      }
+      out.push(day);
+    }
+    return out;
+  }
+
   // ===== 用户关系（与 PiliPlus 的 UserHttp.userRelation / VideoHttp.relationMod 对齐） =====
   static async getUserRelation(mid: number): Promise<number | null> {
     if (mid <= 0) return null;
@@ -466,6 +591,37 @@ export class BiliApi {
     return BiliApi.postVideoAction(Api.modifyUserRelation, {
       'fid': String(mid),
       'act': follow ? '1' : '2',
+      're_src': '11',
+      'gaia_source': 'web_main',
+    });
+  }
+
+  // ===== 黑名单（需登录；act=5 拉黑 / 6 解除，列表分页） =====
+  static async getBlackList(page: number): Promise<RelationUserPageData> {
+    const result: RelationUserPageData = new RelationUserPageData();
+    const params: Record<string, string> = {
+      'pn': String(Math.max(1, page)),
+      'ps': '30',
+    };
+    const resp: HttpResponse = await HttpClient.get(Api.blackList + '?' + HttpClient.buildQuery(params), Constants.webHeaders);
+    const data: Record<string, Object> | null = getData(resp);
+    if (data === null) {
+      return result;
+    }
+    result.total = asNumber(data['total'], 0);
+    const list: Array<Object> = asArray(data['list']);
+    for (let i: number = 0; i < list.length; i++) {
+      const item: RelationUserItem = RelationUserItem.from(list[i]);
+      if (item.mid > 0) result.users.push(item);
+    }
+    return result;
+  }
+
+  static async blockUser(mid: number, block: boolean): Promise<ActionResult> {
+    if (mid <= 0) return new ActionResult(false, '用户信息无效');
+    return BiliApi.postVideoAction(Api.modifyUserRelation, {
+      'fid': String(mid),
+      'act': block ? '5' : '6',
       're_src': '11',
       'gaia_source': 'web_main',
     });
@@ -505,6 +661,14 @@ export class BiliApi {
     return CommentApi.hateReply(oid, type, rpid, hate);
   }
 
+  static async reportReply(oid: number, type: number, rpid: number, reason: string): Promise<ActionResult> {
+    return CommentApi.reportReply(oid, type, rpid, reason);
+  }
+
+  static async deleteReply(oid: number, type: number, rpid: number): Promise<ActionResult> {
+    return CommentApi.deleteReply(oid, type, rpid);
+  }
+
   static async getUserEmotes(business: string = 'reply'): Promise<Array<BiliEmotePackage>> {
     return CommentApi.getUserEmotes(business);
   }
@@ -516,6 +680,19 @@ export class BiliApi {
   // ===== 历史/稍后再看（委托 HistoryApi） =====
   static async getHistory(max: number = 0, viewAt: number = 0): Promise<HistoryPageData> {
     return HistoryApi.getHistory(max, viewAt);
+  }
+
+  /** 删除单条观看历史（按 bvid）。 */
+  static async deleteHistoryItem(bvid: string): Promise<ActionResult> {
+    if (bvid.length === 0) return new ActionResult(false, '参数无效');
+    return BiliApi.postVideoAction(Api.historyDelete, {
+      'aid': '', 'kid': bvid, 'platform': 'web',
+    });
+  }
+
+  /** 清空全部观看历史（需二次确认）。 */
+  static async clearHistory(): Promise<ActionResult> {
+    return BiliApi.postVideoAction(Api.historyClear, { 'platform': 'web' });
   }
 
   static async getWatchLaterList(): Promise<Array<WatchLaterItem>> {
@@ -551,8 +728,31 @@ export class BiliApi {
     return DynamicApi.repostDynamic(dynId);
   }
 
+  // ===== 发布动态（纯文字，需登录；type=4 纯文字；未登录由 csrf 校验失败兜底） =====
+  static async publishDynamic(content: string): Promise<ActionResult> {
+    const text: string = content.trim();
+    if (text.length === 0) return new ActionResult(false, '动态内容不能为空');
+    if (text.length > 2000) return new ActionResult(false, '动态内容过长（最多 2000 字）');
+    return BiliApi.postVideoAction(Api.createDynamic, {
+      'dynamic': text,
+      'type': '4',
+      'at_uids': '',
+      'topic_id': '',
+    });
+  }
+
   static async getUserDynamicFeed(mid: number, offset: string): Promise<DynamicPageData> {
     return DynamicApi.getUserDynamicFeed(mid, offset);
+  }
+
+  /** 动态举报（需要 dynId + reason；reason 参考：1 违法违规 2 色情低俗 … 99 其他）。 */
+  static async reportDynamic(dynId: string, reason: string): Promise<ActionResult> {
+    if (dynId.length === 0) return new ActionResult(false, '动态信息不完整');
+    return BiliApi.postVideoAction(Api.dynamicReport, {
+      'dyn_id': dynId,
+      'reason': reason,
+      'content': '',
+    });
   }
 
 
@@ -571,6 +771,14 @@ export class BiliApi {
 
   static async getFavoriteVideos(mediaId: number, page: number): Promise<FavoriteVideoPageData> {
     return FavoriteApi.getFavoriteVideos(mediaId, page);
+  }
+
+  static async sortFavoriteFolders(folderIds: Array<number>): Promise<ActionResult> {
+    return FavoriteApi.sortFavoriteFolders(folderIds);
+  }
+
+  static async sortFavoriteVideos(mediaId: number, videoIds: Array<number>): Promise<ActionResult> {
+    return FavoriteApi.sortFavoriteVideos(mediaId, videoIds);
   }
 
   static async getAllFavoriteFolders(mid: number): Promise<Array<FavoriteFolderItem>> {
@@ -610,6 +818,14 @@ export class BiliApi {
     return MessageApi.getMessageSessions(beginTs);
   }
 
+  static async removeMessageSession(talkerId: number): Promise<ActionResult> {
+    return MessageApi.removeSession(talkerId);
+  }
+
+  static async reportPrivateMessage(accusedUid: number, reasonType: number, reasonDesc: string): Promise<ActionResult> {
+    return MessageApi.reportImMessage(accusedUid, reasonType, reasonDesc);
+  }
+
   static async getPrivateMessages(talkerId: number, beginSeqno: number = 0): Promise<PrivateMessagePageData> {
     return MessageApi.getPrivateMessages(talkerId, beginSeqno);
   }
@@ -638,10 +854,26 @@ export class BiliApi {
     return MessageApi.updateSysMsgCursor(cursor);
   }
 
+  static async delNotify(kind: string, id: number): Promise<ActionResult> {
+    return MessageApi.delNotify(kind, id);
+  }
+
+  static async delSysNotify(ids: Array<number>): Promise<ActionResult> {
+    return MessageApi.delSysNotify(ids);
+  }
+
 
   // ===== 搜索/排行（委托 SearchApi） =====
   static async getHotSearch(): Promise<Array<HotSearchItem>> {
     return SearchApi.getHotSearch();
+  }
+
+  static async getSearchTrending(): Promise<Array<HotSearchItem>> {
+    return SearchApi.getSearchTrending();
+  }
+
+  static async getSearchDefault(): Promise<string> {
+    return SearchApi.getSearchDefault();
   }
 
   static async search(keyword: string, page: number): Promise<Array<VideoItem>> {
@@ -662,8 +894,8 @@ export class BiliApi {
     return SearchApi.searchVideosByType(keyword, page, order, duration, pubtimeBegin, tids);
   }
 
-  static async searchUsers(keyword: string, page: number, order: string): Promise<UserSearchResult> {
-    return SearchApi.searchUsers(keyword, page, order);
+  static async searchUsers(keyword: string, page: number, order: string, userType: number = 0): Promise<UserSearchResult> {
+    return SearchApi.searchUsers(keyword, page, order, userType);
   }
 
   static async searchMedia(keyword: string, searchType: string, page: number): Promise<PgcSearchResult> {
@@ -713,6 +945,71 @@ export class BiliApi {
 
   static async getUserSpaceInfo(mid: number): Promise<UserSpaceInfo | null> {
     return UserApi.getUserSpaceInfo(mid);
+  }
+
+  // ===== 关注分组（关注标签） =====
+  /** 我的关注分组列表（x/relation/tags），返回 {tagid, name, count}。 */
+  static async getFollowTags(): Promise<Array<FollowTagItem>> {
+    const resp: HttpResponse = await HttpClient.get(Api.followTags,
+      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://space.bilibili.com/' }));
+    const data: Record<string, Object> | null = getData(resp);
+    const result: Array<FollowTagItem> = [];
+    if (data === null) return result;
+    const list: Array<Object> = asArray(data['data']);
+    for (let i: number = 0; i < list.length; i++) {
+      const o: Record<string, Object> = asObject(list[i]);
+      const t: FollowTagItem = new FollowTagItem();
+      t.tagid = asNumber(o['tagid'], 0);
+      t.name = str(o, 'name', '');
+      t.count = asNumber(o['count'], 0);
+      if (t.tagid > 0) result.push(t);
+    }
+    return result;
+  }
+
+  /** 创建关注分组，返回新 tagid（失败/未登录返回 0）。 */
+  static async createFollowTag(tagName: string): Promise<number> {
+    if (tagName.length === 0) return 0;
+    const csrf: string = HttpClient.getCookie('bili_jct');
+    if (csrf.length === 0) return 0;
+    const resp: HttpResponse = await HttpClient.post(Api.followTagCreate,
+      HttpClient.buildQuery({ 'tag': tagName, 'csrf': csrf }),
+      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://space.bilibili.com/' }));
+    const json: Record<string, Object> = resp.json();
+    if (asNumber(json['code'], -1) !== 0) return 0;
+    const data: Record<string, Object> = asObject(json['data']);
+    return asNumber(data['tagid'], 0);
+  }
+
+  /** 设置某 UP 所属关注分组：tagids 为空串 = 默认分组。 */
+  static async addUserToTags(mid: number, tagIds: Array<number>): Promise<ActionResult> {
+    return BiliApi.postVideoAction(Api.followTagsAddUsers, {
+      'fids': String(mid),
+      'tagids': tagIds.map((id: number) => String(id)).join(','),
+    });
+  }
+
+  /** 举报用户（需登录；reason 1 违法违规 2 色情 3 垃圾广告 4 人身攻击 5 其他；响应按 status 判断）。 */
+  static async reportMember(mid: number, reason: string): Promise<ActionResult> {
+    if (mid <= 0) return new ActionResult(false, '用户信息无效');
+    if (HttpClient.getCookie('SESSDATA').length === 0) {
+      return new ActionResult(false, '登录状态已失效，请重新登录', -101);
+    }
+    const csrf: string = HttpClient.getCookie('bili_jct');
+    if (csrf.length === 0) return new ActionResult(false, '登录状态缺少 CSRF，请重新登录', -111);
+    const params: Record<string, string> = {
+      'mid': String(mid),
+      'reason': reason,
+      'reason_v2': '5',
+      'csrf': csrf,
+    };
+    const resp: HttpResponse = await HttpClient.post(Api.reportMember + '?' + HttpClient.buildQuery(params),
+      HttpClient.buildQuery({}),
+      HttpClient.merge(Constants.webHeaders, { 'Origin': 'https://space.bilibili.com' }));
+    if (!resp.ok) return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
+    const json: Record<string, Object> = resp.json();
+    const ok: boolean = json['status'] === true || Number(json['status'] ?? 0) === 1;
+    return new ActionResult(ok, ok ? '已提交举报，感谢反馈' : (String(json['data'] ?? '举报失败')), ok ? 0 : -1);
   }
 
   static async getUserSpaceArcs(mid: number, pn: number, order: string): Promise<SpaceArcData> {
@@ -816,7 +1113,7 @@ export class BiliApi {
       const elems: Array<ProtoDanmaku> = parseDanmakuSegment(buffer);
       const result: Array<DanmakuItem> = [];
       for (let i: number = 0; i < elems.length; i++) {
-        result.push(new DanmakuItem(elems[i].time, elems[i].mode, elems[i].color, elems[i].text));
+        result.push(new DanmakuItem(elems[i].time, elems[i].mode, elems[i].color, elems[i].text, elems[i].id));
       }
       return result;
     } catch (e) {

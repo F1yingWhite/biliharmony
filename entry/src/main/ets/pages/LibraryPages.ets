@@ -1,6 +1,6 @@
 /** 登录用户的观看历史、稍后再看与收藏夹。 */
 import { Immersive } from '../common/Immersive';
-import { AppNavStack, NAV_VIDEO_DETAIL, VideoDetailParam } from '../common/AppRouter';
+import { AppNavStack, NAV_VIDEO_DETAIL, NAV_FAV_SORT, FavSortParam, VideoDetailParam } from '../common/AppRouter';
 import { BiliApi, ActionResult } from '../api/BiliApi';
 import { FavoriteFolderItem, FavoriteVideoPageData, HistoryPageData, HistoryVideoItem, VideoItem, WatchLaterItem } from '../model/Models';
 import { UserStore } from '../common/UserStore';
@@ -82,7 +82,18 @@ export struct HistoryPage {
 
   build() {
     Column() {
-      PageHeader({ title: '历史记录' })
+      PageHeader({
+        title: '历史记录',
+        trailing: (): void => {
+          Text('清空')
+            .fontSize(13)
+            .fontColor(this.itemsSource.totalCount() > 0 ? '#FB4A4A' : '#9499A0')
+            .padding({ left: 18, right: 2, top: 8, bottom: 8 })
+            .onClick(() => {
+              if (this.itemsSource.totalCount() > 0) this.confirmClearHistory();
+            })
+        },
+      })
       if (this.itemCount === 0) {
         LoadingView({ loading: this.loading, empty: !this.loading && this.errorText.length === 0,
           emptyText: '暂无观看历史', errorText: this.errorText,
@@ -105,6 +116,10 @@ export struct HistoryPage {
                   AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
                 },
               })
+                .gesture(
+                  LongPressGesture({ repeat: false })
+                    .onAction(() => this.confirmDeleteHistory(item))
+                )
             }
           }, (item: HistoryVideoItem) => item.video.bvid + String(item.viewAt))
           ListItem() {
@@ -138,6 +153,70 @@ export struct HistoryPage {
     .height('100%')
     .padding({ top: Immersive.statusBarHeight() })
     .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+  }
+
+  /** 长按删除单条历史：二次确认。 */
+  private confirmDeleteHistory(item: HistoryVideoItem): void {
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '删除历史',
+        message: '删除后无法找回，确定删除这条观看记录吗？',
+        buttons: [
+          { text: '取消', color: '#9499A0' },
+          { text: '删除', color: '#FB4A4A' },
+        ],
+      }).then((dialogResult) => {
+        if (Number(dialogResult.index) !== 1) return;
+        BiliApi.deleteHistoryItem(item.video.bvid)
+          .then((r: ActionResult) => {
+            if (r.ok) {
+              this.itemsSource.reset(
+                this.itemsSource.getAll().filter((x: HistoryVideoItem) => x.video.bvid !== item.video.bvid));
+              this.itemCount = this.itemsSource.totalCount();
+              this.getUIContext().getPromptAction().showToast({ message: '已删除' });
+            } else {
+              this.getUIContext().getPromptAction().showToast({ message: r.message });
+            }
+          })
+          .catch(() => {
+            this.getUIContext().getPromptAction().showToast({ message: '删除失败，请稍后重试' });
+          });
+      });
+    } catch (e) {
+      // 弹窗失败不阻塞。
+    }
+  }
+
+  /** 清空全部历史：二次确认。 */
+  private confirmClearHistory(): void {
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '清空历史',
+        message: '将删除全部观看历史，此操作不可恢复。确定清空吗？',
+        buttons: [
+          { text: '取消', color: '#9499A0' },
+          { text: '清空', color: '#FB4A4A' },
+        ],
+      }).then((dialogResult) => {
+        if (Number(dialogResult.index) !== 1) return;
+        BiliApi.clearHistory()
+          .then((r: ActionResult) => {
+            if (r.ok) {
+              this.itemsSource.reset([]);
+              this.itemCount = 0;
+              this.hasMore = false;
+              this.getUIContext().getPromptAction().showToast({ message: '历史已清空' });
+            } else {
+              this.getUIContext().getPromptAction().showToast({ message: r.message });
+            }
+          })
+          .catch(() => {
+            this.getUIContext().getPromptAction().showToast({ message: '清空失败，请稍后重试' });
+          });
+      });
+    } catch (e) {
+      // 弹窗失败不阻塞。
+    }
   }
 }
 
@@ -346,8 +425,9 @@ export struct FavoritesPage {
   @State collectionHasMore: boolean = true;
   @State collectionLoading: boolean = false;
   // ===== 收藏夹管理状态 =====
-  @State editing: boolean = false;                 // 夹内视频编辑模式（多选）
+  @State editing: boolean = false;                 // 夹内视频编辑模式（多选 + 排序）
   @State checkedAids: Array<number> = [];          // 编辑模式勾选的视频 aid
+  @State orderDirty: boolean = false;              // 排序是否有改动，退出编辑时提交
   @State folderDialogVisible: boolean = false;     // 新建/重命名弹窗
   @State folderDialogIsEdit: boolean = false;
   @State folderDialogInput: string = '';
@@ -565,10 +645,49 @@ export struct FavoritesPage {
     }
   }
 
-  // ===== 夹内视频编辑模式：多选删除 / 批量移动 =====
+  // ===== 夹内视频编辑模式：多选删除 / 批量移动 / 排序 =====
   private toggleEdit(): void {
+    if (this.editing && this.orderDirty) {
+      // 退出编辑时提交排序（本地顺序已改，服务端同步）。
+      this.saveVideoOrder().catch(() => {
+      });
+    }
     this.editing = !this.editing;
     this.checkedAids = [];
+    this.orderDirty = false;
+  }
+
+  /** 编辑模式下上下调整视频顺序（只移动位置，不落库；退出时统一提交）。 */
+  private moveVideo(index: number, delta: number): void {
+    const all: Array<VideoItem> = this.videosSource.getAll();
+    const target: number = index + delta;
+    if (target < 0 || target >= all.length) return;
+    const next: Array<VideoItem> = all.slice();
+    const item: VideoItem = next.splice(index, 1)[0];
+    next.splice(target, 0, item);
+    this.videosSource.reset(next);
+    this.orderDirty = true;
+    this.drawVideos();
+  }
+
+  private drawVideos(): void {
+    // reset 已广播变更：无需显式重绘；保留为空方法避免退化路径误用。
+  }
+
+  /** 提交收藏夹内视频排序：按当前列表顺序传 aid。 */
+  private async saveVideoOrder(): Promise<void> {
+    if (this.selected.id <= 0) return;
+    const aids: Array<number> = this.videosSource.getAll().map((v: VideoItem) => v.aid);
+    if (aids.length < 2) {
+      this.orderDirty = false;
+      return;
+    }
+    const result: ActionResult = await BiliApi.sortFavoriteVideos(this.selected.id, aids);
+    if (result.ok) {
+      this.toast('视频排序已保存');
+    } else {
+      this.toast(result.message);
+    }
   }
 
   private isChecked(aid: number): boolean {
@@ -739,14 +858,32 @@ export struct FavoritesPage {
 
   @Builder
   FavHeaderActions() {
-    // 只有进入自建收藏夹（非合集/收藏集）才提供编辑模式
-    if (this.selected.id > 0 && this.selected.type !== 21) {
+    // 收藏夹根列表提供「排序」入口；进入夹内则提供编辑
+    if (this.selected.id === 0 && this.category === 0 && this.foldersSource.totalCount() > 1) {
+      Text('排序')
+        .fontSize(14)
+        .fontColor(this.accent)
+        .padding({ left: 12, right: 2, top: 6, bottom: 6 })
+        .onClick(() => this.openFolderSort())
+    } else if (this.selected.id > 0 && this.selected.type !== 21) {
       Text(this.editing ? '完成' : '编辑')
         .fontSize(14)
         .fontColor(this.accent)
         .padding({ left: 12, right: 2, top: 6, bottom: 6 })
         .onClick(() => this.toggleEdit())
     }
+  }
+
+  /** 打开收藏夹排序页（仅传自建收藏夹，默认收藏夹固定首位不参与）。 */
+  private openFolderSort(): void {
+    const sortable: Array<FavoriteFolderItem> =
+      this.foldersSource.getAll().filter((f: FavoriteFolderItem) => f.type !== 0);
+    if (sortable.length < 2) {
+      this.toast('至少两个自建收藏夹才能排序');
+      return;
+    }
+    const param: FavSortParam = { folders: sortable };
+    AppNavStack.pushPathByName(NAV_FAV_SORT, param);
   }
 
   @Builder
@@ -955,6 +1092,20 @@ export struct FavoritesPage {
                       },
                     })
                       .layoutWeight(1)
+                    if (this.editing) {
+                      Column({ space: 2 }) {
+                        Text('↑')
+                          .fontSize(14).fontColor(index === 0 ? '#B4B6BA' : this.accent)
+                          .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                          .onClick(() => this.moveVideo(index, -1))
+                        Text('↓')
+                          .fontSize(14).fontColor(index === this.videosSource.totalCount() - 1 ? '#B4B6BA' : this.accent)
+                          .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                          .onClick(() => this.moveVideo(index, 1))
+                      }
+                      .width(34)
+                      .alignItems(HorizontalAlign.Center)
+                    }
                   }
                   .width('100%')
                 }
@@ -980,10 +1131,10 @@ export struct FavoritesPage {
           .scrollBar(BarState.Off)
           .onReachEnd(() => this.loadMore())
         }
-        // 编辑模式底部操作条：多选后删除 / 移动到别的收藏夹
+        // 编辑模式底部操作条：多选删除/移动 + 排序提示
         if (this.editing && this.selected.id > 0) {
           Row({ space: 12 }) {
-            Text(this.checkedAids.length > 0 ? '已选 ' + String(this.checkedAids.length) + ' 项' : '选择视频')
+            Text(this.checkedAids.length > 0 ? '已选 ' + String(this.checkedAids.length) + ' 项' : '↑↓ 调整顺序')
               .fontSize(13)
               .fontColor('#9499A0')
               .layoutWeight(1)

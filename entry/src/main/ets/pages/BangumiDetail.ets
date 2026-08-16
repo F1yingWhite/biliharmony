@@ -17,6 +17,7 @@ import { ReplyThreadPanel } from '../components/ReplyThreadPanel';
 import { ReplyShareCard, makeReplyQr, sharePixelMapAsImage } from '../components/ReplyShareCard';
 import { ReplySortChips } from '../components/ReplySortChips';
 import { UserStore } from '../common/UserStore';
+import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
 import { colorWithAlpha, formatCount, formatDuration } from '../common/Utils';
 import { LayoutTokens } from '../common/LayoutTokens';
 
@@ -254,91 +255,31 @@ export struct BangumiDetailPage {
   }
 
   private async likeReply(item: ReplyItem): Promise<void> {
-    if (!UserStore.isLogin) {
-      this.toast('请先登录后再点赞');
-      AppNavStack.pushPathByName(NAV_LOGIN, null);
-      return;
-    }
-    if (this.replyLikeBusy.has(item.rpid)) return;
-    this.replyLikeBusy.add(item.rpid);
-    const current: ReplyItem | null = this.mutateReplyItem(item.rpid, () => {});
-    if (current === null) {
-      this.replyLikeBusy.delete(item.rpid);
-      return;
-    }
-    const next: boolean = !current.liked;
-    this.mutateReplyItem(item.rpid, (target: ReplyItem) => {
-      target.liked = next;
-      target.like = Math.max(0, target.like + (next ? 1 : -1));
-    });
-    try {
-      const result: ActionResult = await BiliApi.likeReply(this.replyOid(), 1, item.rpid, next);
-      if (!this.destroyed && !result.ok) {
-        this.mutateReplyItem(item.rpid, (target: ReplyItem) => {
-          target.liked = !next;
-          target.like = Math.max(0, target.like + (next ? -1 : 1));
-        });
-        this.toast(result.message);
-      }
-    } catch (e) {
-      if (!this.destroyed) {
-        this.mutateReplyItem(item.rpid, (target: ReplyItem) => {
-          target.liked = !next;
-          target.like = Math.max(0, target.like + (next ? -1 : 1));
-        });
-        this.toast('评论点赞失败，请稍后重试');
-      }
-    } finally {
-      this.replyLikeBusy.delete(item.rpid);
-    }
+    await runReplyLike(item, this.replyLikeBusy,
+      (rpid: number, mutate: (target: ReplyItem) => void) => this.mutateReplyItem(rpid, mutate),
+      this.replyReactionHooks());
   }
 
   private async dislikeReply(item: ReplyItem): Promise<void> {
-    if (!UserStore.isLogin) {
-      this.toast('请先登录后再操作');
-      AppNavStack.pushPathByName(NAV_LOGIN, null);
-      return;
-    }
-    if (this.replyLikeBusy.has(item.rpid)) return;
-    this.replyLikeBusy.add(item.rpid);
-    const current: ReplyItem | null = this.mutateReplyItem(item.rpid, () => {});
-    if (current === null) {
-      this.replyLikeBusy.delete(item.rpid);
-      return;
-    }
-    const next: boolean = !current.disliked;
-    const wasLiked: boolean = current.liked;
-    // 踩赞互斥：踩上时本地同步取消赞，失败整体回滚。
-    this.mutateReplyItem(item.rpid, (target: ReplyItem) => {
-      target.disliked = next;
-      if (next && target.liked) {
-        target.liked = false;
-        target.like = Math.max(0, target.like - 1);
-      }
-    });
-    const rollback = () => {
-      this.mutateReplyItem(item.rpid, (target: ReplyItem) => {
-        target.disliked = !next;
-        if (next && wasLiked) {
-          target.liked = true;
-          target.like++;
-        }
-      });
+    await runReplyDislike(item, this.replyLikeBusy,
+      (rpid: number, mutate: (target: ReplyItem) => void) => this.mutateReplyItem(rpid, mutate),
+      this.replyReactionHooks());
+  }
+
+  private replyReactionHooks(): ReplyReactionHooks {
+    return {
+      ensureLogin: () => {
+        if (UserStore.isLogin) return true;
+        this.toast('请先登录后再操作');
+        AppNavStack.pushPathByName(NAV_LOGIN, null);
+        return false;
+      },
+      toast: (message: string) => this.toast(message),
+      isDestroyed: () => this.destroyed,
+      resolveOid: () => this.replyOid(),
+      resolveType: () => 1,
+      clearDislikeOnLike: false,
     };
-    try {
-      const result: ActionResult = await BiliApi.hateReply(this.replyOid(), 1, item.rpid, next);
-      if (!this.destroyed && !result.ok) {
-        rollback();
-        this.toast(result.message);
-      }
-    } catch (e) {
-      if (!this.destroyed) {
-        rollback();
-        this.toast('点踩失败，请稍后重试');
-      }
-    } finally {
-      this.replyLikeBusy.delete(item.rpid);
-    }
   }
 
   private openReplyThread(root: ReplyItem): void {
@@ -465,6 +406,9 @@ export struct BangumiDetailPage {
       onSelectReply: (item: ReplyItem) => {
         this.threadTargetRpid = item.rpid;
         this.threadTargetName = item.uname;
+      },
+      onDeleted: (item: ReplyItem) => {
+        this.threadReplies = this.threadReplies.filter((x: ReplyItem) => x.rpid !== item.rpid);
       },
       onLoadMore: () => this.loadThreadReplies(false).catch(() => {
       }),
@@ -920,8 +864,14 @@ export struct BangumiDetailPage {
             }),
             onShare: (item: ReplyItem) => this.shareReplyAsImage(item),
             onOpenThread: (item: ReplyItem) => this.openReplyThread(item),
+            // 主评论列表："回复"按钮 = 打开该评论的楼中楼面板（与 B 站一致）
+            onSelectReply: (item: ReplyItem) => this.openReplyThread(item),
+            onDeleted: (item: ReplyItem) => {
+              this.replies = this.replies.filter((x: ReplyItem) => x.rpid !== item.rpid);
+            },
           })
-        }, (reply: ReplyItem) => String(reply.rpid) + '_' + String(reply.rev))
+        // 稳定 key：ForEach 由 item 引用/新数组变化驱动更新；rev key 触发重建会闪烁。
+        }, (reply: ReplyItem) => String(reply.rpid))
         if (this.repliesHasMore) {
           Text(this.repliesLoading ? '加载中…' : '加载更多评论')
             .width('100%')

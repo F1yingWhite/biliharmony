@@ -38,6 +38,16 @@ export struct LiveRoomCard {
       .width('100%')
       .clip(true)
       .borderRadius(12)
+      .border({
+        width: 0.6,
+        color: this.isDark ? '#26FFFFFF' : '#1C000000',
+      })
+      .shadow({
+        radius: 12,
+        color: this.isDark ? '#59000000' : '#1F000000',
+        offsetX: 0,
+        offsetY: 4,
+      })
 
       FeedCardTitle({ title: this.room.title, isDark: this.isDark })
       Row({ space: 6 }) {

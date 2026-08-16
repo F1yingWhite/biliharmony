@@ -307,6 +307,9 @@ export struct DynamicDetailPage {
         this.threadTargetRpid = item.rpid;
         this.threadTargetName = item.uname;
       },
+      onDeleted: (item: ReplyItem) => {
+        this.threadReplies = this.threadReplies.filter((x: ReplyItem) => x.rpid !== item.rpid);
+      },
       onLoadMore: () => this.loadThreadReplies(false).catch(() => {
       }),
       onDraftChange: (value: string) => this.threadDraft = value,
@@ -404,8 +407,14 @@ export struct DynamicDetailPage {
                 }),
                 onShare: (item: ReplyItem) => this.shareReplyAsImage(item),
                 onOpenThread: (item: ReplyItem) => this.openReplyThread(item),
+                // 主评论列表："回复"按钮 = 打开该评论的楼中楼面板（与 B 站一致）
+                onSelectReply: (item: ReplyItem) => this.openReplyThread(item),
+                onDeleted: (item: ReplyItem) => {
+                  this.replies = this.replies.filter((x: ReplyItem) => x.rpid !== item.rpid);
+                },
               })
-            }, (reply: ReplyItem) => String(reply.rpid) + '_' + String(reply.rev))
+            // 稳定 key（ForEach 走 item 引用的 @Prop 同步 + 新数组引用；rev 会导致重建闪烁）。
+            }, (reply: ReplyItem) => String(reply.rpid))
             if (this.repliesHasMore) {
               Text(this.repliesLoading ? '加载中…' : '加载更多评论')
                 .width('100%').height(46).textAlign(TextAlign.Center).fontSize(12).fontColor('#9499A0')

@@ -1,7 +1,8 @@
 /**
- * 收藏夹与合集 API：列表 / 增删改 / 移动 / 收藏视频 / 合集视频。
+ * 收藏夹与合集 API：列表 / 增删改 / 移动 / 排序 / 收藏视频 / 合集视频。
  */
 import { HttpClient, HttpResponse } from '../common/HttpClient';
+import { appSign } from '../common/AppSign';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber, asBool, str, toHttps } from '../common/Utils';
 import { FavoriteFolderItem, FavoriteFolderPageData, FavoriteVideoPageData, VideoItem } from '../model/Models';
@@ -46,6 +47,53 @@ export class FavoriteApi {
       'platform': 'web',
     };
     return postVideoAction(Api.favoriteResourceDeal, params);
+  }
+
+  /** 收藏夹自定义排序：sort 为按新顺序排列的收藏夹 id（逗号分隔），需要 appSign + csrf。 */
+  static async sortFavoriteFolders(folderIds: Array<number>): Promise<ActionResult> {
+    if (folderIds.length === 0) return new ActionResult(false, '收藏夹为空');
+    if (HttpClient.getCookie('SESSDATA').length === 0) {
+      return new ActionResult(false, '登录状态已失效，请重新登录', -101);
+    }
+    const csrf: string = HttpClient.getCookie('bili_jct');
+    if (csrf.length === 0) return new ActionResult(false, '登录状态缺少 CSRF，请重新登录', -111);
+    const params: Record<string, string> = {
+      'sort': folderIds.map((id: number) => String(id)).join(','),
+      'csrf': csrf,
+    };
+    await appSign(params);
+    const resp: HttpResponse = await HttpClient.post(Api.favoriteFolderSort + '?' + HttpClient.buildQuery(params),
+      HttpClient.buildQuery({}), Constants.webHeaders);
+    if (!resp.ok) return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
+    const json: Record<string, Object> = resp.json();
+    const code: number = Number(json['code'] ?? -1);
+    const ok: boolean = code === 0;
+    return new ActionResult(ok, ok ? '收藏夹排序已保存' :
+      (String(json['message'] ?? '排序失败') + ' (' + String(code) + ')'), code);
+  }
+
+  /** 收藏夹内视频自定义排序：mediaId + 按新顺序排列的视频资源 id（逗号分隔），需要 appSign + csrf。 */
+  static async sortFavoriteVideos(mediaId: number, videoIds: Array<number>): Promise<ActionResult> {
+    if (mediaId <= 0 || videoIds.length === 0) return new ActionResult(false, '参数无效');
+    if (HttpClient.getCookie('SESSDATA').length === 0) {
+      return new ActionResult(false, '登录状态已失效，请重新登录', -101);
+    }
+    const csrf: string = HttpClient.getCookie('bili_jct');
+    if (csrf.length === 0) return new ActionResult(false, '登录状态缺少 CSRF，请重新登录', -111);
+    const params: Record<string, string> = {
+      'media_id': String(mediaId),
+      'sort': videoIds.map((id: number) => String(id)).join(','),
+      'csrf': csrf,
+    };
+    await appSign(params);
+    const resp: HttpResponse = await HttpClient.post(Api.favoriteResourceSort + '?' + HttpClient.buildQuery(params),
+      HttpClient.buildQuery({}), Constants.webHeaders);
+    if (!resp.ok) return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
+    const json: Record<string, Object> = resp.json();
+    const code: number = Number(json['code'] ?? -1);
+    const ok: boolean = code === 0;
+    return new ActionResult(ok, ok ? '视频排序已保存' :
+      (String(json['message'] ?? '排序失败') + ' (' + String(code) + ')'), code);
   }
 
   static async getFavoriteVideos(mediaId: number, page: number): Promise<FavoriteVideoPageData> {

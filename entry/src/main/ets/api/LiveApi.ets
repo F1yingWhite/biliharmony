@@ -7,7 +7,7 @@ import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber, str, toHttps } from '../common/Utils';
 import { LiveChatMessage, LiveDanmakuInfo, LiveDanmakuServer, LiveEmoteItem, LiveEmotePackage, LivePlayInfo,
-  LiveQualityOption, LiveRoomInfo, LiveRoomItem } from '../model/LiveModels';
+  LiveQualityOption, LiveRoomInfo, LiveRoomItem, LiveStatusItem, LiveZone } from '../model/LiveModels';
 import { ActionResult, actionWithCsrf, getData } from './internal/ApiCommon';
 
 export class LiveApi {
@@ -27,6 +27,70 @@ export class LiveApi {
       if (asNumber(raw['is_ad'], 0) === 1) continue;
       const item: LiveRoomItem = LiveRoomItem.from(source[i]);
       if (item.roomId > 0) result.push(item);
+    }
+    return result;
+  }
+
+  // ===== 直播分区（一级分区列表 + 区内直播间，需登录过风控） =====
+  static async getLiveZones(): Promise<Array<LiveZone>> {
+    const resp: HttpResponse = await HttpClient.get(Api.liveZoneList,
+      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://live.bilibili.com/' }));
+    const result: Array<LiveZone> = [];
+    const json: Record<string, Object> = resp.json();
+    const list: Array<Object> = asArray(json['data']);
+    for (let i: number = 0; i < list.length; i++) {
+      const item: Record<string, Object> = asObject(list[i]);
+      const zone: LiveZone = new LiveZone();
+      zone.id = asNumber(item['id'], 0);
+      zone.name = str(item, 'name', '');
+      if (zone.id > 0 && zone.name.length > 0) result.push(zone);
+    }
+    return result;
+  }
+
+  static async getLiveZoneRooms(zoneId: number, page: number, pageSize: number = 20): Promise<Array<LiveRoomItem>> {
+    if (zoneId <= 0) return [];
+    const params: Record<string, string> = {
+      'parent_area_id': String(zoneId), 'area_id': '0',
+      'sort_type': 'online', 'page': String(page), 'page_size': String(pageSize),
+    };
+    const resp: HttpResponse = await HttpClient.get(Api.liveZoneRooms + '?' + HttpClient.buildQuery(params),
+      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://live.bilibili.com/' }));
+    const data: Record<string, Object> | null = getData(resp);
+    if (data === null) return [];
+    // room/v3/Area/getRoomList 直接返回 data.list 数组。
+    const list: Array<Object> = asArray(data['list']);
+    const result: Array<LiveRoomItem> = [];
+    for (let i: number = 0; i < list.length; i++) {
+      const raw: Record<string, Object> = asObject(list[i]);
+      const item: LiveRoomItem = LiveRoomItem.from(raw);
+      if (item.roomId > 0) result.push(item);
+    }
+    return result;
+  }
+
+  /** 批量查询一批 UP 的开播状态（room/v1/Room/get_status_info_by_uids：入参 uids[]，返回以 uid 为键的映射）。 */
+  static async getLiveStatusByUids(uids: Array<number>): Promise<Array<LiveStatusItem>> {
+    const result: Array<LiveStatusItem> = [];
+    if (uids.length === 0) return result;
+    const params: Record<string, string> = {};
+    for (let i: number = 0; i < uids.length; i++) {
+      params['uids[' + String(i) + ']'] = String(uids[i]);
+    }
+    const resp: HttpResponse = await HttpClient.get(Api.liveStatusByUids + '?' + HttpClient.buildQuery(params),
+      Constants.webHeaders);
+    const json: Record<string, Object> = resp.json();
+    const data: Record<string, Object> = asObject(json['data']);
+    const keys: Array<string> = Object.keys(data);
+    for (let i: number = 0; i < keys.length; i++) {
+      const raw: Record<string, Object> = asObject(data[keys[i]]);
+      const item: LiveStatusItem = new LiveStatusItem();
+      item.uid = asNumber(raw['uid'], Number(keys[i]));
+      item.liveStatus = asNumber(raw['live_status'], 0);
+      item.roomId = asNumber(raw['room_id'], 0);
+      item.title = str(raw, 'title', '');
+      item.uname = str(raw, 'uname', '');
+      result.push(item);
     }
     return result;
   }

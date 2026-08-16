@@ -83,6 +83,9 @@ export class Api {
 
   // ===== 直播（仅观看，不包含开播、送礼或充值） =====
   static readonly liveRoomList: string = HttpString.liveBaseUrl + '/xlive/web-interface/v1/webMain/getList';
+  static readonly liveZoneList: string = HttpString.liveBaseUrl + '/room/v1/Area/getList';
+  static readonly liveZoneRooms: string = HttpString.liveBaseUrl + '/room/v3/Area/getRoomList';
+  static readonly liveStatusByUids: string = HttpString.liveBaseUrl + '/room/v1/Room/get_status_info_by_uids';
   static readonly liveRoomInfo: string = HttpString.liveBaseUrl + '/room/v1/Room/get_info';
   static readonly liveAnchorInfo: string = HttpString.liveBaseUrl + '/live_user/v1/Master/info';
   static readonly livePlayInfo: string = HttpString.liveBaseUrl + '/xlive/web-room/v2/index/getRoomPlayInfo';
@@ -103,6 +106,7 @@ export class Api {
   static readonly playerInfo: string = HttpString.apiBaseUrl + '/x/player/wbi/v2';
   static readonly heartBeat: string = HttpString.apiBaseUrl + '/x/click-interface/web/heartbeat';
   static readonly videoRelation: string = HttpString.apiBaseUrl + '/x/web-interface/archive/relation';
+  static readonly likeTriple: string = HttpString.apiBaseUrl + '/x/web-interface/archive/like/triple';
   static readonly likeVideo: string = HttpString.apiBaseUrl + '/x/web-interface/archive/like';
   static readonly dislikeVideo: string = HttpString.appBaseUrl + '/x/v2/view/dislike';
   static readonly coinVideo: string = HttpString.apiBaseUrl + '/x/web-interface/coin/add';
@@ -112,19 +116,30 @@ export class Api {
   static readonly bangumiSeason: string = HttpString.apiBaseUrl + '/pgc/view/web/season';
   static readonly bangumiFollowAdd: string = HttpString.apiBaseUrl + '/pgc/web/follow/add';
   static readonly bangumiFollowDel: string = HttpString.apiBaseUrl + '/pgc/web/follow/del';
+  // 我的追番/追剧列表（需登录；type: 1=番剧 2=影视 3=全部-后端取值）
+  // 我的追番列表（space 域；对齐 PiliPlus favPgc；type 1番剧 / 2国创·影视）
+  static readonly bangumiFollowList: string = HttpString.apiBaseUrl + '/x/space/bangumi/follow/list';
+  // 番剧索引（季节筛选聚合；season_type: 1=番剧 2=国创 4=电影 5=电视剧 3=纪录片）
+  static readonly bangumiIndex: string = HttpString.apiBaseUrl + '/pgc/season/index/result';
+  // 新番时间表（pgc/web/timeline；types 1 番剧 / 4 国创）
+  static readonly pgcTimeline: string = HttpString.apiBaseUrl + '/pgc/web/timeline';
 
   // ===== 评论 =====
   static readonly replyList: string = HttpString.apiBaseUrl + '/x/v2/reply';
   static readonly replyReplyList: string = HttpString.apiBaseUrl + '/x/v2/reply/reply';
   static readonly replyAdd: string = HttpString.apiBaseUrl + '/x/v2/reply/add';
+  static readonly replyDel: string = HttpString.apiBaseUrl + '/x/v2/reply/del';
   static readonly replyLike: string = HttpString.apiBaseUrl + '/x/v2/reply/action';
   static readonly replyHate: string = HttpString.apiBaseUrl + '/x/v2/reply/hate';
+  static readonly replyReport: string = HttpString.apiBaseUrl + '/x/v2/reply/report';
   static readonly userEmotes: string = HttpString.apiBaseUrl + '/x/emote/user/panel/web';
 
   // ===== 私信 =====
   static readonly sessionList: string = HttpString.tUrl + '/session_svr/v1/session_svr/get_sessions';
   static readonly sessionAccountList: string = HttpString.tUrl + '/account/v1/user/cards';
   static readonly sessionMessages: string = HttpString.tUrl + '/svr_sync/v1/svr_sync/fetch_session_msgs';
+  static readonly sessionRemove: string = HttpString.tUrl + '/session_svr/v1/session_svr/remove_session';
+  static readonly sessionReportIm: string = HttpString.tUrl + '/x/bplus/im/report/add';
   static readonly ackSessionMessage: string = HttpString.tUrl + '/session_svr/v1/session_svr/update_ack';
   static readonly sendMessage: string = HttpString.tUrl + '/web_im/v1/web_im/send_msg';
 
@@ -135,9 +150,14 @@ export class Api {
   static readonly msgFeedLike: string = HttpString.apiBaseUrl + '/x/msgfeed/like';
   static readonly msgSysNotify: string = HttpString.messageBaseUrl + '/x/sys-msg/query_notify_list';
   static readonly msgSysUpdateCursor: string = HttpString.messageBaseUrl + '/x/sys-msg/update_cursor';
+  // 通知删除（回复/@/赞走 x/msgfeed/del，系统通知走 sys-msg/del_notify_list，端点在 messageBase 域名）
+  static readonly xMsgNotifyDel: string = HttpString.apiBaseUrl + '/x/msgfeed/del';
+  static readonly xSysNotifyDel: string = HttpString.messageBaseUrl + '/x/sys-msg/del_notify_list';
 
   // ===== 历史 / 收藏 =====
   static readonly historyList: string = HttpString.apiBaseUrl + '/x/web-interface/history/cursor';
+  static readonly historyDelete: string = HttpString.apiBaseUrl + '/x/v2/history/delete';
+  static readonly historyClear: string = HttpString.apiBaseUrl + '/x/v2/history/clear';
   static readonly dynamicDetail: string = HttpString.apiBaseUrl + '/x/polymer/web-dynamic/v1/detail';
   static readonly favoriteFolders: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/created/list';
   static readonly favoriteFoldersForVideo: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/created/list-all';
@@ -158,9 +178,13 @@ export class Api {
   static readonly favFolderDel: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/del';
   static readonly favResourceDel: string = HttpString.apiBaseUrl + '/x/v3/fav/resource/del';
   static readonly favResourceMove: string = HttpString.apiBaseUrl + '/x/v3/fav/resource/move';
+  // 收藏夹/收藏夹内视频自定义排序（对齐 PiliPlus lib/http/api.dart sortFavFolder / sortFav）
+  static readonly favoriteFolderSort: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/sort';
+  static readonly favoriteResourceSort: string = HttpString.apiBaseUrl + '/x/v3/fav/resource/sort';
 
   // ===== 搜索 =====
   static readonly hotSearchList: string = HttpString.searchBaseUrl + '/main/hotword';
+  static readonly searchTrending: string = HttpString.apiBaseUrl + '/x/v2/search/trending/ranking';
   static readonly searchSuggest: string = HttpString.searchBaseUrl + '/main/suggest';
   static readonly searchDefault: string = HttpString.apiBaseUrl + '/x/web-interface/wbi/search/default';
   static readonly searchAll: string = HttpString.apiBaseUrl + '/x/web-interface/wbi/search/all/v2';
@@ -177,8 +201,18 @@ export class Api {
   static readonly userStat: string = HttpString.apiBaseUrl + '/x/relation/stat';
   static readonly userRelation: string = HttpString.apiBaseUrl + '/x/relation';
   static readonly modifyUserRelation: string = HttpString.apiBaseUrl + '/x/relation/modify';
+  // 关注分组（对齐 PiliPlus lib/http/api.dart followUpTag/createFollowTag/addUsers）
+  static readonly followTags: string = HttpString.apiBaseUrl + '/x/relation/tags';
+  static readonly followTagCreate: string = HttpString.apiBaseUrl + '/x/relation/tag/create';
+  static readonly followTagUpdate: string = HttpString.apiBaseUrl + '/x/relation/tag/update';
+  static readonly followTagDel: string = HttpString.apiBaseUrl + '/x/relation/tag/del';
+  static readonly followTagsAddUsers: string = HttpString.apiBaseUrl + '/x/relation/tags/addUsers';
   static readonly userFollowings: string = HttpString.apiBaseUrl + '/x/relation/followings';
   static readonly userFollowers: string = HttpString.apiBaseUrl + '/x/relation/followers';
+  // 黑名单列表（需登录）
+  static readonly blackList: string = HttpString.apiBaseUrl + '/x/relation/blacks';
+  // 举报用户（space 域旧接口，返回 status 字段而非 code；对齐 PiliPlus Api.reportMember）
+  static readonly reportMember: string = 'https://space.bilibili.com/ajax/report/add';
   static readonly memberInfo: string = HttpString.apiBaseUrl + '/x/space/wbi/acc/info';
   static readonly memberSpaceApp: string = HttpString.appBaseUrl + '/x/v2/space';
   // 小电视空降助手公开的 SponsorBlock for Bilibili 片段接口。
@@ -190,6 +224,8 @@ export class Api {
   static readonly memberDynamic: string = HttpString.apiBaseUrl + '/x/polymer/web-dynamic/v1/feed/space';
   static readonly thumbDynamic: string = HttpString.apiBaseUrl + '/x/dynamic/feed/dyn/thumb';
   static readonly createDynamic: string = HttpString.apiBaseUrl + '/x/dynamic/feed/create/dyn';
+  // 动态举报（需登录；对齐 PiliPlus lib/http/api.dart dynamicReport）
+  static readonly dynamicReport: string = HttpString.apiBaseUrl + '/x/dynamic/feed/dynamic_report/add';
 
   // ===== 登录 (TV 扫码) =====
   static readonly getTVCode: string = HttpString.passBaseUrl + '/x/passport-tv-login/qrcode/auth_code';
@@ -206,6 +242,8 @@ export class Api {
   // 网页端分段弹幕（每 6 分钟一段，DmSegMobileReply protobuf）
   static readonly danmakuSeg: string = HttpString.apiBaseUrl + '/x/v2/dm/web/seg.so';
   static readonly sendDanmaku: string = HttpString.apiBaseUrl + '/x/v2/dm/post';
+  // 弹幕举报（dmid + cid + reason，需登录）
+  static readonly reportDanmaku: string = HttpString.apiBaseUrl + '/x/v2/dm/report/add';
   // 弹幕屏蔽词/正则/用户（x/dm/filter/user；type 0 关键词 / 1 正则 / 2 用户）
   static readonly danmakuFilter: string = HttpString.apiBaseUrl + '/x/dm/filter/user';
   static readonly danmakuFilterAdd: string = HttpString.apiBaseUrl + '/x/dm/filter/user/add';

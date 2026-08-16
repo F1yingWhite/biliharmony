@@ -84,6 +84,45 @@ export class CommentApi {
     });
   }
 
+  /** 删除自己的评论/回复（type 为评论类型、oid 评论对象、rpid 评论 id，均与服务端一致）。 */
+  static async deleteReply(oid: number, type: number, rpid: number): Promise<ActionResult> {
+    if (oid <= 0 || type <= 0 || rpid <= 0) return new ActionResult(false, '评论参数无效');
+    return postVideoAction(Api.replyDel, {
+      'oid': String(oid),
+      'type': String(type),
+      'rpid': String(rpid),
+    });
+  }
+
+  /** 评论举报（需登录；reason 参考网页端：21 违法违规 22 色情低俗…统一走 21 细分，传入具体 reason）。 */
+  static async reportReply(oid: number, type: number, rpid: number, reason: string): Promise<ActionResult> {
+    if (oid <= 0 || type <= 0 || rpid <= 0) return new ActionResult(false, '评论参数无效');
+    if (HttpClient.getCookie('SESSDATA').length === 0) {
+      return new ActionResult(false, '登录状态已失效，请重新登录', -101);
+    }
+    const csrf: string = HttpClient.getCookie('bili_jct');
+    if (csrf.length === 0) return new ActionResult(false, '登录状态缺少 CSRF，请重新登录', -111);
+    const params: Record<string, string> = {
+      'oid': String(oid),
+      'type': String(type),
+      'rpid': String(rpid),
+      'reason': reason,
+      'content': '',
+      'csrf': csrf,
+      'platform': 'web',
+      'web_location': '1315875',
+    };
+    await WbiSign.encWbi(params);
+    const resp: HttpResponse = await HttpClient.post(Api.replyReport + '?' + HttpClient.buildQuery(params),
+      HttpClient.buildQuery({}), Constants.webHeaders);
+    if (!resp.ok) return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
+    const json: Record<string, Object> = resp.json();
+    const code: number = Number(json['code'] ?? -1);
+    const ok: boolean = code === 0;
+    return new ActionResult(ok, ok ? '已提交举报，感谢反馈' :
+      (String(json['message'] ?? '举报失败') + ' (' + String(code) + ')'), code);
+  }
+
   // ===== 当前账号可用的 B 站表情包（评论/动态共用官方素材 URL） =====
   static async getUserEmotes(business: string = 'reply'): Promise<Array<BiliEmotePackage>> {
     const params: Record<string, string> = {
