@@ -13,6 +13,7 @@ import { BasicDataSource } from '../common/BasicDataSource';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { colorWithAlpha } from '../common/Utils';
 import { Haptic } from '../common/Haptic';
+import { LiveApi } from '../api/LiveApi';
 
 @Component
 export struct LiveZonePage {
@@ -42,7 +43,7 @@ export struct LiveZonePage {
 
   async loadZones(): Promise<void> {
     try {
-      this.zones = await BiliApi.getLiveZones();
+      this.zones = await LiveApi.getLiveZones();
     } catch (e) {
       this.errorText = '分区加载失败，请检查网络后重试';
     }
@@ -54,7 +55,7 @@ export struct LiveZonePage {
     if (reset) this.errorText = '';
     try {
       const pn: number = reset ? 1 : this.page + 1;
-      const list: Array<LiveRoomItem> = await BiliApi.getLiveZoneRooms(this.zoneId, pn, 20);
+      const list: Array<LiveRoomItem> = await LiveApi.getLiveZoneRooms(this.zoneId, pn, 20);
       if (list.length === 0 && reset) {
         this.errorText = '该分区暂无直播';
       }

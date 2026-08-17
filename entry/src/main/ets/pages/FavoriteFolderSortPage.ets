@@ -9,6 +9,7 @@ import { ActionResult } from '../api/BiliApi';
 import { FavoriteFolderItem } from '../model/Models';
 import { formatCount } from '../common/Utils';
 import { FavSortParam } from '../common/AppRouter';
+import { FavoriteApi } from '../api/FavoriteApi';
 
 @Component
 export struct FavoriteFolderSortPage {
@@ -37,7 +38,7 @@ export struct FavoriteFolderSortPage {
     this.saving = true;
     try {
       const ids: Array<number> = this.sort.map((item: FavoriteFolderItem) => item.id);
-      const result: ActionResult = await BiliApi.sortFavoriteFolders(ids);
+      const result: ActionResult = await FavoriteApi.sortFavoriteFolders(ids);
       if (result.ok) {
         this.getUIContext().getPromptAction().showToast({ message: '排序已保存' });
       } else {

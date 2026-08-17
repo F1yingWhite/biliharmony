@@ -12,6 +12,7 @@ import { VideoRowCard } from '../components/VideoRowCard';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { colorWithAlpha, formatCount } from '../common/Utils';
+import { SearchApi } from '../api/SearchApi';
 
 @Component
 export struct ZoneChannelPage {
@@ -83,7 +84,7 @@ export struct ZoneChannelPage {
     this.loading = true;
     this.errorText = '';
     try {
-      const list: Array<VideoItem> = await BiliApi.getRankVideos(this.zoneId);
+      const list: Array<VideoItem> = await SearchApi.getRankVideos(this.zoneId);
       if (list.length === 0 && reset) {
         this.errorText = '该分区暂无可展示视频，请稍后再试';
       }

@@ -17,6 +17,9 @@ import { BasicDataSource } from '../common/BasicDataSource';
 import { DecoratedAvatar, UserDecorationBanner } from '../components/UserDecorations';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { Haptic } from '../common/Haptic';
+import { DynamicApi } from '../api/DynamicApi';
+import { LiveApi } from '../api/LiveApi';
+import { UserApi } from '../api/UserApi';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -150,7 +153,7 @@ export struct DynCard {
     this.item.like = this.likeCount;
     this.actionBusy = true;
     try {
-      const result: ActionResult = await BiliApi.likeDynamic(this.item.dynId, next);
+      const result: ActionResult = await DynamicApi.likeDynamic(this.item.dynId, next);
       if (result.ok === false) {
         this.liked = prevLiked;
         this.likeCount = prevCount;
@@ -180,7 +183,7 @@ export struct DynCard {
     if (this.item.dynId.length === 0) return;
     this.actionBusy = true;
     try {
-      const result: ActionResult = await BiliApi.repostDynamic(this.item.dynId);
+      const result: ActionResult = await DynamicApi.repostDynamic(this.item.dynId);
       if (result.ok) {
         this.forwardCount++;
         this.item.forward = this.forwardCount;
@@ -677,7 +680,7 @@ export struct DynamicView {
     try {
       const off: string = reset ? '' : this.dynOffset;
       const page: DynamicPageData = this.hostMid > 0 ?
-        await BiliApi.getUserDynamicFeed(this.hostMid, off) : await BiliApi.getDynamicFeed(off, this.dynType);
+        await DynamicApi.getUserDynamicFeed(this.hostMid, off) : await DynamicApi.getDynamicFeed(off, this.dynType);
       if (reset) {
         this.dynSource.reset(page.items);
       } else {
@@ -701,7 +704,7 @@ export struct DynamicView {
       await UserStore.ensureLoaded();
       const mid: number = UserStore.current !== null ? UserStore.current.mid : 0;
       if (mid <= 0) return;
-      const page: RelationUserPageData = await BiliApi.getRelationUsers(mid, 'following', 1);
+      const page: RelationUserPageData = await UserApi.getRelationUsers(mid, 'following', 1);
       if (page.users.length > 0) {
         this.followed = page.users;
       }
@@ -724,7 +727,7 @@ export struct DynamicView {
       for (let i: number = 0; i < this.followed.length; i++) {
         uids.push(this.followed[i].mid);
       }
-      const items = await BiliApi.getLiveStatusByUids(uids);
+      const items = await LiveApi.getLiveStatusByUids(uids);
       const next: Map<number, number> = new Map<number, number>();
       for (let i: number = 0; i < items.length; i++) {
         if (items[i].liveStatus === 1 && items[i].roomId > 0) {

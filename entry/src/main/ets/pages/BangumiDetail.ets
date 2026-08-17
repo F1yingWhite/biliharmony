@@ -20,6 +20,7 @@ import { UserStore } from '../common/UserStore';
 import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
 import { colorWithAlpha, formatCount, formatDuration } from '../common/Utils';
 import { LayoutTokens } from '../common/LayoutTokens';
+import { CommentApi } from '../api/CommentApi';
 
 @Component
 export struct BangumiDetailPage {
@@ -192,7 +193,7 @@ export struct BangumiDetailPage {
     this.repliesLoading = true;
     if (reset) this.repliesFailed = false;
     try {
-      const data: ReplyData = await BiliApi.getReplies(oid, 1, reset ? '' : this.replyCursor, this.replySortMode);
+      const data: ReplyData = await CommentApi.getReplies(oid, 1, reset ? '' : this.replyCursor, this.replySortMode);
       if (this.destroyed) return;
       this.replies = reset ? data.replies : this.replies.concat(data.replies);
       this.replyCursor = data.cursor;
@@ -301,7 +302,7 @@ export struct BangumiDetailPage {
     this.threadLoading = true;
     const page: number = reset ? 1 : this.threadPage + 1;
     try {
-      const result: ReplyPageData = await BiliApi.getReplyReplies(oid, 1, this.threadRoot.rpid, page);
+      const result: ReplyPageData = await CommentApi.getReplyReplies(oid, 1, this.threadRoot.rpid, page);
       if (this.destroyed || !this.threadOpen) return;
       const next: Array<ReplyItem> = reset ?
         (result.replies.length > 0 ? result.replies : this.threadReplies) :
@@ -322,7 +323,7 @@ export struct BangumiDetailPage {
     this.threadSending = true;
     try {
       const parent: number = this.threadTargetRpid > 0 ? this.threadTargetRpid : this.threadRoot.rpid;
-      const result: ActionResult = await BiliApi.addReply(this.replyOid(), 1, message,
+      const result: ActionResult = await CommentApi.addReply(this.replyOid(), 1, message,
         this.threadRoot.rpid, parent);
       if (this.destroyed) return;
       if (!result.ok) {
@@ -394,8 +395,6 @@ export struct BangumiDetailPage {
       draft: this.threadDraft,
       sending: this.threadSending,
       replyTargetName: this.threadTargetName,
-      isDark: this.isDark,
-      accent: this.accent,
       upMid: 0,
       onClose: () => this.threadOpen = false,
       onLike: (item: ReplyItem) => this.likeReply(item).catch(() => {
@@ -430,7 +429,7 @@ export struct BangumiDetailPage {
     }
     this.replySending = true;
     try {
-      const result: ActionResult = await BiliApi.addReply(oid, 1, message);
+      const result: ActionResult = await CommentApi.addReply(oid, 1, message);
       if (this.destroyed) return;
       if (!result.ok) {
         this.toast(result.message);
@@ -855,8 +854,6 @@ export struct BangumiDetailPage {
             item: reply,
             showPreview: true,
             version: this.replyVersion,
-            isDark: this.isDark,
-            accent: this.accent,
             upMid: 0,
             onLike: (item: ReplyItem) => this.likeReply(item).catch(() => {
             }),
@@ -927,8 +924,6 @@ export struct BangumiDetailPage {
             text: this.replyDraft,
             sending: this.replySending,
             showEmoteButton: false,
-            isDark: this.isDark,
-            accent: this.accent,
             onChange: (value: string) => {
               this.replyDraft = value;
             },

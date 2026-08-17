@@ -13,8 +13,8 @@ export struct ReplyEmotePanel {
   @Prop loading: boolean = false;
   @Prop panelHeight: number = 300;
   @Prop screenWidth: number = 360;
-  @Prop isDark: boolean = false;
-  @Prop accent: string = '#FB7299';
+  @StorageProp('isDarkMode') isDark: boolean = false;
+  @StorageProp('accentColor') accent: string = '#FB7299';
   onPackageChange: (index: number) => void = () => {};
   onSelect: (item: BiliEmote) => void = () => {};
 
