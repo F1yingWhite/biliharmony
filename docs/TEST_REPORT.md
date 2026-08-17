@@ -83,3 +83,4 @@
 - Round31：PlayerView 已拆为 16+ 模块，剩余 MoreMenuSheet 核心与双轨初始化，其余 UI/业务控制器均已下沉。
 - Round33：尝试 PlayerEmbeddedSettingsPanel 拆分，因属性链过长暂未合并，记录为后续候选。
 - Round34：4090 模拟器运行中，BiliHarmony 进程存活，持续回归通过。
+- Round36：PlayerMoreMenuPage 拆分后 API24 安装回归通过。
