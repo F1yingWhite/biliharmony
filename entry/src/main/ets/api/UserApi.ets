@@ -29,11 +29,28 @@ export class UserApi {
 
   // ===== 用户统计 =====
   static async getUserStat(mid: number): Promise<UserStat> {
-    const resp: HttpResponse = await webGet(Api.userStat, { 'vmid': String(mid) });
-    if (!resp.ok) {
+    // acc/info 已移除 stat 字段；/x/web-interface/card 的 data 根直接带 follower/following/like_num。
+    try {
+      const params: Record<string, string> = { 'mid': String(mid), 'photo': 'false' };
+      const resp: HttpResponse = await webGet(Api.memberCardInfo, params);
+      if (!resp.ok) {
+        return new UserStat();
+      }
+      const data: Record<string, Object> | null = getData(resp);
+      if (data === null) {
+        return new UserStat();
+      }
+      // card 根字段：follower=粉丝、like_num=获赞；注意根上还有一个布尔型 following
+      // （表示“当前登录用户是否关注了他”），数值型关注数在 card.attention。
+      const card: Record<string, Object> = asObject(data['card']);
+      const s: UserStat = new UserStat();
+      s.follower = asNumber(data['follower'], asNumber(card['fans'], 0));
+      s.following = asNumber(card['attention'], 0);
+      s.likeNum = asNumber(data['like_num'], 0);
+      return s;
+    } catch (e) {
       return new UserStat();
     }
-    return UserStat.from(resp.json());
   }
 
   static async getRelationUsers(mid: number, mode: string, page: number): Promise<RelationUserPageData> {

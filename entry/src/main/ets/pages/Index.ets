@@ -38,6 +38,8 @@ import { RankPage } from './RankPage';
 import { ArticlePage } from './ArticlePage';
 import { UserStore } from '../common/UserStore';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
+import { Haptic } from '../common/Haptic';
+import { curves } from '@kit.ArkUI';
 
 /** NavDestination 公共修饰：隐藏标题栏 + 页面显示/消失回调（各页面回调体不变，消除 8 分支重复）。 */
 @Extend(NavDestination)
@@ -387,6 +389,22 @@ struct Index {
     }
   }
 
+  /** 底部导航图标选中弹跳动效比例（0/1/2 对首页/动态/我的）。 */
+  @State tabScale: Array<number> = [1, 1, 1];
+
+  /** 轻触底部导航：轻震 + 图标先缩后弹回（只有切到别的 Tab 才弹）。 */
+  private tapTabItem(index: number): void {
+    Haptic.light();
+    if (this.currentTab === index) return;
+    this.tabScale = this.tabScale.map((v: number, i: number) => (i === index ? 0.78 : v));
+    const pending: number = index;
+    setTimeout(() => {
+      this.tabScale = this.tabScale.map((v: number, i: number) => (i === pending ? 1 : v));
+    }, 30);
+    // 自定义 tabBar 的 onClick 会拦截默认切换逻辑，必须显式驱动索引切换。
+    this.currentTab = index;
+  }
+
   @Builder
   TabBarItem(index: number, label: string, icon: Resource, activeIcon: Resource) {
     Column({ space: 2 }) {
@@ -394,6 +412,8 @@ struct Index {
         .width(24)
         .height(24)
         .fillColor(this.currentTab === index ? this.accent : (this.isDark ? '#8A8A8E' : '#9499A0'))
+        .scale({ x: this.tabScale[index], y: this.tabScale[index] })
+        .animation({ duration: 260, curve: curves.springMotion(0.35, 0.7) })
       Text(label)
         .fontSize(10)
         .fontColor(this.currentTab === index ? this.accent : (this.isDark ? '#8A8A8E' : '#9499A0'))
@@ -401,6 +421,9 @@ struct Index {
     .width('100%')
     .height('100%')
     .justifyContent(FlexAlign.Center)
+    .onClick(() => {
+      this.tapTabItem(index);
+    })
   }
 
   @Builder
@@ -438,6 +461,8 @@ struct Index {
     // 深色模式给原生玻璃叠一层深色吸收底：透明度必须足够高才能压住
     // 系统材质在深色下的白雾（实测 ~70% 仍泛白，Dock 整条变浅灰）。
     .barBackgroundColor(this.glassOn ? (this.isDark ? '#EA15161A' : '#00000000') : AppTheme.floatBg(this.isDark, false))
+    .animationDuration(320)
+    .animationMode(AnimationMode.CONTENT_FIRST)
     .onChange(() => {
       AppTheme.resetHeaderFade();
     })
@@ -470,6 +495,8 @@ struct Index {
     // 左右滑动留给各页面内部的频道 Tabs（首页推荐/热门/直播，动态全部/视频/番剧）。
     .scrollable(false)
     .barBackgroundColor(AppTheme.floatBg(this.isDark, this.glassOn))
+    .animationDuration(320)
+    .animationMode(AnimationMode.CONTENT_FIRST)
     .onChange(() => {
       AppTheme.resetHeaderFade();
     })

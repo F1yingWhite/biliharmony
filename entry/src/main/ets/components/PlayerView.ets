@@ -84,6 +84,17 @@ export struct PlayerView {
   onCoin: () => void = () => {};
   onFavorite: () => void = () => {};
   onShare: () => void = () => {};
+  /** 播完后「立即播放」下一段（由业务页替换为推荐视频/下一集）。 */
+  onEndPlayNow: () => void = () => {};
+  // 播完推荐卡数据（推荐列表第一条的排布）
+  @Prop endRecTitle: string = '';
+  @Prop endRecCover: string = '';
+  @Prop endRecUpName: string = '';
+  @Prop endRecPlayText: string = '';
+  @Prop endRecDuration: number = 0;
+  @Prop endRecToken: number = 0;
+  /** 播完结束画面是否可见（由 onEnded 置位，播放新源时复位）。 */
+  @State endScreenOpen: boolean = false;
   @State playing: boolean = false;
   @State prepared: boolean = false;
   @State errorText: string = '';
@@ -183,6 +194,9 @@ export struct PlayerView {
   private destroyed: boolean = false;
   // 高精度播放头（秒）：弹幕引擎与恢复定位使用；@State curTime 只做秒级 UI 刷新。
   private playheadSec: number = 0;
+  // seek 目标锁：seek 发起后到 seekDone 前，忽略 AVPlayer 上报的旧位置回写，
+  // 避免进度条从目标值弹回（快速拖动/双击快进时最明显）。
+  private seekLocked: boolean = false;
   // 拖动进度条期间滑块以拖动值为准，避免 timeUpdate 回写 curTime 把滑块拽回。
   @State sliderDragging: boolean = false;
   @State sliderDragValue: number = 0;
@@ -200,9 +214,10 @@ export struct PlayerView {
   private dmSegFallback: boolean = false;
 
   aboutToAppear(): void {
-    // 被其他 NavDestination 覆盖时 aboutToDisappear 已置位；返回同一实例需恢复。
+    // 被其他 NavDestination 覆盖时 aboutToDisappear 已置位；返回同一实例时恢复。
     this.destroyed = false;
     this.showControls = false;
+    this.endScreenOpen = false;
     AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
     AppStorage.setOrCreate<number>('videoFullscreenExitRequest', 0);
     if (this.seekCtl === null) {
@@ -227,6 +242,8 @@ export struct PlayerView {
             }
           }
           this.buffering = false;
+          // seek 完成：解锁进度回写，让 timeUpdate 接管进度显示。
+          this.seekLocked = false;
           if (this.playing) this.startDmLoop();
         },
         (video: media.AVPlayer | null, targetMs: number): void => {
@@ -554,6 +571,8 @@ if (this.runtimeSources.length === 0) {
     this.stopDmLoop(true);
     this.dmEngine.list = [];
     this.dmEngine.cursor = 0;
+    this.seekLocked = false;
+    this.endScreenOpen = false;
     this.onPlayingChange(false);
     if (oldPlayer !== null) {
       try {
@@ -854,6 +873,8 @@ if (this.runtimeSources.length === 0) {
           this.updateAVSessionPlaybackState();
           Immersive.setKeepScreenOn(false);
           if (state === 'completed') {
+            // 自然播完：在播放区弹出「推荐/重播/分享」结束画面（覆盖整个视频播放区，不切全屏）。
+            this.endScreenOpen = true;
             this.onEnded();
           }
         }
@@ -873,8 +894,8 @@ if (this.runtimeSources.length === 0) {
         }
         this.dmEngine.lastPlayerTime = nextTime;
         this.playheadSec = nextTime;
-        // 控制层只需秒级刷新，避免 250ms 一次的 @State 写入驱动整棵控制子树重建。
-        if (Math.floor(nextTime) !== Math.floor(this.curTime)) this.curTime = nextTime;
+        // seek 锁定时 AVPlayer 仍会上报 seek 前的位置，忽略这些旧回写，让进度条钉在目标值。
+        if (!this.seekLocked && Math.floor(nextTime) !== Math.floor(this.curTime)) this.curTime = nextTime;
         this.onProgress(nextTime);
         this.updateSubtitle(nextTime);
         this.spawnDanmaku(nextTime);
@@ -1137,6 +1158,7 @@ if (this.runtimeSources.length === 0) {
   }
 
   private beginPlayerPan(event: GestureEvent): void {
+    if (this.endScreenOpen) return;
     // 滑动手势判定后不再视为点弹幕。
     this.pendingDm = null;
     const x: number = event.fingerList.length > 0 ? event.fingerList[0].localX : this.dmEngine.width / 2;
@@ -1177,7 +1199,7 @@ if (this.runtimeSources.length === 0) {
 
   private handleDoubleTap(): void {
     this.pendingDm = null;
-    if (!this.prepared || this.player === null) return;
+    if (!this.prepared || this.player === null || this.endScreenOpen) return;
     const willPlay: boolean = !this.playing;
     this.doubleTapFeedbackPlaying = willPlay;
     this.doubleTapFeedbackVisible = true;
@@ -1325,6 +1347,35 @@ if (this.runtimeSources.length === 0) {
     }
   }
 
+  /** 结束画面「重播」：从头开始再播一遍（seek 0 并恢复播放）。 */
+  endReplay(): void {
+    this.endScreenOpen = false;
+    const p: media.AVPlayer | null = this.player;
+    if (p === null || !this.prepared) return;
+    this.resumeTransitionActive = this.compactMode && !this.fullscreen;
+    this.onResumeRequest();
+    try {
+      this.resetDanmakuAt(0);
+      this.playheadSec = 0;
+      this.curTime = 0;
+      this.lastAudioSyncBucket = -1;
+      this.dmEngine.list = [];
+      this.dmEngine.cursor = 0;
+      // seek 恢复播放：seek 到 0 后由 onSeekDone 回调自动 play。
+      this.seekLocked = true;
+      this.seekCtl?.request(0, true, true);
+      this.showControls = false;
+    } catch (e) {
+      this.resumeTransitionActive = false;
+    }
+  }
+
+  /** 结束画面关闭：回到剧终画面（保留控制层）。 */
+  closeEndScreen(): void {
+    this.endScreenOpen = false;
+    this.showControls = true;
+  }
+
   seekTo(positionSec: number, precise: boolean = false): void {
     const p: media.AVPlayer | null = this.player;
     if (p === null || !this.prepared) return;
@@ -1341,6 +1392,10 @@ if (this.runtimeSources.length === 0) {
     this.updateSubtitle(clamped);
     this.updateAVSessionPlaybackState();
     this.lastAudioSyncBucket = -1;
+    // seek 期间 AVPlayer 的 timeUpdate 仍会上报旧位置，若直接写回 curTime 会让进度条
+    // 从目标值弹回旧位置再跳过去（视觉上"抖动"）。用 seek 锁让进度显示钉住目标值，
+    // 等 seekDone 解锁后再跟随正常 timeUpdate。
+    this.seekLocked = true;
     this.seekCtl?.request(targetMs, precise, this.playing);
   }
 
@@ -1356,6 +1411,7 @@ if (this.runtimeSources.length === 0) {
     if (this.player !== stalledVideo) return;
     const resume: boolean = this.seekCtl?.seekResumePlaying ?? false;
     this.seekCtl?.cancel();
+    this.seekLocked = false;
     this.invalidatePlayerCreation();
     const stalledAudio: media.AVPlayer | null = this.audioPlayer;
     this.player = null;
@@ -1662,6 +1718,143 @@ if (this.runtimeSources.length === 0) {
     this.dmEngine.syncCursor(time);
   }
 
+  /** 播完结束画面：推荐卡片（照推荐列表第一条排布）+ 右侧「立即播放」 + 左下角重播/分享。 */
+  @Builder
+  PlayerEndScreen() {
+    Stack({ alignContent: Alignment.Center }) {
+      // 半透明遮罩：点空白处关闭回到剧终画面
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#99000000')
+        .onClick(() => this.closeEndScreen())
+      // 推荐视频卡片（点击封面/标题也直接开播）
+      Column({ space: 14 }) {
+        Row({ space: 10 }) {
+          // 封面（点击即开播）
+          Stack({ alignContent: Alignment.BottomEnd }) {
+            Image(this.endRecCover)
+              .width(110)
+              .height(70)
+              .objectFit(ImageFit.Cover)
+              .borderRadius(6)
+              .onClick(() => {
+                this.endScreenOpen = false;
+                this.onEndPlayNow();
+              })
+            if (this.endRecDuration > 0) {
+              Text(formatDuration(this.endRecDuration))
+                .fontSize(10)
+                .fontColor('#FFFFFF')
+                .backgroundColor('#88000000')
+                .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+                .borderRadius(3)
+                .margin({ right: 5, bottom: 5 })
+            }
+          }
+          .width(110)
+          .clip(true)
+          // 标题 + 简介
+          Column({ space: 6 }) {
+            Text(this.endRecTitle.length > 0 ? this.endRecTitle : '为你推荐')
+              .fontSize(14)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.endRecTitle.length > 0 ? '#FFFFFF' : this.accent)
+              .maxLines(2)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .lineHeight(18)
+              .onClick(() => {
+                this.endScreenOpen = false;
+                this.onEndPlayNow();
+              })
+            Row({ space: 8 }) {
+              if (this.endRecUpName.length > 0) {
+                Text(this.endRecUpName)
+                  .fontSize(11)
+                  .fontColor('#C0C4CC')
+                  .maxLines(1)
+              }
+              if (this.endRecPlayText.length > 0) {
+                Row({ space: 3 }) {
+                  Image($r('app.media.ic_play'))
+                    .width(11)
+                    .height(11)
+                    .renderMode(ImageRenderMode.Template)
+                    .fillColor('#C0C4CC')
+                  Text(this.endRecPlayText)
+                    .fontSize(10)
+                    .fontColor('#C0C4CC')
+                }
+              }
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Center)
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
+          // 右侧「立即播放」：灰色小字，与封面底部对齐
+          Column() {
+            Text('立即播放')
+              .fontSize(11)
+              .fontColor('#8E9399')
+          }
+          .height(70)
+          .justifyContent(FlexAlign.End)
+          .padding({ top: 0 })
+          .onClick(() => {
+            this.endScreenOpen = false;
+            this.onEndPlayNow();
+          })
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Top)
+        // 左下角：重播 / 分享（无边框小按钮）
+        Row({ space: 24 }) {
+          // 重播
+          Row({ space: 5 }) {
+            Image($r('app.media.ic_video_replay'))
+              .width(15)
+              .height(15)
+              .renderMode(ImageRenderMode.Template)
+              .fillColor('#C2C6CC')
+            Text('重播')
+              .fontSize(12)
+              .fontColor('#C2C6CC')
+          }
+          .padding({ left: 2, right: 8, top: 4, bottom: 4 })
+          .onClick(() => this.endReplay())
+          // 分享
+          Row({ space: 5 }) {
+            Image($r('app.media.ic_share'))
+              .width(15)
+              .height(15)
+              .renderMode(ImageRenderMode.Template)
+              .fillColor('#C2C6CC')
+            Text('分享')
+              .fontSize(12)
+              .fontColor('#C2C6CC')
+          }
+          .padding({ left: 2, right: 8, top: 4, bottom: 4 })
+          .onClick(() => {
+            this.endScreenOpen = false;
+            this.onShare();
+          })
+        }
+        .width('100%')
+        .justifyContent(FlexAlign.Start)
+        .alignItems(VerticalAlign.Center)
+      }
+      .width('86%')
+      .padding(16)
+      .borderRadius(14)
+      .backgroundColor('#B3000000')
+      .onClick(() => {
+      })
+    }
+    .width('100%')
+    .height('100%')
+  }
+
   build() {
     Stack({ alignContent: Alignment.Center }) {
       // 视频画面
@@ -1912,6 +2105,11 @@ if (this.runtimeSources.length === 0) {
           },
         })
       }
+
+      // 播完结束画面：推荐视频卡片（照推荐列表第一条的排布）+ 右侧「立即播放」 + 下方重播/分享
+      if (this.endScreenOpen && !this.compactMode && this.errorText.length === 0) {
+        this.PlayerEndScreen()
+      }
     }
     .width('100%')
     .height('100%')
@@ -1956,6 +2154,8 @@ if (this.runtimeSources.length === 0) {
 
   /** 单击播放画面：命中的弹幕先"停住"并显示点赞/点踩/举报操作条（B 站交互）；否则照常切控件。 */
   private handleCanvasTap(event: GestureEvent): void {
+    // 播完结束画面打开时接管整块画面，手势不再切换控件/停弹幕。
+    if (this.endScreenOpen) return;
     // 已在按下瞬间命中的弹幕：直接停住（放入气泡）。优先于本次证据，避免弹幕滑走误判。
     if (!this.dmPinnedVisible && this.pendingDm !== null) {
       const hit: ActiveDm = this.pendingDm;

@@ -17,6 +17,7 @@ import { LayoutTokens } from '../common/LayoutTokens';
 import { AppNavStack, NAV_RANK, NAV_ZONE, NAV_BANGUMI_INDEX, NAV_LIVE_ZONE } from '../common/AppRouter';
 import { FeedApi } from '../api/FeedApi';
 import { LiveApi } from '../api/LiveApi';
+import { Haptic } from '../common/Haptic';
 
 /** 悬浮频道切换条：单独订阅 headerFade，滚动逐帧淡出时不再带动整个 HomeView 重建。 */
 @Component
@@ -308,8 +309,10 @@ export struct HomeView {
     .height(30)
     .borderRadius(15)
     .backgroundColor(this.visualTab === index ? (this.isDark ? '#33FB7299' : '#1FFB7299') : '#00000000')
+    .scale({ x: this.visualTab === index ? 1.0 : 1.0, y: this.visualTab === index ? 1.0 : 1.0 })
     .animation({ duration: 180, curve: Curve.EaseOut })
     .onClick(() => {
+      Haptic.light();
       this.switchTab(index);
     })
   }

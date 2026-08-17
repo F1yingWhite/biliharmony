@@ -1302,9 +1302,11 @@ export class UserStat {
   static from(o: Object): UserStat {
     const j: Record<string, Object> = asObject(o);
     const data: Record<string, Object> = asObject(j['data']);
+    // card 根的 following 是布尔（是否关注了他），数值型关注数在 card.attention。
+    const card: Record<string, Object> = asObject(data['card']);
     const s: UserStat = new UserStat();
-    s.following = asNumber(data['following'], 0);
-    s.follower = asNumber(data['follower'], 0);
+    s.following = asNumber(card['attention'], 0);
+    s.follower = asNumber(data['follower'], asNumber(card['fans'], 0));
     s.likeNum = asNumber(data['like_num'], 0);
     return s;
   }
@@ -1795,9 +1797,15 @@ export class UserSpaceInfo {
   liveRoomId: number = 0;
   liveTitle: string = '';
   liveCover: string = '';
+  // 空间统计：x/space/wbi/acc/info 响应自带 stat 字段
+  // （/x/relation/stat 已半废弃，2025 起大量返回空，这里直接复用 acc/info 的数值）。
+  follower: number = 0;
+  following: number = 0;
+  likeNum: number = 0;
 
   static from(o: Object): UserSpaceInfo {
     const j: Record<string, Object> = asObject(o);
+    const stat: Record<string, Object> = asObject(j['stat']);
     const u: UserSpaceInfo = new UserSpaceInfo();
     u.mid = asNumber(j['mid'], 0);
     u.name = str(j, 'name', '');
@@ -1819,6 +1827,9 @@ export class UserSpaceInfo {
     u.liveRoomId = asNumber(liveRoom['roomid'], asNumber(liveRoom['room_id'], 0));
     u.liveTitle = str(liveRoom, 'title', '');
     u.liveCover = toHttps(str(liveRoom, 'cover', str(liveRoom, 'keyframe', '')));
+    u.follower = asNumber(stat['follower'], 0);
+    u.following = asNumber(stat['following'], 0);
+    u.likeNum = asNumber(stat['like_num'], 0);
     return u;
   }
 }

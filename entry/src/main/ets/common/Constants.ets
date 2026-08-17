@@ -209,6 +209,8 @@ export class Api {
   // 举报用户（space 域旧接口，返回 status 字段而非 code；对齐 PiliPlus Api.reportMember）
   static readonly reportMember: string = 'https://space.bilibili.com/ajax/report/add';
   static readonly memberInfo: string = HttpString.apiBaseUrl + '/x/space/wbi/acc/info';
+  // 用户名片卡：card.stat 含 粉丝/关注/获赞（acc/info 2025 起已移除 stat）。
+  static readonly memberCardInfo: string = HttpString.apiBaseUrl + '/x/web-interface/card';
   static readonly memberSpaceApp: string = HttpString.appBaseUrl + '/x/v2/space';
   // 小电视空降助手公开的 SponsorBlock for Bilibili 片段接口。
   static readonly sponsorSegments: string = 'https://bsbsb.top/api/skipSegments';
