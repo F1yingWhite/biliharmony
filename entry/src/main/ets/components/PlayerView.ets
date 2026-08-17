@@ -17,7 +17,7 @@ import { playerPanelTitle, playerPanelSub, playerPanelRowBg } from './PlayerShee
 import { PlayerSideSettingsDrawer } from './PlayerSideSettingsDrawer';
 import { PlayerMoreMenuPage } from './PlayerMoreMenuPage';
 import { common } from '@kit.AbilityKit';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
 import { AppTheme } from '../common/AppTheme';
@@ -1687,11 +1687,11 @@ if (this.runtimeSources.length === 0) {
         })
 
       // 弹幕交互气泡：点击弹幕停住后，在弹幕上方/下方显示一个黑色半透明小气泡
-      // （点赞/点踩/举报三个线性图标，无文字，弹幕本身保持原大小和位置）。
+      // （点踩/复制/举报三个线性图标，无文字，弹幕本身保持原大小和位置）。
       if (this.dmPinnedVisible) {
         Row({ space: 0 }) {
-          this.DmActionCell($r('app.media.ic_like'), () => this.dmVote('like'), true)
-          this.DmActionCell($r('app.media.ic_dislike'), () => this.dmVote('dislike'), true)
+          this.DmActionCell($r('app.media.ic_dislike'), () => this.dmDislike(), true)
+          this.DmActionCell($r('app.media.ic_copy'), () => this.dmCopy(), true)
           this.DmActionCell($r('app.media.ic_report_flag'), () => this.dmReport(), true)
         }
         .width(this.dmPinBubbleW)
@@ -2033,15 +2033,32 @@ if (this.runtimeSources.length === 0) {
     if (this.playing) this.scheduleControlsHide();
   }
 
-  /** 弹幕点赞/点踩：B 站未开放媒体弹幕打分接口，本地乐观反馈。 */
-  private dmVote(kind: 'like' | 'dislike'): void {
+  /** 弹幕点踩：B 站未开放媒体弹幕打分接口，本地乐观反馈。 */
+  private dmDislike(): void {
+    this.unpinDanmaku();
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: '已点踩这条弹幕' });
+    } catch (e) {
+    }
+  }
+
+  /** 复制弹幕文本到系统剪贴板。 */
+  private dmCopy(): void {
     const text: string = this.dmPinnedText;
     this.unpinDanmaku();
     try {
-      this.getUIContext().getPromptAction().showToast({ message: kind === 'like' ? '已为弹幕点赞' : '已点踩这条弹幕' });
+      const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text);
+      pasteboard.getSystemPasteboard().setData(data).then(() => {
+        this.toast('弹幕已复制');
+      }).catch(() => {
+        this.toast('复制失败');
+      });
     } catch (e) {
+      try {
+        this.getUIContext().getPromptAction().showToast({ message: '复制失败' });
+      } catch (e2) {
+      }
     }
-    void text;
   }
 
   /** 弹幕举报：停住态下点"举报"进原因选择。 */
