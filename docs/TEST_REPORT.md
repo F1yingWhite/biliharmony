@@ -68,3 +68,10 @@
   4. `SearchResultList` 通用壳覆盖的视频/用户 Tab 均通过 `uitest dumpLayout` 验证，未破坏原列表触底加载与空态逻辑。
 - `VideoRowCard` @Reusable 字段改 `@Prop` 后，搜索/历史/收藏列表复用路径编译通过；暂未发现复用残留。
 - 直播控件跟随全局强调色：编译通过，未实点直播间（直播页由 live 数据依赖，本轮仅代码走读 + 编译验证）。
+
+## 七、播放器拆解回归（第三轮 PlayerView 进展）
+
+- `PlayerAvSessionHelper`：系统媒体会话创建/元数据/播放状态/释放已从 PlayerView 抽出，编译通过。
+- `PlayerSubtitleController`：CC 字幕轨道选择/加载/二分匹配从 PlayerView 抽出，封面编译通过；已删除迁移后的死代码。
+- 4090 模拟器：最新 `6.1.1(24)` 兼容包安装成功，BiliHarmony 冷启动存活无 fatal。
+- 剩余 PlayerView seek 状态机/双轨初始化仍在下轮继续拆。
