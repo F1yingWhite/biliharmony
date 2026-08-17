@@ -81,3 +81,4 @@
 - Round29：PlayerSideSettingsDrawer + 最新 PlayerView 拆分分支安装回归通过，冷启动无崩溃。
 - Round30：远程 Xorg/x11vnc/websockify 健康检查正常，noVNC 可访问。
 - Round31：PlayerView 已拆为 16+ 模块，剩余 MoreMenuSheet 核心与双轨初始化，其余 UI/业务控制器均已下沉。
+- Round33：尝试 PlayerEmbeddedSettingsPanel 拆分，因属性链过长暂未合并，记录为后续候选。
