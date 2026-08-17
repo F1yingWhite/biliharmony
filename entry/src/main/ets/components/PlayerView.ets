@@ -12,6 +12,7 @@ import { PlayerToggleItem } from './PlayerMenuItems';
 import { PlayerGestureController } from './PlayerGestureController';
 import { PlayerPlaybackConfig } from './PlayerPlaybackConfig';
 import { DanmakuListPanel } from './DanmakuListPanel';
+import { DmFilterPanel } from './DmFilterPanel';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
@@ -1991,120 +1992,6 @@ if (this.runtimeSources.length === 0) {
     return this.isDark ? '#26272B' : '#F5F7F9';
   }
 
-  @Builder
-  DmFilterPanel(embedded: boolean = false) {
-    Column({ space: 8 }) {
-      Row() {
-        Text('弹幕屏蔽管理').fontSize(15).fontWeight(FontWeight.Bold).fontColor(this.sheetTitleColor())
-        Blank()
-        Text(this.dmFilterLoading ? '加载中…' : '')
-          .fontSize(11)
-          .fontColor(this.sheetSubColor())
-      }
-      .width('100%')
-      Row({ space: 6 }) {
-        Text('关键词').fontSize(11)
-          .fontColor(this.dmFilterType === 0 ? '#FFFFFF' : this.sheetSubColor())
-          .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-          .borderRadius(13)
-          .backgroundColor(this.dmFilterType === 0 ? this.accent : this.sheetRowBg())
-          .onClick(() => this.dmFilterType = 0)
-        Text('正则').fontSize(11)
-          .fontColor(this.dmFilterType === 1 ? '#FFFFFF' : this.sheetSubColor())
-          .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-          .borderRadius(13)
-          .backgroundColor(this.dmFilterType === 1 ? this.accent : this.sheetRowBg())
-          .onClick(() => this.dmFilterType = 1)
-        Text('用户').fontSize(11)
-          .fontColor(this.dmFilterType === 2 ? '#FFFFFF' : this.sheetSubColor())
-          .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-          .borderRadius(13)
-          .backgroundColor(this.dmFilterType === 2 ? this.accent : this.sheetRowBg())
-          .onClick(() => this.dmFilterType = 2)
-      }
-      .width('100%')
-      Row({ space: 6 }) {
-        TextInput({ text: this.dmFilterDraft, placeholder: '输入后点添加' })
-          .layoutWeight(1)
-          .height(32)
-          .fontSize(12)
-          .fontColor(this.sheetTitleColor())
-          .placeholderColor(this.sheetSubColor())
-          .backgroundColor(this.sheetRowBg())
-          .borderRadius(15)
-          .padding({ left: 12, right: 12 })
-          .onChange((value: string) => this.dmFilterDraft = value)
-        Text('添加').fontSize(12).fontColor('#FFFFFF')
-          .padding({ left: 14, right: 14, top: 7, bottom: 7 })
-          .borderRadius(15)
-          .backgroundColor(this.accent)
-          .onClick(() => {
-            this.submitDmFilterRule().catch(() => {
-            });
-          })
-      }
-      .width('100%')
-      if (this.dmFilterRulesCount === 0) {
-        Text(this.dmFilterLoading ? '加载中…' : '暂无屏蔽规则')
-          .fontSize(12)
-          .fontColor(this.sheetSubColor())
-          .width('100%')
-          .textAlign(TextAlign.Center)
-          .padding({ top: 18, bottom: 18 })
-      } else {
-        List({ space: 4 }) {
-          LazyForEach(this.dmFilterRuleSource, (rule: DmFilterRule) => {
-            ListItem() {
-              Row({ space: 8 }) {
-                Text(this.dmFilterTypeLabel(rule.type))
-                  .fontSize(10)
-                  .fontColor(this.accent)
-                  .padding({ left: 6, right: 6, top: 2, bottom: 2 })
-                  .borderRadius(4)
-                  .backgroundColor('#26FB7299')
-                Text(rule.filter)
-                  .fontSize(12)
-                  .fontColor(this.sheetTitleColor())
-                  .maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  .layoutWeight(1)
-                Text('删除')
-                  .fontSize(11)
-                  .fontColor('#FF6B6B')
-                  .onClick(() => {
-                    this.deleteDmFilterRule(rule.id).catch(() => {
-                    });
-                  })
-              }
-              .width('100%')
-              .padding({ left: 8, right: 8, top: 7, bottom: 7 })
-              .borderRadius(6)
-              .backgroundColor(this.sheetRowBg())
-            }
-          }, (rule: DmFilterRule) => String(rule.id))
-        }
-        .width('100%')
-        .height(embedded ? 'auto' : 180)
-        .layoutWeight(embedded ? 1 : 0)
-        .scrollBar(BarState.Off)
-        .cachedCount(4)
-      }
-    }
-    .width('100%')
-    .height(embedded ? '100%' : 'auto')
-    .padding({ left: 16, right: 16, top: 12, bottom: 14 })
-    .borderRadius(embedded ? 0 : { topLeft: 16, topRight: 16 })
-    .backgroundColor(embedded ? '#00000000' : (this.isDark ? '#18191C' : '#FFFFFF'))
-    .backdropBlur(embedded ? 0 : 24)
-    .border(embedded ? { width: 0 } : { width: { top: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
-    .align(embedded ? Alignment.Top : Alignment.Bottom)
-    .transition(embedded ? TransitionEffect.IDENTITY :
-      TransitionEffect.asymmetric(
-        TransitionEffect.opacity(0).combine(TransitionEffect.translate({ y: 24 }))
-          .animation({ duration: 200, curve: Curve.EaseOut }),
-        TransitionEffect.opacity(0).animation({ duration: 150, curve: Curve.EaseIn })))
-  }
-
   /** 更多功能 Sheet 内嵌管理页：复用 PlayerSettingsPanel 的内容与回调，但去掉播放器内弹层的半透明灰底。 */
   @Builder
   EmbeddedSettingsPanel(which: number) {
@@ -2202,7 +2089,28 @@ if (this.runtimeSources.length === 0) {
               this.showSideDrawer = false;
             },
           })
-          else if (this.moreSheetPage === 'dmFilter') this.DmFilterPanel(true)
+          else if (this.moreSheetPage === 'dmFilter') DmFilterPanel({
+            source: this.dmFilterRuleSource,
+            loading: this.dmFilterLoading,
+            filterType: this.dmFilterType,
+            draft: this.dmFilterDraft,
+            rulesCount: this.dmFilterRulesCount,
+            embedded: true,
+            onTypeChange: (type: number): void => {
+              this.dmFilterType = type;
+            },
+            onDraftChange: (draft: string): void => {
+              this.dmFilterDraft = draft;
+            },
+            onAdd: (): void => {
+              this.submitDmFilterRule().catch(() => {
+              });
+            },
+            onDelete: (id: number): void => {
+              this.deleteDmFilterRule(id).catch(() => {
+              });
+            },
+          })
         }
         .layoutWeight(1)
       } else {
