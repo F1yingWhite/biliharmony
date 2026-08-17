@@ -18,6 +18,28 @@ export struct PlayerGestureOverlay {
   @Prop doubleTapPlaying: boolean = false;
   @Prop doubleTapScale: number = 1;
   @Prop doubleTapOpacity: number = 0;
+  /** 长按倍速：三个右向小三角逐个亮起的循环动画步（0/1/2）。 */
+  @State holdAnimStep: number = 0;
+  private holdAnimTimer: number = -1;
+
+  private startHoldAnimation(): void {
+    if (this.holdAnimTimer >= 0) return;
+    this.holdAnimTimer = setInterval(() => {
+      if (!this.holdSpeedActive) {
+        this.stopHoldAnimation();
+        return;
+      }
+      this.holdAnimStep = (this.holdAnimStep + 1) % 3;
+    }, 220);
+  }
+
+  private stopHoldAnimation(): void {
+    if (this.holdAnimTimer >= 0) {
+      clearInterval(this.holdAnimTimer);
+      this.holdAnimTimer = -1;
+    }
+    this.holdAnimStep = 0;
+  }
 
   build() {
     Stack({ alignContent: Alignment.Center }) {
@@ -30,24 +52,7 @@ export struct PlayerGestureOverlay {
       }
 
       if (this.holdSpeedActive || this.gestureSeekPreview >= 0 || this.gestureAdjustPercent >= 0) {
-        Row({ space: 7 }) {
-          Text(this.holdSpeedActive ? '»' : (this.gestureAdjustPercent >= 0 ?
-            (this.gestureAdjustKind === '亮度' ? '☀' : '♪') :
-            (this.gestureSeekPreview >= this.panStartTime ? '››' : '‹‹')))
-            .fontSize(18)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#FFFFFF')
-          Text(this.holdSpeedActive ? '2× 快速播放' : (this.gestureAdjustPercent >= 0 ?
-            this.gestureAdjustKind + ' ' + this.gestureAdjustPercent + '%' :
-            formatDuration(this.gestureSeekPreview) + ' / ' + formatDuration(this.duration)))
-            .fontSize(13)
-            .fontWeight(FontWeight.Medium)
-            .fontColor('#FFFFFF')
-        }
-        .padding({ left: 14, right: 14, top: 9, bottom: 9 })
-        .borderRadius(18)
-        .backgroundColor('#A6000000')
-        .backdropBlur(12)
+        this.HintBubble()
       }
 
       if (this.doubleTapVisible) {
@@ -63,5 +68,51 @@ export struct PlayerGestureOverlay {
     .width('100%')
     .height('100%')
     .hitTestBehavior(HitTestMode.None)
+  }
+
+  /** 顶部小胶囊：长按倍速 = »»» 逐个点亮；横滑/音量/亮度保持简洁符号。 */
+  @Builder
+  HintBubble() {
+    Row({ space: 7 }) {
+      if (this.holdSpeedActive) {
+        // 三个右向三角形逐个亮起：亮 = 白，灭 = 半透明，间隔刷新实现循环。
+        Row({ space: 3 }) {
+          Text('›').fontSize(15).fontWeight(FontWeight.Bold)
+            .fontColor(this.holdAnimStep >= 0 ? '#FFFFFF' : '#59FFFFFF')
+            .animation({ duration: 160, curve: Curve.EaseOut })
+          Text('›').fontSize(15).fontWeight(FontWeight.Bold)
+            .fontColor(this.holdAnimStep >= 1 ? '#FFFFFF' : '#59FFFFFF')
+            .animation({ duration: 160, curve: Curve.EaseOut })
+          Text('›').fontSize(15).fontWeight(FontWeight.Bold)
+            .fontColor(this.holdAnimStep >= 2 ? '#FFFFFF' : '#59FFFFFF')
+            .animation({ duration: 160, curve: Curve.EaseOut })
+        }
+        Text('2× 快速播放')
+          .fontSize(12)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#FFFFFF')
+      } else {
+        Text(this.gestureAdjustPercent >= 0 ?
+          ((this.gestureAdjustKind === '亮度' ? '☀' : '♪') + ' ' + this.gestureAdjustPercent + '%') :
+          (formatDuration(this.gestureSeekPreview) + ' / ' + formatDuration(this.duration)))
+          .fontSize(12)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#FFFFFF')
+      }
+    }
+    .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+    .borderRadius(14)
+    .backgroundColor('#A6000000')
+    .backdropBlur(10)
+    // 顶部居中：位置 x 用百分比锚左侧，translate 回移一半实现水平居中。
+    .position({ x: '50%', y: this.fullscreen ? 96 : 66 })
+    .translate({ x: '-50%' })
+    // 进入倍速态时启动动画；退出时停止并复位。
+    .onAppear(() => {
+      if (this.holdSpeedActive) this.startHoldAnimation();
+    })
+    .onDisAppear(() => {
+      this.stopHoldAnimation();
+    })
   }
 }

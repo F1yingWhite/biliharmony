@@ -37,14 +37,30 @@ export class FavoriteApi {
   }
 
   static async modifyVideoFavorite(aid: number, addIds: Array<number>, deleteIds: Array<number>): Promise<ActionResult> {
+    // 对齐 PiliPlus lib/http/fav.dart favVideo：
+    // POST /x/v3/fav/resource/batch-deal body 用 resources(=视频 aid) + add/del_media_ids + csrf。
+    // 该接口不要 wbi/appSign（加了反而 -400）。用 webPost 带 formurlencoded。
+    if (HttpClient.getCookie('SESSDATA').length === 0) {
+      return new ActionResult(false, '登录状态已失效，请重新登录', -101);
+    }
+    const csrf: string = HttpClient.getCookie('bili_jct');
+    if (csrf.length === 0) return new ActionResult(false, '登录状态缺少 CSRF，请重新登录', -111);
     const params: Record<string, string> = {
-      'rid': String(aid),
-      'type': '2',
+      'resources': String(aid),
       'add_media_ids': addIds.map((id: number) => String(id)).join(','),
       'del_media_ids': deleteIds.map((id: number) => String(id)).join(','),
-      'platform': 'web',
+      'csrf': csrf,
     };
-    return postVideoAction(Api.favoriteResourceDeal, params);
+    const resp: HttpResponse = await webPost(Api.favoriteResourceDeal, params);
+    if (!resp.ok) {
+      return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
+    }
+    const json: Record<string, Object> = resp.json();
+    const code: number = Number(json['code'] ?? -1);
+    const ok: boolean = code === 0;
+    const serverMessage: string = str(json, 'message', '');
+    return new ActionResult(ok, ok ? '操作成功' :
+      ((serverMessage.length > 0 && serverMessage !== '0' ? serverMessage : '收藏失败') + ' (' + String(code) + ')'), code);
   }
 
   /** 收藏夹自定义排序：sort 为按新顺序排列的收藏夹 id（逗号分隔），需要 appSign + csrf。 */
