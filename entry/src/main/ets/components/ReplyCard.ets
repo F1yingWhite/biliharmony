@@ -1,4 +1,5 @@
 import { AppTheme } from '../common/AppTheme';
+import { ReplyActionBar } from './ReplyActionBar';
 import { AppNavStack, ImageViewerParam, NAV_IMAGE_VIEWER, NAV_USER_SPACE, NAV_VIDEO_DETAIL,
   UserSpaceParam, VideoDetailParam } from '../common/AppRouter';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
@@ -277,24 +278,15 @@ export struct ReplyCard {
 
   @Builder
   ActionBar() {
-    Row({ space: this.threadDepth > 0 ? 4 : 8 }) {
-      Row({ space: 4 }) {
-        Image($r('app.media.ic_like'))
-          .width(17)
-          .height(17)
-          .renderMode(ImageRenderMode.Template)
-          .fillColor(this.mirrorLiked ? this.accent : '#9499A0')
-          .scale({ x: this.likeScale, y: this.likeScale })
-        Text(this.mirrorLike > 0 ? String(this.mirrorLike) : '点赞')
-          .fontSize(11)
-          .fontColor(this.mirrorLiked ? this.accent : '#9499A0')
-      }
-      .height(30)
-      .padding({ left: 4, right: 4 })
-      .borderRadius(15)
-      .priorityGesture(TapGesture().onAction(() => {
+    ReplyActionBar({
+      mirrorLiked: this.mirrorLiked,
+      mirrorDisliked: this.mirrorDisliked,
+      mirrorLike: this.mirrorLike,
+      likeScale: this.likeScale,
+      dislikeScale: this.dislikeScale,
+      threadDepth: this.threadDepth,
+      onLike: (): void => {
         this.playLikeAnimation();
-        // priorityGesture 在 List 内优先识别，确保点击不被滚动手势/根事件抢占。
         if (this.mirrorLiked) {
           this.mirrorLiked = false;
           this.mirrorLike = Math.max(0, this.mirrorLike - 1);
@@ -304,22 +296,8 @@ export struct ReplyCard {
           this.mirrorDisliked = false;
         }
         this.onLike(this.item);
-      }))
-      Row({ space: 4 }) {
-        Image($r('app.media.ic_dislike'))
-          .width(16)
-          .height(16)
-          .renderMode(ImageRenderMode.Template)
-          .fillColor(this.mirrorDisliked ? this.accent : '#9499A0')
-          .scale({ x: this.dislikeScale, y: this.dislikeScale })
-        Text('点踩')
-          .fontSize(11)
-          .fontColor(this.mirrorDisliked ? this.accent : '#9499A0')
-      }
-      .height(30)
-      .padding({ left: 4, right: 4 })
-      .borderRadius(15)
-      .priorityGesture(TapGesture().onAction(() => {
+      },
+      onDislike: (): void => {
         this.playDislikeAnimation();
         if (this.mirrorDisliked) {
           this.mirrorDisliked = false;
@@ -331,52 +309,19 @@ export struct ReplyCard {
           }
         }
         this.onDislike(this.item);
-      }))
-      Row({ space: 4 }) {
-        Image($r('app.media.ic_share'))
-          .width(16)
-          .height(16)
-          .renderMode(ImageRenderMode.Template)
-          .fillColor('#9499A0')
-        Text('转发')
-          .fontSize(11)
-          .fontColor('#9499A0')
-      }
-      .height(30)
-      .padding({ left: 4, right: 4 })
-      .borderRadius(15)
-      .priorityGesture(TapGesture().onAction(() => this.onShare(this.item)))
-      Row({ space: 4 }) {
-        Image($r('app.media.ic_comment'))
-          .width(16)
-          .height(16)
-          .renderMode(ImageRenderMode.Template)
-          .fillColor('#9499A0')
-        Text('回复')
-          .fontSize(11)
-          .fontColor('#9499A0')
-      }
-      .height(30)
-      .padding({ left: 4, right: 4 })
-      .borderRadius(15)
-      .priorityGesture(TapGesture().onAction(() => this.onSelectReply(this.item)))
-      Row({ space: 4 }) {
-        Image($r('app.media.ic_more'))
-          .width(16)
-          .height(16)
-          .renderMode(ImageRenderMode.Template)
-          .fillColor('#9499A0')
-      }
-      .height(30)
-      .padding({ left: 4, right: 4 })
-      .borderRadius(15)
-      .priorityGesture(TapGesture().onAction(() => this.promptReport()))
-      Blank()
-    }
-    .width('100%')
-    .height(32)
-    .alignItems(VerticalAlign.Center)
+      },
+      onShare: (): void => {
+        this.onShare(this.item);
+      },
+      onSelectReply: (): void => {
+        this.onSelectReply(this.item);
+      },
+      onMore: (): void => {
+        this.promptReport();
+      },
+    })
   }
+
 
   /** 评论操作：自己的评论可删除；他人评论走举报原因选择。 */
   private promptReport(): void {
