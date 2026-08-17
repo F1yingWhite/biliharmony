@@ -28,6 +28,7 @@ import { HotSearchStore } from '../common/HotSearchStore';
 import { SearchHistoryStore } from '../common/SearchHistoryStore';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { inputMethod } from '@kit.IMEKit';
+import { SearchApi } from '../api/SearchApi';
 
 @Component
 export struct SearchPage {
@@ -92,7 +93,7 @@ export struct SearchPage {
     this.loadHotSearch().catch(() => {
     });
     // 拉取 B 站搜索默认词作为占位（失败时保持现有占位不变）。
-    const def: string = await BiliApi.getSearchDefault();
+    const def: string = await SearchApi.getSearchDefault();
     if (this.destroyed || def.length === 0) {
       return;
     }
@@ -116,7 +117,7 @@ export struct SearchPage {
     }
     this.hotList = list;
     // 趋势榜独立拉取（轻量、失败不阻塞热搜展示）。
-    BiliApi.getSearchTrending().then((trending: Array<HotSearchItem>) => {
+    SearchApi.getSearchTrending().then((trending: Array<HotSearchItem>) => {
       if (!this.destroyed && trending.length > 0) {
         this.trendingList = trending;
       }
@@ -132,6 +133,8 @@ export struct SearchPage {
       this.suggestTimer = -1;
     }
     if (value.length === 0) {
+      // 清空输入回到热搜/历史首页面；searching 若不复位，结果 Tabs 会一直霸屏。
+      this.searching = false;
       this.showSuggest = false;
       this.suggests = [];
       return;
@@ -145,7 +148,7 @@ export struct SearchPage {
   }
 
   async fetchSuggest(value: string, seq: number): Promise<void> {
-    const s: Array<string> = await BiliApi.searchSuggest(value);
+    const s: Array<string> = await SearchApi.searchSuggest(value);
     if (this.destroyed || seq !== this.suggestSeq) {
       return;
     }
@@ -184,7 +187,7 @@ export struct SearchPage {
           this.allPage = 1;
         }
         const page: number = this.allPage;
-        const res: SearchAllResult = await BiliApi.searchAll(kw, page);
+        const res: SearchAllResult = await SearchApi.searchAll(kw, page);
         if (this.destroyed) {
           return;
         }
@@ -205,7 +208,7 @@ export struct SearchPage {
         if (this.filterPubtime > 0) {
           pubtimeBegin = Math.floor(Date.now() / 1000) - VIDEO_PUBTIME_OPTIONS[this.filterPubtime].value;
         }
-        const res: VideoSearchResult = await BiliApi.searchVideosByType(kw, page, this.videoOrder,
+        const res: VideoSearchResult = await SearchApi.searchVideosByType(kw, page, this.videoOrder,
           VIDEO_DURATION_OPTIONS[this.filterDuration].value, pubtimeBegin, this.filterTids);
         if (this.destroyed) {
           return;
@@ -228,7 +231,7 @@ export struct SearchPage {
           }
         }
         const page: number = isBangumi ? this.bangumiPage : this.ftPage;
-        const res: PgcSearchResult = await BiliApi.searchMedia(kw,
+        const res: PgcSearchResult = await SearchApi.searchMedia(kw,
           isBangumi ? SearchTypes.mediaBangumi : SearchTypes.mediaFt, page);
         if (this.destroyed) {
           return;
@@ -250,7 +253,7 @@ export struct SearchPage {
           this.livePage = 1;
         }
         const page: number = this.livePage;
-        const res: LiveSearchResult = await BiliApi.searchLiveRooms(kw, page, this.liveOrder);
+        const res: LiveSearchResult = await SearchApi.searchLiveRooms(kw, page, this.liveOrder);
         if (this.destroyed) {
           return;
         }
@@ -266,7 +269,7 @@ export struct SearchPage {
           this.articlePage = 1;
         }
         const page: number = this.articlePage;
-        const res: ArticleSearchResult = await BiliApi.searchArticles(kw, page);
+        const res: ArticleSearchResult = await SearchApi.searchArticles(kw, page);
         if (this.destroyed) {
           return;
         }
@@ -282,7 +285,7 @@ export struct SearchPage {
           this.userPage = 1;
         }
         const page: number = this.userPage;
-        const res: UserSearchResult = await BiliApi.searchUsers(kw, page, this.userOrder, this.userType);
+        const res: UserSearchResult = await SearchApi.searchUsers(kw, page, this.userOrder, this.userType);
         if (this.destroyed) {
           return;
         }

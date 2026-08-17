@@ -2,7 +2,7 @@
  * 数据模型：视频、评论、用户、动态、搜索等
  * 字段映射移植自 PiliPlus lib/models
  */
-import { asObject, asString, asNumber, asArray, asBool, str, num, formatCount, toHttps } from '../common/Utils';
+import { asObject, asString, asNumber, asArray, asBool, str, formatCount, toHttps } from '../common/Utils';
 
 // ===== 视频卡片项（统一 app 推荐 / 热门 / 搜索结果） =====
 export class VideoItem {
@@ -2081,8 +2081,9 @@ export class WatchLaterSeasonItem {
       item.newEpDesc = '';
     }
     item.cover = toHttps(str(j, 'square_cover', str(j, 'cover', '')));
-    const seasonType: Record<string, Object> = asObject(j['season_type_name']);
-    item.typeText = str(seasonType, '', '');
+    // season_type_name 是字符串字段（不是对象），旧代码却把它当对象 + '' 取 key，
+    // 恒取到空串，然后凭空 fallback，属于拼写/类型不匹配 bug。
+    item.typeText = str(j, 'season_type_name', '');
     if (item.typeText.length === 0) {
       item.typeText = str(j, 'type_name', '');
     }

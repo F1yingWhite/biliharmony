@@ -7,7 +7,7 @@ import { UserStore } from '../common/UserStore';
 import { SearchHistoryStore } from '../common/SearchHistoryStore';
 
 const DOMAIN: number = 0x0000;
-const TAG: string = 'BiliHaromny';
+const TAG: string = 'BiliHarmony';
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
