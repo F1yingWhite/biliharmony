@@ -168,16 +168,22 @@ export struct BangumiIndexPage {
             .borderRadius(3)
             .margin({ left: 6, bottom: 6 })
         }
-        if (item.score.length > 0 && item.score !== '0') {
-          Text('★ ' + item.score)
-            .fontSize(11)
-            .fontColor('#FFFFFF')
-            .backgroundColor('#66000000')
-            .padding({ left: 5, right: 5, top: 2, bottom: 2 })
-            .borderRadius(4)
-            .align(Alignment.TopEnd)
-            .margin(6)
+        // 评分布章：Stack 子组件不能各自独立对齐（align 会被容器的 alignContent 覆盖），
+        // 必须包一层等大覆盖 Stack 才能固定在右上角，否则会和左下角"大会员"徽标叠在一起。
+        Stack({ alignContent: Alignment.TopEnd }) {
+          if (item.score.length > 0 && item.score !== '0') {
+            Text('★ ' + item.score)
+              .fontSize(11)
+              .fontColor('#FFFFFF')
+              .backgroundColor('#66000000')
+              .padding({ left: 5, right: 5, top: 2, bottom: 2 })
+              .borderRadius(4)
+              .margin(6)
+          }
         }
+        .width('100%')
+        .height('100%')
+        .hitTestBehavior(HitTestMode.None)
       }
       .width('100%')
       .clip(true)
