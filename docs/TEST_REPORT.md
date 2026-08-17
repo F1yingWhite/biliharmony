@@ -76,3 +76,4 @@
 - 4090 模拟器：最新 `6.1.1(24)` 兼容包安装成功，BiliHarmony 冷启动存活无 fatal。
 - 剩余 PlayerView seek 状态机/双轨初始化仍在下轮继续拆。
 - `PlayerSeekController`：seek 合并调度/音视频双轨回调/看门狗抽离，API24 包安装成功，冷启动无崩溃。
+- PlayerView 已从 2615 行降至 2223 行；已拆组件：AVSession/字幕/Seek/倍速/手势/菜单/Sponsor/弹幕列表/弹幕屏蔽/播放策略。
