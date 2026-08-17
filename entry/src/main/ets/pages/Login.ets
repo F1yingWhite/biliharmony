@@ -7,6 +7,7 @@ import { AppNavStack } from '../common/AppRouter';
 import { BiliApi, CookiePair, LoginResult, SmsSendResult, TVCodeResult } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
 import { BackButton } from '../components/BackButton';
+import { safeToast } from '../common/Toast';
 
 // 登录表单输入框统一样式
 @Extend(TextInput)
@@ -52,11 +53,7 @@ export struct LoginPage {
   private destroyed: boolean = false;
 
   private toast(message: string): void {
-    try {
-      this.toast(message);
-    } catch (e) {
-      // 页面销毁或窗口异常时忽略提示。
-    }
+    safeToast(this.getUIContext(), message);
   }
 
   aboutToAppear(): void {

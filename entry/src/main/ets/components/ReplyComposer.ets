@@ -9,8 +9,8 @@ export struct ReplyComposer {
   @Prop sending: boolean = false;
   @Prop emoteOpen: boolean = false;
   @Prop showEmoteButton: boolean = true;
-  @Prop isDark: boolean = false;
-  @Prop accent: string = '#FB7299';
+  @StorageProp('isDarkMode') isDark: boolean = false;
+  @StorageProp('accentColor') accent: string = '#FB7299';
   @State focused: boolean = false;
   private editorController: RichEditorController = new RichEditorController();
   private editorReady: boolean = false;

@@ -9,7 +9,8 @@ import { common } from '@kit.AbilityKit';
 import { systemShare } from '@kit.ShareKit';
 import { generateBarcode, scanCore } from '@kit.ScanKit';
 import { parseReplyContent, ReplyRenderPart } from '../common/ReplyContentParser';
-import { formatCount, formatRelativeTime } from '../common/Utils';
+import { formatCount } from '../common/Utils';
+import { formatReplyMeta } from '../common/ReplyMeta';
 import { ReplyItem } from '../model/Models';
 
 /** 生成评论分享二维码；失败时返回 null，卡片退化为一行链接文字。 */
@@ -78,8 +79,7 @@ export struct ReplyShareCard {
   @Prop linkLabel: string = 'www.bilibili.com';
 
   private metaText(): string {
-    const location: string = this.item.location.replace('IP属地：', '').replace('IP属地:', '').trim();
-    return formatRelativeTime(this.item.ctime) + (location.length > 0 ? '  IP属地：' + location : '');
+    return formatReplyMeta(this.item);
   }
 
   build() {

@@ -10,6 +10,8 @@ import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { PageHeader } from '../components/PageHeader';
 import { VideoRowCard } from '../components/VideoRowCard';
 import { BasicDataSource } from '../common/BasicDataSource';
+import { FavoriteApi } from '../api/FavoriteApi';
+import { HistoryApi } from '../api/HistoryApi';
 
 @Component
 export struct HistoryPage {
@@ -45,7 +47,7 @@ export struct HistoryPage {
     this.loading = true;
     this.errorText = '';
     try {
-      const data: HistoryPageData = await BiliApi.getHistory(reset ? 0 : this.cursorMax, reset ? 0 : this.cursorViewAt);
+      const data: HistoryPageData = await HistoryApi.getHistory(reset ? 0 : this.cursorMax, reset ? 0 : this.cursorViewAt);
       if (reset) {
         this.itemsSource.reset(data.items);
       } else {
@@ -262,7 +264,7 @@ export struct WatchLaterPage {
     this.loading = true;
     this.errorText = '';
     try {
-      const items: Array<WatchLaterItem> = await BiliApi.getWatchLaterList();
+      const items: Array<WatchLaterItem> = await HistoryApi.getWatchLaterList();
       this.itemsSource.reset(items);
       this.itemCount = items.length;
     } catch (e) {
@@ -277,7 +279,7 @@ export struct WatchLaterPage {
     if (this.actionBusy) return;
     this.actionBusy = true;
     try {
-      const result: ActionResult = await BiliApi.delWatchLater([item.video.aid]);
+      const result: ActionResult = await HistoryApi.delWatchLater([item.video.aid]);
       if (!result.ok) {
         this.toast(result.message);
         return;
@@ -317,7 +319,7 @@ export struct WatchLaterPage {
     if (this.actionBusy) return;
     this.actionBusy = true;
     try {
-      const result: ActionResult = await BiliApi.clearWatchLater();
+      const result: ActionResult = await HistoryApi.clearWatchLater();
       if (!result.ok) {
         this.toast(result.message);
         return;
@@ -462,7 +464,7 @@ export struct FavoritesPage {
     this.collectionLoading = true;
     try {
       const page: number = reset ? 1 : this.collectionPage + 1;
-      const data = await BiliApi.getCollectedFolders(user.mid, page);
+      const data = await FavoriteApi.getCollectedFolders(user.mid, page);
       if (reset) {
         this.collectionsSource.reset(data.folders);
       } else {
@@ -483,7 +485,7 @@ export struct FavoritesPage {
     this.loading = true;
     try {
       const page: number = reset ? 1 : this.folderPage + 1;
-      const data = await BiliApi.getFavoriteFolders(user.mid, page);
+      const data = await FavoriteApi.getFavoriteFolders(user.mid, page);
       if (reset) {
         this.foldersSource.reset(data.folders);
       } else {
@@ -512,7 +514,7 @@ export struct FavoritesPage {
     try {
       const page: number = reset ? 1 : this.videoPage + 1;
       const data: FavoriteVideoPageData = this.selected.type === 21 ?
-        await BiliApi.getCollectionVideos(this.selected.id, page) : await BiliApi.getFavoriteVideos(this.selected.id, page);
+        await FavoriteApi.getCollectionVideos(this.selected.id, page) : await FavoriteApi.getFavoriteVideos(this.selected.id, page);
       if (reset) {
         this.videosSource.reset(data.videos);
       } else {
@@ -593,8 +595,8 @@ export struct FavoritesPage {
     this.actionBusy = true;
     try {
       const result: ActionResult = this.folderDialogIsEdit ?
-        await BiliApi.editFavoriteFolder(this.dialogFolder.id, title, this.dialogFolder.isPublic, this.dialogFolder.intro) :
-        await BiliApi.addFavoriteFolder(title);
+        await FavoriteApi.editFavoriteFolder(this.dialogFolder.id, title, this.dialogFolder.isPublic, this.dialogFolder.intro) :
+        await FavoriteApi.addFavoriteFolder(title);
       this.toast(result.ok ? (this.folderDialogIsEdit ? '已重命名' : '已创建') : result.message);
       if (result.ok) {
         this.folderDialogVisible = false;
@@ -632,7 +634,7 @@ export struct FavoritesPage {
     if (this.actionBusy) return;
     this.actionBusy = true;
     try {
-      const result: ActionResult = await BiliApi.delFavoriteFolder([folder.id]);
+      const result: ActionResult = await FavoriteApi.delFavoriteFolder([folder.id]);
       this.toast(result.ok ? '已删除' : result.message);
       if (result.ok) {
         this.loadFolders(true).catch(() => {
@@ -682,7 +684,7 @@ export struct FavoritesPage {
       this.orderDirty = false;
       return;
     }
-    const result: ActionResult = await BiliApi.sortFavoriteVideos(this.selected.id, aids);
+    const result: ActionResult = await FavoriteApi.sortFavoriteVideos(this.selected.id, aids);
     if (result.ok) {
       this.toast('视频排序已保存');
     } else {
@@ -732,7 +734,7 @@ export struct FavoritesPage {
     if (this.actionBusy) return;
     this.actionBusy = true;
     try {
-      const result: ActionResult = await BiliApi.delFavoriteResources(this.selected.id, this.checkedAids);
+      const result: ActionResult = await FavoriteApi.delFavoriteResources(this.selected.id, this.checkedAids);
       this.toast(result.ok ? '已移除' : result.message);
       if (result.ok) this.removeCheckedLocally();
     } catch (e) {
@@ -750,7 +752,7 @@ export struct FavoritesPage {
     const user = UserStore.current;
     if (user === null) return;
     try {
-      const all: Array<FavoriteFolderItem> = await BiliApi.getAllFavoriteFolders(user.mid);
+      const all: Array<FavoriteFolderItem> = await FavoriteApi.getAllFavoriteFolders(user.mid);
       this.moveTargets = all.filter((f: FavoriteFolderItem) => f.id !== this.selected.id);
       if (this.moveTargets.length === 0) {
         this.toast('没有其他收藏夹可移动');
@@ -767,7 +769,7 @@ export struct FavoritesPage {
     if (this.actionBusy) return;
     this.actionBusy = true;
     try {
-      const result: ActionResult = await BiliApi.moveFavoriteResources(this.selected.id, target.id, this.checkedAids);
+      const result: ActionResult = await FavoriteApi.moveFavoriteResources(this.selected.id, target.id, this.checkedAids);
       this.toast(result.ok ? '已移动到「' + target.title + '」' : result.message);
       if (result.ok) {
         this.removeCheckedLocally();

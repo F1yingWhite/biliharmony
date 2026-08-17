@@ -8,6 +8,7 @@ import { DynCard } from '../views/DynamicView';
 import { UserStore } from '../common/UserStore';
 import { UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
+import { safeToast } from '../common/Toast';
 import { image } from '@kit.ImageKit';
 import { ReplyCard } from '../components/ReplyCard';
 import { ReplyComposer } from '../components/ReplyComposer';
@@ -15,6 +16,8 @@ import { ReplyThreadPanel } from '../components/ReplyThreadPanel';
 import { ReplyShareCard, makeReplyQr, sharePixelMapAsImage } from '../components/ReplyShareCard';
 import { ReplySortChips } from '../components/ReplySortChips';
 import { LayoutTokens } from '../common/LayoutTokens';
+import { CommentApi } from '../api/CommentApi';
+import { DynamicApi } from '../api/DynamicApi';
 import {
   ReplyCloneResult, ReplyReactionHooks, mutateReplyInArray, mutatedReplyClone, runReplyDislike, runReplyLike
 } from '../common/ReplyMutation';
@@ -55,11 +58,7 @@ export struct DynamicDetailPage {
   private shareCardBusy: boolean = false;
 
   private toast(message: string): void {
-    try {
-      this.toast(message);
-    } catch (e) {
-      // 页面销毁或窗口异常时忽略提示。
-    }
+    safeToast(this.getUIContext(), message);
   }
 
   aboutToAppear(): void {
@@ -82,7 +81,7 @@ export struct DynamicDetailPage {
     this.loading = true;
     this.loadFailed = false;
     try {
-      const detail: DynamicItem | null = await BiliApi.getDynamicDetail(this.item.dynId);
+      const detail: DynamicItem | null = await DynamicApi.getDynamicDetail(this.item.dynId);
       if (!this.destroyed && detail !== null) {
         this.item = detail;
         if (this.replies.length === 0) await this.loadReplies(true);
@@ -101,7 +100,7 @@ export struct DynamicDetailPage {
     this.repliesLoading = true;
     if (reset) this.repliesFailed = false;
     try {
-      const data: ReplyData = await BiliApi.getReplies(this.item.commentId, this.item.commentType,
+      const data: ReplyData = await CommentApi.getReplies(this.item.commentId, this.item.commentType,
         reset ? '' : this.replyCursor, this.replySortMode);
       if (this.destroyed) return;
       this.replies = reset ? data.replies : this.replies.concat(data.replies);
@@ -207,7 +206,7 @@ export struct DynamicDetailPage {
     this.threadLoading = true;
     const page: number = reset ? 1 : this.threadPage + 1;
     try {
-      const result: ReplyPageData = await BiliApi.getReplyReplies(this.item.commentId, this.item.commentType,
+      const result: ReplyPageData = await CommentApi.getReplyReplies(this.item.commentId, this.item.commentType,
         this.threadRoot.rpid, page);
       if (this.destroyed || !this.threadOpen) return;
       const next: Array<ReplyItem> = reset ?
@@ -229,7 +228,7 @@ export struct DynamicDetailPage {
     this.threadSending = true;
     try {
       const parent: number = this.threadTargetRpid > 0 ? this.threadTargetRpid : this.threadRoot.rpid;
-      const result: ActionResult = await BiliApi.addReply(this.item.commentId, this.item.commentType, message,
+      const result: ActionResult = await CommentApi.addReply(this.item.commentId, this.item.commentType, message,
         this.threadRoot.rpid, parent);
       if (this.destroyed) return;
       if (!result.ok) {
@@ -294,8 +293,6 @@ export struct DynamicDetailPage {
       draft: this.threadDraft,
       sending: this.threadSending,
       replyTargetName: this.threadTargetName,
-      isDark: this.isDark,
-      accent: '#FB7299',
       upMid: this.item.mid,
       onClose: () => this.threadOpen = false,
       onLike: (item: ReplyItem) => this.likeReply(item).catch(() => {
@@ -329,7 +326,7 @@ export struct DynamicDetailPage {
     }
     this.replySending = true;
     try {
-      const result: ActionResult = await BiliApi.addReply(this.item.commentId, this.item.commentType, message);
+      const result: ActionResult = await CommentApi.addReply(this.item.commentId, this.item.commentType, message);
       if (this.destroyed) return;
       if (!result.ok) {
         this.toast(result.message);
@@ -398,8 +395,6 @@ export struct DynamicDetailPage {
                 item: reply,
                 showPreview: true,
                 version: this.replyVersion,
-                isDark: this.isDark,
-                accent: '#FB7299',
                 upMid: this.item.mid,
                 onLike: (item: ReplyItem) => this.likeReply(item).catch(() => {
                 }),
@@ -435,8 +430,6 @@ export struct DynamicDetailPage {
         text: this.replyDraft,
         sending: this.replySending,
         showEmoteButton: false,
-        isDark: this.isDark,
-        accent: '#FB7299',
         onChange: (value: string) => {
           this.replyDraft = value;
         },

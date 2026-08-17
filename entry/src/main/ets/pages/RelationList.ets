@@ -5,6 +5,7 @@ import { BiliApi } from '../api/BiliApi';
 import { PageHeader } from '../components/PageHeader';
 import { DecoratedAvatar } from '../components/UserDecorations';
 import { formatCount } from '../common/Utils';
+import { UserApi } from '../api/UserApi';
 
 @Component
 export struct RelationListPage {
@@ -37,7 +38,7 @@ export struct RelationListPage {
       this.page = 1;
     }
     try {
-      const data: RelationUserPageData = await BiliApi.getRelationUsers(this.param.mid, this.param.mode, this.page);
+      const data: RelationUserPageData = await UserApi.getRelationUsers(this.param.mid, this.param.mode, this.page);
       if (this.destroyed) return;
       this.users = reset ? data.users : this.users.concat(data.users);
       this.total = data.total;

@@ -31,6 +31,12 @@ import { VideoActionItem } from '../components/VideoActionItem';
 import { buildReplyTree, ReplyTreeMeta, ReplyTreeSnapshot } from '../common/ReplyTree';
 import { ReplyShareCard, makeReplyQr, sharePixelMapAsImage } from '../components/ReplyShareCard';
 import { ReplySortChips } from '../components/ReplySortChips';
+import { safeToast } from '../common/Toast';
+import { CommentApi } from '../api/CommentApi';
+import { FavoriteApi } from '../api/FavoriteApi';
+import { FeedApi } from '../api/FeedApi';
+import { HistoryApi } from '../api/HistoryApi';
+import { UserApi } from '../api/UserApi';
 
 /** 「加载更多」底部块参数：对象字面量按引用传入，状态变化才能驱动 @Builder 刷新。 */
 interface LoadMoreFooterOptions {
@@ -300,11 +306,7 @@ export struct VideoDetailPage {
   }
 
   private toast(message: string): void {
-    try {
-      this.toast(message);
-    } catch (e) {
-      // 页面销毁或窗口异常时忽略提示。
-    }
+    safeToast(this.getUIContext(), message);
   }
 
   /** 播放进度心跳：播放中每 5 秒报一次；暂停/离场强制补报。未登录时 BiliApi 内部直接跳过。 */
@@ -471,12 +473,12 @@ export struct VideoDetailPage {
       this.upVideoCount = 0;
       return;
     }
-    BiliApi.getUserStat(mid).then((stat: UserStat) => {
+    UserApi.getUserStat(mid).then((stat: UserStat) => {
       if (!this.destroyed && this.detail.upMid === mid) this.upFollowerCount = stat.follower;
     }).catch(() => {
       // 粉丝统计失败时保留占位，不伪造为 0。
     });
-    BiliApi.getUserSpaceArcs(mid, 1, 'pubdate').then((data: SpaceArcData) => {
+    UserApi.getUserSpaceArcs(mid, 1, 'pubdate').then((data: SpaceArcData) => {
       if (!this.destroyed && this.detail.upMid === mid) this.upVideoCount = data.total;
     }).catch(() => {
       // 投稿统计失败时保留占位，用户仍可正常进入 UP 空间。
@@ -552,7 +554,7 @@ export struct VideoDetailPage {
     this.relatedLoadError = '';
     const idx: number = this.relatedRecommendIdx;
     try {
-      const list: Array<VideoItem> = await BiliApi.getRecommend(idx);
+      const list: Array<VideoItem> = await FeedApi.getRecommend(idx);
       if (this.destroyed) return;
       if (list.length === 0) {
         this.relatedLoadError = '暂时没有刷新到新推荐，点击重试';
@@ -640,7 +642,7 @@ export struct VideoDetailPage {
     if (this.emoteLoading || this.emotePackages.length > 0 || !UserStore.isLogin) return;
     this.emoteLoading = true;
     try {
-      const packages: Array<BiliEmotePackage> = await BiliApi.getUserEmotes('reply');
+      const packages: Array<BiliEmotePackage> = await CommentApi.getUserEmotes('reply');
       if (this.destroyed) return;
       this.emotePackages = packages;
       if (this.emotePackageIndex >= this.emotePackages.length) this.emotePackageIndex = 0;
@@ -832,7 +834,7 @@ export struct VideoDetailPage {
     this.favoriteCount = Math.max(0, this.favoriteCount + (next ? 1 : -1));
     try {
       const selfMid: number = UserStore.current !== null ? UserStore.current.mid : 0;
-      const folders: Array<FavoriteFolderItem> = await BiliApi.getFavoriteFoldersForVideo(this.detail.aid,
+      const folders: Array<FavoriteFolderItem> = await FavoriteApi.getFavoriteFoldersForVideo(this.detail.aid,
         selfMid);
       if (this.destroyed) return;
       if (folders.length === 0) {
@@ -848,7 +850,7 @@ export struct VideoDetailPage {
       const addIds: Array<number> = next ? [folders[0].id] : [];
       const deleteIds: Array<number> = next ? [] : selected;
       if (!next && deleteIds.length === 0) deleteIds.push(folders[0].id);
-      const result: ActionResult = await BiliApi.modifyVideoFavorite(this.detail.aid, addIds, deleteIds);
+      const result: ActionResult = await FavoriteApi.modifyVideoFavorite(this.detail.aid, addIds, deleteIds);
       if (this.destroyed) return;
       if (!result.ok) {
         this.favorited = !next;
@@ -881,7 +883,7 @@ export struct VideoDetailPage {
     this.favPickOpen = true;
     try {
       const selfMid: number = UserStore.current !== null ? UserStore.current.mid : 0;
-      const folders: Array<FavoriteFolderItem> = await BiliApi.getFavoriteFoldersForVideo(this.detail.aid, selfMid);
+      const folders: Array<FavoriteFolderItem> = await FavoriteApi.getFavoriteFoldersForVideo(this.detail.aid, selfMid);
       if (this.destroyed) return;
       this.favPickFolders = folders;
       const checked: Array<number> = [];
@@ -922,7 +924,7 @@ export struct VideoDetailPage {
       for (let i: number = 0; i < prev.length; i++) {
         if (this.favPickChecked.indexOf(prev[i]) < 0) drop.push(prev[i]);
       }
-      const result: ActionResult = await BiliApi.modifyVideoFavorite(this.detail.aid, keep, drop);
+      const result: ActionResult = await FavoriteApi.modifyVideoFavorite(this.detail.aid, keep, drop);
       if (this.destroyed) return;
       if (!result.ok) {
         this.toast(result.message);
@@ -1006,7 +1008,7 @@ export struct VideoDetailPage {
     if (!this.ensureLogin() || this.actionBusy) return;
     this.actionBusy = true;
     try {
-      const result: ActionResult = await BiliApi.addWatchLater(this.detail.aid, this.detail.bvid);
+      const result: ActionResult = await HistoryApi.addWatchLater(this.detail.aid, this.detail.bvid);
       if (this.destroyed) return;
       // 新代码统一走 UIContext 版 PromptAction，避开全局 promptAction 的废弃告警。
       this.toast(result.ok ? '已加入稍后再看' : result.message);
@@ -1211,7 +1213,7 @@ export struct VideoDetailPage {
     const cursor: string = reset ? '' : this.replyCursor;
     let loaded: boolean = false;
     try {
-      const data = await BiliApi.getReplies(this.detail.aid, 1, cursor, this.replySortMode);
+      const data = await CommentApi.getReplies(this.detail.aid, 1, cursor, this.replySortMode);
       if (this.destroyed) return;
       if (reset) {
         this.replySource.reset(data.replies);
@@ -1337,7 +1339,7 @@ export struct VideoDetailPage {
     const page: number = reset ? 1 : this.threadPage + 1;
     let loaded: boolean = false;
     try {
-      const data = await BiliApi.getReplyReplies(this.detail.aid, 1, this.replyThreadRoot.rpid, page);
+      const data = await CommentApi.getReplyReplies(this.detail.aid, 1, this.replyThreadRoot.rpid, page);
       if (this.destroyed) return;
       // 保留 item.replies 里的预览回复：接口偶尔返回空列表时，楼中楼不会变成“有数字但没内容”。
       this.threadAllReplies = this.mergeUniqueReplies(this.threadAllReplies, data.replies);
@@ -1381,8 +1383,6 @@ export struct VideoDetailPage {
       draft: this.replyDraft,
       sending: this.replySending,
       replyTargetName: this.replyTargetName,
-      isDark: this.isDark,
-      accent: this.accent,
       upMid: this.detail.upMid,
       showEmoteButton: true,
       emoteOpen: this.emotePanelOpen,
@@ -1421,7 +1421,7 @@ export struct VideoDetailPage {
       const root: number = this.replyThreadOpen ? this.replyThreadRoot.rpid : 0;
       const parent: number = this.replyThreadOpen ?
         (this.replyTargetRpid > 0 ? this.replyTargetRpid : root) : 0;
-      const result: ActionResult = await BiliApi.addReply(this.detail.aid, 1, content, root, parent);
+      const result: ActionResult = await CommentApi.addReply(this.detail.aid, 1, content, root, parent);
       if (this.destroyed) return;
       if (!result.ok) {
         this.toast(result.message);
@@ -1939,8 +1939,6 @@ export struct VideoDetailPage {
         (this.replyTargetName.length > 0 ? this.replyTargetName : this.replyThreadRoot.uname) : '发一条友善的评论',
       sending: this.replySending,
       emoteOpen: this.emotePanelOpen,
-      isDark: this.isDark,
-      accent: this.accent,
       onChange: (value: string) => {
         this.replyDraft = value;
       },
@@ -1970,8 +1968,6 @@ export struct VideoDetailPage {
       loading: this.emoteLoading,
       panelHeight: this.emoteKeyboardHeight(),
       screenWidth: this.screenWidthVp,
-      isDark: this.isDark,
-      accent: this.accent,
       onPackageChange: (index: number) => this.emotePackageIndex = index,
       onSelect: (item: BiliEmote) => this.insertEmote(item),
     })
@@ -2028,8 +2024,6 @@ export struct VideoDetailPage {
             item: this.replyThreadRoot,
             showPreview: false,
             version: this.replyLikeVersion,
-            isDark: this.isDark,
-            accent: this.accent,
             upMid: this.detail.upMid,
             onLike: (item: ReplyItem) => this.actionReplyLike(item),
             onDislike: (item: ReplyItem) => this.actionReplyDislike(item),
@@ -2077,8 +2071,6 @@ export struct VideoDetailPage {
               parentLabel: item.parentRpid > 0 && item.parentRpid !== this.replyThreadRoot.rpid ?
                 this.threadParentName(item) : '',
               version: this.replyLikeVersion,
-              isDark: this.isDark,
-              accent: this.accent,
               upMid: this.detail.upMid,
               onLike: (reply: ReplyItem) => this.actionReplyLike(reply),
               onDislike: (reply: ReplyItem) => this.actionReplyDislike(reply),
@@ -2153,8 +2145,6 @@ export struct VideoDetailPage {
                   item: item,
                   showPreview: true,
                   version: this.replyLikeVersion,
-                  isDark: this.isDark,
-                  accent: this.accent,
                   upMid: this.detail.upMid,
                   onLike: (reply: ReplyItem) => this.actionReplyLike(reply),
               onDislike: (reply: ReplyItem) => this.actionReplyDislike(reply),

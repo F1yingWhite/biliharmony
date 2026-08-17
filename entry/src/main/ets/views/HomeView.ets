@@ -12,8 +12,11 @@ import { UserStore } from '../common/UserStore';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { LiveRoomItem } from '../model/LiveModels';
 import { LiveRoomCard } from '../components/LiveRoomCard';
+import { NavEntryRow } from '../components/NavEntryRow';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { AppNavStack, NAV_RANK, NAV_ZONE, NAV_BANGUMI_INDEX, NAV_LIVE_ZONE } from '../common/AppRouter';
+import { FeedApi } from '../api/FeedApi';
+import { LiveApi } from '../api/LiveApi';
 
 /** 悬浮频道切换条：单独订阅 headerFade，滚动逐帧淡出时不再带动整个 HomeView 重建。 */
 @Component
@@ -155,7 +158,7 @@ export struct HomeView {
       }
       this.recError = '';
       const idx: number = this.recIdx;
-      const list: Array<VideoItem> = await BiliApi.getRecommend(idx);
+      const list: Array<VideoItem> = await FeedApi.getRecommend(idx);
       if (list.length === 0) {
         this.recHasMore = false;
         if (this.recSource.isEmpty()) {
@@ -189,7 +192,7 @@ export struct HomeView {
       }
       this.hotError = '';
       const pn: number = this.hotPage;
-      const list: Array<VideoItem> = await BiliApi.getHot(pn, 20);
+      const list: Array<VideoItem> = await FeedApi.getHot(pn, 20);
       if (list.length === 0) {
         this.hotHasMore = false;
         if (this.hotSource.isEmpty()) {
@@ -224,7 +227,7 @@ export struct HomeView {
       }
       this.liveError = '';
       const page: number = this.livePage;
-      const list: Array<LiveRoomItem> = await BiliApi.getLiveRooms(page, 20);
+      const list: Array<LiveRoomItem> = await LiveApi.getLiveRooms(page, 20);
       if (list.length === 0) {
         this.liveHasMore = false;
         if (this.liveSource.isEmpty()) {
@@ -400,84 +403,36 @@ export struct HomeView {
   /** 热门频道顶部的排行榜入口：全站排行 / 每周必看 / 入站必刷。 */
   @Builder
   HotRankEntry() {
-    Row({ space: 10 }) {
-      Image($r('app.media.ic_hot'))
-        .width(18)
-        .height(18)
-        .fillColor(this.accent)
-      Text('排行榜')
-        .fontSize(14)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-      Blank()
-      Image($r('app.media.ic_arrow_right'))
-        .width(14)
-        .height(14)
-        .fillColor('#9499A0')
-    }
-    .width('100%')
-    .height(44)
-    .padding({ left: 14, right: 14 })
-    .borderRadius(12)
-    .backgroundColor(this.isDark ? '#212225' : '#FFFFFF')
-    .onClick(() => {
-      AppNavStack.pushPathByName(NAV_RANK, null);
+    NavEntryRow({
+      icon: $r('app.media.ic_hot'),
+      title: '排行榜',
+      onTap: () => {
+        AppNavStack.pushPathByName(NAV_RANK, null);
+      },
     })
   }
 
   /** 热门频道顶部入口：分区频道（进分区排行浏览）。 */
   @Builder
   ZoneEntry() {
-    Row({ space: 10 }) {
-      Image($r('app.media.ic_sort'))
-        .width(18)
-        .height(18)
-        .fillColor(this.accent)
-      Text('分区频道')
-        .fontSize(14)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-      Blank()
-      Image($r('app.media.ic_arrow_right'))
-        .width(14)
-        .height(14)
-        .fillColor('#9499A0')
-    }
-    .width('100%')
-    .height(44)
-    .padding({ left: 14, right: 14 })
-    .borderRadius(12)
-    .backgroundColor(this.isDark ? '#212225' : '#FFFFFF')
-    .onClick(() => {
-      AppNavStack.pushPathByName(NAV_ZONE, null);
+    NavEntryRow({
+      icon: $r('app.media.ic_sort'),
+      title: '分区频道',
+      onTap: () => {
+        AppNavStack.pushPathByName(NAV_ZONE, null);
+      },
     })
   }
 
   /** 热门频道顶部入口：番剧索引（类型×状态聚合浏览）。 */
   @Builder
   BangumiEntry() {
-    Row({ space: 10 }) {
-      Image($r('app.media.ic_favorite'))
-        .width(18)
-        .height(18)
-        .fillColor(this.accent)
-      Text('番剧索引')
-        .fontSize(14)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-      Blank()
-      Image($r('app.media.ic_arrow_right'))
-        .width(14)
-        .height(14)
-        .fillColor('#9499A0')
-    }
-    .width('100%')
-    .height(44)
-    .padding({ left: 14, right: 14 })
-    .borderRadius(12)
-    .backgroundColor(this.isDark ? '#212225' : '#FFFFFF')
-    .onClick(() => {
-      AppNavStack.pushPathByName(NAV_BANGUMI_INDEX, null);
+    NavEntryRow({
+      icon: $r('app.media.ic_favorite'),
+      title: '番剧索引',
+      onTap: () => {
+        AppNavStack.pushPathByName(NAV_BANGUMI_INDEX, null);
+      },
     })
   }
 
@@ -545,28 +500,12 @@ export struct HomeView {
   /** 直播频道顶部入口：直播分区（按分区浏览直播间）。 */
   @Builder
   LiveZoneEntry() {
-    Row({ space: 10 }) {
-      Image($r('app.media.ic_live'))
-        .width(18)
-        .height(18)
-        .fillColor(this.accent)
-      Text('直播分区')
-        .fontSize(14)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-      Blank()
-      Image($r('app.media.ic_arrow_right'))
-        .width(14)
-        .height(14)
-        .fillColor('#9499A0')
-    }
-    .width('100%')
-    .height(44)
-    .padding({ left: 14, right: 14 })
-    .borderRadius(12)
-    .backgroundColor(this.isDark ? '#212225' : '#FFFFFF')
-    .onClick(() => {
-      AppNavStack.pushPathByName(NAV_LIVE_ZONE, null);
+    NavEntryRow({
+      icon: $r('app.media.ic_live'),
+      title: '直播分区',
+      onTap: () => {
+        AppNavStack.pushPathByName(NAV_LIVE_ZONE, null);
+      },
     })
   }
 

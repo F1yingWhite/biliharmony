@@ -2,7 +2,8 @@ import { AppNavStack, ImageViewerParam, NAV_IMAGE_VIEWER, NAV_USER_SPACE, NAV_VI
   UserSpaceParam, VideoDetailParam } from '../common/AppRouter';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
 import { parseReplyContent, ReplyRenderPart } from '../common/ReplyContentParser';
-import { formatDuration, formatRelativeTime } from '../common/Utils';
+import { formatDuration } from '../common/Utils';
+import { formatReplyMeta } from '../common/ReplyMeta';
 import { ReplyItem } from '../model/Models';
 import { DecoratedAvatar, UserDecorationBanner } from './UserDecorations';
 import { biliImageOriginal, biliImageThumbnail } from '../common/ImageUrl';
@@ -10,6 +11,7 @@ import { Haptic } from '../common/Haptic';
 import { curves } from '@kit.ArkUI';
 import { BiliApi, ActionResult } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
+import { CommentApi } from '../api/CommentApi';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -32,8 +34,8 @@ export struct ReplyCard {
   @Prop threadHasChildren: boolean = false;
   @Prop threadCollapsed: boolean = false;
   @Prop version: number = 0;
-  @Prop isDark: boolean = false;
-  @Prop accent: string = '#FB7299';
+  @StorageProp('isDarkMode') isDark: boolean = false;
+  @StorageProp('accentColor') accent: string = '#FB7299';
   /** 所属稿件/动态的 UP 主 mid；评论或回复作者是本人时名字旁标注"UP主"。 */
   @Prop upMid: number = 0;
   onLike: (item: ReplyItem) => void = () => {};
@@ -185,8 +187,8 @@ export struct ReplyCard {
     return this.isDark ? '#26272B' : '#FFFFFF';
   }
 
-  private locationLabel(): string {
-    return this.item.location.replace('IP属地：', '').replace('IP属地:', '').trim();
+  private replyMetaText(): string {
+    return formatReplyMeta(this.item);
   }
 
   private shouldShowParentLabel(): boolean {
@@ -202,11 +204,6 @@ export struct ReplyCard {
   private decorationReserve(): number {
     if (this.item.cardBackground.length === 0) return 0;
     return this.threadDepth > 0 ? 40 : 48;
-  }
-
-  private replyMetaText(): string {
-    const location: string = this.locationLabel();
-    return formatRelativeTime(this.item.ctime) + (location.length > 0 ? '  IP属地：' + location : '');
   }
 
   @Builder
@@ -415,7 +412,7 @@ export struct ReplyCard {
           this.toast('请先登录后再举报评论');
           return;
         }
-        BiliApi.reportReply(this.item.oid, this.item.type, this.item.rpid, values[pick])
+        CommentApi.reportReply(this.item.oid, this.item.type, this.item.rpid, values[pick])
           .then((r: ActionResult) => {
             this.toast(r.ok ? '已提交举报，感谢反馈' : r.message);
           })
@@ -440,7 +437,7 @@ export struct ReplyCard {
         ],
       }).then((dialogResult) => {
         if (Number(dialogResult.index) !== 1) return;
-        BiliApi.deleteReply(this.item.oid, this.item.type, this.item.rpid)
+        CommentApi.deleteReply(this.item.oid, this.item.type, this.item.rpid)
           .then((r: ActionResult) => {
             if (r.ok) {
               this.toast('评论已删除');

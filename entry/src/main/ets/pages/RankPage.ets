@@ -11,6 +11,7 @@ import { PageHeader } from '../components/PageHeader';
 import { VideoRowCard } from '../components/VideoRowCard';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { LayoutTokens } from '../common/LayoutTokens';
+import { SearchApi } from '../api/SearchApi';
 
 @Component
 export struct RankPage {
@@ -44,7 +45,7 @@ export struct RankPage {
     this.rankLoading = true;
     this.rankError = '';
     try {
-      const list: Array<VideoItem> = await BiliApi.getRankVideos(0);
+      const list: Array<VideoItem> = await SearchApi.getRankVideos(0);
       this.rankSource.reset(list);
       this.rankCount = this.rankSource.totalCount();
       if (list.length === 0) {
@@ -67,12 +68,12 @@ export struct RankPage {
     this.weeklyLoading = true;
     this.weeklyError = '';
     try {
-      const series: Array<PopularSeriesItem> = await BiliApi.getPopularSeriesList();
+      const series: Array<PopularSeriesItem> = await SearchApi.getPopularSeriesList();
       if (series.length === 0) {
         this.weeklyError = '每周必看加载失败，请检查网络后重试';
         return;
       }
-      const data: PopularSeriesData = await BiliApi.getPopularSeriesOne(series[0].number);
+      const data: PopularSeriesData = await SearchApi.getPopularSeriesOne(series[0].number);
       this.weeklyLabel = data.label.length > 0 ? data.label : series[0].name;
       this.weeklySource.reset(data.videos);
       this.weeklyCount = this.weeklySource.totalCount();
@@ -95,7 +96,7 @@ export struct RankPage {
     this.preciousLoading = true;
     this.preciousError = '';
     try {
-      const list: Array<VideoItem> = await BiliApi.getPopularPrecious(1);
+      const list: Array<VideoItem> = await SearchApi.getPopularPrecious(1);
       this.preciousSource.reset(list);
       this.preciousCount = this.preciousSource.totalCount();
       if (list.length === 0) {

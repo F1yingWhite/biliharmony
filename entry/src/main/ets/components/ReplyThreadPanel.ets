@@ -16,8 +16,8 @@ export struct ReplyThreadPanel {
   @Prop draft: string = '';
   @Prop sending: boolean = false;
   @Prop replyTargetName: string = '';
-  @Prop isDark: boolean = false;
-  @Prop accent: string = '#FB7299';
+  @StorageProp('isDarkMode') isDark: boolean = false;
+  @StorageProp('accentColor') accent: string = '#FB7299';
   /** 楼主（动态/稿件作者）mid，用于标注"UP主"。 */
   @Prop upMid: number = 0;
   @Prop showEmoteButton: boolean = false;
@@ -109,8 +109,6 @@ export struct ReplyThreadPanel {
           ReplyCard({
             item: this.root,
             version: this.version,
-            isDark: this.isDark,
-            accent: this.accent,
             upMid: this.upMid,
             onLike: (item: ReplyItem) => this.onLike(item),
             onDislike: (item: ReplyItem) => this.onDislike(item),
@@ -143,8 +141,6 @@ export struct ReplyThreadPanel {
               threadCollapsed: this.meta(item).collapsed,
               parentLabel: this.parentName(item),
               version: this.version + this.treeVersion,
-              isDark: this.isDark,
-              accent: this.accent,
               upMid: this.upMid,
               onLike: (reply: ReplyItem) => this.onLike(reply),
               onDislike: (reply: ReplyItem) => this.onDislike(reply),
@@ -195,8 +191,6 @@ export struct ReplyThreadPanel {
         sending: this.sending,
         emoteOpen: this.emoteOpen,
         showEmoteButton: this.showEmoteButton,
-        isDark: this.isDark,
-        accent: this.accent,
         onChange: (value: string) => this.onDraftChange(value),
         onSend: () => this.onSend(),
         onToggleEmote: () => this.onToggleEmote(),

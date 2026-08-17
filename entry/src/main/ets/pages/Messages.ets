@@ -11,6 +11,7 @@ import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { MsgNotifyList } from '../components/MsgNotifyList';
 import { PageHeader } from '../components/PageHeader';
 import { BasicDataSource } from '../common/BasicDataSource';
+import { MessageApi } from '../api/MessageApi';
 
 @Component
 export struct MessagesPage {
@@ -51,7 +52,7 @@ export struct MessagesPage {
     try {
       const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
       const beginTs: number = reset || all.length === 0 ? 0 : all[all.length - 1].sessionTs;
-      const data: MessageSessionPageData = await BiliApi.getMessageSessions(beginTs);
+      const data: MessageSessionPageData = await MessageApi.getMessageSessions(beginTs);
       if (data.error.length > 0) {
         // 失败不清空已有列表；首次加载失败时由 LoadingView 展示原因与重试。
         if (reset) this.sessionError = data.error;
@@ -104,7 +105,7 @@ export struct MessagesPage {
     this.loading = true;
     const talkerId: number = this.current.talkerId;
     try {
-      const data: PrivateMessagePageData = await BiliApi.getPrivateMessages(talkerId, reset ? 0 : this.minSeqno);
+      const data: PrivateMessagePageData = await MessageApi.getPrivateMessages(talkerId, reset ? 0 : this.minSeqno);
       if (this.current.talkerId !== talkerId) return;
       if (data.error.length > 0) {
         this.messageError = data.error;
@@ -128,7 +129,7 @@ export struct MessagesPage {
         }
         this.sessionsSource.reset(all);
         this.current.unread = 0;
-        BiliApi.markPrivateMessagesRead(talkerId, ackSeqno).catch(() => {
+        MessageApi.markPrivateMessagesRead(talkerId, ackSeqno).catch(() => {
         });
       }
     } catch (e) {
@@ -162,7 +163,7 @@ export struct MessagesPage {
     if (content.length === 0 || user === null || this.sending) return;
     this.sending = true;
     try {
-      const result: ActionResult = await BiliApi.sendPrivateMessage(user.mid, this.current.talkerId, content);
+      const result: ActionResult = await MessageApi.sendPrivateMessage(user.mid, this.current.talkerId, content);
       if (!result.ok) {
         this.getUIContext().getPromptAction().showToast({ message: result.message });
         return;
@@ -268,7 +269,7 @@ export struct MessagesPage {
         ],
       }).then((dialogResult) => {
         if (Number(dialogResult.index) !== 1) return;
-        BiliApi.removeMessageSession(item.talkerId)
+        MessageApi.removeSession(item.talkerId)
           .then((r: ActionResult) => {
             if (r.ok) {
               this.sessionsSource.reset(
@@ -535,7 +536,7 @@ export struct MessagesPage {
         const pick: number = Number(dialogResult.index);
         const reasons: Array<Array<string>> = [['', ''], ['6', '垃圾广告'], ['8', '人身攻击'], ['7', '骚扰'], ['9', '其他']];
         if (pick <= 0 || pick >= reasons.length) return;
-        BiliApi.reportPrivateMessage(this.current.talkerId,
+        MessageApi.reportImMessage(this.current.talkerId,
           Number(reasons[pick][0]), reasons[pick][1])
           .then((r: ActionResult) => {
             this.getUIContext().getPromptAction().showToast({ message: r.ok ? '已提交举报，感谢反馈' : r.message });

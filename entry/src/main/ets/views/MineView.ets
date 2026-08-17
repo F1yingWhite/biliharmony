@@ -17,6 +17,7 @@ import { LoadingView } from '../components/LoadingView';
 import { formatCount } from '../common/Utils';
 import { Immersive } from '../common/Immersive';
 import { DecoratedAvatar } from '../components/UserDecorations';
+import { UserApi } from '../api/UserApi';
 
 @Component
 export struct MineView {
@@ -119,7 +120,7 @@ export struct MineView {
       const u: UserInfo = await UserStore.refresh();
       this.user = u;
       if (u.isLogin) {
-        this.stat = await BiliApi.getUserStat(u.mid);
+        this.stat = await UserApi.getUserStat(u.mid);
       } else {
         this.stat = new UserStat();
       }

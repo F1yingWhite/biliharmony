@@ -8,6 +8,7 @@ import { LivePlayerView } from '../components/LivePlayerView';
 import { BackButton, BackButtonVariant } from '../components/BackButton';
 import { LiveChatMessage, LiveEmoteItem, LiveEmotePackage, LivePlayInfo, LiveRoomInfo } from '../model/LiveModels';
 import { UserStore } from '../common/UserStore';
+import { LiveApi } from '../api/LiveApi';
 
 @Component
 export struct LiveRoomPage {
@@ -80,16 +81,16 @@ export struct LiveRoomPage {
     this.loading = true;
     this.errorText = '';
     try {
-      const info: LiveRoomInfo | null = await BiliApi.getLiveRoomInfo(this.param.roomId, this.param.uid);
+      const info: LiveRoomInfo | null = await LiveApi.getLiveRoomInfo(this.param.roomId, this.param.uid);
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
       if (info !== null) this.roomInfo = info;
-      const play: LivePlayInfo | null = await BiliApi.getLivePlayInfo(this.param.roomId, 10000);
+      const play: LivePlayInfo | null = await LiveApi.getLivePlayInfo(this.param.roomId, 10000);
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
       if (play === null || play.url.length === 0) {
         this.errorText = info !== null && info.liveStatus !== 1 ? '主播当前未开播' : '直播播放地址获取失败';
         return;
       }
-      const history: Array<LiveChatMessage> = await BiliApi.getLiveDanmakuHistory(this.param.roomId);
+      const history: Array<LiveChatMessage> = await LiveApi.getLiveDanmakuHistory(this.param.roomId);
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
       this.knownMessageIds.clear();
       for (let i: number = 0; i < history.length; i++) this.knownMessageIds.add(history[i].id);
@@ -98,7 +99,7 @@ export struct LiveRoomPage {
       this.lastLiveMessageAt = Date.now();
       // 先建立首屏历史基线再挂播放器，避免把历史消息一次性灌入画面轨道。
       this.playInfo = play;
-      this.superChats = await BiliApi.getLiveSuperChats(this.param.roomId);
+      this.superChats = await LiveApi.getLiveSuperChats(this.param.roomId);
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
       this.client.connect(this.param.roomId).catch(() => {
       });
@@ -117,7 +118,7 @@ export struct LiveRoomPage {
     this.qualityLoading = true;
     const generation: number = this.lifecycleGeneration;
     try {
-      const next: LivePlayInfo | null = await BiliApi.getLivePlayInfo(this.param.roomId, qn);
+      const next: LivePlayInfo | null = await LiveApi.getLivePlayInfo(this.param.roomId, qn);
       if (!this.destroyed && generation === this.lifecycleGeneration && next !== null && next.url.length > 0) {
         this.playInfo = next;
       }
@@ -130,7 +131,7 @@ export struct LiveRoomPage {
     if (this.emoteLoading || this.emotePackages.length > 0) return;
     this.emoteLoading = true;
     try {
-      const packages: Array<LiveEmotePackage> = await BiliApi.getLiveEmoticons(this.param.roomId);
+      const packages: Array<LiveEmotePackage> = await LiveApi.getLiveEmoticons(this.param.roomId);
       if (!this.destroyed) this.emotePackages = packages;
     } finally {
       if (!this.destroyed) this.emoteLoading = false;
@@ -149,7 +150,7 @@ export struct LiveRoomPage {
     if (this.sending || !this.ensureLogin() || (emote === null && content.length === 0)) return;
     this.sending = true;
     try {
-      const result: ActionResult = await BiliApi.sendLiveDanmaku(this.param.roomId, content, emote);
+      const result: ActionResult = await LiveApi.sendLiveDanmaku(this.param.roomId, content, emote);
       if (!result.ok) {
         this.getUIContext().getPromptAction().showToast({ message: result.message });
         return;
@@ -201,7 +202,7 @@ export struct LiveRoomPage {
 
   /** WebSocket 安静超过 8 秒时低频补拉，只追加未见 ID，不重放进房快照。 */
   private async pollRecentHistory(): Promise<void> {
-    const history: Array<LiveChatMessage> = await BiliApi.getLiveDanmakuHistory(this.param.roomId);
+    const history: Array<LiveChatMessage> = await LiveApi.getLiveDanmakuHistory(this.param.roomId);
     if (this.destroyed) return;
     for (let i: number = 0; i < history.length; i++) {
       if (!this.knownMessageIds.has(history[i].id)) this.appendMessage(history[i]);

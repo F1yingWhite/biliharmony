@@ -8,6 +8,7 @@ import { AppNavStack, ImageViewerParam, LiveRoomParam, NAV_IMAGE_VIEWER, NAV_LIV
 import { VideoItem, UserSpaceHeaderItem, UserSpaceInfo, UserStat, SpaceArcData, FollowTagItem } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { VideoCard } from '../components/VideoCard';
+import { safeToast } from '../common/Toast';
 import { LoadingView } from '../components/LoadingView';
 import { BackButton, BackButtonVariant } from '../components/BackButton';
 import { FilterChip } from '../components/FilterChip';
@@ -18,6 +19,7 @@ import { BasicDataSource } from '../common/BasicDataSource';
 import { DecoratedAvatar } from '../components/UserDecorations';
 import { DynamicView } from '../views/DynamicView';
 import { LayoutTokens } from '../common/LayoutTokens';
+import { UserApi } from '../api/UserApi';
 
 // 投稿排序（order 参数）
 const ARC_ORDERS: Array<Record<string, string>> = [
@@ -90,14 +92,14 @@ export struct UserSpacePage {
     this.loading = true;
     this.errorText = '';
     try {
-      const info: UserSpaceInfo | null = await BiliApi.getUserSpaceInfo(this.param.mid);
+      const info: UserSpaceInfo | null = await UserApi.getUserSpaceInfo(this.param.mid);
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
       if (info === null) {
         this.errorText = '用户信息加载失败，请检查网络后重试';
         return;
       }
       this.info = info;
-      BiliApi.getUserStat(this.param.mid).then((stat: UserStat) => {
+      UserApi.getUserStat(this.param.mid).then((stat: UserStat) => {
         if (!this.destroyed && generation === this.lifecycleGeneration) this.stat = stat;
       }).catch(() => {
       });
@@ -127,11 +129,7 @@ export struct UserSpacePage {
   }
 
   private toast(message: string): void {
-    try {
-      this.toast(message);
-    } catch (e) {
-      // 页面销毁或窗口异常时忽略提示。
-    }
+    safeToast(this.getUIContext(), message);
   }
 
   async toggleFollow(): Promise<void> {
@@ -178,7 +176,7 @@ export struct UserSpacePage {
         this.arcLoading = true;
       }
       const pn: number = this.arcPage;
-      const data: SpaceArcData = await BiliApi.getUserSpaceArcs(this.param.mid, pn, this.arcOrder);
+      const data: SpaceArcData = await UserApi.getUserSpaceArcs(this.param.mid, pn, this.arcOrder);
       if (this.destroyed || generation !== this.lifecycleGeneration) {
         return;
       }
