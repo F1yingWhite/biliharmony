@@ -7,6 +7,7 @@ import { PlayerAvSessionHelper } from './PlayerAvSessionHelper';
 import { PlayerSubtitleController } from './PlayerSubtitleController';
 import { PlayerSeekController } from './PlayerSeekController';
 import { PlayerSpeedController } from './PlayerSpeedController';
+import { PlayerMenuItem, PlayerToggleItem } from './PlayerMenuItems';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
@@ -2335,28 +2336,75 @@ export struct PlayerView {
         .width('100%')
         .padding({ left: 8, right: 8, top: 4, bottom: 10 })
 
-        this.MoreMenuItem($r('app.media.ic_play'), '清晰度', this.qualityLoading ? '切换中…' : this.qualityLabel(),
-          () => this.moreSheetPage = 'quality')
-        this.MoreMenuItem($r('app.media.ic_video_replay'), '倍速',
-          this.playbackRate === 1 ? '1.0x' : this.playbackRate.toFixed(this.playbackRate % 1 === 0 ? 0 : 2) + 'x',
-          () => this.moreSheetPage = 'speed')
-        this.MoreMenuItem($r('app.media.ic_danmaku_settings'), '弹幕设置', '', () => this.moreSheetPage = 'dm')
-        this.MoreMenuItem($r('app.media.ic_danmaku_on'), '弹幕列表',
-          this.dmEngine.list.length > 0 ? String(this.dmEngine.list.length) + ' 条' : '', () => this.openDanmakuList())
-        this.MoreMenuItem($r('app.media.ic_filter'), '屏蔽管理', '', () => this.openDanmakuFilter())
+        PlayerMenuItem({
+          icon: $r('app.media.ic_play'),
+          label: '清晰度',
+          value: this.qualityLoading ? '切换中…' : this.qualityLabel(),
+          onTap: (): void => {
+            this.moreSheetPage = 'quality';
+          },
+        })
+        PlayerMenuItem({
+          icon: $r('app.media.ic_video_replay'),
+          label: '倍速',
+          value: this.playbackRate === 1 ? '1.0x' : this.playbackRate.toFixed(this.playbackRate % 1 === 0 ? 0 : 2) + 'x',
+          onTap: (): void => {
+            this.moreSheetPage = 'speed';
+          },
+        })
+        PlayerMenuItem({
+          icon: $r('app.media.ic_danmaku_settings'),
+          label: '弹幕设置',
+          value: '',
+          onTap: (): void => {
+            this.moreSheetPage = 'dm';
+          },
+        })
+        PlayerMenuItem({
+          icon: $r('app.media.ic_danmaku_on'),
+          label: '弹幕列表',
+          value: this.dmEngine.list.length > 0 ? String(this.dmEngine.list.length) + ' 条' : '',
+          onTap: (): void => {
+            this.openDanmakuList();
+          },
+        })
+        PlayerMenuItem({
+          icon: $r('app.media.ic_filter'),
+          label: '屏蔽管理',
+          value: '',
+          onTap: (): void => {
+            this.openDanmakuFilter();
+          },
+        })
         if (this.chapters.length > 0) {
-          this.MoreMenuItem($r('app.media.ic_sort'), '分段视频', String(this.chapters.length) + ' 段',
-            () => this.moreSheetPage = 'chapters')
+          PlayerMenuItem({
+            icon: $r('app.media.ic_sort'),
+            label: '分段视频',
+            value: String(this.chapters.length) + ' 段',
+            onTap: (): void => {
+              this.moreSheetPage = 'chapters';
+            },
+          })
         }
         if (this.subtitles.length > 0) {
-          this.MoreMenuItem($r('app.media.ic_comment'), 'CC字幕', this.subtitleOn ? this.subtitleLabel() : '关闭',
-            () => this.moreSheetPage = 'subtitle')
+          PlayerMenuItem({
+            icon: $r('app.media.ic_comment'),
+            label: 'CC字幕',
+            value: this.subtitleOn ? this.subtitleLabel() : '关闭',
+            onTap: (): void => {
+              this.moreSheetPage = 'subtitle';
+            },
+          })
         }
-        this.MoreToggleItem($r('app.media.ic_video_replay'), '自动连播',
-          () => this.autoContinuePlay, (next: boolean) => {
+        PlayerToggleItem({
+          icon: $r('app.media.ic_video_replay'),
+          label: '自动连播',
+          isOn: this.autoContinuePlay,
+          onChange: (next: boolean): void => {
             this.autoContinuePlay = next;
             AppTheme.persistAutoContinue(next);
-          })
+          },
+        })
         this.SponsorMenuItem()
       }
     }
@@ -2398,59 +2446,5 @@ export struct PlayerView {
     })
   }
 
-  @Builder
-  MoreMenuItem(icon: Resource, label: string, value: string, onTap: () => void) {
-    Row({ space: 12 }) {
-      Image(icon)
-        .width(22)
-        .height(22)
-        .renderMode(ImageRenderMode.Template)
-        .fillColor(this.isDark ? '#FFFFFF' : '#18191C')
-      Text(label)
-        .fontSize(15)
-        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-      Blank()
-      if (value.length > 0) {
-        Text(value)
-          .fontSize(12)
-          .fontColor(this.isDark ? '#B3FFFFFF' : '#9499A0')
-      }
-      Image($r('app.media.ic_arrow_right'))
-        .width(18)
-        .height(18)
-        .renderMode(ImageRenderMode.Template)
-        .fillColor(this.isDark ? '#8AFFFFFF' : '#8A8A8E')
-    }
-    .width('100%')
-    .height(56)
-    .padding({ left: 14, right: 12 })
-    .borderRadius(12)
-    .backgroundColor(this.isDark ? '#26272B' : '#F5F7F9')
-    .onClick(() => onTap())
-  }
-
-  /** 带 Switch 的开关型菜单项（对齐 B 站"自动连播"设置样式）。 */
-  @Builder
-  MoreToggleItem(icon: Resource, label: string, checked: () => boolean, onChange: (next: boolean) => void) {
-    Row({ space: 12 }) {
-      Image(icon)
-        .width(22)
-        .height(22)
-        .renderMode(ImageRenderMode.Template)
-        .fillColor(this.isDark ? '#FFFFFF' : '#18191C')
-      Text(label)
-        .fontSize(15)
-        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-        .layoutWeight(1)
-      Toggle({ type: ToggleType.Switch, isOn: checked() })
-        .selectedColor(this.accent)
-        .onChange((isOn: boolean) => onChange(isOn))
-    }
-    .width('100%')
-    .height(56)
-    .padding({ left: 14, right: 12 })
-    .borderRadius(12)
-    .backgroundColor(this.isDark ? '#26272B' : '#F5F7F9')
-  }
 
 }
