@@ -7,7 +7,8 @@ import { PlayerAvSessionHelper } from './PlayerAvSessionHelper';
 import { PlayerSubtitleController } from './PlayerSubtitleController';
 import { PlayerSeekController } from './PlayerSeekController';
 import { PlayerSpeedController } from './PlayerSpeedController';
-import { PlayerMenuItem, PlayerToggleItem } from './PlayerMenuItems';
+import { PlayerMenuItem, PlayerSponsorItem } from './PlayerMenuItems';
+import { PlayerToggleItem } from './PlayerMenuItems';
 import { PlayerGestureController } from './PlayerGestureController';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -2369,7 +2370,14 @@ if (this.runtimeSources.length === 0) {
             AppTheme.persistAutoContinue(next);
           },
         })
-        this.SponsorMenuItem()
+        PlayerSponsorItem({
+          sponsorOn: this.sponsorSkipEnabled,
+          onToggle: (current: boolean): void => {
+            this.sponsorSkipEnabled = !current;
+            AppTheme.persistSponsorSkip(this.sponsorSkipEnabled);
+            this.toast(this.sponsorSkipEnabled ? '广告空降已开启' : '广告空降已关闭');
+          },
+        })
       }
     }
     .width('100%')
@@ -2377,38 +2385,4 @@ if (this.runtimeSources.length === 0) {
     .padding({ left: 16, right: 16, top: 14, bottom: 14 })
     .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
   }
-  @Builder
-  SponsorMenuItem() {
-    Row({ space: 12 }) {
-      Image($r('app.media.ic_hot'))
-        .width(22)
-        .height(22)
-        .renderMode(ImageRenderMode.Template)
-        .fillColor(this.isDark ? '#FFFFFF' : '#18191C')
-      Text('广告空降')
-        .fontSize(15)
-        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-      Blank()
-      Text(this.sponsorSkipEnabled ? '已开启' : '已关闭')
-        .fontSize(12)
-        .fontColor(this.isDark ? '#B3FFFFFF' : '#9499A0')
-      Image($r('app.media.ic_arrow_right'))
-        .width(18)
-        .height(18)
-        .renderMode(ImageRenderMode.Template)
-        .fillColor(this.isDark ? '#8AFFFFFF' : '#8A8A8E')
-    }
-    .width('100%')
-    .height(56)
-    .padding({ left: 14, right: 12 })
-    .borderRadius(12)
-    .backgroundColor(this.isDark ? '#26272B' : '#F5F7F9')
-    .onClick(() => {
-      this.sponsorSkipEnabled = !this.sponsorSkipEnabled;
-      AppTheme.persistSponsorSkip(this.sponsorSkipEnabled);
-      this.toast(this.sponsorSkipEnabled ? '广告空降已开启' : '广告空降已关闭');
-    })
-  }
-
-
 }

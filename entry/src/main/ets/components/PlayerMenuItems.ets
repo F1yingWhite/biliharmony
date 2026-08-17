@@ -77,3 +77,39 @@ export struct PlayerToggleItem {
     .backgroundColor(this.isDark ? '#26272B' : '#F5F7F9')
   }
 }
+
+@Component
+export struct PlayerSponsorItem {
+  @Prop sponsorOn: boolean = false;
+  @StorageProp('isDarkMode') isDark: boolean = false;
+  onToggle: (enabled: boolean) => void = (enabled: boolean) => {
+  };
+
+  build() {
+    Row({ space: 12 }) {
+      Image($r('app.media.ic_hot'))
+        .width(22)
+        .height(22)
+        .renderMode(ImageRenderMode.Template)
+        .fillColor(this.isDark ? '#FFFFFF' : '#18191C')
+      Text('广告空降')
+        .fontSize(15)
+        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+      Blank()
+      Text(this.sponsorOn ? '已开启' : '已关闭')
+        .fontSize(12)
+        .fontColor(this.isDark ? '#B3FFFFFF' : '#9499A0')
+      Image($r('app.media.ic_arrow_right'))
+        .width(18)
+        .height(18)
+        .renderMode(ImageRenderMode.Template)
+        .fillColor(this.isDark ? '#8AFFFFFF' : '#8A8A8E')
+    }
+    .width('100%')
+    .height(56)
+    .padding({ left: 14, right: 12 })
+    .borderRadius(12)
+    .backgroundColor(this.isDark ? '#26272B' : '#F5F7F9')
+    .onClick(() => this.onToggle(this.sponsorOn))
+  }
+}
