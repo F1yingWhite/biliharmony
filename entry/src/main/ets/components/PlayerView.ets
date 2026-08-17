@@ -3,6 +3,7 @@
  */
 import { media } from '@kit.MediaKit';
 import { avSession } from '@kit.AVSessionKit';
+import { PlayerAvSessionHelper } from './PlayerAvSessionHelper';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
@@ -147,9 +148,7 @@ export struct PlayerView {
   private subtitleCues: Array<SubtitleCue> = [];
   private subtitleBusy: boolean = false;
   private subtitleRequestSeq: number = 0;
-  private avSession: avSession.AVSession | null = null;
-  private avSessionActive: boolean = false;
-  private avSessionBusy: boolean = false;
+  private avSessionHelper: PlayerAvSessionHelper | null = null;
   private dmListSource: BasicDataSource<DanmakuItem> = new BasicDataSource<DanmakuItem>();
   private dmFilterRuleSource: BasicDataSource<DmFilterRule> = new BasicDataSource<DmFilterRule>();
   private runtimeQualityOptions: Array<VideoQualityOption> = [];
@@ -238,52 +237,41 @@ export struct PlayerView {
     if (this.qualityOptions.length > 0) this.runtimeQualityOptions = this.qualityOptions;
   }
 
-  private async ensureAVSession(): Promise<void> {
-    if (this.avSessionActive || this.avSessionBusy) return;
-    this.avSessionBusy = true;
-    try {
-      const context: common.UIAbilityContext | undefined =
-        this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
-      if (context === undefined) return;
-      this.avSession = await avSession.createAVSession(context, 'BiliHaromny', 'video');
-      this.avSession.on('play', () => {
-        if (this.playing === false) this.togglePlay();
-      });
-      this.avSession.on('pause', () => {
-        if (this.playing) this.togglePlay();
-      });
-      this.avSession.on('seek', (time: number) => {
-        this.seekTo(time / 1000, true);
-      });
-      await this.avSession.activate();
-      this.avSessionActive = true;
-      this.updateAVSessionMetadata();
-      this.updateAVSessionPlaybackState();
-    } catch (e) {
-      this.avSession = null;
-    } finally {
-      this.avSessionBusy = false;
+  private ensureAVSession(): void {
+    const context: common.UIAbilityContext | undefined =
+      this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+    if (context === undefined) return;
+    if (this.avSessionHelper === null) {
+      this.avSessionHelper = new PlayerAvSessionHelper(context);
     }
+    this.avSessionHelper.ensure(
+      (): void => {
+        if (this.playing === false) this.togglePlay();
+      },
+      (): void => {
+        if (this.playing) this.togglePlay();
+      },
+      (timeMs: number): void => {
+        this.seekTo(timeMs / 1000, true);
+      },
+      this.avSessionMetadata(),
+      this.avSessionPlaybackState(),
+    ).catch(() => {
+    });
   }
 
-  private updateAVSessionMetadata(): void {
-    const session: avSession.AVSession | null = this.avSession;
-    if (session === null || this.avSessionActive === false) return;
-    const metadata: avSession.AVMetadata = {
+  private avSessionMetadata(): avSession.AVMetadata {
+    return {
       assetId: this.bvid.length > 0 ? this.bvid : String(this.aid),
       title: this.videoTitle,
       artist: this.ownerName,
       mediaImage: this.videoCover.length > 0 ? this.videoCover : this.ownerFace,
       duration: this.duration > 0 ? Math.floor(this.duration * 1000) : undefined,
     };
-    session.setAVMetadata(metadata).catch(() => {
-    });
   }
 
-  private updateAVSessionPlaybackState(): void {
-    const session: avSession.AVSession | null = this.avSession;
-    if (session === null || this.avSessionActive === false) return;
-    const state: avSession.AVPlaybackState = {
+  private avSessionPlaybackState(): avSession.AVPlaybackState {
+    return {
       state: this.playing ? avSession.PlaybackState.PLAYBACK_STATE_PLAY :
         avSession.PlaybackState.PLAYBACK_STATE_PAUSE,
       speed: this.playbackRate,
@@ -292,22 +280,28 @@ export struct PlayerView {
         updateTime: Date.now(),
       },
     };
-    session.setAVPlaybackState(state).catch(() => {
-    });
+  }
+
+  private updateAVSessionMetadata(): void {
+    const helper: PlayerAvSessionHelper | null = this.avSessionHelper;
+    if (helper === null) return;
+    helper.setMetadata(this.avSessionMetadata());
+  }
+
+  private updateAVSessionPlaybackState(): void {
+    const helper: PlayerAvSessionHelper | null = this.avSessionHelper;
+    if (helper === null) return;
+    helper.setPlaybackState(this.avSessionPlaybackState());
   }
 
   private deactivateAVSession(): void {
-    const session: avSession.AVSession | null = this.avSession;
-    if (session !== null && this.avSessionActive) {
-      try {
-        session.deactivate().catch(() => {
-        });
-      } catch (e) {
-      }
+    const helper: PlayerAvSessionHelper | null = this.avSessionHelper;
+    if (helper !== null) {
+      helper.release();
+      this.avSessionHelper = null;
     }
-    this.avSession = null;
-    this.avSessionActive = false;
   }
+
 
   onSubtitlesChanged(): void {
     if (this.subtitles.length === 0) {
