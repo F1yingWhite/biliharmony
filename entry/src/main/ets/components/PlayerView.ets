@@ -11,6 +11,7 @@ import { PlayerMenuItem, PlayerSponsorItem } from './PlayerMenuItems';
 import { PlayerToggleItem } from './PlayerMenuItems';
 import { PlayerGestureController } from './PlayerGestureController';
 import { PlayerPlaybackConfig } from './PlayerPlaybackConfig';
+import { DanmakuListPanel } from './DanmakuListPanel';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
@@ -1991,80 +1992,6 @@ if (this.runtimeSources.length === 0) {
   }
 
   @Builder
-  DanmakuListPanel(embedded: boolean = false) {
-    Column({ space: 8 }) {
-      Row() {
-        Text('弹幕列表').fontSize(15).fontWeight(FontWeight.Bold).fontColor(this.sheetTitleColor())
-        Blank()
-        Text(this.dmListCount > 0 ? '已加载 ' + String(this.dmListCount) + ' 条' : '暂无弹幕')
-          .fontSize(11)
-          .fontColor(this.sheetSubColor())
-      }
-      .width('100%')
-      if (this.dmListCount === 0) {
-        Text('播放后这里会列出已加载的弹幕')
-          .fontSize(12)
-          .fontColor(this.sheetSubColor())
-          .width('100%')
-          .textAlign(TextAlign.Center)
-          .padding({ top: 20, bottom: 20 })
-      } else {
-        List({ space: 4 }) {
-          LazyForEach(this.dmListSource, (item: DanmakuItem) => {
-            ListItem() {
-              Row({ space: 8 }) {
-                Text(formatDuration(item.time))
-                  .fontSize(11)
-                  .fontColor(this.accent)
-                Text(item.text)
-                  .fontSize(12)
-                  .fontColor(this.sheetTitleColor())
-                  .maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  .layoutWeight(1)
-              }
-              .width('100%')
-              .padding({ left: 8, right: 8, top: 7, bottom: 7 })
-              .borderRadius(6)
-              .backgroundColor(this.sheetRowBg())
-              .onClick(() => {
-                this.seekTo(item.time, true);
-                this.showMoreMenu = false;
-                this.showSideDrawer = false;
-              })
-              // 长按弹幕 → 举报菜单（需登录与 dmid；protobuf 加载的弹幕才有）
-              .gesture(
-                LongPressGesture({ repeat: false })
-                  .onAction(() => {
-                    this.promptReportDanmaku(item);
-                  })
-              )
-            }
-          }, (item: DanmakuItem) => String(item.time) + '_' + item.text)
-        }
-        .width('100%')
-        .height(embedded ? 'auto' : 200)
-        .layoutWeight(embedded ? 1 : 0)
-        .scrollBar(BarState.Off)
-        .cachedCount(4)
-      }
-    }
-    .width('100%')
-    .height(embedded ? '100%' : 'auto')
-    .padding({ left: 16, right: 16, top: 12, bottom: 14 })
-    .borderRadius(embedded ? 0 : { topLeft: 16, topRight: 16 })
-    .backgroundColor(embedded ? '#00000000' : (this.isDark ? '#18191C' : '#FFFFFF'))
-    .backdropBlur(embedded ? 0 : 24)
-    .border(embedded ? { width: 0 } : { width: { top: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
-    .align(embedded ? Alignment.Top : Alignment.Bottom)
-    .transition(embedded ? TransitionEffect.IDENTITY :
-      TransitionEffect.asymmetric(
-        TransitionEffect.opacity(0).combine(TransitionEffect.translate({ y: 24 }))
-          .animation({ duration: 200, curve: Curve.EaseOut }),
-        TransitionEffect.opacity(0).animation({ duration: 150, curve: Curve.EaseIn })))
-  }
-
-  @Builder
   DmFilterPanel(embedded: boolean = false) {
     Column({ space: 8 }) {
       Row() {
@@ -2260,7 +2187,21 @@ if (this.runtimeSources.length === 0) {
           else if (this.moreSheetPage === 'dm') this.EmbeddedSettingsPanel(0)
           else if (this.moreSheetPage === 'chapters') this.EmbeddedSettingsPanel(2)
           else if (this.moreSheetPage === 'subtitle') this.EmbeddedSettingsPanel(4)
-          else if (this.moreSheetPage === 'danmakuList') this.DanmakuListPanel(true)
+          else if (this.moreSheetPage === 'danmakuList') DanmakuListPanel({
+            source: this.dmListSource,
+            count: this.dmListCount,
+            embedded: true,
+            onSeek: (seconds: number): void => {
+              this.seekTo(seconds, true);
+            },
+            onReport: (item: DanmakuItem): void => {
+              this.promptReportDanmaku(item);
+            },
+            onClose: (): void => {
+              this.showMoreMenu = false;
+              this.showSideDrawer = false;
+            },
+          })
           else if (this.moreSheetPage === 'dmFilter') this.DmFilterPanel(true)
         }
         .layoutWeight(1)
