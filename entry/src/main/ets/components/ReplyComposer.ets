@@ -9,6 +9,8 @@ export struct ReplyComposer {
   @Prop sending: boolean = false;
   @Prop emoteOpen: boolean = false;
   @Prop showEmoteButton: boolean = true;
+  /** 宿主递增该值请求编辑器聚焦并拉起键盘（"回复某用户"等场景）。 */
+  @Prop @Watch('onFocusTick') focusTick: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @State focused: boolean = false;
@@ -19,6 +21,16 @@ export struct ReplyComposer {
   onSend: () => void = () => {};
   onToggleEmote: () => void = () => {};
   onRequestKeyboard: () => void = () => {};
+
+  private onFocusTick(): void {
+    if (this.focusTick <= 0) return;
+    // 请求系统焦点：RichEditor 获得焦点会自动弹键盘（enableKeyboardOnFocus(true)）。
+    try {
+      this.getUIContext().getFocusController().requestFocus('reply_composer_editor');
+    } catch (e) {
+      // 焦点请求失败不阻塞：用户仍可手动点击输入框。
+    }
+  }
 
   private expanded(): boolean {
     return this.focused || this.emoteOpen || this.text.length > 0;
@@ -146,7 +158,7 @@ export struct ReplyComposer {
     Column({ space: this.expanded() ? 6 : 0 }) {
       Row({ space: 8 }) {
         RichEditor({ controller: this.editorController })
-          .height(this.expanded() ? 48 : 38)
+          .id('reply_composer_editor')
           .layoutWeight(1)
           .caretColor(this.accent)
           .placeholder(this.placeholder, {

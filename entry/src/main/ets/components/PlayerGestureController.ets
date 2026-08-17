@@ -72,7 +72,9 @@ export class PlayerGestureController {
     if (this.panMode === 'seek') {
       this.panGestureActive = true;
       const secondsPerVp: number = duration / 1.6;
-      const preview: number = Math.max(0, Math.min(duration, this.panStartTime + offsetX * secondsPerVp));
+      // 手势 seek 目标最多到结尾前 0.5s：拖到头不触发"自然播完"，防止误切下一个视频。
+      const maxPreview: number = duration > 0 ? Math.max(0, duration - 0.5) : duration;
+      const preview: number = Math.max(0, Math.min(maxPreview, this.panStartTime + offsetX * secondsPerVp));
       this.onSeekPreview(preview);
       return;
     }

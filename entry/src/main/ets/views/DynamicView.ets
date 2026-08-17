@@ -1042,51 +1042,43 @@ export struct DynamicView {
     }
   }
 
-  /** 发布动态（纯文本）底部面板：输入 + 发布；发布成功后重载 feed。 */
+  /** 发布动态（纯文本）底部面板：输入 + 发布；发布成功后重载 feed。用系统 bindSheet 从底部滑出。 */
   @Builder
-  DynComposerOverlay() {
-    Stack({ alignContent: Alignment.Top }) {
-      Column().width('100%').height('100%')
-        .backgroundColor('#66000000')
-        .onClick(() => this.showComposer = false)
-      Column({ space: 12 }) {
-        Row() {
-          Text('发布动态').fontSize(16).fontWeight(FontWeight.Bold)
-            .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-          Blank()
-          Text('取消').fontSize(13).fontColor('#9499A0')
-            .onClick(() => this.showComposer = false)
-        }
-        .width('100%')
-        TextArea({ placeholder: '分享新鲜事…', text: this.composerText })
-          .width('100%')
-          .height(140)
-          .fontSize(15)
+  DynComposerSheet() {
+    Column({ space: 12 }) {
+      Row() {
+        Text('发布动态').fontSize(16).fontWeight(FontWeight.Bold)
           .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-          .placeholderColor('#9499A0')
-          .backgroundColor(this.isDark ? '#26272B' : '#F3F4F6')
-          .borderRadius(10)
-          .onChange((value: string) => this.composerText = value)
-        Text(this.composerText.length + ' / 2000')
-          .width('100%').fontSize(11).fontColor('#B0B3B8').textAlign(TextAlign.End)
-        Button(this.composing ? '发布中…' : '发布')
-          .width('100%').height(42).borderRadius(21)
-          .fontSize(15).fontColor('#FFFFFF')
-          .backgroundColor(this.accent)
-          .enabled(!this.composing && this.composerText.trim().length > 0)
-          .onClick(() => this.submitDynamic())
+        Blank()
+        Text('取消').fontSize(13).fontColor('#9499A0')
+          .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+          .stateStyles({
+            pressed: { opacity: 0.6 },
+            normal: { opacity: 1 },
+          })
+          .onClick(() => this.showComposer = false)
       }
       .width('100%')
-      .padding({ left: 16, right: 16, top: 16, bottom: Immersive.bottomInset() + 12 })
-      .backgroundColor(this.isDark ? '#1E2024' : '#FFFFFF')
-      .borderRadius({ topLeft: 18, topRight: 18 })
-      .align(Alignment.Bottom)
-      .transition(TransitionEffect.asymmetric(
-        TransitionEffect.translate({ y: 300 }).animation({ duration: 220, curve: Curve.EaseOut }),
-        TransitionEffect.translate({ y: 300 }).animation({ duration: 180, curve: Curve.EaseIn })))
+      TextArea({ placeholder: '分享新鲜事…', text: this.composerText })
+        .width('100%')
+        .height(150)
+        .fontSize(15)
+        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+        .placeholderColor('#9499A0')
+        .backgroundColor(this.isDark ? '#26272B' : '#F3F4F6')
+        .borderRadius(10)
+        .onChange((value: string) => this.composerText = value)
+      Text(this.composerText.length + ' / 2000')
+        .width('100%').fontSize(11).fontColor('#B0B3B8').textAlign(TextAlign.End)
+      Button(this.composing ? '发布中…' : '发布')
+        .width('100%').height(42).borderRadius(21)
+        .fontSize(15).fontColor('#FFFFFF')
+        .backgroundColor(this.accent)
+        .enabled(!this.composing && this.composerText.trim().length > 0)
+        .onClick(() => this.submitDynamic())
     }
-    .width('100%').height('100%')
-    .zIndex(6)
+    .width('100%')
+    .padding({ left: 16, right: 16, top: 16, bottom: 16 })
   }
 
   private async submitDynamic(): Promise<void> {
@@ -1147,35 +1139,46 @@ export struct DynamicView {
       }
 
       // 发布动态 FAB：主页动态流右下角悬浮（非内嵌、已登录时显示）。
+      // align(Middle/BottomEnd) 锚定在悬浮 Dock 上方，不再用百分比 position 避免随屏高漂移。
+      // 发布动态 FAB：不依赖子组件 .align()（在该布局下会错位到顶部），
+      // 用独立全屏容器 + alignContent(BottomEnd) 直接锚定右下角，避开悬浮 Dock。
       if (this.login && this.hostMid <= 0 && this.embedded === false) {
-        Stack({ alignContent: Alignment.Center }) {
-          Image($r('app.media.ic_comment'))
-            .width(22)
-            .height(22)
-            .fillColor('#FFFFFF')
+        Stack({ alignContent: Alignment.BottomEnd }) {
+          Stack({ alignContent: Alignment.Center }) {
+            Image($r('app.media.ic_comment'))
+              .width(22)
+              .height(22)
+              .fillColor('#FFFFFF')
+          }
+          .width(48)
+          .height(48)
+          .borderRadius(24)
+          .backgroundColor(this.accent)
+          .shadow({ radius: 12, color: '#66FB7299', offsetY: 3 })
+          .onClick(() => {
+            this.showComposer = true;
+          })
+          .stateStyles({
+            pressed: { opacity: 0.85 },
+            normal: { opacity: 1 },
+          })
         }
-        .width(48)
-        .height(48)
-        .borderRadius(24)
-        .backgroundColor(this.accent)
-        .shadow({ radius: 12, color: '#66FB7299', offsetY: 3 })
-        .position({ x: '88%', y: '86%' })
-        .zIndex(5)
-        .onClick(() => {
-          this.showComposer = true;
-        })
-        .stateStyles({
-          pressed: { opacity: 0.85 },
-          normal: { opacity: 1 },
-        })
-      }
-
-      if (this.showComposer) {
-        this.DynComposerOverlay()
+        .width('100%')
+        .height('100%')
+        .padding({ right: 16, bottom: Immersive.bottomInset() + 88 })
+        .hitTestBehavior(HitTestMode.Transparent)
+        .zIndex(50)
       }
     }
     .width('100%')
     .height('100%')
     .layoutWeight(1)
+    .bindSheet($$this.showComposer, this.DynComposerSheet(), {
+      height: SheetSize.FIT_CONTENT,
+      dragBar: true,
+      showClose: false,
+      radius: { topLeft: 18, topRight: 18 },
+      backgroundColor: this.isDark ? '#1E2024' : '#FFFFFF',
+    })
   }
 }

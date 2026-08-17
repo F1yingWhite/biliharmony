@@ -7,6 +7,14 @@
 import { DanmakuItem } from '../api/BiliApi';
 import { ActiveDm, colorHex } from './PlayerDanmakuSupport';
 
+/** 弹幕视口矩形（Canvas 像素坐标），供点击气泡定位。 */
+export class DmViewportRect {
+  x: number = 0;
+  y: number = 0;
+  w: number = 0;
+  h: number = 0;
+}
+
 export class PlayerDanmakuEngine {
   /** 已按 time 升序排列的全量弹幕。 */
   list: Array<DanmakuItem> = [];
@@ -28,6 +36,8 @@ export class PlayerDanmakuEngine {
   blockColorDm: boolean = false;
   /** 有序弹幕列表消费游标。 */
   cursor: number = 0;
+  /** 被点击"停住"的弹幕：绘制暂停（不前进、不过期），等待用户点赞/点踩/举报后解冻。 */
+  pinned: ActiveDm | null = null;
 
   private ctx: CanvasRenderingContext2D;
   lastDrawMs: number = 0;
@@ -103,6 +113,7 @@ export class PlayerDanmakuEngine {
 
   clearActive(): void {
     this.active = [];
+    this.pinned = null;
     this.nextScrollLane = 0;
     this.nextTopLane = 0;
     this.nextBottomLane = 0;
@@ -120,12 +131,18 @@ export class PlayerDanmakuEngine {
 
   /** 命中测试：返回包含点 (x, y) 的最后绘制的弹幕（视觉最上层优先），用于点击弹幕触发举报。 */
   hitTest(x: number, y: number): DanmakuItem | null {
+    const hit: ActiveDm | null = this.hitTestActive(x, y);
+    return hit !== null ? hit.item : null;
+  }
+
+  /** 命中测试（返回运行态实例）：点击弹幕时先冻结该条，供弹幕操作条点赞/点踩/举报。 */
+  hitTestActive(x: number, y: number): ActiveDm | null {
     if (x < 0 || y < 0 || x > this.width || y > this.height) {
       return null;
     }
     const fontSize: number = this.fontSize();
     const laneH: number = this.lineHeight();
-    let hit: DanmakuItem | null = null;
+    let hit: ActiveDm | null = null;
     for (let i: number = 0; i < this.active.length; i++) {
       const dm: ActiveDm = this.active[i];
       const top: number = dm.lane * laneH;
@@ -135,10 +152,29 @@ export class PlayerDanmakuEngine {
         left = (this.width - dm.textWidth) / 2;
       }
       if (x >= left - 4 && x <= left + dm.textWidth + 4) {
-        hit = dm.item; // 越靠后的越新，走在最上层
+        hit = dm; // 越靠后的越新，走在最上层
       }
     }
     return hit;
+  }
+
+  /** 停住某条被点中的弹幕（B 站交互：点一下弹幕冻结，上方显示点赞/点踩/举报）。 */
+  pin(dm: ActiveDm | null): void {
+    this.pinned = dm;
+    this.drawFrame(false);
+  }
+
+  /** 弹幕视口矩形（px）：供点击气泡在弹幕上方/下方定位。 */
+  dmViewportOf(dm: ActiveDm): DmViewportRect {
+    const fs: number = this.fontSize();
+    const top: number = dm.lane * this.lineHeight();
+    const w: number = dm.textWidth;
+    const rect: DmViewportRect = new DmViewportRect();
+    rect.x = dm.isFixed ? (this.width - w) / 2 : dm.x;
+    rect.y = top;
+    rect.w = w;
+    rect.h = fs;
+    return rect;
   }
 
   spawn(now: number): void {
@@ -202,8 +238,10 @@ export class PlayerDanmakuEngine {
     this.ctx.lineWidth = this.fullscreen ? 2.5 : 2;
     for (let i: number = 0; i < this.active.length; i++) {
       const dm: ActiveDm = this.active[i];
+      const frozen: boolean = dm === this.pinned;
       if (dm.isFixed) {
-        if (now > dm.fixedUntil) {
+        // 固定弹幕：被点击冻结时不过期（保持停住），否则按 fixedUntil 过期。
+        if (!frozen && now > dm.fixedUntil) {
           continue;
         }
         this.ctx.fillStyle = dm.renderColor;
@@ -213,8 +251,9 @@ export class PlayerDanmakuEngine {
         this.ctx.fillText(dm.renderText, x, y);
         keep.push(dm);
       } else {
-        dm.x -= dm.speed * deltaSec;
-        if (dm.x + dm.textWidth < -10) {
+        // 滚动弹幕：被冻结时停在当前位置不再前进。
+        if (!frozen) dm.x -= dm.speed * deltaSec;
+        if (!frozen && dm.x + dm.textWidth < -10) {
           continue;
         }
         this.ctx.fillStyle = dm.renderColor;

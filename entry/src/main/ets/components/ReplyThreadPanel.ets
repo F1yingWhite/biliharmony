@@ -16,6 +16,7 @@ export struct ReplyThreadPanel {
   @Prop draft: string = '';
   @Prop sending: boolean = false;
   @Prop replyTargetName: string = '';
+  @Prop focusTick: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   /** 楼主（动态/稿件作者）mid，用于标注"UP主"。 */
@@ -190,6 +191,7 @@ export struct ReplyThreadPanel {
         placeholder: this.replyTargetName.length > 0 ? '回复 @' + this.replyTargetName : '回复这条评论',
         sending: this.sending,
         emoteOpen: this.emoteOpen,
+        focusTick: this.focusTick,
         showEmoteButton: this.showEmoteButton,
         onChange: (value: string) => this.onDraftChange(value),
         onSend: () => this.onSend(),

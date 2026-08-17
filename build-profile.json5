@@ -5,13 +5,13 @@
         "name": "default",
         "type": "HarmonyOS",
         "material": {
-          "certpath": "/home/xuyihan/.ohos/bili-local-sign/bili-debug.cer",
-          "keyAlias": "bilidebugkey",
-          "keyPassword": "bili_debug_2026_0123456789abcdef",
-          "profile": "/home/xuyihan/.ohos/bili-local-sign/bili-debug.p7b",
+          "certpath": "C:\\Users\\f1yin\\.ohos\\config\\default_biliharmony_1w9J4asWbdJapm-91Ty0_oEvgB2DuW_6CctCqXhCLb0=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001B55BF92ADA6530F1D7A5135762EDDEBC03B257373D818B1A7599FF9C09454370DCA67DD1D9D1CEB",
+          "profile": "C:\\Users\\f1yin\\.ohos\\config\\default_biliharmony_1w9J4asWbdJapm-91Ty0_oEvgB2DuW_6CctCqXhCLb0=.p7b",
           "signAlg": "SHA256withECDSA",
-          "storeFile": "/home/xuyihan/.ohos/bili-local-sign/bili-app-full.p12",
-          "storePassword": "bili_debug_2026_0123456789abcdef"
+          "storeFile": "C:\\Users\\f1yin\\.ohos\\config\\default_biliharmony_1w9J4asWbdJapm-91Ty0_oEvgB2DuW_6CctCqXhCLb0=.p12",
+          "storePassword": "0000001B8F802539EAE1E4E7825FEC4660CC33BADAD0148E4DCF2542DBA92F1C161A258FC8780CECC1A78B"
         }
       }
     ],
