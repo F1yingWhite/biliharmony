@@ -27,7 +27,7 @@ export class HSL {
   }
 }
 
-export function hexToRgb(hex: string): RGB {
+function hexToRgb(hex: string): RGB {
   let h: string = hex.replace('#', '').trim();
   if (h.length === 3) {
     h = h.charAt(0) + h.charAt(0) + h.charAt(1) + h.charAt(1) + h.charAt(2) + h.charAt(2);
@@ -49,7 +49,7 @@ export function rgbToHex(rgb: RGB): string {
   return '#' + to2(rgb.r) + to2(rgb.g) + to2(rgb.b);
 }
 
-export function rgbToHsl(rgb: RGB): HSL {
+function rgbToHsl(rgb: RGB): HSL {
   const r: number = rgb.r / 255;
   const g: number = rgb.g / 255;
   const b: number = rgb.b / 255;
@@ -73,7 +73,7 @@ export function rgbToHsl(rgb: RGB): HSL {
   return new HSL(h * 360, s, l);
 }
 
-export function hslToRgb(hsl: HSL): RGB {
+function hslToRgb(hsl: HSL): RGB {
   const h: number = hsl.h / 360;
   const s: number = hsl.s;
   const l: number = hsl.l;
@@ -106,7 +106,7 @@ export function hslToRgb(hsl: HSL): RGB {
 }
 
 /** 感知亮度 0-1（越大越亮） */
-export function luminance(hex: string): number {
+function luminance(hex: string): number {
   const rgb: RGB = hexToRgb(hex);
   return (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
 }
@@ -116,7 +116,7 @@ export function isDarkColor(hex: string): boolean {
 }
 
 /** 与白色混合（amount 0-1 为白色占比） */
-export function mixWithWhite(hex: string, amount: number): string {
+function mixWithWhite(hex: string, amount: number): string {
   const rgb: RGB = hexToRgb(hex);
   return rgbToHex(new RGB(
     rgb.r + (255 - rgb.r) * amount,
@@ -126,7 +126,7 @@ export function mixWithWhite(hex: string, amount: number): string {
 }
 
 /** 与黑色混合（amount 0-1 为黑色占比） */
-export function mixWithBlack(hex: string, amount: number): string {
+function mixWithBlack(hex: string, amount: number): string {
   const rgb: RGB = hexToRgb(hex);
   return rgbToHex(new RGB(
     rgb.r * (1 - amount),

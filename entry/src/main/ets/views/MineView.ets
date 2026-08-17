@@ -508,7 +508,7 @@ export struct MineView {
           Row() {
             Text('退出登录')
               .fontSize(15)
-              .fontColor('#FB4A4A')
+              .fontColor(AppTheme.DANGER)
           }
           .width('100%')
           .height(48)

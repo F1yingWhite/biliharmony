@@ -1,4 +1,5 @@
 /** 登录用户的观看历史、稍后再看与收藏夹。 */
+import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, NAV_VIDEO_DETAIL, NAV_FAV_SORT, FavSortParam, VideoDetailParam } from '../common/AppRouter';
 import { BiliApi, ActionResult } from '../api/BiliApi';
@@ -89,7 +90,7 @@ export struct HistoryPage {
         trailing: (): void => {
           Text('清空')
             .fontSize(13)
-            .fontColor(this.itemsSource.totalCount() > 0 ? '#FB4A4A' : '#9499A0')
+            .fontColor(this.itemsSource.totalCount() > 0 ? AppTheme.DANGER : '#9499A0')
             .padding({ left: 18, right: 2, top: 8, bottom: 8 })
             .onClick(() => {
               if (this.itemsSource.totalCount() > 0) this.confirmClearHistory();
@@ -165,7 +166,7 @@ export struct HistoryPage {
         message: '删除后无法找回，确定删除这条观看记录吗？',
         buttons: [
           { text: '取消', color: '#9499A0' },
-          { text: '删除', color: '#FB4A4A' },
+          { text: '删除', color: AppTheme.DANGER },
         ],
       }).then((dialogResult) => {
         if (Number(dialogResult.index) !== 1) return;
@@ -197,7 +198,7 @@ export struct HistoryPage {
         message: '将删除全部观看历史，此操作不可恢复。确定清空吗？',
         buttons: [
           { text: '取消', color: '#9499A0' },
-          { text: '清空', color: '#FB4A4A' },
+          { text: '清空', color: AppTheme.DANGER },
         ],
       }).then((dialogResult) => {
         if (Number(dialogResult.index) !== 1) return;
@@ -355,7 +356,7 @@ export struct WatchLaterPage {
     .width(72)
     .height('100%')
     .justifyContent(FlexAlign.Center)
-    .backgroundColor('#FB4A4A')
+    .backgroundColor(AppTheme.DANGER)
     .onClick(() => {
       this.removeItem(item).catch(() => {
       });
@@ -559,7 +560,7 @@ export struct FavoritesPage {
         title: folder.title,
         buttons: [
           { text: '重命名', color: this.isDark ? '#E6E6E6' : '#18191C' },
-          { text: '删除收藏夹', color: '#FB4A4A' },
+          { text: '删除收藏夹', color: AppTheme.DANGER },
         ],
       }).then((result) => {
         if (result.index === 0) {
@@ -617,7 +618,7 @@ export struct FavoritesPage {
         message: '夹内视频不会被删除，但收藏夹本身不可恢复。确定删除吗？',
         buttons: [
           { text: '取消', color: '#9499A0' },
-          { text: '删除', color: '#FB4A4A' },
+          { text: '删除', color: AppTheme.DANGER },
         ],
       }).then((dialogResult) => {
         if (dialogResult.index === 1) {
@@ -717,7 +718,7 @@ export struct FavoritesPage {
         message: '将 ' + String(this.checkedAids.length) + ' 个视频从本收藏夹移除（不会取消其他收藏夹的收藏）。',
         buttons: [
           { text: '取消', color: '#9499A0' },
-          { text: '移除', color: '#FB4A4A' },
+          { text: '移除', color: AppTheme.DANGER },
         ],
       }).then((dialogResult) => {
         if (dialogResult.index === 1) {
@@ -1150,7 +1151,7 @@ export struct FavoritesPage {
               })
             Text('删除')
               .fontSize(14)
-              .fontColor(this.checkedAids.length > 0 ? '#FB4A4A' : '#B4B6BA')
+              .fontColor(this.checkedAids.length > 0 ? AppTheme.DANGER : '#B4B6BA')
               .padding({ left: 10, right: 10, top: 8, bottom: 8 })
               .onClick(() => this.confirmDeleteChecked())
           }

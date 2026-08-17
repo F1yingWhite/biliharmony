@@ -1,4 +1,5 @@
 /** B 站消息中心：私信会话/聊天 + 回复我的/@我/收到的赞/系统通知 五个分类 Tab。 */
+import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, NAV_LOGIN, NAV_VIDEO_DETAIL, VideoDetailParam } from '../common/AppRouter';
 import { BiliApi, ActionResult } from '../api/BiliApi';
@@ -217,7 +218,7 @@ export struct MessagesPage {
         }
         if (item.unread > 0) {
           Text(item.unread > 99 ? '99+' : String(item.unread))
-            .fontSize(9).fontColor('#FFFFFF').backgroundColor('#FA4B4B')
+            .fontSize(9).fontColor('#FFFFFF').backgroundColor(AppTheme.DANGER)
             .padding({ left: 5, right: 5, top: 2, bottom: 2 }).borderRadius(9)
             .translate({ x: 5, y: -3 })
         }
@@ -265,7 +266,7 @@ export struct MessagesPage {
         message: '删除后聊天记录不再显示（对方记录不受影响）。确定删除吗？',
         buttons: [
           { text: '取消', color: '#9499A0' },
-          { text: '删除', color: '#FB4A4A' },
+          { text: '删除', color: AppTheme.DANGER },
         ],
       }).then((dialogResult) => {
         if (Number(dialogResult.index) !== 1) return;

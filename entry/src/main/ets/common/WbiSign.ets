@@ -60,7 +60,7 @@ export class WbiSign {
   }
 
   /** 获取 mixinKey（带日级缓存） */
-  static async getMixinKey(): Promise<string> {
+  private static async getMixinKey(): Promise<string> {
     const today: number = new Date().getDate();
     if (WbiSign.mixinKey.length > 0 && WbiSign.cacheDay === today) {
       return WbiSign.mixinKey;

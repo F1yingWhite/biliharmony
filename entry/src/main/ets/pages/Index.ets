@@ -403,46 +403,146 @@ struct Index {
     .justifyContent(FlexAlign.Center)
   }
 
+  @Builder
+  FloatingTabs() {
+    Tabs({ barPosition: BarPosition.End, index: $$this.currentTab }) {
+      TabContent() {
+        HomeView()
+      }
+      .tabBar(this.TabBarItem(0, '首页', $r('app.media.ic_tab_home'), $r('app.media.ic_tab_home_fill')))
+      .clip(false)
+
+      TabContent() {
+        DynamicView()
+      }
+      .tabBar(this.TabBarItem(1, '动态', $r('app.media.ic_tab_dynamic'), $r('app.media.ic_tab_dynamic_fill')))
+      .clip(false)
+
+      TabContent() {
+        MineView()
+      }
+      .tabBar(this.TabBarItem(2, '我的', $r('app.media.ic_tab_mine'), $r('app.media.ic_tab_mine_fill')))
+      .clip(false)
+    }
+    .barHeight(52)
+    .barOverlap(true)
+    // 顶层首页/动态/我的只通过底部 Dock 切换，不响应左右滑动；
+    // 左右滑动留给各页面内部的频道 Tabs（首页推荐/热门/直播，动态全部/视频/番剧）。
+    .scrollable(false)
+    // 原生悬浮式 Dock 底栏 + 沉浸光感材质（API 26+；低版本时退化为实底背板）
+    .barFloatingStyle({
+      barSideMargin: 16,
+      barBottomMargin: 16,
+      systemMaterial: AppTheme.floatMaterial(this.glassOn),
+    })
+    // 深色模式给原生玻璃叠一层深色吸收底：透明度必须足够高才能压住
+    // 系统材质在深色下的白雾（实测 ~70% 仍泛白，Dock 整条变浅灰）。
+    .barBackgroundColor(this.glassOn ? (this.isDark ? '#EA15161A' : '#00000000') : AppTheme.floatBg(this.isDark, false))
+    .onChange(() => {
+      AppTheme.resetHeaderFade();
+    })
+  }
+
+  @Builder
+  PlainTabs() {
+    Tabs({ barPosition: BarPosition.End, index: $$this.currentTab }) {
+      TabContent() {
+        HomeView()
+      }
+      .tabBar(this.TabBarItem(0, '首页', $r('app.media.ic_tab_home'), $r('app.media.ic_tab_home_fill')))
+      .clip(false)
+
+      TabContent() {
+        DynamicView()
+      }
+      .tabBar(this.TabBarItem(1, '动态', $r('app.media.ic_tab_dynamic'), $r('app.media.ic_tab_dynamic_fill')))
+      .clip(false)
+
+      TabContent() {
+        MineView()
+      }
+      .tabBar(this.TabBarItem(2, '我的', $r('app.media.ic_tab_mine'), $r('app.media.ic_tab_mine_fill')))
+      .clip(false)
+    }
+    .barHeight(52)
+    .barOverlap(true)
+    // 顶层首页/动态/我的只通过底部 Dock 切换，不响应左右滑动；
+    // 左右滑动留给各页面内部的频道 Tabs（首页推荐/热门/直播，动态全部/视频/番剧）。
+    .scrollable(false)
+    .barBackgroundColor(AppTheme.floatBg(this.isDark, this.glassOn))
+    .onChange(() => {
+      AppTheme.resetHeaderFade();
+    })
+  }
+
+  @Builder
+  SearchFloat() {
+    Row() {
+      Blank()
+      Stack({ alignContent: Alignment.Center }) {
+        Image($r('app.media.ic_search'))
+          .width(18)
+          .height(18)
+          .fillColor(this.accent)
+      }
+      .width(40)
+      .height(40)
+      .borderRadius(20)
+      .backgroundColor(this.glassOn ? '#00000000' : AppTheme.floatBg(this.isDark, false))
+      .systemMaterial(AppTheme.floatMaterial(this.glassOn))
+      .shadow({ radius: 8, color: this.isDark ? '#59000000' : '#1A000000', offsetX: 0, offsetY: 2 })
+      .opacity(this.fade)
+      .scale({ x: 0.6 + 0.4 * this.fade, y: 0.6 + 0.4 * this.fade })
+      .onClick(() => {
+        AppNavStack.pushPathByName(NAV_SEARCH, null);
+      })
+    }
+    .width('100%')
+    .height(40)
+    .padding({ right: 14 })
+    .margin({ top: Immersive.statusBarHeight() + 6 })
+    .hitTestBehavior(HitTestMode.Transparent)
+    .zIndex(4)
+  }
+
+  @Builder
+  SearchPlain() {
+    Row() {
+      Blank()
+      Stack({ alignContent: Alignment.Center }) {
+        Image($r('app.media.ic_search'))
+          .width(18)
+          .height(18)
+          .fillColor(this.accent)
+      }
+      .width(40)
+      .height(40)
+      .borderRadius(20)
+      .backgroundColor(AppTheme.floatBg(this.isDark, this.glassOn))
+      .shadow({ radius: 8, color: this.isDark ? '#59000000' : '#1A000000', offsetX: 0, offsetY: 2 })
+      .opacity(this.fade)
+      .scale({ x: 0.6 + 0.4 * this.fade, y: 0.6 + 0.4 * this.fade })
+      .onClick(() => {
+        AppNavStack.pushPathByName(NAV_SEARCH, null);
+      })
+    }
+    .width('100%')
+    .height(40)
+    .padding({ right: 14 })
+    .margin({ top: Immersive.statusBarHeight() + 6 })
+    .hitTestBehavior(HitTestMode.Transparent)
+    .zIndex(4)
+  }
+
   build() {
     Navigation(AppNavStack) {
       Stack({ alignContent: Alignment.TopStart }) {
         // 系统 Tabs：三个视图常驻保活，切换不丢滚动位置
-        Tabs({ barPosition: BarPosition.End, index: $$this.currentTab }) {
-          TabContent() {
-            HomeView()
-          }
-          .tabBar(this.TabBarItem(0, '首页', $r('app.media.ic_tab_home'), $r('app.media.ic_tab_home_fill')))
-          .clip(false)
-
-          TabContent() {
-            DynamicView()
-          }
-          .tabBar(this.TabBarItem(1, '动态', $r('app.media.ic_tab_dynamic'), $r('app.media.ic_tab_dynamic_fill')))
-          .clip(false)
-
-          TabContent() {
-            MineView()
-          }
-          .tabBar(this.TabBarItem(2, '我的', $r('app.media.ic_tab_mine'), $r('app.media.ic_tab_mine_fill')))
-          .clip(false)
+        if (AppTheme.isImmersiveUiSupported()) {
+          this.FloatingTabs()
+        } else {
+          this.PlainTabs()
         }
-        .barHeight(52)
-        .barOverlap(true)
-        // 顶层首页/动态/我的只通过底部 Dock 切换，不响应左右滑动；
-        // 左右滑动留给各页面内部的频道 Tabs（首页推荐/热门/直播，动态全部/视频/番剧）。
-        .scrollable(false)
-        // 原生悬浮式 Dock 底栏 + 沉浸光感材质（API 26+；关闭玻璃时退化为实底背板）
-        .barFloatingStyle({
-          barSideMargin: 16,
-          barBottomMargin: 16,
-          systemMaterial: AppTheme.floatMaterial(this.glassOn),
-        })
-        // 深色模式给原生玻璃叠一层深色吸收底：透明度必须足够高才能压住
-        // 系统材质在深色下的白雾（实测 ~70% 仍泛白，Dock 整条变浅灰）。
-        .barBackgroundColor(this.glassOn ? (this.isDark ? '#EA15161A' : '#00000000') : AppTheme.floatBg(this.isDark, false))
-        .onChange(() => {
-          AppTheme.resetHeaderFade();
-        })
 
         // 玻璃头栏（上滑渐隐）
         GlassHeaderBar({
@@ -455,32 +555,11 @@ struct Index {
         // 头栏收起后的悬浮搜索球（右上角，对齐华为设置的折叠形态：头栏淡出 → 搜索球淡入）
         // 只有真正开始显示时才创建节点；透明度为 0 的可点击节点会抢走消息按钮的事件。
         if (this.fade > 0.05) {
-          Row() {
-            Blank()
-            Stack({ alignContent: Alignment.Center }) {
-              Image($r('app.media.ic_search'))
-                .width(18)
-                .height(18)
-                .fillColor(this.accent)
-            }
-            .width(40)
-            .height(40)
-            .borderRadius(20)
-            .backgroundColor(this.glassOn ? '#00000000' : AppTheme.floatBg(this.isDark, false))
-            .systemMaterial(AppTheme.floatMaterial(this.glassOn))
-            .shadow({ radius: 8, color: this.isDark ? '#59000000' : '#1A000000', offsetX: 0, offsetY: 2 })
-            .opacity(this.fade)
-            .scale({ x: 0.6 + 0.4 * this.fade, y: 0.6 + 0.4 * this.fade })
-            .onClick(() => {
-              AppNavStack.pushPathByName(NAV_SEARCH, null);
-            })
+          if (AppTheme.isImmersiveUiSupported()) {
+            this.SearchFloat()
+          } else {
+            this.SearchPlain()
           }
-          .width('100%')
-          .height(40)
-          .padding({ right: 14 })
-          .margin({ top: Immersive.statusBarHeight() + 6 })
-          .hitTestBehavior(HitTestMode.Transparent)
-          .zIndex(4)
         }
       }
       .width('100%')
