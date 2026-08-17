@@ -4,25 +4,8 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { Immersive } from '../common/Immersive';
 import { Constants } from '../common/Constants';
 import { LiveChatMessage, LivePlayInfo, LiveQualityOption } from '../model/LiveModels';
-import { colorHex } from './PlayerDanmakuSupport';
+import { LiveDanmakuRenderer } from './LiveDanmakuRenderer';
 
-class ActiveLiveDanmaku {
-  message: LiveChatMessage;
-  x: number;
-  lane: number;
-  speed: number;
-  width: number;
-  text: string;
-
-  constructor(message: LiveChatMessage, x: number, lane: number, speed: number, width: number, text: string) {
-    this.message = message;
-    this.x = x;
-    this.lane = lane;
-    this.speed = speed;
-    this.width = width;
-    this.text = text;
-  }
-}
 
 @Component
 export struct LivePlayerView {
@@ -52,28 +35,20 @@ export struct LivePlayerView {
   private playerGeneration: number = 0;
   private playerCreating: boolean = false;
   private dmContext: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
-  private activeDanmaku: Array<ActiveLiveDanmaku> = [];
-  private dmTick: number = -1;
-  private dmLastDrawMs: number = 0;
-  private dmWidth: number = 1;
-  private dmHeight: number = 1;
-  private nextLane: number = 0;
-  private seenMessageIds: Set<string> = new Set<string>();
-  private messageBaselineReady: boolean = false;
+  private dmRenderer: LiveDanmakuRenderer = new LiveDanmakuRenderer(this.dmContext);
 
   aboutToAppear(): void {
     this.destroyed = false;
     AppStorage.setOrCreate<boolean>('livePlayerFullscreen', false);
     AppStorage.setOrCreate<number>('livePlayerExitRequest', 0);
-    for (let i: number = 0; i < this.messages.length; i++) this.seenMessageIds.add(this.messages[i].id);
-    this.messageBaselineReady = true;
+    this.dmRenderer.setBaseline(this.messages);
   }
 
   aboutToDisappear(): void {
     this.destroyed = true;
     this.playerGeneration++;
     this.release();
-    this.stopDanmakuLoop(true);
+    this.dmRenderer.release();
     if (this.fullscreen) Immersive.setFullscreen(false);
     AppStorage.setOrCreate<boolean>('livePlayerFullscreen', false);
   }
@@ -138,7 +113,7 @@ export struct LivePlayerView {
         } else if (state === 'playing') {
           this.playing = true;
           this.buffering = false;
-          if (this.activeDanmaku.length > 0) this.startDanmakuLoop();
+          this.dmRenderer.setPlayback(true, this.fullscreen);
           this.scheduleHide();
         } else if (state === 'paused') {
           this.playing = false;
@@ -197,7 +172,7 @@ export struct LivePlayerView {
     if (this.fullscreenTimer >= 0) clearTimeout(this.fullscreenTimer);
     this.fullscreenTimer = -1;
     this.playerGeneration++;
-    this.stopDanmakuLoop(true);
+    this.dmRenderer.release();
     this.playerCreating = false;
     const p: media.AVPlayer | null = this.player;
     this.player = null;
@@ -236,6 +211,7 @@ export struct LivePlayerView {
       return;
     }
     this.fullscreen = true;
+    this.dmRenderer.setPlayback(this.playing, true);
     AppStorage.setOrCreate<boolean>('livePlayerFullscreen', true);
     this.onFullscreenChange(true);
     Immersive.setFullscreen(true);
@@ -244,6 +220,7 @@ export struct LivePlayerView {
   exitFullscreen(): void {
     if (!this.fullscreen) return;
     this.fullscreen = false;
+    this.dmRenderer.setPlayback(this.playing, false);
     Immersive.setFullscreen(false);
     if (this.fullscreenTimer >= 0) clearTimeout(this.fullscreenTimer);
     this.fullscreenTimer = setTimeout(() => {
@@ -262,119 +239,14 @@ export struct LivePlayerView {
   }
 
   onMessagesChanged(): void {
-    if (!this.messageBaselineReady) return;
-    for (let i: number = 0; i < this.messages.length; i++) {
-      const message: LiveChatMessage = this.messages[i];
-      if (this.seenMessageIds.has(message.id)) continue;
-      this.seenMessageIds.add(message.id);
-      this.spawnLiveDanmaku(message);
-    }
-    if (this.seenMessageIds.size > 600) {
-      this.seenMessageIds.clear();
-      for (let i: number = 0; i < this.messages.length; i++) this.seenMessageIds.add(this.messages[i].id);
-    }
-  }
-
-  private dmFontSize(): number {
-    return this.fullscreen ? 28 : 18;
-  }
-
-  private dmLineHeight(): number {
-    return this.dmFontSize() + 5;
-  }
-
-  private dmLaneCount(): number {
-    const topInset: number = this.fullscreen ? 54 : 6;
-    const usable: number = Math.max(this.dmLineHeight(), this.dmHeight * 0.78 - topInset);
-    return Math.max(1, Math.floor(usable / this.dmLineHeight()));
-  }
-
-  private laneAvailable(lane: number, spawnX: number): boolean {
-    const gap: number = Math.max(20, this.dmFontSize());
-    for (let i: number = 0; i < this.activeDanmaku.length; i++) {
-      const current: ActiveLiveDanmaku = this.activeDanmaku[i];
-      if (current.lane === lane && current.x + current.width + gap > spawnX) return false;
-    }
-    return true;
-  }
-
-  private allocateLane(spawnX: number): number {
-    const count: number = this.dmLaneCount();
-    for (let offset: number = 0; offset < count; offset++) {
-      const lane: number = (this.nextLane + offset) % count;
-      if (this.laneAvailable(lane, spawnX)) {
-        this.nextLane = (lane + 1) % count;
-        return lane;
-      }
-    }
-    return -1;
-  }
-
-  private spawnLiveDanmaku(message: LiveChatMessage): void {
-    if (!this.danmakuOn || this.dmWidth <= 1 || message.text.length === 0 || this.activeDanmaku.length >= 28) return;
-    const text: string = message.type === 'sc' ? 'SC ¥' + String(message.price) + '  ' + message.text :
-      (message.emotes.length > 0 && message.text === message.emotes[0].unique ? '[直播表情]' : message.text);
-    this.dmContext.font = '600 ' + String(this.dmFontSize()) + 'px sans-serif';
-    const width: number = Math.max(24, this.dmContext.measureText(text).width);
-    const spawnX: number = this.dmWidth + 10;
-    const lane: number = this.allocateLane(spawnX);
-    if (lane < 0) return;
-    const travelSeconds: number = this.fullscreen ? 10 : 8.5;
-    this.activeDanmaku.push(new ActiveLiveDanmaku(message, spawnX, lane,
-      (spawnX + width) / travelSeconds, width, text));
-    if (this.playing) this.startDanmakuLoop();
-  }
-
-  private drawDanmakuFrame(): void {
-    this.dmContext.clearRect(0, 0, this.dmWidth, this.dmHeight);
-    const now: number = Date.now();
-    const delta: number = this.dmLastDrawMs > 0 ? Math.min(0.12, Math.max(0.012, (now - this.dmLastDrawMs) / 1000)) : 0.033;
-    this.dmLastDrawMs = now;
-    const fontSize: number = this.dmFontSize();
-    const topInset: number = this.fullscreen ? 54 : 6;
-    this.dmContext.font = '600 ' + String(fontSize) + 'px sans-serif';
-    this.dmContext.lineWidth = this.fullscreen ? 2.5 : 2;
-    this.dmContext.strokeStyle = '#B3000000';
-    this.dmContext.globalAlpha = 0.88;
-    const keep: Array<ActiveLiveDanmaku> = [];
-    for (let i: number = 0; i < this.activeDanmaku.length; i++) {
-      const dm: ActiveLiveDanmaku = this.activeDanmaku[i];
-      dm.x -= dm.speed * delta;
-      if (dm.x + dm.width < -10) continue;
-      this.dmContext.fillStyle = dm.message.type === 'sc' ? '#FFD45A' : colorHex(dm.message.color);
-      const y: number = topInset + dm.lane * this.dmLineHeight() + fontSize;
-      this.dmContext.strokeText(dm.text, dm.x, y);
-      this.dmContext.fillText(dm.text, dm.x, y);
-      keep.push(dm);
-    }
-    this.dmContext.globalAlpha = 1;
-    this.activeDanmaku = keep;
-    if (keep.length === 0) this.stopDanmakuLoop(false);
-  }
-
-  private startDanmakuLoop(): void {
-    if (this.dmTick >= 0 || !this.danmakuOn || this.activeDanmaku.length === 0) return;
-    this.dmLastDrawMs = Date.now();
-    this.dmTick = setInterval(() => {
-      if (this.playing && this.danmakuOn) this.drawDanmakuFrame();
-    }, this.fullscreen ? 25 : 33);
-  }
-
-  private stopDanmakuLoop(clear: boolean): void {
-    if (this.dmTick >= 0) clearInterval(this.dmTick);
-    this.dmTick = -1;
-    this.dmLastDrawMs = 0;
-    if (clear) {
-      this.activeDanmaku = [];
-      this.nextLane = 0;
-    }
-    this.dmContext.clearRect(0, 0, this.dmWidth, this.dmHeight);
+    this.dmRenderer.onMessagesChanged(this.messages);
   }
 
   private toggleDanmaku(): void {
     this.danmakuOn = !this.danmakuOn;
-    if (!this.danmakuOn) this.stopDanmakuLoop(true);
+    this.dmRenderer.toggle(this.danmakuOn);
   }
+
 
   build() {
     Stack({ alignContent: Alignment.Center }) {
@@ -399,8 +271,8 @@ export struct LivePlayerView {
         .onAreaChange((oldValue: Area, newValue: Area) => {
           const width: number = Number(newValue.width);
           const height: number = Number(newValue.height);
-          if (width > 0) this.dmWidth = width;
-          if (height > 0) this.dmHeight = height;
+          if (width > 0) this.dmRenderer.width = width;
+          if (height > 0) this.dmRenderer.height = height;
         })
 
       if (this.buffering) {
