@@ -11,6 +11,9 @@ import { ArticleSearchItem, ArticleSearchResult, HotSearchItem, PgcSearchItem, P
 import { LiveRoomItem, LiveSearchResult } from '../model/LiveModels';
 import { getData, webGet } from './internal/ApiCommon';
 
+/** web 搜索每页条数：B 站搜索接口翻页时必须显式传 page_size，否则 page>1 返回空 result。 */
+const SEARCH_PAGE_SIZE: number = 20;
+
 export class SearchApi {
   // ===== 热搜 =====
   static async getHotSearch(): Promise<Array<HotSearchItem>> {
@@ -77,6 +80,7 @@ export class SearchApi {
     const params: Record<string, string> = {
       'keyword': keyword,
       'page': String(page),
+      'page_size': String(SEARCH_PAGE_SIZE),
     };
     await WbiSign.encWbi(params);
     const resp: HttpResponse = await webGet(Api.searchAll, params);
@@ -133,6 +137,7 @@ export class SearchApi {
       'keyword': keyword,
       'search_type': searchType,
       'page': String(page),
+      'page_size': String(SEARCH_PAGE_SIZE),
     };
     if (order.length > 0) {
       params['order'] = order;
@@ -371,3 +376,4 @@ export class SearchApi {
     return out;
   }
 }
+

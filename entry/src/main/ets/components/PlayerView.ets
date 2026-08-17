@@ -30,7 +30,7 @@ import { PlayerProgressBar } from './PlayerProgressBar';
 import { PlayerSettingsPanel } from './PlayerSettingsPanel';
 import { PlayerGestureOverlay } from './PlayerGestureOverlay';
 import { PlayerFullscreenHeader } from './PlayerFullscreenHeader';
-import { CONTROLS_GRADIENT_COLORS, DM_SEGMENT_SECONDS } from './PlayerDanmakuSupport';
+import { CONTROLS_GRADIENT_COLORS, DM_SEGMENT_SECONDS, ActiveDm } from './PlayerDanmakuSupport';
 import { PlayerDanmakuEngine } from './PlayerDanmakuEngine';
 import { PlayerBottomControls } from './PlayerBottomControls';
 import { PlayerPlaybackIndicator } from './PlayerPlaybackIndicator';
@@ -90,6 +90,15 @@ export struct PlayerView {
   @State curTime: number = 0;
   @State duration: number = 0;
   @State danmakuOn: boolean = true;
+  /** 被点击停住的弹幕（操作条：点赞/点踩/举报）。null 表示无选中。 */
+  @State dmPinnedText: string = '';
+  @State dmPinnedVisible: boolean = false;
+  /** 气泡锚点（vp）：定位在弹幕上方/下方。 */
+  @State dmPinBubbleX: number = 0;
+  @State dmPinBubbleY: number = 0;
+  /** 气泡尺寸（供 clamp 复用）。 */
+  @State dmPinBubbleW: number = 100;
+  @State dmPinBubbleH: number = 34;
   @State fullscreen: boolean = false;
   // 进入播放页直接展示纯画面；用户点画面或暂停时再唤出控制层。
   @State showControls: boolean = false;
@@ -1095,6 +1104,7 @@ if (this.runtimeSources.length === 0) {
   }
 
   private beginHoldSpeed(): void {
+    this.pendingDm = null;
     if (!this.playing || !this.prepared || this.holdSpeedActive) return;
     this.speedCtl?.beginHold(this.playbackRate);
   }
@@ -1127,6 +1137,8 @@ if (this.runtimeSources.length === 0) {
   }
 
   private beginPlayerPan(event: GestureEvent): void {
+    // 滑动手势判定后不再视为点弹幕。
+    this.pendingDm = null;
     const x: number = event.fingerList.length > 0 ? event.fingerList[0].localX : this.dmEngine.width / 2;
     this.gestureCtl?.beginPan(x, this.dmEngine.width, this.playheadSec, this.duration);
   }
@@ -1164,6 +1176,7 @@ if (this.runtimeSources.length === 0) {
 
 
   private handleDoubleTap(): void {
+    this.pendingDm = null;
     if (!this.prepared || this.player === null) return;
     const willPlay: boolean = !this.playing;
     this.doubleTapFeedbackPlaying = willPlay;
@@ -1315,7 +1328,11 @@ if (this.runtimeSources.length === 0) {
   seekTo(positionSec: number, precise: boolean = false): void {
     const p: media.AVPlayer | null = this.player;
     if (p === null || !this.prepared) return;
-    const clamped: number = Math.max(0, Math.min(this.duration > 0 ? this.duration : positionSec, positionSec));
+    const clampedRaw: number = Math.max(0, Math.min(this.duration > 0 ? this.duration : positionSec, positionSec));
+    // 用户把手势/滑块拖到最末尾时，停在结尾前 0.5s，避免精确 seek 到末帧被 AVPlayer 当作
+    // "自然播完"而触发自动连播切到下一视频；真正自然播完仍走 completed → onEnded 连线。
+    const clamped: number = this.duration > 0 && clampedRaw >= this.duration ?
+      Math.max(0, this.duration - 0.5) : clampedRaw;
     const targetMs: number = Math.floor(clamped * 1000);
     this.resetDanmakuAt(clamped);
     this.playheadSec = clamped;
@@ -1576,6 +1593,8 @@ if (this.runtimeSources.length === 0) {
     this.dmEngine.lastDrawMs = 0;
     if (clearActive) {
       this.dmEngine.clearActive();
+      this.dmPinnedVisible = false;
+      this.dmPinnedText = '';
     } else {
       this.dmEngine.clearCanvas();
     }
@@ -1666,6 +1685,27 @@ if (this.runtimeSources.length === 0) {
         .onAreaChange((oldV: Area, newV: Area) => {
           this.onDanmakuAreaChange(newV);
         })
+
+      // 弹幕交互气泡：点击弹幕停住后，在弹幕上方/下方显示一个黑色半透明小气泡
+      // （点赞/点踩/举报三个线性图标，无文字，弹幕本身保持原大小和位置）。
+      if (this.dmPinnedVisible) {
+        Row({ space: 0 }) {
+          this.DmActionCell($r('app.media.ic_like'), () => this.dmVote('like'), true)
+          this.DmActionCell($r('app.media.ic_dislike'), () => this.dmVote('dislike'), true)
+          this.DmActionCell($r('app.media.ic_report_flag'), () => this.dmReport(), true)
+        }
+        .width(this.dmPinBubbleW)
+        .height(this.dmPinBubbleH)
+        .padding({ left: 4, right: 4, top: 2, bottom: 2 })
+        .borderRadius(17)
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor('#99000000')
+        .border({ width: 0.5, color: '#33FFFFFF' })
+        .shadow({ radius: 8, color: '#33000000', offsetY: 2 })
+        .align(Alignment.TopStart)
+        .position({ x: this.dmPinBubbleX, y: this.dmPinBubbleY })
+        .zIndex(60)
+      }
 
       // CC 字幕层：底部黑底白字，开关与轨道选择见设置面板/更多菜单。
       if (this.subtitleOn && this.subtitleText.length > 0) {
@@ -1900,21 +1940,132 @@ if (this.runtimeSources.length === 0) {
           .onActionCancel(() => this.endPlayerPan())
       )
     )
+    .onTouch((event: TouchEvent) => {
+      // 按下瞬间就用当时坐标命中弹幕并冻结：TapGesture 判定完成时弹幕早已滑走，
+      // 抬起后若没有发生滑动手势（hand=PanGesture 未接管）再确认停住。
+      if (event.type === TouchType.Down && !this.dmPinnedVisible && this.dmEngine.active.length > 0) {
+        const x: number = event.touches.length > 0 ? event.touches[0].x : -1;
+        const y: number = event.touches[0].y;
+        this.pendingDm = this.dmEngine.hitTestActive(x, y);
+      }
+    })
   }
 
-  /** 单击播放画面：命中的弹幕优先弹举报，否则照常切换控件。 */
+  /** 按下时命中的弹幕（可能被 Pan 接管后丢弃）。 */
+  private pendingDm: ActiveDm | null = null;
+
+  /** 单击播放画面：命中的弹幕先"停住"并显示点赞/点踩/举报操作条（B 站交互）；否则照常切控件。 */
   private handleCanvasTap(event: GestureEvent): void {
+    // 已在按下瞬间命中的弹幕：直接停住（放入气泡）。优先于本次证据，避免弹幕滑走误判。
+    if (!this.dmPinnedVisible && this.pendingDm !== null) {
+      const hit: ActiveDm = this.pendingDm;
+      this.pendingDm = null;
+      // 确认点击并未被相邻弹幕（若已过期/移除则忽略）。
+      if (hit.item !== undefined) {
+        this.pinDanmaku(hit);
+        return;
+      }
+    }
+    this.pendingDm = null;
     const finger: FingerInfo | undefined = event.fingerList.length > 0 ? event.fingerList[0] : undefined;
     const x: number = finger !== undefined ? finger.localX : -1;
     const y: number = finger !== undefined ? finger.localY : -1;
     if (x >= 0 && y >= 0) {
-      const hit: DanmakuItem | null = this.dmEngine.hitTest(x, y);
-      if (hit !== null && hit.id > 0) {
-        this.promptReportDanmaku(hit);
+      // 已有停住弹幕：点击画面任意处先解冻，避免误触发下一段的举报。
+      if (this.dmPinnedVisible) {
+        this.unpinDanmaku();
+        return;
+      }
+      // engine 视口与手势同为 vp 坐标（onAreaChange 提供 vp 尺寸），直接命中。
+      const hit = this.dmEngine.hitTestActive(x, y);
+      if (hit !== null) {
+        this.pinDanmaku(hit);
         return;
       }
     }
     this.toggleControls();
+  }
+
+  /** 停住被点中的弹幕并显示其旁的小气泡（内含点赞/点踩/举报，弹幕本身不变形不移动）。 */
+  private pinDanmaku(hit: ActiveDm): void {
+    this.dmEngine.pin(hit);
+    this.dmPinnedText = hit.renderText;
+    // 弹幕视口是 canvas 像素坐标，UI 叠层用 vp：统一经密度换算。
+    const rect = this.dmEngine.dmViewportOf(hit);
+    const uiCtx: UIContext = this.getUIContext();
+    const bubbleW: number = 100;  // vp
+    const bubbleH: number = 34;   // vp
+    const gap: number = 4;        // vp：贴近弹幕
+    const rx: number = uiCtx.px2vp(rect.x + rect.w / 2); // 弹幕水平中心（vp）
+    const ry: number = uiCtx.px2vp(rect.y);              // 弹幕顶（vp）
+    const rh: number = uiCtx.px2vp(rect.h);            // 弹幕高（vp）
+    // 默认放弹幕上方；贴顶（<60vp）则放下方。
+    let bx: number = rx - bubbleW / 2;
+    const maxX: number = uiCtx.px2vp(this.dmEngine.width) - bubbleW - 4;
+    bx = Math.max(4, Math.min(bx, maxX));
+    let by: number = ry - gap - bubbleH;
+    if (by < 60) {
+      by = ry + rh + gap;
+    }
+    this.dmPinBubbleX = bx;
+    this.dmPinBubbleY = by;
+    this.dmPinBubbleW = bubbleW;
+    this.dmPinBubbleH = bubbleH;
+    this.dmPinnedVisible = true;
+    if (this.hideTimer >= 0) {
+      clearTimeout(this.hideTimer);
+      this.hideTimer = -1;
+    }
+    this.showControls = true;
+  }
+
+  /** 取消停住，恢复弹幕滚动。 */
+  private unpinDanmaku(): void {
+    this.dmEngine.pin(null);
+    this.dmPinnedVisible = false;
+    this.dmPinnedText = '';
+    if (this.playing) this.scheduleControlsHide();
+  }
+
+  /** 弹幕点赞/点踩：B 站未开放媒体弹幕打分接口，本地乐观反馈。 */
+  private dmVote(kind: 'like' | 'dislike'): void {
+    const text: string = this.dmPinnedText;
+    this.unpinDanmaku();
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: kind === 'like' ? '已为弹幕点赞' : '已点踩这条弹幕' });
+    } catch (e) {
+    }
+    void text;
+  }
+
+  /** 弹幕举报：停住态下点"举报"进原因选择。 */
+  private dmReport(): void {
+    const pinned = this.dmEngine.pinned;
+    this.unpinDanmaku();
+    if (pinned !== null) this.promptReportDanmaku(pinned.item);
+  }
+
+  /** 弹幕气泡按钮：黑色半透明圆底 + 线性图标（点赞/点踩/举报），按压反馈。 */
+  @Builder
+  DmActionCell(icon: Resource, onTap: () => void, ignore: boolean) {
+    Stack({ alignContent: Alignment.Center }) {
+      Image(icon)
+        .width(15)
+        .height(15)
+        .renderMode(ImageRenderMode.Template)
+        .fillColor('#FFFFFF')
+    }
+    .width(30)
+    .height(28)
+    .borderRadius(14)
+    .backgroundColor('#00000000')
+    .stateStyles({
+      pressed: {
+        .backgroundColor('#59FFFFFF')
+        .scale({ x: 0.88, y: 0.88 })
+      },
+    })
+    .onClick(() => onTap())
   }
 
   /** 圆形图标按钮：Stack 居中 Image，可选深色圆形底。 */

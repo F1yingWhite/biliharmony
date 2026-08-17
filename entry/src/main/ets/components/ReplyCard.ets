@@ -14,6 +14,7 @@ import { DecoratedAvatar, UserDecorationBanner } from './UserDecorations';
 import { biliImageOriginal, biliImageThumbnail } from '../common/ImageUrl';
 import { Haptic } from '../common/Haptic';
 import { curves } from '@kit.ArkUI';
+import { pasteboard } from '@kit.BasicServicesKit';
 import { BiliApi, ActionResult } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
 import { CommentApi } from '../api/CommentApi';
@@ -224,11 +225,84 @@ export struct ReplyCard {
         this.onSelectReply(this.item);
       },
       onMore: (): void => {
-        this.promptReport();
+        this.showMoreMenu();
       },
     })
   }
 
+
+  /** 三点菜单：先给一级菜单（复制/屏蔽/举报或删除），点"举报"才进原因选择，避免一点就直接弹举报。 */
+  private showMoreMenu(): void {
+    if (this.item.rpid <= 0 || this.item.oid <= 0) {
+      this.toast('评论信息不完整，暂不支持操作');
+      return;
+    }
+    const isMine: boolean = UserStore.isLogin && UserStore.current !== null && UserStore.current.mid === this.item.mid;
+    const darkText: string = this.isDark ? '#E6E6E6' : '#18191C';
+    try {
+      if (isMine) {
+        this.getUIContext().getPromptAction().showActionMenu({
+          title: this.item.content.substring(0, Math.min(18, this.item.content.length)),
+          buttons: [
+            { text: '复制评论', color: darkText },
+            { text: '删除这条评论', color: AppTheme.DANGER },
+          ],
+        }).then((menuResult) => {
+          const pick: number = Number(menuResult.index);
+          if (pick === 0) this.copyComment();
+          else if (pick === 1) this.deleteOwnComment();
+        });
+      } else {
+        this.getUIContext().getPromptAction().showActionMenu({
+          title: this.item.content.substring(0, Math.min(18, this.item.content.length)),
+          buttons: [
+            { text: '复制评论', color: darkText },
+            { text: '屏蔽该用户', color: darkText },
+            { text: '举报', color: darkText },
+          ],
+        }).then((menuResult) => {
+          const pick: number = Number(menuResult.index);
+          if (pick === 0) this.copyComment();
+          else if (pick === 1) this.blockAuthor();
+          else if (pick === 2) this.promptReport();
+        });
+      }
+    } catch (e) {
+      // 弹窗失败不阻塞。
+    }
+  }
+
+  /** 复制评论全文到剪贴板。 */
+  private copyComment(): void {
+    try {
+      const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN,
+        this.item.content.trim().length > 0 ? this.item.content : '');
+      pasteboard.getSystemPasteboard().setData(data).then(() => {
+        this.toast('评论已复制');
+      }).catch(() => {
+        this.toast('复制失败');
+      });
+    } catch (e) {
+      this.toast('复制失败');
+    }
+  }
+
+  /** 屏蔽作者：确认后调服务端拉黑，失败给提示。 */
+  private blockAuthor(): void {
+    if (UserStore.isLogin === false) {
+      this.toast('请先登录后再屏蔽');
+      return;
+    }
+    if (this.item.mid <= 0) {
+      this.toast('该用户信息不完整，暂不支持屏蔽');
+      return;
+    }
+    BiliApi.blockUser(this.item.mid, true).then((r: ActionResult) => {
+      this.toast(r.ok ? '已屏蔽该用户' : r.message);
+    }).catch(() => {
+      this.toast('屏蔽失败，请稍后重试');
+    });
+  }
 
   /** 评论操作：自己的评论可删除；他人评论走举报原因选择。 */
   private promptReport(): void {

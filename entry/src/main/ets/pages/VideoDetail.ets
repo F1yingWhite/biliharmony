@@ -6,6 +6,7 @@ import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
 import { systemShare } from '@kit.ShareKit';
 import { inputMethod } from '@kit.IMEKit';
+import { pasteboard } from '@kit.BasicServicesKit';
 import { Immersive } from '../common/Immersive';
 import { Haptic } from '../common/Haptic';
 import { AppNavStack, NAV_LOGIN, NAV_VIDEO_DETAIL, NAV_USER_SPACE, VideoDetailParam,
@@ -85,6 +86,7 @@ export struct VideoDetailPage {
   @State threadPrefetchCount: number = 0;
   @State replyTargetRpid: number = 0;
   @State replyTargetName: string = '';
+  @State replyFocusTick: number = 0;
   @State replyDraft: string = '';
   @State replySending: boolean = false;
   @State replyLikeVersion: number = 0;
@@ -834,13 +836,22 @@ export struct VideoDetailPage {
     this.favoriteCount = Math.max(0, this.favoriteCount + (next ? 1 : -1));
     try {
       const selfMid: number = UserStore.current !== null ? UserStore.current.mid : 0;
-      const folders: Array<FavoriteFolderItem> = await FavoriteApi.getFavoriteFoldersForVideo(this.detail.aid,
+      let folders: Array<FavoriteFolderItem> = await FavoriteApi.getFavoriteFoldersForVideo(this.detail.aid,
         selfMid);
       if (this.destroyed) return;
+      if (folders.length === 0 && next) {
+        // 没有可用收藏夹：先自动创建一个默认收藏夹再收藏，避免"未找到可用的收藏夹"卡住收藏。
+        const created: ActionResult = await FavoriteApi.addFavoriteFolder('默认收藏夹');
+        if (this.destroyed) return;
+        if (created.ok) {
+          folders = await FavoriteApi.getFavoriteFoldersForVideo(this.detail.aid, selfMid);
+        }
+        if (this.destroyed) return;
+      }
       if (folders.length === 0) {
         this.favorited = !next;
         this.favoriteCount = Math.max(0, this.favoriteCount + (next ? -1 : 1));
-        this.toast('未找到可用的收藏夹');
+        this.toast(next ? '收藏夹创建失败，请稍后重试' : '未找到可用的收藏夹');
         return;
       }
       const selected: Array<number> = [];
@@ -1394,9 +1405,11 @@ export struct VideoDetailPage {
       onLike: (item: ReplyItem) => this.actionReplyLike(item),
       onDislike: (item: ReplyItem) => this.actionReplyDislike(item),
       onShare: (item: ReplyItem) => this.shareReplyAsImage(item),
+      focusTick: this.replyFocusTick,
       onSelectReply: (item: ReplyItem) => {
         this.replyTargetRpid = item.rpid;
         this.replyTargetName = item.uname;
+        this.replyFocusTick++;
       },
       onDeleted: (item: ReplyItem) => {
         this.threadRemoveReply(item);
@@ -1585,11 +1598,26 @@ export struct VideoDetailPage {
       const pixelMap: image.PixelMap = await uiContext.getComponentSnapshot()
         .createFromBuilder((): void => { this.ReplyShareCardBuilder(); }, 400, true);
       await sharePixelMapAsImage(context, pixelMap, 'reply_share_' + String(item.rpid));
-    })().catch(() => {
-      this.toast('分享图片生成失败，请稍后重试');
-    }).finally(() => {
-      this.shareCardBusy = false;
-    });
+    })()
+      .catch(() => {
+        // 分享面板不可用/截图失败时兜底为复制链接，保证"转发"始终有结果。
+        this.copyTextToClipboard(link);
+        this.toast('分享面板暂不可用，已复制评论链接');
+      })
+      .finally(() => {
+        this.shareCardBusy = false;
+      });
+  }
+
+  /** 复制文本到系统剪贴板；失败静默。 */
+  private copyTextToClipboard(content: string): void {
+    try {
+      const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, content);
+      pasteboard.getSystemPasteboard().setData(data).catch(() => {
+      });
+    } catch (e) {
+      // 剪贴板不可用时忽略。
+    }
   }
 
   /** 离屏分享卡内容；字段在截图前一次性赋值，渲染期间不变化。 */
@@ -1939,6 +1967,7 @@ export struct VideoDetailPage {
         (this.replyTargetName.length > 0 ? this.replyTargetName : this.replyThreadRoot.uname) : '发一条友善的评论',
       sending: this.replySending,
       emoteOpen: this.emotePanelOpen,
+      focusTick: this.replyFocusTick,
       onChange: (value: string) => {
         this.replyDraft = value;
       },
@@ -2031,6 +2060,7 @@ export struct VideoDetailPage {
             onSelectReply: (item: ReplyItem) => {
               this.replyTargetRpid = item.rpid;
               this.replyTargetName = item.uname;
+              this.replyFocusTick++;
             },
             onDeleted: (item: ReplyItem) => {
               // 楼中楼面板的根评论被删除：关闭面板并移除主列表中对应行。
@@ -2078,6 +2108,7 @@ export struct VideoDetailPage {
               onSelectReply: (reply: ReplyItem) => {
                 this.replyTargetRpid = reply.rpid;
                 this.replyTargetName = reply.uname;
+                this.replyFocusTick++;
               },
               onToggleThread: (reply: ReplyItem) => this.toggleThreadBranch(reply),
               onDeleted: (reply: ReplyItem) => {
