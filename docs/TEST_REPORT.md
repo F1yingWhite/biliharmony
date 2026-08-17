@@ -84,3 +84,4 @@
 - Round33：尝试 PlayerEmbeddedSettingsPanel 拆分，因属性链过长暂未合并，记录为后续候选。
 - Round34：4090 模拟器运行中，BiliHarmony 进程存活，持续回归通过。
 - Round36：PlayerMoreMenuPage 拆分后 API24 安装回归通过。
+- Round38：清理后 API24 安装与冷启动回归通过。
