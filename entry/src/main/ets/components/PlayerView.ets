@@ -1992,20 +1992,21 @@ if (this.runtimeSources.length === 0) {
     this.dmPinnedText = hit.renderText;
     // 弹幕引擎视口坐标与 UI 叠层渲染都在同一 vp 坐标系（onAreaChange 提供 vp 尺寸），
     // 直接复用 rect 的 vp 值定位气泡，切勿再做 px 换算（会缩 3.3x 跑到左上角）。
+    // rect.y 是轨道顶，文字实际以 baseline 绘制（fillText y = lane*lineHeight+fontSize），
+    // 所以气泡建议用“文字中线”对齐：垂直中心放在弹幕文字中心上方 / 下方，避免视觉上"离得远"。
     const rect = this.dmEngine.dmViewportOf(hit);
     const bubbleW: number = 100;  // vp
     const bubbleH: number = 34;   // vp
-    const gap: number = 4;        // vp：贴近弹幕
-    const rx: number = rect.x + rect.w / 2; // 弹幕水平中心（vp）
-    const ry: number = rect.y;              // 弹幕顶（vp）
-    const rh: number = rect.h;            // 弹幕高（vp）
-    // 默认放弹幕上方；贴顶（<60vp）则放下方。
+    const gap: number = 5;        // vp：气泡中心与弹幕文字中心的间距
+    const textCenterY: number = rect.y + rect.h * 0.5; // 弹幕文字中线（vp）
+    const rx: number = rect.x + rect.w / 2;            // 弹幕水平中心（vp）
     let bx: number = rx - bubbleW / 2;
     const maxX: number = this.dmEngine.width - bubbleW - 4;
     bx = Math.max(4, Math.min(bx, maxX));
-    let by: number = ry - gap - bubbleH;
-    if (by < 60) {
-      by = ry + rh + gap;
+    // 默认放弹幕上方；中心距顶 < 70vp（放不下）则放下方。
+    let by: number = textCenterY - gap - bubbleH / 2;
+    if (by < 70) {
+      by = textCenterY + gap + bubbleH / 2;
     }
     this.dmPinBubbleX = bx;
     this.dmPinBubbleY = by;
