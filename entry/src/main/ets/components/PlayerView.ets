@@ -13,6 +13,7 @@ import { PlayerGestureController } from './PlayerGestureController';
 import { PlayerPlaybackConfig } from './PlayerPlaybackConfig';
 import { DanmakuListPanel } from './DanmakuListPanel';
 import { DmFilterPanel } from './DmFilterPanel';
+import { playerPanelTitle, playerPanelSub, playerPanelRowBg } from './PlayerSheetTheme';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
@@ -1981,15 +1982,15 @@ if (this.runtimeSources.length === 0) {
 
   /** 竖屏 ⋮ 更多菜单：清晰度/倍速/弹幕设置/分段/空降收纳项。 */
   private sheetTitleColor(): string {
-    return this.isDark ? '#FFFFFF' : '#18191C';
+    return playerPanelTitle(this.isDark);
   }
 
   private sheetSubColor(): string {
-    return this.isDark ? '#B3FFFFFF' : '#5A5F66';
+    return playerPanelSub(this.isDark);
   }
 
   private sheetRowBg(): string {
-    return this.isDark ? '#26272B' : '#F5F7F9';
+    return playerPanelRowBg(this.isDark);
   }
 
   /** 更多功能 Sheet 内嵌管理页：复用 PlayerSettingsPanel 的内容与回调，但去掉播放器内弹层的半透明灰底。 */
