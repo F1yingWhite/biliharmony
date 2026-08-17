@@ -38,7 +38,12 @@ case "${1:-}" in
   stop) "$E" -stop "$INSTANCE" 2>&1 | tail -2 ;;
   status|info)
     echo "--- 实例 ---"; "$E" -list -details 2>&1 | head -25
-    echo "--- hdc 设备 ---"; cmd_connect; "$HDC" list targets 2>&1 | head -5 ;;
+    echo "--- hdc 设备 ---"; cmd_connect; "$HDC" list targets 2>&1 | head -5
+    echo "--- 远程 UI 服务 ---"
+    pgrep -a "Xorg :99" 2>/dev/null || echo "Xorg :99 NOT RUNNING"
+    pgrep -a x11vnc 2>/dev/null || echo "x11vnc NOT RUNNING"
+    pgrep -a websockify 2>/dev/null | head -1 || echo "websockify NOT RUNNING"
+    ss -ltnp 2>/dev/null | grep -E ":5900|:6080" || echo "VNC/Web no listener" ;;
   shell)
     shift; cmd_connect; "$HDC" shell "$@" 2>&1 ;;
   install)
