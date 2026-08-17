@@ -2,7 +2,7 @@
  * 沉浸式窗口工具（Telegram 式边到边）：
  * 状态栏/导航栏透明 + 内容背景一路延伸到屏幕最顶端，图标深浅随主题。
  */
-import { window } from '@kit.ArkUI';
+import { display, window } from '@kit.ArkUI';
 
 export class Immersive {
   private static mainWindow: window.Window | null = null;
@@ -92,7 +92,7 @@ export class Immersive {
     let height: number = 0;
     try {
       const area: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
-      const h: number = px2vp(area.topRect.height);
+      const h: number = Immersive.pxToVp(area.topRect.height);
       if (h > 0 && h <= 100) {
         height = h;
       }
@@ -115,7 +115,7 @@ export class Immersive {
     let height: number = 0;
     try {
       const area: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
-      const h: number = px2vp(area.bottomRect.height);
+      const h: number = Immersive.pxToVp(area.bottomRect.height);
       if (h > 0 && h <= 60) {
         height = h;
       }
@@ -124,6 +124,17 @@ export class Immersive {
     }
     Immersive.cachedBottomInset = height;
     return height;
+  }
+
+
+  /** 避免区原始 px 转 vp：px / 屏幕密度。替代已废弃的全局 px2vp。 */
+  private static pxToVp(px: number): number {
+    try {
+      const density: number = display.getDefaultDisplaySync().densityPixels;
+      return density > 0 ? px / density : 0;
+    } catch (e) {
+      return 0;
+    }
   }
 
   /** 播放器手势读取当前窗口亮度；-1 表示仍跟随系统。 */

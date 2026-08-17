@@ -196,8 +196,8 @@ export struct VideoDetailPage {
   private refreshScreenSize(): void {
     try {
       const screen: display.Display = display.getDefaultDisplaySync();
-      this.screenWidthVp = px2vp(screen.width);
-      this.screenHeightVp = px2vp(screen.height);
+      this.screenWidthVp = this.getUIContext().px2vp(screen.width);
+      this.screenHeightVp = this.getUIContext().px2vp(screen.height);
     } catch (e) {
       // 读取失败保留旧值，playerHeight 会回退到默认高度。
     }
