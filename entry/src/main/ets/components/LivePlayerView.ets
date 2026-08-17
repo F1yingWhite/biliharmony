@@ -41,6 +41,7 @@ export struct LivePlayerView {
   @State fullscreen: boolean = false;
   @State errorText: string = '';
   @StorageProp('livePlayerExitRequest') @Watch('onExitRequested') exitRequest: number = 0;
+  @StorageProp('accentColor') accent: string = '#FB7299';
   private player: media.AVPlayer | null = null;
   private controller: XComponentController = new XComponentController();
   private surfaceId: string = '';
@@ -434,7 +435,7 @@ export struct LivePlayerView {
               .width(24).height(24).fillColor('#FFFFFF')
               .onClick(() => this.togglePlay())
             Image(this.danmakuOn ? $r('app.media.ic_danmaku_on') : $r('app.media.ic_danmaku_off'))
-              .width(23).height(23).fillColor(this.danmakuOn ? '#FB7299' : '#AAFFFFFF')
+              .width(23).height(23).fillColor(this.danmakuOn ? this.accent : '#AAFFFFFF')
               .onClick(() => this.toggleDanmaku())
             Text(this.showQuality ? '收起画质' : this.qualityLabel())
               .fontSize(12).fontColor('#FFFFFF')
@@ -443,7 +444,7 @@ export struct LivePlayerView {
               .onClick(() => this.showQuality = !this.showQuality)
             Blank()
             Row({ space: 4 }) {
-              Circle().width(7).height(7).fill('#FB7299')
+              Circle().width(7).height(7).fill(this.accent)
               Text('直播').fontSize(12).fontColor('#FFFFFF')
             }
             Image(this.fullscreen ? $r('app.media.ic_fullscreen_exit') : $r('app.media.ic_fullscreen'))
@@ -471,7 +472,7 @@ export struct LivePlayerView {
                 .padding({ left: 13, right: 13, top: 7, bottom: 7 })
                 .margin({ right: 8, bottom: 4 })
                 .borderRadius(16)
-                .backgroundColor(option.qn === this.playInfo.currentQn ? '#FB7299' : '#33FFFFFF')
+                .backgroundColor(option.qn === this.playInfo.currentQn ? this.accent : '#33FFFFFF')
                 .onClick(() => {
                   this.showQuality = false;
                   if (option.qn !== this.playInfo.currentQn) this.onQualityChange(option.qn);
