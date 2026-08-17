@@ -13,6 +13,10 @@ export class DmViewportRect {
   y: number = 0;
   w: number = 0;
   h: number = 0;
+  /** 文字可见顶（baseline - actualAscent）。 */
+  visualTop: number = 0;
+  /** 文字可见底（baseline + actualDescent）。 */
+  visualBottom: number = 0;
 }
 
 export class PlayerDanmakuEngine {
@@ -164,7 +168,7 @@ export class PlayerDanmakuEngine {
     this.drawFrame(false);
   }
 
-  /** 弹幕视口矩形（px）：供点击气泡在弹幕上方/下方定位。 */
+  /** 弹幕视口矩形（px/pv 统一）：x/w 是水平范围，y 为轨道顶（≈文字顶），h 为字号。 */
   dmViewportOf(dm: ActiveDm): DmViewportRect {
     const fs: number = this.fontSize();
     const top: number = dm.lane * this.lineHeight();
@@ -174,6 +178,20 @@ export class PlayerDanmakuEngine {
     rect.y = top;
     rect.w = w;
     rect.h = fs;
+    // 文字实际以 baseline（lane*lineHeight+fontSize）绘制；用真实 ascent/descent
+    // 精确给出可见文字范围，供气泡定位避免与文字重叠。
+    try {
+      this.ctx.font = '600 ' + fs + 'px sans-serif';
+      const tm: TextMetrics = this.ctx.measureText(dm.renderText);
+      const ascent: number = Number(tm.actualBoundingBoxAscent);
+      const descent: number = Number(tm.actualBoundingBoxDescent);
+      const baseline: number = top + fs;
+      rect.visualTop = baseline - (ascent > 0 ? ascent : fs * 0.82);
+      rect.visualBottom = baseline + (descent > 0 ? descent : fs * 0.18);
+    } catch (e) {
+      rect.visualTop = top + fs * 0.18;
+      rect.visualBottom = top + fs * 1.15;
+    }
     return rect;
   }
 

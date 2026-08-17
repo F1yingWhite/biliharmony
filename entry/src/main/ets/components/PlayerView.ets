@@ -1997,18 +1997,19 @@ if (this.runtimeSources.length === 0) {
     const rect = this.dmEngine.dmViewportOf(hit);
     const bubbleW: number = 100;  // vp
     const bubbleH: number = 34;   // vp
-    // 气泡外缘与弹幕文字边缘的间距：不重叠、不远离。
-    const gap: number = 9;        // vp
-    const textTop: number = rect.y;             // 弹幕文字顶（vp）
-    const textBottom: number = rect.y + rect.h; // 弹幕文字底（vp）
-    const rx: number = rect.x + rect.w / 2;     // 弹幕水平中心（vp）
+    // 气泡与文字可见边缘的间距：用引擎测出的 visibleTop/visibleBottom 精确对齐，
+    // 避免凭字号猜测文字顶部（文字按 baseline 绘制）导致气泡压字或飘高。
+    const gap: number = 8;        // vp
+    const textTop: number = rect.visualTop > 0 ? rect.visualTop : rect.y;
+    const textBottom: number = rect.visualBottom > 0 ? rect.visualBottom : rect.y + rect.h;
+    const rx: number = rect.x + rect.w / 2;                 // 弹幕水平中心（vp）
     let bx: number = rx - bubbleW / 2;
     const maxX: number = Math.max(130, this.dmEngine.width - bubbleW - 4);
     bx = Math.max(4, Math.min(bx, maxX));
     const bottomLimit: number = Math.max(bubbleH + 4, this.dmEngine.height - bubbleH - 4);
-    // 优先放弹幕上方：气泡底 = 文字顶 - gap；顶部放不下（<24vp）再放下方。
+    // 优先放弹幕上方：气泡底 = 文字可见顶 - gap；顶部放不下（<22vp）再翻下方。
     let by: number = textTop - gap - bubbleH;
-    if (by < 24) {
+    if (by < 22) {
       by = textBottom + gap;
     }
     by = Math.max(4, Math.min(by, bottomLimit));
