@@ -12,7 +12,6 @@ export class HttpString {
   static readonly passBaseUrl: string = 'https://passport.bilibili.com';
   static readonly messageBaseUrl: string = 'https://message.bilibili.com';
   static readonly spaceBaseUrl: string = 'https://space.bilibili.com';
-  static readonly accountBaseUrl: string = 'https://account.bilibili.com';
   static readonly searchBaseUrl: string = 'https://s.search.bilibili.com';
   static readonly commentBaseUrl: string = 'https://comment.bilibili.com';
 }
@@ -101,7 +100,6 @@ export class Api {
   static readonly ugcUrl: string = HttpString.apiBaseUrl + '/x/player/playurl';
   static readonly ugcWbiUrl: string = HttpString.apiBaseUrl + '/x/player/wbi/playurl';
   static readonly relatedList: string = HttpString.apiBaseUrl + '/x/web-interface/archive/related';
-  static readonly ab2c: string = HttpString.apiBaseUrl + '/x/player/pagelist';
   static readonly onlineTotal: string = HttpString.apiBaseUrl + '/x/player/online/total';
   static readonly playerInfo: string = HttpString.apiBaseUrl + '/x/player/wbi/v2';
   static readonly heartBeat: string = HttpString.apiBaseUrl + '/x/click-interface/web/heartbeat';
@@ -176,7 +174,6 @@ export class Api {
   static readonly favFolderAdd: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/add';
   static readonly favFolderEdit: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/edit';
   static readonly favFolderDel: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/del';
-  static readonly favResourceDel: string = HttpString.apiBaseUrl + '/x/v3/fav/resource/del';
   static readonly favResourceMove: string = HttpString.apiBaseUrl + '/x/v3/fav/resource/move';
   // 收藏夹/收藏夹内视频自定义排序（对齐 PiliPlus lib/http/api.dart sortFavFolder / sortFav）
   static readonly favoriteFolderSort: string = HttpString.apiBaseUrl + '/x/v3/fav/folder/sort';
@@ -204,8 +201,6 @@ export class Api {
   // 关注分组（对齐 PiliPlus lib/http/api.dart followUpTag/createFollowTag/addUsers）
   static readonly followTags: string = HttpString.apiBaseUrl + '/x/relation/tags';
   static readonly followTagCreate: string = HttpString.apiBaseUrl + '/x/relation/tag/create';
-  static readonly followTagUpdate: string = HttpString.apiBaseUrl + '/x/relation/tag/update';
-  static readonly followTagDel: string = HttpString.apiBaseUrl + '/x/relation/tag/del';
   static readonly followTagsAddUsers: string = HttpString.apiBaseUrl + '/x/relation/tags/addUsers';
   static readonly userFollowings: string = HttpString.apiBaseUrl + '/x/relation/followings';
   static readonly userFollowers: string = HttpString.apiBaseUrl + '/x/relation/followers';

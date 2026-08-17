@@ -102,6 +102,11 @@ export struct LivePlayerView {
     if (old !== null) {
       try { await old.release(); } catch (e) {}
     }
+    // 等待上一个在途创建退场（其 finally 无条件复位 playerCreating），
+    // 否则 initPlayer 被 playerCreating 守卫直接 return，换源后无人补建，黑屏。
+    while (this.playerCreating && !this.destroyed && generation === this.playerGeneration) {
+      await new Promise<void>((resolve: () => void) => setTimeout(resolve, 50));
+    }
     if (!this.destroyed && generation === this.playerGeneration && this.surfaceId.length > 0) await this.initPlayer();
   }
 
@@ -165,7 +170,9 @@ export struct LivePlayerView {
         this.buffering = false;
       }
     } finally {
-      if (generation === this.playerGeneration) this.playerCreating = false;
+      // 无条件复位：若换源（generation++）发生在创建期间，旧代不再复位会导致
+      // playerCreating 永久 true，后续 initPlayer 全部被入口守卫挡掉，直播黑屏。
+      this.playerCreating = false;
     }
   }
 
