@@ -15,6 +15,7 @@ import { DanmakuListPanel } from './DanmakuListPanel';
 import { DmFilterPanel } from './DmFilterPanel';
 import { playerPanelTitle, playerPanelSub, playerPanelRowBg } from './PlayerSheetTheme';
 import { PlayerSideSettingsDrawer } from './PlayerSideSettingsDrawer';
+import { PlayerMoreMenuPage } from './PlayerMoreMenuPage';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
@@ -2124,78 +2125,41 @@ if (this.runtimeSources.length === 0) {
         .width('100%')
         .padding({ left: 8, right: 8, top: 4, bottom: 10 })
 
-        PlayerMenuItem({
-          icon: $r('app.media.ic_play'),
-          label: '清晰度',
-          value: this.qualityLoading ? '切换中…' : this.qualityLabel(),
-          onTap: (): void => {
+        PlayerMoreMenuPage({
+          qualityValue: this.qualityLoading ? '切换中…' : this.qualityLabel(),
+          speedValue: this.playbackRate === 1 ? '1.0x' : this.playbackRate.toFixed(this.playbackRate % 1 === 0 ? 0 : 2) + 'x',
+          danmakuCount: this.dmEngine.list.length,
+          chapterCount: this.chapters.length,
+          subtitleCount: this.subtitles.length,
+          subtitleValue: this.subtitleOn ? this.subtitleLabel() : '关闭',
+          autoContinue: this.autoContinuePlay,
+          sponsorOn: this.sponsorSkipEnabled,
+          onQuality: (): void => {
             this.openSheetPage('quality');
           },
-        })
-        PlayerMenuItem({
-          icon: $r('app.media.ic_video_replay'),
-          label: '倍速',
-          value: this.playbackRate === 1 ? '1.0x' : this.playbackRate.toFixed(this.playbackRate % 1 === 0 ? 0 : 2) + 'x',
-          onTap: (): void => {
+          onSpeed: (): void => {
             this.openSheetPage('speed');
           },
-        })
-        PlayerMenuItem({
-          icon: $r('app.media.ic_danmaku_settings'),
-          label: '弹幕设置',
-          value: '',
-          onTap: (): void => {
+          onDmSettings: (): void => {
             this.openSheetPage('dm');
           },
-        })
-        PlayerMenuItem({
-          icon: $r('app.media.ic_danmaku_on'),
-          label: '弹幕列表',
-          value: this.dmEngine.list.length > 0 ? String(this.dmEngine.list.length) + ' 条' : '',
-          onTap: (): void => {
+          onDmList: (): void => {
             this.openDanmakuList();
           },
-        })
-        PlayerMenuItem({
-          icon: $r('app.media.ic_filter'),
-          label: '屏蔽管理',
-          value: '',
-          onTap: (): void => {
+          onDmFilter: (): void => {
             this.openDanmakuFilter();
           },
-        })
-        if (this.chapters.length > 0) {
-          PlayerMenuItem({
-            icon: $r('app.media.ic_sort'),
-            label: '分段视频',
-            value: String(this.chapters.length) + ' 段',
-            onTap: (): void => {
-              this.openSheetPage('chapters');
-            },
-          })
-        }
-        if (this.subtitles.length > 0) {
-          PlayerMenuItem({
-            icon: $r('app.media.ic_comment'),
-            label: 'CC字幕',
-            value: this.subtitleOn ? this.subtitleLabel() : '关闭',
-            onTap: (): void => {
-              this.openSheetPage('subtitle');
-            },
-          })
-        }
-        PlayerToggleItem({
-          icon: $r('app.media.ic_video_replay'),
-          label: '自动连播',
-          isOn: this.autoContinuePlay,
-          onChange: (next: boolean): void => {
+          onChapter: (): void => {
+            this.openSheetPage('chapters');
+          },
+          onSubtitle: (): void => {
+            this.openSheetPage('subtitle');
+          },
+          onAutoContinue: (next: boolean): void => {
             this.autoContinuePlay = next;
             AppTheme.persistAutoContinue(next);
           },
-        })
-        PlayerSponsorItem({
-          sponsorOn: this.sponsorSkipEnabled,
-          onToggle: (current: boolean): void => {
+          onSponsor: (current: boolean): void => {
             this.sponsorSkipEnabled = !current;
             AppTheme.persistSponsorSkip(this.sponsorSkipEnabled);
             this.toast(this.sponsorSkipEnabled ? '广告空降已开启' : '广告空降已关闭');
