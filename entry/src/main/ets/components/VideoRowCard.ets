@@ -13,14 +13,14 @@ export struct VideoRowCard {
   @Prop title: string = '';
   @Prop upName: string = '';
   /** 封面右下角徽标文案，空串不显示 */
-  overlayText: string = '';
+  @Prop overlayText: string = '';
   /** 第三行灰字（观看时间 / 播放量），空串不显示 */
-  extraText: string = '';
-  compact: boolean = false;
+  @Prop extraText: string = '';
+  @Prop compact: boolean = false;
   /** 非 compact 时标题与 UP 主行间距（历史 6 / 收藏 7） */
-  contentSpace: number = 6;
-  /** 深色模式下标题色，各列表略有差异 */
-  titleDarkColor: string = '#E6E6E6';
+  @Prop contentSpace: number = 6;
+  /** 深色模式下标题文字，各系列略有差异 */
+  @Prop titleDarkColor: string = '#E6E6E6';
   onTap: () => void = () => {
   };
   @StorageProp('isDarkMode') isDark: boolean = false;
