@@ -12,7 +12,6 @@ export struct PlayerMoreMenuPage {
   @Prop subtitleOn: boolean = false;
   @Prop subtitleValue: string = '关闭';
   @StorageProp('isDarkMode') isDark: boolean = false;
-  @StorageProp('accentColor') accent: string = '#FB7299';
   onQuality: () => void = () => {};
   onSpeed: () => void = () => {};
   onDmSettings: () => void = () => {};
