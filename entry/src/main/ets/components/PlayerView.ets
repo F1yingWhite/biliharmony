@@ -14,6 +14,7 @@ import { PlayerPlaybackConfig } from './PlayerPlaybackConfig';
 import { DanmakuListPanel } from './DanmakuListPanel';
 import { DmFilterPanel } from './DmFilterPanel';
 import { playerPanelTitle, playerPanelSub, playerPanelRowBg } from './PlayerSheetTheme';
+import { PlayerSideSettingsDrawer } from './PlayerSideSettingsDrawer';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
@@ -1855,7 +1856,15 @@ if (this.runtimeSources.length === 0) {
 
       // 横屏设置抽屉：从右侧滑入，点左侧空白收起；竖屏设置走 bindSheet（见下方 showMoreMenu）。
       if (this.fullscreen && this.showSideDrawer && this.errorText.length === 0) {
-        this.SideSettingsDrawer()
+        PlayerSideSettingsDrawer({
+          onClose: (): void => {
+            this.showSideDrawer = false;
+            this.moreSheetPage = 'menu';
+          },
+          content: (): void => {
+            this.MoreMenuSheetContent()
+          },
+        })
       }
     }
     .width('100%')
@@ -1953,35 +1962,7 @@ if (this.runtimeSources.length === 0) {
     }
   }
 
-  /** 横屏右侧设置抽屉：复用「更多功能」Sheet 的菜单与子页内容，点左侧空白收起。 */
-  @Builder
-  SideSettingsDrawer() {
-    Row() {
-      Blank()
-        .layoutWeight(1)
-        .height('100%')
-        .onClick(() => {
-          this.showSideDrawer = false;
-          this.moreSheetPage = 'menu';
-        })
-      Column() {
-        this.MoreMenuSheetContent()
-      }
-      .width(320)
-      .height('100%')
-      .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
-      .shadow({ radius: 24, color: '#40000000', offsetX: -6, offsetY: 0 })
-    }
-    .width('100%')
-    .height('100%')
-    .transition(TransitionEffect.asymmetric(
-      TransitionEffect.opacity(0).combine(TransitionEffect.translate({ x: 320 }))
-        .animation({ duration: 220, curve: Curve.EaseOut }),
-      TransitionEffect.opacity(0).combine(TransitionEffect.translate({ x: 320 }))
-        .animation({ duration: 160, curve: Curve.EaseIn })))
-  }
 
-  /** 竖屏 ⋮ 更多菜单：清晰度/倍速/弹幕设置/分段/空降收纳项。 */
   private sheetTitleColor(): string {
     return playerPanelTitle(this.isDark);
   }
