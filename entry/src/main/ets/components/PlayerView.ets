@@ -8,6 +8,7 @@ import { PlayerSubtitleController } from './PlayerSubtitleController';
 import { PlayerSeekController } from './PlayerSeekController';
 import { PlayerSpeedController } from './PlayerSpeedController';
 import { PlayerMenuItem, PlayerToggleItem } from './PlayerMenuItems';
+import { PlayerGestureController } from './PlayerGestureController';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
@@ -159,15 +160,7 @@ export struct PlayerView {
   // seek 采用“并发请求获胜”的串行状态机，由 PlayerSeekController 管理音视频双轨 seek 合并。
   private seekCtl: PlayerSeekController | null = null;
   private speedCtl: PlayerSpeedController | null = null;
-  private panStartTime: number = 0;
-  private panGestureActive: boolean = false;
-  private panMode: string = '';
-  private panStartX: number = 0;
-  private panStartBrightness: number = 0.5;
-  private panStartVolume: number = 100;
-  private gestureBrightness: number = 0.5;
-  private gestureVolume: number = 100;
-  private lastGestureApplyMs: number = 0;
+  private gestureCtl: PlayerGestureController | null = null;
   private onlineRequest: number = 0;
   private surfaceId: string = '';
   // 组件销毁后置位：所有跨 await 的换源/重建流程在 initPlayer 前据此放弃，避免泄漏无人释放的 AVPlayer。
@@ -236,7 +229,36 @@ export struct PlayerView {
         },
       );
     }
-    if (this.runtimeSources.length === 0) {
+    
+    if (this.gestureCtl === null) {
+      this.gestureCtl = new PlayerGestureController(
+        (value: number): void => {
+          this.gestureSeekPreview = value;
+        },
+        (value: number): void => {
+          if (this.gestureSeekPreview >= 0 && value === -1) {
+            this.seekTo(this.gestureSeekPreview, true);
+            this.gestureSeekPreview = -1;
+          }
+        },
+        (kind: string, percent: number): void => {
+          this.gestureAdjustKind = kind === 'brightness' ? '亮度' : (kind === 'volume' ? '音量' : '');
+          this.gestureAdjustPercent = percent;
+        },
+        (value: number): void => {
+          this.applyGestureVolume(value);
+        },
+        (value: number): void => {
+          this.applyGestureVolume(value);
+        },
+        (value: number): void => {
+        },
+        (value: number): void => {
+          Immersive.setWindowBrightness(value);
+        },
+      );
+    }
+if (this.runtimeSources.length === 0) {
       this.runtimeSources = this.videoUrls.length > 0 ? this.videoUrls : (this.videoUrl.length > 0 ? [this.videoUrl] : []);
       this.runtimeAudioSources = this.audioUrls;
       this.runtimeQualityOptions = this.qualityOptions;
@@ -615,7 +637,7 @@ export struct PlayerView {
       this.volumeRestoreTimer = -1;
       if (this.destroyed) return;
       try {
-        const restoreVolume: number = this.gestureVolume / 100;
+        const restoreVolume: number = (this.gestureCtl?.gestureVolume ?? 100) / 100;
         if (this.player === video && video !== null && this.prepared) video.setVolume(restoreVolume);
         if (this.audioPlayer === audio && audio !== null && this.audioPrepared) audio.setVolume(restoreVolume);
       } catch (e) {
@@ -787,7 +809,7 @@ export struct PlayerView {
           this.applyVideoScaleType();
           try {
             p.setPlaybackRate(this.playbackRate);
-            p.setVolume(this.gestureVolume / 100);
+            p.setVolume((this.gestureCtl?.gestureVolume ?? 100) / 100);
           } catch (e) {
             // 某些视频解码器不支持非常用倍速，保持 1x 即可。
           }
@@ -953,7 +975,7 @@ export struct PlayerView {
         this.audioPrepared = true;
         try {
           audio.setPlaybackRate(this.playbackRate);
-          audio.setVolume(this.gestureVolume / 100);
+          audio.setVolume((this.gestureCtl?.gestureVolume ?? 100) / 100);
         } catch (e) {
           // 倍速不被音频解码器支持时，设置入口会统一回退到 1x。
         }
@@ -1088,25 +1110,13 @@ export struct PlayerView {
     this.speedCtl?.endHold();
   }
 
-  private beginHorizontalSeek(): void {
-    if (this.duration <= 0) return;
-    this.panStartTime = this.playheadSec;
-    this.panGestureActive = false;
-    this.gestureSeekPreview = -1;
-  }
-
   private loadGestureLevels(): void {
-    const brightness: number = Immersive.windowBrightness();
-    if (brightness >= 0) this.gestureBrightness = brightness;
-    // AVPlayer 没有启用 APP_INDIVIDUAL 模式，应用音量百分比既不控制实际声音，
-    // 还可能读回旧版本遗留的 0。播放器本地增益以字段默认值 100% 起步即可。
+    this.gestureCtl?.loadInitials();
   }
 
   private applyGestureVolume(value: number): void {
     const normalized: number = Math.max(0, Math.min(1, value / 100));
     try {
-      // AVPlayer 默认不属于 APP_INDIVIDUAL 音量模式，setAppVolumePercentage
-      // 在部分设备上只会返回成功但不改变声音；直接设置当前视频/音频轨才可靠。
       if (this.player !== null && this.prepared) this.player.setVolume(normalized);
       if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.setVolume(normalized);
     } catch (e) {
@@ -1124,79 +1134,32 @@ export struct PlayerView {
   }
 
   private beginPlayerPan(event: GestureEvent): void {
-    this.beginHorizontalSeek();
-    this.panMode = '';
-    this.gestureAdjustKind = '';
-    this.gestureAdjustPercent = -1;
-    this.panStartX = event.fingerList.length > 0 ? event.fingerList[0].localX : this.dmEngine.width / 2;
-    const brightness: number = Immersive.windowBrightness();
-    if (brightness >= 0) this.gestureBrightness = brightness;
-    this.panStartBrightness = this.gestureBrightness;
-    this.panStartVolume = this.gestureVolume;
+    const x: number = event.fingerList.length > 0 ? event.fingerList[0].localX : this.dmEngine.width / 2;
+    this.gestureCtl?.beginPan(x, this.dmEngine.width, this.playheadSec, this.duration);
   }
 
   private updatePlayerPan(event: GestureEvent): void {
-    const absX: number = Math.abs(event.offsetX);
-    const absY: number = Math.abs(event.offsetY);
-    if (this.panMode.length === 0) {
-      if (Math.max(absX, absY) < 12) return;
-      if (absX > absY * 1.15) this.panMode = 'seek';
-      else if (absY > absX * 1.15) this.panMode = this.panStartX < this.dmEngine.width / 2 ? 'brightness' : 'volume';
-      else return;
+    this.gestureCtl?.updatePan(event.offsetX, event.offsetY, this.dmEngine.width, this.duration);
+    if (this.gestureCtl?.panMode === 'seek') {
+      this.showControls = true;
+      if (this.hideTimer >= 0) {
+        clearTimeout(this.hideTimer);
+        this.hideTimer = -1;
+      }
     }
-    if (this.panMode === 'seek') {
-      this.updateHorizontalSeek(event.offsetX);
-      return;
-    }
-    const travel: number = Math.max(180, this.dmEngine.height * 0.72);
-    const now: number = Date.now();
-    if (this.panMode === 'brightness') {
-      const value: number = Math.max(0.02, Math.min(1, this.panStartBrightness - event.offsetY / travel));
-      this.gestureBrightness = value;
-      this.gestureAdjustKind = '亮度';
-      this.gestureAdjustPercent = Math.round(value * 100);
-      if (now - this.lastGestureApplyMs >= 16) Immersive.setWindowBrightness(value);
-    } else {
-      const value: number = Math.max(0, Math.min(100, this.panStartVolume - event.offsetY * 100 / travel));
-      this.gestureVolume = value;
-      this.gestureAdjustKind = '音量';
-      this.gestureAdjustPercent = Math.round(value);
-      this.applyGestureVolume(value);
-    }
-    if (now - this.lastGestureApplyMs >= 16) this.lastGestureApplyMs = now;
   }
 
   private endPlayerPan(): void {
-    if (this.panMode === 'seek') this.endHorizontalSeek();
-    else {
-      this.panGestureActive = false;
+    const ctl: PlayerGestureController | null = this.gestureCtl;
+    if (ctl === null) return;
+    const preview: number = this.gestureSeekPreview;
+    ctl.endPan();
+    if (preview >= 0) {
+      this.seekTo(preview, true);
       this.gestureSeekPreview = -1;
     }
-    this.panMode = '';
     this.gestureAdjustKind = '';
     this.gestureAdjustPercent = -1;
-  }
-
-  private updateHorizontalSeek(offsetX: number): void {
-    if (this.duration <= 0 || Math.abs(offsetX) < 12) return;
-    this.panGestureActive = true;
-    // 横滑期间主动展示底部进度条，并用预览值驱动滑块；松手后才真正 seek。
-    this.showControls = true;
-    if (this.hideTimer >= 0) {
-      clearTimeout(this.hideTimer);
-      this.hideTimer = -1;
-    }
-    // 长视频提高单次拖动跨度，短视频保持精细；最终只在松手时 seek 一次。
-    const secondsPerVp: number = Math.max(0.10, Math.min(0.60, this.duration / 1800));
-    this.gestureSeekPreview = Math.max(0, Math.min(this.duration, this.panStartTime + offsetX * secondsPerVp));
-  }
-
-  private endHorizontalSeek(): void {
-    if (this.panGestureActive && this.gestureSeekPreview >= 0) {
-      this.seekTo(this.gestureSeekPreview, true);
-    }
-    this.panGestureActive = false;
-    this.gestureSeekPreview = -1;
     if (this.playing) this.scheduleControlsHide();
   }
 
@@ -1205,6 +1168,7 @@ export struct PlayerView {
     if (this.gestureSeekPreview >= 0) return this.gestureSeekPreview;
     return this.duration > 0 ? this.curTime : 0;
   }
+
 
   private handleDoubleTap(): void {
     if (!this.prepared || this.player === null) return;
@@ -1755,7 +1719,7 @@ export struct PlayerView {
         gestureSeekPreview: this.gestureSeekPreview,
         gestureAdjustKind: this.gestureAdjustKind,
         gestureAdjustPercent: this.gestureAdjustPercent,
-        panStartTime: this.panStartTime,
+        panStartTime: this.gestureCtl?.panStartTime ?? 0,
         duration: this.duration,
         doubleTapVisible: this.doubleTapFeedbackVisible,
         doubleTapPlaying: this.doubleTapFeedbackPlaying,
