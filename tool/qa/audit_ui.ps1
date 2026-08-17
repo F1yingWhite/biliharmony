@@ -54,40 +54,43 @@ function Audit-Dump {
     }
   }
 
-  # --- 列对齐: 使用文本节点 x1/x2 聚类成列 ---
-  $cols = @{}
+  # --- 列对齐: 文本按 (行带 + 中心x) 二维聚类，检查同组边缘一致性 ---
+  $groups = @{}
   foreach ($n in $textNodes) {
     $b = Parse-Bounds (Get-NodeBounds $n)
     if (-not $b) { continue }
     if ($b.y1 -lt 380 -or $b.y1 -gt 2600) { continue }
     $txt = (Get-NodeText $n)
-    if ($txt.Length -lt 4) { continue }  # 跳过排行数字/时间等短文本
-    # 用宽度中心聚类，避免左右对齐文字干扰
-    $colKey = [int]((($b.x1 + $b.x2) / 2) / 40) * 40
-    if (-not $cols.ContainsKey($colKey)) { $cols[$colKey] = New-Object System.Collections.ArrayList }
-    [void]$cols[$colKey].Add($b)
+    if ($txt.Length -lt 4) { continue }
+    $rowKey = [int]($b.y1 / 90) * 90
+    $colKey = [int]((($b.x1 + $b.x2) / 2) / 60) * 60
+    $key = "$rowKey|$colKey"
+    if (-not $groups.ContainsKey($key)) { $groups[$key] = New-Object System.Collections.ArrayList }
+    [void]$groups[$key].Add($b)
   }
   $alignIssues = New-Object System.Collections.ArrayList
-  foreach ($k in ($cols.Keys | Sort-Object)) {
-    $bs = @($cols[$k])
+  foreach ($k in $groups.Keys) {
+    $bs = @($groups[$k])
     if ($bs.Count -lt 3) { continue }
     $x1s = @($bs | ForEach-Object { $_.x1 } | Sort-Object)
     $x2s = @($bs | ForEach-Object { $_.x2 } | Sort-Object)
+    $y1s = @($bs | ForEach-Object { $_.y1 } | Sort-Object)
     $spreadL = $x1s[$x1s.Count - 1] - $x1s[0]
     $spreadR = $x2s[$x2s.Count - 1] - $x2s[0]
-    # 左对齐列要求 x1 稳定；右对齐列要求 x2 稳定；只有两者都散才报警
-    if ($spreadL -gt 14 -and $spreadR -gt 14) {
-      # 找该列中的最长文本作样本
+    $spreadY = $y1s[$y1s.Count - 1] - $y1s[0]
+    # 同一行同一列内出现 ≥6px 左缘不一致 且 ≥8px 垂直错落 → 真实对不齐
+    if ($spreadL -gt 6 -and $spreadY -gt 8) {
+      # 该组样本文本
       $sample = ''
       foreach ($tn in $textNodes) {
         $tb = Parse-Bounds (Get-NodeBounds $tn)
-        if ($tb -and ((($tb.x1 + $tb.x2) / 2 / 40) * 40) -eq $k) {
+        if ($tb -and ($rowKey -eq ([int]($tb.y1 / 40) * 40)) -and ($colKey -eq ([int]((($tb.x1 + $tb.x2) / 2) / 60) * 60))) {
           $tx = (Get-NodeText $tn)
           if ($tx.Length -gt $sample.Length) { $sample = $tx }
         }
       }
-      if ($sample.Length -gt 20) { $sample = $sample.Substring(0, 20) }
-      [void]$alignIssues.Add("列中心~$k : $($bs.Count) 个文本 左缘散 ${spreadL}px 右缘散 ${spreadR}px (样本 '$sample')")
+      if ($sample.Length -gt 24) { $sample = $sample.Substring(0, 24) }
+      [void]$alignIssues.Add("行y=$rowKey 列x~$colKey : $($bs.Count) 项左缘散 ${spreadL}px 垂直散 ${spreadY}px ('$sample' 等)")
     }
   }
 
