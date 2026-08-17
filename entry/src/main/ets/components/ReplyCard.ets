@@ -1,6 +1,7 @@
 import { AppTheme } from '../common/AppTheme';
 import { ReplyActionBar } from './ReplyActionBar';
 import { ReplyRichText } from './ReplyRichText';
+import { ReplyPreview } from './ReplyPreview';
 import { AppNavStack, ImageViewerParam, NAV_IMAGE_VIEWER, NAV_USER_SPACE, NAV_VIDEO_DETAIL,
   UserSpaceParam, VideoDetailParam } from '../common/AppRouter';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
@@ -207,48 +208,6 @@ export struct ReplyCard {
   private decorationReserve(): number {
     if (this.item.cardBackground.length === 0) return 0;
     return this.threadDepth > 0 ? 40 : 48;
-  }
-
-  @Builder
-  ReplyPreview() {
-    Column({ space: 5 }) {
-      ForEach(this.item.replies.slice(0, 2), (reply: ReplyItem) => {
-        // 单 Text + Span 让"名字：内容"真正连排，冒号后不再被整行宽度的 Flex 挤到下一行。
-        Text() {
-          Span(this.upMid > 0 && reply.mid === this.upMid ? 'UP主 ' : '')
-            .fontColor(this.accent)
-          Span(reply.uname + '：')
-            .fontColor('#008AC5')
-          ForEach(parseReplyContent(reply), (part: ReplyRenderPart) => {
-            if (part.image.length > 0) {
-              ImageSpan(part.image)
-                .width(18)
-                .height(18)
-                .objectFit(ImageFit.Contain)
-                .verticalAlign(ImageSpanAlignment.CENTER)
-            } else {
-              Span(part.text)
-                .fontColor(part.mentionMid > 0 || part.seekSeconds >= 0 || part.bvid.length > 0 || part.aid > 0 ?
-                  '#008AC5' : (this.isDark ? '#F0F0F0' : '#18191C'))
-            }
-          }, (part: ReplyRenderPart) => part.key)
-        }
-        .fontSize(12)
-        .lineHeight(18)
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .width('100%')
-      }, (reply: ReplyItem) => String(reply.rpid))
-      Text('共 ' + this.item.count + ' 条回复  ›')
-        .fontSize(12)
-        .fontColor('#008AC5')
-        .padding({ top: 2, bottom: 2 })
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
-    .padding({ left: 10, right: 10, top: 8, bottom: 8 })
-    .borderRadius(4)
-    .backgroundColor(this.isDark ? '#26272B' : '#F5F7F9')
   }
 
   @Builder
@@ -542,7 +501,13 @@ export struct ReplyCard {
         }
         this.ActionBar()
         if (this.showPreview && this.item.count > 0) {
-          this.ReplyPreview()
+          ReplyPreview({
+          reply: this.item,
+          upMid: this.upMid,
+          onOpenThread: (): void => {
+            this.onOpenThread(this.item);
+          },
+        })
         }
       }
       .alignItems(HorizontalAlign.Start)
