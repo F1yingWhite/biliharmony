@@ -29,8 +29,10 @@
 /PiliPlus/android/local.properties
 
 # 本地测试临时目录
-/tool/
+/tool/*
 !/tool/qa/
+/tool/qa/*.sh.orig
+/tool/qa/.tmp/
 /dist/
 screenshot
 .emulator
