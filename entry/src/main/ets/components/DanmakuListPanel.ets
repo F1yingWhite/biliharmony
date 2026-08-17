@@ -3,7 +3,7 @@
  * 从 PlayerView.DanmakuListPanel 拆出。
  */
 import { BasicDataSource } from '../common/BasicDataSource';
-import { playerPanelTitle, playerPanelRowBg } from './PlayerSheetTheme';
+import { playerPanelTitle, playerPanelSub, playerPanelRowBg } from './PlayerSheetTheme';
 import { formatDuration } from '../common/Utils';
 import { DanmakuItem } from '../api/BiliApi';
 
@@ -26,7 +26,7 @@ export struct DanmakuListPanel {
   }
 
   private subColor(): string {
-    return this.isDark ? '#B3FFFFFF' : '#9499A0';
+    return playerPanelSub(this.isDark);
   }
 
   private rowBg(): string {
