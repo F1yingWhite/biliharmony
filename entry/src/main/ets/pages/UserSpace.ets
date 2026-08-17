@@ -34,6 +34,10 @@ export struct UserSpacePage {
   param: UserSpaceParam = { mid: 0 };
   @State info: UserSpaceInfo = new UserSpaceInfo();
   @State stat: UserStat = new UserStat();
+  /** 统计单独放 @State 数字：整体替换对象在部分机型不触发 UI 刷新。 */
+  @State statFollower: number = -1;
+  @State statFollowing: number = -1;
+  @State statLikeNum: number = -1;
   @State loading: boolean = true;
   @State errorText: string = '';
   // ===== 投稿 Tab =====
@@ -100,10 +104,14 @@ export struct UserSpacePage {
         return;
       }
       this.info = info;
-      UserApi.getUserStat(this.param.mid).then((stat: UserStat) => {
-        if (!this.destroyed && generation === this.lifecycleGeneration) this.stat = stat;
-      }).catch(() => {
-      });
+      // 统计放主流程 await：异步 .then 在部分 nav 模式（返回后又 push）下不触发，
+      // info 能显示而 stat 恒 0 就是这个原因——两者对齐到同一 async 链。
+      const stat: UserStat = await UserApi.getUserStat(this.param.mid);
+      if (this.destroyed || generation !== this.lifecycleGeneration) return;
+      this.stat = stat;
+      this.statFollower = stat.follower;
+      this.statFollowing = stat.following;
+      this.statLikeNum = stat.likeNum;
       if (UserStore.isLogin) this.loadFollowState().catch(() => {
       });
       this.loadArcs(true).catch(() => {
@@ -478,9 +486,9 @@ export struct UserSpacePage {
       .position({ x: 14, y: -48 })
       .onClick(() => this.openLiveRoom())
       Row() {
-        this.StatCell(this.stat.follower, '粉丝', 'follower')
-        this.StatCell(this.stat.following, '关注', 'following')
-        this.StatCell(this.stat.likeNum, '获赞', '')
+        this.StatCell(this.statFollower >= 0 ? this.statFollower : this.stat.follower, '粉丝', 'follower')
+        this.StatCell(this.statFollowing >= 0 ? this.statFollowing : this.stat.following, '关注', 'following')
+        this.StatCell(this.statLikeNum >= 0 ? this.statLikeNum : this.stat.likeNum, '获赞', '')
       }
       .position({ x: this.viewportWidth < 360 ? 120 : 132, y: 12 })
       Column({ space: 8 }) {

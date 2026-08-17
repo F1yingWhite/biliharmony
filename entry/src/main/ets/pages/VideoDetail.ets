@@ -69,6 +69,13 @@ export struct VideoDetailPage {
   @State related: Array<VideoItem> = [];
   @State relatedLoading: boolean = false;
   @State relatedLoadError: string = '';
+  // 播完结束画面的推荐卡（推荐列表第一条 / 合集下一集）
+  @State endRecTitle: string = '';
+  @State endRecCover: string = '';
+  @State endRecUpName: string = '';
+  @State endRecPlayText: string = '';
+  @State endRecDuration: number = 0;
+  @State endRecToken: number = 0;
   @State upFollowerCount: number = -1;
   @State upVideoCount: number = -1;
   @State replyCursor: string = '';
@@ -1111,25 +1118,48 @@ export struct VideoDetailPage {
   }
 
   private onPlayerEnded(): void {
-    // 尊重"自动连播"设置：关闭时停在剧终画面不跳转。
-    let autoNext: boolean = true;
-    try {
-      autoNext = AppStorage.get<boolean>('autoContinuePlay') ?? true;
-    } catch (e) {
-      autoNext = true;
-    }
-    if (!autoNext) return;
+    // 播完：自动填入"推荐列表第一条"作为结束画面的推荐卡。
+    // 优先合集下一集（合集里连续观看），否则用相关推荐第一条。
     const next: UgcSeasonEpisode | null = this.nextUgcEpisode();
     if (next !== null) {
-      this.toast('自动连播：' + next.title);
-      this.openUgcEpisode(next);
+      this.endRecTitle = next.title;
+      this.endRecCover = next.cover;
+      this.endRecUpName = this.detail.upName;
+      this.endRecPlayText = '';
+      this.endRecDuration = 0;
+      this.endRecToken++;
       return;
     }
-    // 无合集下一集时自动连播「相关推荐」第一条（与 B 站网页端相同的播完行为）。
     if (this.related.length > 0) {
       const related: VideoItem = this.related[0];
       if (related.aid > 0 || related.bvid.length > 0) {
-        this.toast('自动连播：' + related.title);
+        this.endRecTitle = related.title;
+        this.endRecCover = related.cover;
+        this.endRecUpName = related.upName;
+        this.endRecPlayText = related.playText;
+        this.endRecDuration = related.duration;
+        this.endRecToken++;
+        return;
+      }
+    }
+    this.endRecTitle = '';
+    this.endRecCover = '';
+    this.endRecUpName = '';
+    this.endRecPlayText = '';
+    this.endRecDuration = 0;
+    this.endRecToken++;
+  }
+
+  /** 结束画面「立即播放」：与旧"自动连播"同一跳转逻辑。 */
+  private onPlayerEndPlayNow(): void {
+    const next: UgcSeasonEpisode | null = this.nextUgcEpisode();
+    if (next !== null) {
+      this.openUgcEpisode(next);
+      return;
+    }
+    if (this.related.length > 0) {
+      const related: VideoItem = this.related[0];
+      if (related.aid > 0 || related.bvid.length > 0) {
         const param: VideoDetailParam = { bvid: related.bvid, aid: related.aid, title: related.title };
         AppNavStack.replacePathByName(NAV_VIDEO_DETAIL, param);
       }
@@ -2574,6 +2604,15 @@ export struct VideoDetailPage {
               onEnded: () => {
                 this.onPlayerEnded();
               },
+              onEndPlayNow: () => {
+                this.onPlayerEndPlayNow();
+              },
+              endRecTitle: this.endRecTitle,
+              endRecCover: this.endRecCover,
+              endRecUpName: this.endRecUpName,
+              endRecPlayText: this.endRecPlayText,
+              endRecDuration: this.endRecDuration,
+              endRecToken: this.endRecToken,
               onLike: () => {
                 this.actionLike();
               },

@@ -522,9 +522,7 @@ export struct ReplyCard {
     .width('100%')
     .padding({ top: this.threadDepth > 0 ? 0 : 12, bottom: this.threadDepth > 0 ? 0 : 12 })
     .border({ width: { bottom: this.threadDepth > 0 ? 0 : 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
-    .onClick((event: ClickEvent) => {
-      if (this.showPreview && this.item.count > 0) this.onOpenThread(this.item);
-      else this.onSelectReply(this.item);
-    })
+    // 刻意不给整卡 onClick：打开楼中楼/回复只由「共 N 条回复 ›」预览条与底部 ActionBar
+    // 上的回复按钮触发，避免点击评论任意区域就误入回复详情（用户反馈触发面积太大）。
   }
 }
