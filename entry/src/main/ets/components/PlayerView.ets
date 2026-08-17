@@ -456,7 +456,7 @@ if (this.runtimeSources.length === 0) {
   /** 弹幕列表：切到「更多功能」Sheet 内嵌子页，不再从播放器上弹层。 */
   private openDanmakuList(): void {
     this.rebuildDmListSource();
-    this.moreSheetPage = 'danmakuList';
+    this.openSheetPage('danmakuList');
   }
 
   private async loadDmFilterRules(): Promise<void> {
@@ -478,7 +478,7 @@ if (this.runtimeSources.length === 0) {
   private openDanmakuFilter(): void {
     this.dmFilterDraft = '';
     this.dmFilterType = 0;
-    this.moreSheetPage = 'dmFilter';
+    this.openSheetPage('dmFilter');
     this.loadDmFilterRules().catch(() => {
     });
   }
@@ -1426,18 +1426,23 @@ if (this.runtimeSources.length === 0) {
     this.showSideDrawer = false;
   }
 
+  /** 切换更多菜单/抽屉内页。 */
+  private openSheetPage(page: string): void {
+    this.moreSheetPage = page;
+  }
+
   /** 设置面板开关：竖屏弹底部 Sheet，横屏弹右侧抽屉；再点一次收起。 */
   private toggleMoreMenu(): void {
     if (this.fullscreen) {
       const next: boolean = !this.showSideDrawer;
       this.closeSettingPanels();
       this.showSideDrawer = next;
-      if (next) this.moreSheetPage = 'menu';
+      if (next) this.openSheetPage('menu');
     } else {
       const next: boolean = !this.showMoreMenu;
       this.closeSettingPanels();
       this.showMoreMenu = next;
-      if (next) this.moreSheetPage = 'menu';
+      if (next) this.openSheetPage('menu');
     }
   }
 
@@ -1859,7 +1864,7 @@ if (this.runtimeSources.length === 0) {
         PlayerSideSettingsDrawer({
           onClose: (): void => {
             this.showSideDrawer = false;
-            this.moreSheetPage = 'menu';
+            this.openSheetPage('menu');
           },
           content: (): void => {
             this.MoreMenuSheetContent()
@@ -2049,7 +2054,7 @@ if (this.runtimeSources.length === 0) {
         .width('100%')
         .padding({ left: 8, right: 8, top: 4, bottom: 10 })
         .onClick(() => {
-          this.moreSheetPage = 'menu';
+          this.openSheetPage('menu');
         })
         Column() {
           if (this.moreSheetPage === 'quality') this.EmbeddedSettingsPanel(1)
@@ -2124,7 +2129,7 @@ if (this.runtimeSources.length === 0) {
           label: '清晰度',
           value: this.qualityLoading ? '切换中…' : this.qualityLabel(),
           onTap: (): void => {
-            this.moreSheetPage = 'quality';
+            this.openSheetPage('quality');
           },
         })
         PlayerMenuItem({
@@ -2132,7 +2137,7 @@ if (this.runtimeSources.length === 0) {
           label: '倍速',
           value: this.playbackRate === 1 ? '1.0x' : this.playbackRate.toFixed(this.playbackRate % 1 === 0 ? 0 : 2) + 'x',
           onTap: (): void => {
-            this.moreSheetPage = 'speed';
+            this.openSheetPage('speed');
           },
         })
         PlayerMenuItem({
@@ -2140,7 +2145,7 @@ if (this.runtimeSources.length === 0) {
           label: '弹幕设置',
           value: '',
           onTap: (): void => {
-            this.moreSheetPage = 'dm';
+            this.openSheetPage('dm');
           },
         })
         PlayerMenuItem({
@@ -2165,7 +2170,7 @@ if (this.runtimeSources.length === 0) {
             label: '分段视频',
             value: String(this.chapters.length) + ' 段',
             onTap: (): void => {
-              this.moreSheetPage = 'chapters';
+              this.openSheetPage('chapters');
             },
           })
         }
@@ -2175,7 +2180,7 @@ if (this.runtimeSources.length === 0) {
             label: 'CC字幕',
             value: this.subtitleOn ? this.subtitleLabel() : '关闭',
             onTap: (): void => {
-              this.moreSheetPage = 'subtitle';
+              this.openSheetPage('subtitle');
             },
           })
         }
