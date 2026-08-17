@@ -79,3 +79,4 @@
 - PlayerView 已从 2615 行降至 2223 行；已拆组件：AVSession/字幕/Seek/倍速/手势/菜单/Sponsor/弹幕列表/弹幕屏蔽/播放策略。
 - Round23 回归：最新 PlayerView 拆解分支 API24 安装成功，冷启动进程存活，无 fatal。
 - Round29：PlayerSideSettingsDrawer + 最新 PlayerView 拆分分支安装回归通过，冷启动无崩溃。
+- Round30：远程 Xorg/x11vnc/websockify 健康检查正常，noVNC 可访问。
