@@ -233,11 +233,17 @@ function Test-08 {
       Tap-CenterOf -Bounds (Get-NodeBounds $nDark) -WaitMs 900
       $shot = Snapshot-Shot 'h08_dark_on'
       $py = 'D:\code\biliharmony\tool\gif-tool\.venv\Scripts\python.exe'
-      $pyOut = & $py "$PSScriptRoot\check_img.py" --shot $shot --mode bg 2>$null
+      $so = Join-Path $env:TEMP 'qa_py_bg.txt'
+      $p = Start-Process -FilePath $py -ArgumentList @("$PSScriptRoot\check_img.py", '--shot', $shot, '--mode', 'bg') -NoNewWindow -Wait -RedirectStandardOutput $so
+      $pyOut = if (Test-Path $so) { Get-Content $so -Raw } else { 'noout' }
+      Remove-Item $so -Force -ErrorAction SilentlyContinue
       $j = $pyOut | ConvertFrom-Json
       if ($j.checks.is_dark) { Pass-Test "深色生效 $($j.checks.mid)" } else { Fail-Test "深色未生效: $pyOut" }
       # Dock 泛白检查
-      $pyOut2 = & $py "$PSScriptRoot\check_img.py" --shot $shot --mode dock 2>$null
+      $so2 = Join-Path $env:TEMP 'pyx_dock.txt'
+      $p2 = Start-Process -FilePath $py -ArgumentList @("$PSScriptRoot\check_img.py", '--shot', $shot, '--mode', 'dock') -NoNewWindow -Wait -RedirectStandardOutput $so2
+      $pyOut2 = if (Test-Path $so2) { Get-Content $so2 -Raw } else { '' }
+      Remove-Item $so2 -Force -ErrorAction SilentlyContinue
       $j2 = $pyOut2 | ConvertFrom-Json
       if ($j2.checks.too_bright) { Fail-Test "Dock 泛白: $($j2.checks.dock_avg)" } else { Pass-Test "Dock 亮度正常 $($j2.checks.dock_avg)" }
       # 恢复浅色
