@@ -3,6 +3,7 @@
  * 从 PlayerView.DmFilterPanel 拆出，供竖屏弹层/设置内嵌页复用。
  */
 import { BasicDataSource } from '../common/BasicDataSource';
+import { playerPanelTitle, playerPanelRowBg } from './PlayerSheetTheme';
 import { DmFilterRule } from '../api/BiliApi';
 
 @Component
@@ -25,7 +26,7 @@ export struct DmFilterPanel {
   };
 
   private titleColor(): string {
-    return this.isDark ? '#FFFFFF' : '#18191C';
+    return playerPanelTitle(this.isDark);
   }
 
   private subColor(): string {
@@ -33,7 +34,7 @@ export struct DmFilterPanel {
   }
 
   private rowBg(): string {
-    return this.isDark ? '#26272B' : '#F5F7F9';
+    return playerPanelRowBg(this.isDark);
   }
 
   private typeLabel(type: number): string {
