@@ -10,6 +10,7 @@ import { PlayerSpeedController } from './PlayerSpeedController';
 import { PlayerMenuItem, PlayerSponsorItem } from './PlayerMenuItems';
 import { PlayerToggleItem } from './PlayerMenuItems';
 import { PlayerGestureController } from './PlayerGestureController';
+import { PlayerPlaybackConfig } from './PlayerPlaybackConfig';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
@@ -920,38 +921,23 @@ if (this.runtimeSources.length === 0) {
   }
 
   private currentSourceUrl(): string {
-    return this.runtimeSources[Math.min(this.sourceIndex, Math.max(0, this.runtimeSources.length - 1))] ?? '';
+    return PlayerPlaybackConfig.sourceUrl(this.runtimeSources, this.sourceIndex);
   }
 
   private currentAudioSourceUrl(): string {
-    return this.runtimeAudioSources[Math.min(this.audioSourceIndex,
-      Math.max(0, this.runtimeAudioSources.length - 1))] ?? '';
+    return PlayerPlaybackConfig.sourceUrl(this.runtimeAudioSources, this.audioSourceIndex);
   }
 
-  /** 快速出首帧、卡顿后留足续播水位，同时限制前向缓存避免高码率视频占用过多内存。 */
   private videoPlaybackStrategy(): media.PlaybackStrategy {
-    return {
-      preferredBufferDuration: 15,
-      preferredBufferDurationForPlaying: 1,
-      thresholdForAutoQuickPlay: 3,
-      showFirstFrameOnPrepare: true,
-    };
+    return PlayerPlaybackConfig.videoStrategy();
   }
 
   private audioPlaybackStrategy(): media.PlaybackStrategy {
-    return {
-      preferredBufferDuration: 20,
-      preferredBufferDurationForPlaying: 0.6,
-      thresholdForAutoQuickPlay: 2.6,
-    };
+    return PlayerPlaybackConfig.audioStrategy();
   }
 
-  /** PiliPlus 同样在底层播放器统一设置 PC UA + bilibili Referer。 */
   private playbackHeaders(): Record<string, string> {
-    return {
-      'User-Agent': Constants.browserUa,
-      'Referer': 'https://www.bilibili.com/',
-    };
+    return PlayerPlaybackConfig.playbackHeaders();
   }
 
   private async initAudioPlayer(generation: number): Promise<void> {
