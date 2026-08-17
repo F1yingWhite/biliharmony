@@ -517,6 +517,7 @@ if (this.runtimeSources.length === 0) {
 
   async onSourceVersionChanged(): Promise<void> {
     this.invalidatePlayerCreation();
+    this.seekCtl?.cancel();
     const oldPlayer: media.AVPlayer | null = this.player;
     const oldAudioPlayer: media.AVPlayer | null = this.audioPlayer;
     this.player = null;
