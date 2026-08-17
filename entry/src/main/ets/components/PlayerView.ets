@@ -314,19 +314,8 @@ export struct PlayerView {
     return this.subtitleCtl.label();
   }
 
-  private loadSubtitleTrack(index: number): void {
-    this.subtitleCtl?.load(index, this.playheadSec);
-  }
-
   private updateSubtitle(timeSec: number): void {
     this.subtitleCtl?.update(timeSec);
-  }
-
-  private matchSubtitleText(timeSec: number): string {
-    const ctl: PlayerSubtitleController | null = this.subtitleCtl;
-    if (ctl === null) return '';
-    ctl.update(timeSec);
-    return ctl.text;
   }
 
   private changeSubtitle(index: number): void {
