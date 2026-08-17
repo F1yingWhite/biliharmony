@@ -2,6 +2,7 @@ import { AppTheme } from '../common/AppTheme';
 import { ReplyActionBar } from './ReplyActionBar';
 import { ReplyRichText } from './ReplyRichText';
 import { ReplyPreview } from './ReplyPreview';
+import { ReplyThreadGuides } from './ReplyThreadGuides';
 import { AppNavStack, ImageViewerParam, NAV_IMAGE_VIEWER, NAV_USER_SPACE, NAV_VIDEO_DETAIL,
   UserSpaceParam, VideoDetailParam } from '../common/AppRouter';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
@@ -163,34 +164,6 @@ export struct ReplyCard {
   }
 
   /** 回复头像容器顶部为 5vp、高 38vp；所有树枝统一对齐头像中心。 */
-  private treeJoinY(): number {
-    return 24;
-  }
-
-  private treeGuideX(index: number): number {
-    return index * 18 + 9;
-  }
-
-  private guideIndexes(): Array<number> {
-    const indexes: Array<number> = [];
-    for (let i: number = 0; i < this.visualDepth(); i++) indexes.push(i);
-    return indexes;
-  }
-
-  private guideContinues(index: number): boolean {
-    if (this.threadGuides.length === 0) return false;
-    if (index === this.visualDepth() - 1) return this.threadGuides[this.threadGuides.length - 1] ?? false;
-    return this.threadGuides[index] ?? false;
-  }
-
-  private treeLineColor(): string {
-    return this.isDark ? '#4A4D54' : '#D3D7DD';
-  }
-
-  private treeNodeFillColor(): string {
-    return this.isDark ? '#26272B' : '#FFFFFF';
-  }
-
   private replyMetaText(): string {
     return formatReplyMeta(this.item);
   }
@@ -336,72 +309,6 @@ export struct ReplyCard {
   }
 
   /** 回复树连接线：视觉采用原生评论区的实心小圆点，圆点热区可折叠子树。 */
-  @Builder
-  ThreadTreeLines() {
-    ForEach(this.guideIndexes(), (index: number) => {
-      if (index < this.visualDepth() - 1 && this.guideContinues(index)) {
-        Column()
-          .width(1.5)
-          .height(this.measuredThreadHeight)
-          .borderRadius(0.75)
-          .backgroundColor(this.treeLineColor())
-          .position({ x: this.treeGuideX(index) - 0.75, y: 0 })
-          .hitTestBehavior(HitTestMode.None)
-      }
-      if (index === this.visualDepth() - 1) {
-        // 拐角终点严格落在当前层头像左缘，底边与头像中心共用 treeJoinY 基线。
-        Row()
-          .width(Math.max(1, this.threadIndent() - this.treeGuideX(index) + 0.75))
-          .height(this.treeJoinY() + 0.75)
-          .border({
-            width: { left: 1.5, bottom: 1.5 },
-            color: this.treeLineColor(),
-            radius: { bottomLeft: 7 },
-          })
-          .position({ x: this.treeGuideX(index) - 0.75, y: 0 })
-          .hitTestBehavior(HitTestMode.None)
-        if (this.guideContinues(index)) {
-          // 向下多画 16vp 探进下一个兄弟节点的拐角区，吃掉行高测量/行间距的误差，
-          // 否则两段线之间会断出一截白缝。
-          Column()
-            .width(1.5)
-            .height(Math.max(0, this.measuredThreadHeight - this.treeJoinY() + 16))
-            .borderRadius(0.75)
-            .backgroundColor(this.treeLineColor())
-            .position({ x: this.treeGuideX(index) - 0.75, y: this.treeJoinY() })
-            .hitTestBehavior(HitTestMode.None)
-        }
-        if (this.threadHasChildren) {
-          // 参考 B 站网页版：白底灰边圆钮 + 减号，折叠态变主题色加号；叶节点拐角不画圆点。
-          Stack({ alignContent: Alignment.Center }) {
-            Circle()
-              .width(12)
-              .height(12)
-              .fill(this.treeNodeFillColor())
-              .stroke(this.threadCollapsed ? this.accent : this.treeLineColor())
-              .strokeWidth(1.2)
-            Row()
-              .width(6)
-              .height(1.4)
-              .backgroundColor(this.threadCollapsed ? this.accent : '#9BA0A8')
-            Column()
-              .width(1.4)
-              .height(6)
-              .backgroundColor(this.accent)
-              .opacity(this.threadCollapsed ? 1 : 0)
-              .scale({ x: 1, y: this.threadCollapsed ? 1 : 0.1 })
-              .animation({ duration: 130, curve: Curve.EaseInOut })
-          }
-          .width(28)
-          .height(28)
-          .position({ x: this.treeGuideX(index) - 14, y: this.treeJoinY() - 14 })
-          .hitTestBehavior(HitTestMode.Block)
-          .priorityGesture(TapGesture().onAction(() => this.onToggleThread(this.item)))
-        }
-      }
-    }, (index: number) => 'tree-guide-' + String(this.item.rpid) + '-' + String(index))
-  }
-
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
       Row({ space: this.threadDepth > 0 ? 8 : 10 }) {
@@ -526,7 +433,16 @@ export struct ReplyCard {
       })
       // 连接线和折叠节点最后绘制，避免被整行评论覆盖而无法点击。
       if (this.threadDepth > 0) {
-        this.ThreadTreeLines()
+        ReplyThreadGuides({
+          threadDepth: this.threadDepth,
+          threadGuides: this.threadGuides,
+          threadHasChildren: this.threadHasChildren,
+          threadCollapsed: this.threadCollapsed,
+          measuredHeight: this.measuredThreadHeight,
+          onToggle: (): void => {
+            this.onToggleThread(this.item);
+          },
+        })
       }
     }
     .width('100%')
