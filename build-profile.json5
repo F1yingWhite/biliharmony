@@ -6,7 +6,7 @@
         "type": "HarmonyOS",
         "material": {
           "certpath": "/home/ohos-builder/.ohos/bili-local-sign/bili-debug.cer",
-          "keyAlias": "biliDebugKey",
+          "keyAlias": "bilidebugkey",
           "keyPassword": "__REDACTED__",
           "profile": "/home/ohos-builder/.ohos/bili-local-sign/bili-debug.p7b",
           "signAlg": "SHA256withECDSA",
