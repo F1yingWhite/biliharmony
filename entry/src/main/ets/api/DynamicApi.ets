@@ -6,7 +6,7 @@ import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asBool, str, randomString } from '../common/Utils';
 import { DynamicItem, DynamicPageData } from '../model/Models';
-import { ActionResult, actionWithCsrf, getData } from './internal/ApiCommon';
+import { ActionResult, actionWithCsrf, getData, webGet, webPost } from './internal/ApiCommon';
 
 export class DynamicApi {
   static async getDynamicDetail(id: string): Promise<DynamicItem | null> {
@@ -21,8 +21,7 @@ export class DynamicApi {
     };
     const csrf: string = HttpClient.getCookie('bili_jct');
     if (csrf.length > 0) params['csrf'] = csrf;
-    const resp: HttpResponse = await HttpClient.get(Api.dynamicDetail + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://t.bilibili.com/' + id }));
+    const resp: HttpResponse = await webGet(Api.dynamicDetail, params, 'https://t.bilibili.com/' + id);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return null;
     const item: Record<string, Object> = asObject(data['item']);
@@ -39,9 +38,7 @@ export class DynamicApi {
       'features': Constants.dynFeatures,
       'offset': offset,
     };
-    const url: string = Api.followDynamic + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
-    return DynamicApi.parseDynamicPage(resp);
+    return DynamicApi.parseDynamicPage(await webGet(Api.followDynamic, params));
   }
 
   /** 动态点赞：up=1 点赞、0 取消，协议对齐 PiliPlus lib/http/dynamics.dart thumbDynamic。 */
@@ -57,8 +54,7 @@ export class DynamicApi {
           'spmid': '333.1365.0.0',
           'csrf': csrf,
         };
-        return HttpClient.post(Api.thumbDynamic, HttpClient.buildQuery(params),
-          HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://t.bilibili.com/' }));
+        return webPost(Api.thumbDynamic, params, 'https://t.bilibili.com/');
       });
   }
 
@@ -69,14 +65,24 @@ export class DynamicApi {
       (csrf: string): Promise<HttpResponse> => {
         const uploadId: string = '0_' + String(Math.floor(Date.now() / 1000)) + '_' +
           String(Math.floor(Math.random() * 9000) + 1000);
-        const dynReq: Record<string, Object> = asObject(JSON.parse(
-          '{"content":{"contents":[]},"scene":4,"upload_id":"' + uploadId +
-          '","meta":{"app_meta":{"from":"create.dynamic.web","mobi_app":"web"}}}') as Object);
-        const webRepostSrc: Record<string, Object> = asObject(JSON.parse(
-          '{"dyn_id_str":"' + dynId + '"}') as Object);
+        // 直接构造对象再 stringify（禁止字符串拼 JSON，dynId/uploadId 含引号会畸形）。
+        // ArkTS 限制对象字面量必须对应显式声明类型，逐层构建 Record。
+        const emptyContents: Array<Object> = [];
+        const contentObj: Record<string, Object> = { 'contents': emptyContents };
+        const appMeta: Record<string, Object> = { 'from': 'create.dynamic.web', 'mobi_app': 'web' };
+        const metaObj: Record<string, Object> = { 'app_meta': appMeta };
+        const dynReqObj: Record<string, Object> = {
+          'content': contentObj,
+          'scene': 4,
+          'upload_id': uploadId,
+          'meta': metaObj,
+        };
+        const webRepostObj: Record<string, Object> = {
+          'dyn_id_str': dynId,
+        };
         const params: Record<string, string> = {
-          'dyn_req': JSON.stringify(dynReq),
-          'web_repost_src': JSON.stringify(webRepostSrc),
+          'dyn_req': JSON.stringify(dynReqObj),
+          'web_repost_src': JSON.stringify(webRepostObj),
           'platform': 'web',
           'csrf': csrf,
           'csrf_token': csrf,
@@ -86,6 +92,7 @@ export class DynamicApi {
           'x-bili-device-req-json': '{"platform":"web","device":"pc"}',
           'x-bili-web-req-json': '{"spm_id":"333.999"}',
         };
+        // URL 带平台头 query + form body（两套参数），不走 webPost。
         return HttpClient.post(Api.createDynamic + '?' + HttpClient.buildQuery(query),
           HttpClient.buildQuery(params), Constants.webHeaders);
       });
@@ -107,12 +114,9 @@ export class DynamicApi {
       'x-bili-device-req-json': '{"platform":"web","device":"pc","spmid":"333.1387"}',
     };
     await WbiSign.encWbi(params);
-    const url: string = Api.memberDynamic + '?' + HttpClient.buildQuery(params);
-    const headers: Record<string, string> = HttpClient.merge(Constants.webHeaders, {
-      'Origin': 'https://space.bilibili.com',
-      'Referer': 'https://space.bilibili.com/' + String(mid) + '/dynamic',
-    });
-    const resp: HttpResponse = await HttpClient.get(url, headers);
+    const resp: HttpResponse = await webGet(Api.memberDynamic, params,
+      'https://space.bilibili.com/' + String(mid) + '/dynamic',
+      { 'Origin': 'https://space.bilibili.com' });
     return DynamicApi.parseDynamicPage(resp);
   }
 

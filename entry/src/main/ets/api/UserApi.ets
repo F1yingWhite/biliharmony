@@ -8,7 +8,7 @@ import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber, asString, str, toHttps } from '../common/Utils';
 import { RelationUserItem, RelationUserPageData, SpaceArcData, UserInfo, UserSpaceHeaderItem, UserSpaceInfo,
   UserStat, VideoItem } from '../model/Models';
-import { getData } from './internal/ApiCommon';
+import { getData, webGet } from './internal/ApiCommon';
 
 class SpaceDecorationInfo {
   light: string = '';
@@ -20,7 +20,7 @@ class SpaceDecorationInfo {
 export class UserApi {
   // ===== 当前登录用户（nav） =====
   static async getNav(): Promise<UserInfo> {
-    const resp: HttpResponse = await HttpClient.get(Api.userInfo, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.userInfo);
     if (!resp.ok) {
       return new UserInfo();
     }
@@ -29,8 +29,7 @@ export class UserApi {
 
   // ===== 用户统计 =====
   static async getUserStat(mid: number): Promise<UserStat> {
-    const url: string = Api.userStat + '?' + HttpClient.buildQuery({ 'vmid': String(mid) });
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.userStat, { 'vmid': String(mid) });
     if (!resp.ok) {
       return new UserStat();
     }
@@ -48,7 +47,7 @@ export class UserApi {
     };
     if (mode === 'following') params['order_type'] = 'attention';
     const endpoint: string = mode === 'follower' ? Api.userFollowers : Api.userFollowings;
-    const resp: HttpResponse = await HttpClient.get(endpoint + '?' + HttpClient.buildQuery(params), Constants.webHeaders);
+    const resp: HttpResponse = await webGet(endpoint, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return result;
     result.total = asNumber(data['total'], 0);
@@ -65,8 +64,7 @@ export class UserApi {
     const decorationPromise: Promise<SpaceDecorationInfo> = UserApi.getUserSpaceDecoration(mid);
     const params: Record<string, string> = { 'mid': String(mid) };
     await WbiSign.encWbi(params);
-    const url: string = Api.memberInfo + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.memberInfo, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return null;
@@ -168,8 +166,7 @@ export class UserApi {
       'order': order,
     };
     await WbiSign.encWbi(params);
-    const url: string = Api.memberArcSearch + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.memberArcSearch, params);
     const result: SpaceArcData = new SpaceArcData();
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {

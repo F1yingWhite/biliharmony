@@ -6,7 +6,7 @@ import { appSign } from '../common/AppSign';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber, asBool, str, toHttps } from '../common/Utils';
 import { FavoriteFolderItem, FavoriteFolderPageData, FavoriteVideoPageData, VideoItem } from '../model/Models';
-import { ActionResult, getData, postVideoAction } from './internal/ApiCommon';
+import { ActionResult, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
 
 export class FavoriteApi {
   // ===== 收藏夹 =====
@@ -14,8 +14,7 @@ export class FavoriteApi {
     const params: Record<string, string> = {
       'up_mid': String(mid), 'pn': String(page), 'ps': '20',
     };
-    const resp: HttpResponse = await HttpClient.get(Api.favoriteFolders + '?' + HttpClient.buildQuery(params),
-      Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.favoriteFolders, params);
     const data: Record<string, Object> | null = getData(resp);
     const result: FavoriteFolderPageData = new FavoriteFolderPageData();
     if (data === null) return result;
@@ -28,8 +27,7 @@ export class FavoriteApi {
   /** 当前视频可用的自建收藏夹，同时返回每个收藏夹是否已包含该视频（up_mid 必填，否则 -400）。 */
   static async getFavoriteFoldersForVideo(aid: number, mid: number): Promise<Array<FavoriteFolderItem>> {
     const params: Record<string, string> = { 'rid': String(aid), 'type': '2', 'up_mid': String(mid), 'platform': 'web' };
-    const resp: HttpResponse = await HttpClient.get(Api.favoriteFoldersForVideo + '?' + HttpClient.buildQuery(params),
-      Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.favoriteFoldersForVideo, params);
     const data: Record<string, Object> | null = getData(resp);
     const result: Array<FavoriteFolderItem> = [];
     if (data === null) return result;
@@ -62,8 +60,7 @@ export class FavoriteApi {
       'csrf': csrf,
     };
     await appSign(params);
-    const resp: HttpResponse = await HttpClient.post(Api.favoriteFolderSort + '?' + HttpClient.buildQuery(params),
-      HttpClient.buildQuery({}), Constants.webHeaders);
+    const resp: HttpResponse = await webPost(Api.favoriteFolderSort, params);
     if (!resp.ok) return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
     const json: Record<string, Object> = resp.json();
     const code: number = Number(json['code'] ?? -1);
@@ -86,8 +83,7 @@ export class FavoriteApi {
       'csrf': csrf,
     };
     await appSign(params);
-    const resp: HttpResponse = await HttpClient.post(Api.favoriteResourceSort + '?' + HttpClient.buildQuery(params),
-      HttpClient.buildQuery({}), Constants.webHeaders);
+    const resp: HttpResponse = await webPost(Api.favoriteResourceSort, params);
     if (!resp.ok) return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
     const json: Record<string, Object> = resp.json();
     const code: number = Number(json['code'] ?? -1);
@@ -101,8 +97,7 @@ export class FavoriteApi {
       'media_id': String(mediaId), 'pn': String(page), 'ps': '20', 'keyword': '',
       'order': 'mtime', 'type': '0', 'tid': '0', 'platform': 'web',
     };
-    const resp: HttpResponse = await HttpClient.get(Api.favoriteResources + '?' + HttpClient.buildQuery(params),
-      Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.favoriteResources, params);
     const data: Record<string, Object> | null = getData(resp);
     const result: FavoriteVideoPageData = new FavoriteVideoPageData();
     if (data === null) return result;
@@ -131,8 +126,7 @@ export class FavoriteApi {
   /** 全部自建收藏夹（created/list-all 不分页，移动目标选择用）。 */
   static async getAllFavoriteFolders(mid: number): Promise<Array<FavoriteFolderItem>> {
     const params: Record<string, string> = { 'up_mid': String(mid) };
-    const resp: HttpResponse = await HttpClient.get(Api.favoriteFoldersForVideo + '?' + HttpClient.buildQuery(params),
-      Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.favoriteFoldersForVideo, params);
     const data: Record<string, Object> | null = getData(resp);
     const result: Array<FavoriteFolderItem> = [];
     if (data === null) return result;
@@ -201,8 +195,7 @@ export class FavoriteApi {
     const params: Record<string, string> = {
       'up_mid': String(mid), 'pn': String(page), 'ps': '20', 'platform': 'web',
     };
-    const resp: HttpResponse = await HttpClient.get(Api.collectedFolders + '?' + HttpClient.buildQuery(params),
-      Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.collectedFolders, params);
     const data: Record<string, Object> | null = getData(resp);
     const result: FavoriteFolderPageData = new FavoriteFolderPageData();
     if (data === null) return result;
@@ -216,8 +209,7 @@ export class FavoriteApi {
     const params: Record<string, string> = {
       'season_id': String(seasonId), 'pn': String(page), 'ps': '20',
     };
-    const resp: HttpResponse = await HttpClient.get(Api.collectionResources + '?' + HttpClient.buildQuery(params),
-      Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.collectionResources, params);
     const data: Record<string, Object> | null = getData(resp);
     const result: FavoriteVideoPageData = new FavoriteVideoPageData();
     if (data === null) return result;

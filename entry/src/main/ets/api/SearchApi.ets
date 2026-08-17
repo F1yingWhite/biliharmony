@@ -9,12 +9,12 @@ import { ArticleSearchItem, ArticleSearchResult, HotSearchItem, PgcSearchItem, P
   PopularSeriesData, PopularSeriesItem, SearchAllResult, SearchAllSection, SearchTypes, UserSearchItem,
   UserSearchResult, VideoItem, VideoSearchResult } from '../model/Models';
 import { LiveRoomItem, LiveSearchResult } from '../model/LiveModels';
-import { getData } from './internal/ApiCommon';
+import { getData, webGet } from './internal/ApiCommon';
 
 export class SearchApi {
   // ===== 热搜 =====
   static async getHotSearch(): Promise<Array<HotSearchItem>> {
-    const resp: HttpResponse = await HttpClient.get(Api.hotSearchList, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.hotSearchList);
     if (!resp.ok) {
       return [];
     }
@@ -29,7 +29,7 @@ export class SearchApi {
 
   // ===== 搜索趋势榜（x/v2/search/trending/ranking；keyword 可直接搜索） =====
   static async getSearchTrending(): Promise<Array<HotSearchItem>> {
-    const resp: HttpResponse = await HttpClient.get(Api.searchTrending, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.searchTrending);
     if (!resp.ok) {
       return [];
     }
@@ -50,8 +50,7 @@ export class SearchApi {
       'page': String(page),
     };
     await WbiSign.encWbi(params);
-    const url: string = Api.searchAll + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.searchAll, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return [];
@@ -80,8 +79,7 @@ export class SearchApi {
       'page': String(page),
     };
     await WbiSign.encWbi(params);
-    const url: string = Api.searchAll + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.searchAll, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return result;
@@ -146,8 +144,7 @@ export class SearchApi {
       }
     }
     await WbiSign.encWbi(params);
-    const url: string = Api.searchByType + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.searchByType, params);
     return getData(resp);
   }
 
@@ -259,8 +256,7 @@ export class SearchApi {
   static async getRankVideos(rid: number = 0): Promise<Array<VideoItem>> {
     const params: Record<string, string> = { 'rid': String(rid), 'type': 'all' };
     await WbiSign.encWbi(params);
-    const resp: HttpResponse = await HttpClient.get(Api.rankAll + '?' + HttpClient.buildQuery(params),
-      Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.rankAll, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return [];
@@ -277,8 +273,7 @@ export class SearchApi {
   static async getPopularSeriesList(): Promise<Array<PopularSeriesItem>> {
     const params: Record<string, string> = { 'web_location': '333.934' };
     await WbiSign.encWbi(params);
-    const resp: HttpResponse = await HttpClient.get(Api.popularSeriesList + '?' + HttpClient.buildQuery(params),
-      Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.popularSeriesList, params);
     const data: Record<string, Object> | null = getData(resp);
     const result: Array<PopularSeriesItem> = [];
     if (data === null) {
@@ -301,8 +296,7 @@ export class SearchApi {
     }
     const params: Record<string, string> = { 'number': String(number), 'web_location': '333.934' };
     await WbiSign.encWbi(params);
-    const resp: HttpResponse = await HttpClient.get(Api.popularSeriesOne + '?' + HttpClient.buildQuery(params),
-      Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.popularSeriesOne, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return result;
@@ -324,8 +318,7 @@ export class SearchApi {
       'page_size': '100', 'page': String(page), 'web_location': '333.934',
     };
     await WbiSign.encWbi(params);
-    const resp: HttpResponse = await HttpClient.get(Api.popularPrecious + '?' + HttpClient.buildQuery(params),
-      Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.popularPrecious, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return [];
@@ -343,8 +336,7 @@ export class SearchApi {
     try {
       const params: Record<string, string> = {};
       await WbiSign.encWbi(params);
-      const resp: HttpResponse = await HttpClient.get(
-        Api.searchDefault + '?' + HttpClient.buildQuery(params), Constants.webHeaders);
+      const resp: HttpResponse = await webGet(Api.searchDefault, params);
       const data: Record<string, Object> | null = getData(resp);
       if (data === null) return '';
       // 实测返回结构：data.show_name 是字符串（如 "脱缰凯KK"），name 冗余同值。
@@ -361,8 +353,7 @@ export class SearchApi {
   // ===== 搜索建议 =====
   static async searchSuggest(term: string): Promise<Array<string>> {
     const params: Record<string, string> = { 'term': term, 'main_ver': 'v1' };
-    const url: string = Api.searchSuggest + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.searchSuggest, params);
     if (!resp.ok) {
       return [];
     }

@@ -5,15 +5,14 @@ import { HttpClient, HttpResponse } from '../common/HttpClient';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber } from '../common/Utils';
 import { HistoryPageData, HistoryVideoItem, WatchLaterItem } from '../model/Models';
-import { ActionResult, getData, postVideoAction } from './internal/ApiCommon';
+import { ActionResult, getData, postVideoAction, webGet } from './internal/ApiCommon';
 
 export class HistoryApi {
   static async getHistory(max: number = 0, viewAt: number = 0): Promise<HistoryPageData> {
     const params: Record<string, string> = {
       'type': 'archive', 'ps': '20', 'max': String(max), 'view_at': String(viewAt),
     };
-    const resp: HttpResponse = await HttpClient.get(Api.historyList + '?' + HttpClient.buildQuery(params),
-      Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.historyList, params);
     const data: Record<string, Object> | null = getData(resp);
     const result: HistoryPageData = new HistoryPageData();
     if (data === null) return result;
@@ -34,7 +33,7 @@ export class HistoryApi {
 
   // ===== 稍后再看（列表一次性返回全量，最多 100 条；移植自 PiliPlus UserHttp.seeYouLater / toViewLater 等） =====
   static async getWatchLaterList(): Promise<Array<WatchLaterItem>> {
-    const resp: HttpResponse = await HttpClient.get(Api.toviewList, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.toviewList);
     const data: Record<string, Object> | null = getData(resp);
     const result: Array<WatchLaterItem> = [];
     if (data === null) return result;

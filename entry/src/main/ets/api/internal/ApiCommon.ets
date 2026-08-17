@@ -31,6 +31,24 @@ export function getData(resp: HttpResponse): Record<string, Object> | null {
   return asObject(json['data']);
 }
 
+/**
+ * 统一的失败原因文案：网络层失败（!resp.ok）与业务失败（code != 0）区分，
+ * 供各域方法在 getData 返回 null 时透出到 UI 的 error 字段。
+ * undefined = 失败但无需细分（调用方可直接返回默认结果）。
+ */
+export function failureText(resp: HttpResponse, fallback: string): string {
+  if (!resp.ok) {
+    return '网络请求失败 (' + String(resp.status) + ')';
+  }
+  const json: Record<string, Object> = resp.json();
+  const serverMessage: string = str(json, 'message', str(json, 'msg', ''));
+  if (serverMessage.length > 0 && serverMessage !== '0') {
+    return serverMessage;
+  }
+  const code: number = asNumber(json['code'], -1);
+  return fallback + ' (' + String(code) + ')';
+}
+
 /** 互动接口公共骨架：取 bili_jct 判空 → 发请求 → ok/code/message 统一转结果文案。 */
 export async function actionWithCsrf(csrfError: string, okMessage: string, failMessage: string,
   doRequest: (csrf: string) => Promise<HttpResponse>): Promise<ActionResult> {
@@ -56,4 +74,47 @@ export async function postVideoAction(url: string, params: Record<string, string
       params['csrf'] = csrf;
       return HttpClient.post(url, HttpClient.buildQuery(params), Constants.webHeaders);
     });
+}
+
+// ===== Web 域请求脚手架：统一“拼 query + web 头 + 可选 Referer/自定义头” =====
+
+/** 拼接 headers：Web 头 + 可选 Referer + 可选额外头。 */
+function webHeaders(referer?: string, extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = Constants.webHeaders;
+  const needExtra: boolean = (referer !== undefined && referer.length > 0) || (extra !== undefined);
+  if (!needExtra) {
+    return headers;
+  }
+  const merged: Record<string, string> = HttpClient.merge(headers, {});
+  if (referer !== undefined && referer.length > 0) {
+    merged['Referer'] = referer;
+  }
+  if (extra !== undefined) {
+    const keys: Array<string> = Object.keys(extra);
+    for (let i: number = 0; i < keys.length; i++) {
+      merged[keys[i]] = extra[keys[i]];
+    }
+  }
+  return merged;
+}
+
+/** 带上 query 的 GET（query 为空时保持原 URL）。 */
+function withQuery(url: string, params?: Record<string, string>): string {
+  if (params === undefined || Object.keys(params).length === 0) {
+    return url;
+  }
+  return url + '?' + HttpClient.buildQuery(params);
+}
+
+/** Web 域 GET：params 拼 query，headers = webHeaders + 可选 Referer/extra。 */
+export function webGet(url: string, params?: Record<string, string>, referer?: string,
+  extra?: Record<string, string>): Promise<HttpResponse> {
+  return HttpClient.get(withQuery(url, params), webHeaders(referer, extra));
+}
+
+/** Web 域 POST（x-www-form-urlencoded）：body 由 params 构造；headers 同 webGet。 */
+export function webPost(url: string, params?: Record<string, string>, referer?: string,
+  extra?: Record<string, string>): Promise<HttpResponse> {
+  const body: string = params === undefined ? '' : HttpClient.buildQuery(params);
+  return HttpClient.post(url, body, webHeaders(referer, extra));
 }

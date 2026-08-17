@@ -10,6 +10,7 @@
  */
 import { ReplyItem } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
+import { CommentApi } from '../api/CommentApi';
 
 /** 在数组中按 rpid 找到真身并 mutate 后的结果：克隆（rev 已 +1）与原下标。 */
 export class ReplyCloneResult {
@@ -82,7 +83,7 @@ export async function runReplyLike(item: ReplyItem, busy: Set<number>, mutateIte
     });
   };
   try {
-    const result: ActionResult = await BiliApi.likeReply(hooks.resolveOid(item), hooks.resolveType(item),
+    const result: ActionResult = await CommentApi.likeReply(hooks.resolveOid(item), hooks.resolveType(item),
       item.rpid, next);
     if (hooks.isDestroyed()) return;
     if (!result.ok) {
@@ -128,7 +129,7 @@ export async function runReplyDislike(item: ReplyItem, busy: Set<number>, mutate
     });
   };
   try {
-    const result: ActionResult = await BiliApi.hateReply(hooks.resolveOid(item), hooks.resolveType(item),
+    const result: ActionResult = await CommentApi.hateReply(hooks.resolveOid(item), hooks.resolveType(item),
       item.rpid, next);
     if (hooks.isDestroyed()) return;
     if (!result.ok) {

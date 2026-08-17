@@ -8,7 +8,7 @@ import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber, asBool, str, toHttps, randomString } from '../common/Utils';
 import { MessageSessionItem, MessageSessionPageData, PrivateMessageItem, PrivateMessagePageData,
   MsgFeedUnread, MsgNotifyItem, MsgNotifyPageData } from '../model/Models';
-import { ActionResult, actionWithCsrf, getData } from './internal/ApiCommon';
+import { ActionResult, actionWithCsrf, getData, webGet, webPost, failureText } from './internal/ApiCommon';
 
 export class MessageApi {
   static async getMessageSessions(beginTs: number = 0): Promise<MessageSessionPageData> {
@@ -19,14 +19,13 @@ export class MessageApi {
     };
     if (beginTs > 0) params['begin_ts'] = String(beginTs);
     await WbiSign.encWbi(params);
-    const resp: HttpResponse = await HttpClient.get(Api.sessionList + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+    const resp: HttpResponse = await webGet(Api.sessionList, params, 'https://message.bilibili.com/');
     const data: Record<string, Object> | null = getData(resp);
     const result: MessageSessionPageData = new MessageSessionPageData();
     if (data === null) {
       // 失败原因透出到 UI（区分网络错误与业务错误），同时留 hilog 便于定位风控/签名问题。
       const json: Record<string, Object> = resp.json();
-      result.error = resp.ok ? str(json, 'message', '接口异常') : '网络请求失败 (' + String(resp.status) + ')';
+      result.error = failureText(resp, '接口异常');
       hilog.warn(0x0000, 'BiliApi', 'getMessageSessions failed: status=%{public}d code=%{public}d body=%{public}s',
         resp.status, asNumber(json['code'], -999), resp.body.substring(0, 200));
       return result;
@@ -46,8 +45,7 @@ export class MessageApi {
 
   private static async fillSessionAccounts(sessions: Array<MessageSessionItem>, ids: Array<string>): Promise<void> {
     const params: Record<string, string> = { 'uids': ids.join(','), 'build': '0', 'mobi_app': 'web' };
-    const resp: HttpResponse = await HttpClient.get(Api.sessionAccountList + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+    const resp: HttpResponse = await webGet(Api.sessionAccountList, params, 'https://message.bilibili.com/');
     if (!resp.ok) return;
     const json: Record<string, Object> = resp.json();
     if (asNumber(json['code'], -1) !== 0) return;
@@ -81,9 +79,7 @@ export class MessageApi {
           'extra': '{}',
           'csrf': csrf,
         };
-        return HttpClient.post(Api.sessionReportIm + '?' + HttpClient.buildQuery(params),
-          HttpClient.buildQuery({}),
-          HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+        return webPost(Api.sessionReportIm, params, 'https://message.bilibili.com/');
       });
   }
 
@@ -104,9 +100,7 @@ export class MessageApi {
       'csrf': csrf,
     };
     await WbiSign.encWbi(params);
-    const resp: HttpResponse = await HttpClient.post(Api.sessionRemove + '?' + HttpClient.buildQuery(params),
-      HttpClient.buildQuery({}),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+    const resp: HttpResponse = await webPost(Api.sessionRemove, params, 'https://message.bilibili.com/');
     if (!resp.ok) return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
     const json: Record<string, Object> = resp.json();
     const code: number = Number(json['code'] ?? -1);
@@ -121,17 +115,13 @@ export class MessageApi {
     };
     if (beginSeqno > 0) params['begin_seqno'] = String(beginSeqno);
     await WbiSign.encWbi(params);
-    const resp: HttpResponse = await HttpClient.get(Api.sessionMessages + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+    const resp: HttpResponse = await webGet(Api.sessionMessages, params, 'https://message.bilibili.com/');
     const data: Record<string, Object> | null = getData(resp);
     const result: PrivateMessagePageData = new PrivateMessagePageData();
     if (data === null) {
       const json: Record<string, Object> = resp.json();
       const code: number = asNumber(json['code'], -999);
-      const serverMessage: string = str(json, 'message', str(json, 'msg', ''));
-      result.error = resp.ok ?
-        (serverMessage.length > 0 && serverMessage !== '0' ? serverMessage : '私信接口异常 (' + String(code) + ')') :
-        '网络请求失败 (' + String(resp.status) + ')';
+      result.error = failureText(resp, '私信接口异常');
       hilog.warn(0x0000, 'BiliApi', 'getPrivateMessages failed: talker=%{public}d status=%{public}d code=%{public}d body=%{public}s',
         talkerId, resp.status, code, resp.body.substring(0, 200));
       return result;
@@ -154,8 +144,7 @@ export class MessageApi {
           'build': '0', 'mobi_app': 'web', 'csrf_token': csrf, 'csrf': csrf,
         };
         await WbiSign.encWbi(params);
-        return HttpClient.get(Api.ackSessionMessage + '?' + HttpClient.buildQuery(params),
-          HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+        return webGet(Api.ackSessionMessage, params, 'https://message.bilibili.com/');
       });
   }
 
@@ -174,8 +163,10 @@ export class MessageApi {
           'msg[content]': JSON.stringify({ 'content': content }), 'csrf_token': csrf, 'csrf': csrf,
           'build': '0', 'mobi_app': 'web',
         };
+        // 发送私信：URL 上带 WBI 签名的 query + form body，两个独立参数，不走 webPost。
         return HttpClient.post(Api.sendMessage + '?' + HttpClient.buildQuery(query),
-          HttpClient.buildQuery(body), HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+          HttpClient.buildQuery(body),
+          HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
       });
   }
 
@@ -183,8 +174,8 @@ export class MessageApi {
   /** 消息中心各分类未读数，供首页消息入口角标使用。 */
   static async getMsgFeedUnread(): Promise<MsgFeedUnread> {
     const result: MsgFeedUnread = new MsgFeedUnread();
-    const resp: HttpResponse = await HttpClient.get(Api.msgFeedUnread + '?platform=web&build=0&mobi_app=web',
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+    const resp: HttpResponse = await webGet(Api.msgFeedUnread + '?platform=web&build=0&mobi_app=web',
+      undefined, 'https://message.bilibili.com/');
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return result;
     result.reply = asNumber(data['reply'], 0);
@@ -203,13 +194,12 @@ export class MessageApi {
     };
     if (cursorId.length > 0) params['id'] = cursorId;
     if (cursorTime.length > 0) params[timeKey] = cursorTime;
-    const resp: HttpResponse = await HttpClient.get(url + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+    const resp: HttpResponse = await webGet(url, params, 'https://message.bilibili.com/');
     const result: MsgNotifyPageData = new MsgNotifyPageData();
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       const json: Record<string, Object> = resp.json();
-      result.error = resp.ok ? str(json, 'message', '接口异常') : '网络请求失败 (' + String(resp.status) + ')';
+      result.error = failureText(resp, '接口异常');
       hilog.warn(0x0000, 'BiliApi', 'getMsgFeedNotify failed: kind=%{public}s status=%{public}d code=%{public}d',
         kind, resp.status, asNumber(json['code'], -999));
       return result;
@@ -255,12 +245,11 @@ export class MessageApi {
       'page_size': '20', 'mobi_app': 'web', 'build': '0', 'web_location': '333.40164',
     };
     if (cursor.length > 0) params['cursor'] = cursor;
-    const resp: HttpResponse = await HttpClient.get(Api.msgSysNotify + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+    const resp: HttpResponse = await webGet(Api.msgSysNotify, params, 'https://message.bilibili.com/');
     const result: MsgNotifyPageData = new MsgNotifyPageData();
     const json: Record<string, Object> = resp.json();
     if (!resp.ok || asNumber(json['code'], -1) !== 0) {
-      result.error = resp.ok ? str(json, 'message', '接口异常') : '网络请求失败 (' + String(resp.status) + ')';
+      result.error = failureText(resp, '接口异常');
       hilog.warn(0x0000, 'BiliApi', 'getSysNotifications failed: status=%{public}d code=%{public}d',
         resp.status, asNumber(json['code'], -999));
       return result;
@@ -292,8 +281,7 @@ export class MessageApi {
         const params: Record<string, string> = {
           'csrf': csrf, 'cursor': cursor, 'has_up': '0', 'build': '0', 'mobi_app': 'web',
         };
-        return HttpClient.get(Api.msgSysUpdateCursor + '?' + HttpClient.buildQuery(params),
-          HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+        return webGet(Api.msgSysUpdateCursor, params, 'https://message.bilibili.com/');
       });
   }
 
@@ -306,9 +294,7 @@ export class MessageApi {
         const params: Record<string, string> = {
           'tp': String(tp), 'id': String(id), 'build': '0', 'mobi_app': 'web', 'csrf': csrf,
         };
-        return HttpClient.post(Api.xMsgNotifyDel + '?' + HttpClient.buildQuery(params),
-          HttpClient.buildQuery({}),
-          HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+        return webPost(Api.xMsgNotifyDel, params, 'https://message.bilibili.com/');
       });
   }
 
@@ -321,9 +307,7 @@ export class MessageApi {
           'ids': ids.map((id: number) => String(id)).join(','),
           'station_ids': '', 'type': '4', 'mobi_app': 'web', 'csrf': csrf,
         };
-        return HttpClient.post(Api.xSysNotifyDel + '?' + HttpClient.buildQuery(params),
-          HttpClient.buildQuery({}),
-          HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+        return webPost(Api.xSysNotifyDel, params, 'https://message.bilibili.com/');
       });
   }
 }

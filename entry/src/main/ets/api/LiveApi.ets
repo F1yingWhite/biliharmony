@@ -8,7 +8,7 @@ import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber, str, toHttps } from '../common/Utils';
 import { LiveChatMessage, LiveDanmakuInfo, LiveDanmakuServer, LiveEmoteItem, LiveEmotePackage, LivePlayInfo,
   LiveQualityOption, LiveRoomInfo, LiveRoomItem, LiveStatusItem, LiveZone } from '../model/LiveModels';
-import { ActionResult, actionWithCsrf, getData } from './internal/ApiCommon';
+import { ActionResult, actionWithCsrf, getData, webGet, webPost } from './internal/ApiCommon';
 
 export class LiveApi {
   // ===== 直播（只读观看） =====
@@ -16,8 +16,7 @@ export class LiveApi {
     const params: Record<string, string> = {
       'platform': 'web', 'page': String(page), 'page_size': String(pageSize),
     };
-    const resp: HttpResponse = await HttpClient.get(Api.liveRoomList + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://live.bilibili.com/' }));
+    const resp: HttpResponse = await webGet(Api.liveRoomList, params, 'https://live.bilibili.com/');
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return [];
     const source: Array<Object> = asArray(data['recommend_room_list']);
@@ -33,8 +32,7 @@ export class LiveApi {
 
   // ===== 直播分区（一级分区列表 + 区内直播间，需登录过风控） =====
   static async getLiveZones(): Promise<Array<LiveZone>> {
-    const resp: HttpResponse = await HttpClient.get(Api.liveZoneList,
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://live.bilibili.com/' }));
+    const resp: HttpResponse = await webGet(Api.liveZoneList, undefined, 'https://live.bilibili.com/');
     const result: Array<LiveZone> = [];
     const json: Record<string, Object> = resp.json();
     const list: Array<Object> = asArray(json['data']);
@@ -54,8 +52,7 @@ export class LiveApi {
       'parent_area_id': String(zoneId), 'area_id': '0',
       'sort_type': 'online', 'page': String(page), 'page_size': String(pageSize),
     };
-    const resp: HttpResponse = await HttpClient.get(Api.liveZoneRooms + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://live.bilibili.com/' }));
+    const resp: HttpResponse = await webGet(Api.liveZoneRooms, params, 'https://live.bilibili.com/');
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return [];
     // room/v3/Area/getRoomList 直接返回 data.list 数组。
@@ -77,8 +74,7 @@ export class LiveApi {
     for (let i: number = 0; i < uids.length; i++) {
       params['uids[' + String(i) + ']'] = String(uids[i]);
     }
-    const resp: HttpResponse = await HttpClient.get(Api.liveStatusByUids + '?' + HttpClient.buildQuery(params),
-      Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.liveStatusByUids, params);
     const json: Record<string, Object> = resp.json();
     const data: Record<string, Object> = asObject(json['data']);
     const keys: Array<string> = Object.keys(data);
@@ -96,9 +92,7 @@ export class LiveApi {
   }
 
   static async getLiveRoomInfo(roomId: number, uid: number = 0): Promise<LiveRoomInfo | null> {
-    const roomResp: HttpResponse = await HttpClient.get(Api.liveRoomInfo + '?' +
-      HttpClient.buildQuery({ 'room_id': String(roomId) }),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://live.bilibili.com/' + String(roomId) }));
+    const roomResp: HttpResponse = await webGet(Api.liveRoomInfo, { 'room_id': String(roomId) }, 'https://live.bilibili.com/' + String(roomId));
     const roomData: Record<string, Object> | null = getData(roomResp);
     if (roomData === null) return null;
     const info: LiveRoomInfo = new LiveRoomInfo();
@@ -110,9 +104,7 @@ export class LiveApi {
     info.areaName = str(roomData, 'area_name', str(roomData, 'parent_area_name', ''));
     info.watched = asNumber(roomData['online'], 0) > 0 ? String(asNumber(roomData['online'], 0)) + '人气' : '';
     if (info.uid > 0) {
-      const anchorResp: HttpResponse = await HttpClient.get(Api.liveAnchorInfo + '?' +
-        HttpClient.buildQuery({ 'uid': String(info.uid) }),
-        HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://live.bilibili.com/' + String(roomId) }));
+      const anchorResp: HttpResponse = await webGet(Api.liveAnchorInfo, { 'uid': String(info.uid) }, 'https://live.bilibili.com/' + String(roomId));
       const anchorData: Record<string, Object> | null = getData(anchorResp);
       if (anchorData !== null) {
         const base: Record<string, Object> = asObject(anchorData['info']);
@@ -129,8 +121,7 @@ export class LiveApi {
       'room_id': String(roomId), 'protocol': '0,1', 'format': '0,1,2', 'codec': '0,1',
       'qn': String(qn), 'platform': 'web', 'ptype': '8', 'dolby': '5', 'panorama': '1',
     };
-    const resp: HttpResponse = await HttpClient.get(Api.livePlayInfo + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://live.bilibili.com/' + String(roomId) }));
+    const resp: HttpResponse = await webGet(Api.livePlayInfo, params, 'https://live.bilibili.com/' + String(roomId));
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return null;
     const info: LivePlayInfo = new LivePlayInfo();
@@ -201,8 +192,7 @@ export class LiveApi {
     // 当前接口已启用 WBI 风控；对齐 PiliPlus，必须携带 web_location 并签名。
     const params: Record<string, string> = { 'id': String(roomId), 'web_location': '444.8' };
     await WbiSign.encWbi(params);
-    const resp: HttpResponse = await HttpClient.get(Api.liveDanmakuInfo + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://live.bilibili.com/' + String(roomId) }));
+    const resp: HttpResponse = await webGet(Api.liveDanmakuInfo, params, 'https://live.bilibili.com/' + String(roomId));
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return null;
     const info: LiveDanmakuInfo = new LiveDanmakuInfo();
@@ -216,9 +206,7 @@ export class LiveApi {
   }
 
   static async getLiveDanmakuHistory(roomId: number): Promise<Array<LiveChatMessage>> {
-    const resp: HttpResponse = await HttpClient.get(Api.liveDanmakuHistory + '?' +
-      HttpClient.buildQuery({ 'roomid': String(roomId) }),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://live.bilibili.com/' + String(roomId) }));
+    const resp: HttpResponse = await webGet(Api.liveDanmakuHistory, { 'roomid': String(roomId) }, 'https://live.bilibili.com/' + String(roomId));
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return [];
     const source: Array<Object> = asArray(data['room']);
@@ -231,8 +219,7 @@ export class LiveApi {
 
   static async getLiveEmoticons(roomId: number): Promise<Array<LiveEmotePackage>> {
     const params: Record<string, string> = { 'platform': 'pc', 'room_id': String(roomId) };
-    const resp: HttpResponse = await HttpClient.get(Api.liveEmoticons + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://live.bilibili.com/' + String(roomId) }));
+    const resp: HttpResponse = await webGet(Api.liveEmoticons, params, 'https://live.bilibili.com/' + String(roomId));
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return [];
     const packages: Array<Object> = asArray(data['data']);
@@ -292,16 +279,12 @@ export class LiveApi {
           body['reply_type'] = '0';
           body['reply_uname'] = '';
         }
-        return HttpClient.post(Api.liveSendDanmaku + '?' + HttpClient.buildQuery(query),
-          HttpClient.buildQuery(body),
-          HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://live.bilibili.com/' + String(roomId) }));
+        return webPost(Api.liveSendDanmaku, query, 'https://live.bilibili.com/' + String(roomId));
       });
   }
 
   static async getLiveSuperChats(roomId: number): Promise<Array<LiveChatMessage>> {
-    const resp: HttpResponse = await HttpClient.get(Api.liveSuperChat + '?' +
-      HttpClient.buildQuery({ 'room_id': String(roomId) }),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://live.bilibili.com/' + String(roomId) }));
+    const resp: HttpResponse = await webGet(Api.liveSuperChat, { 'room_id': String(roomId) }, 'https://live.bilibili.com/' + String(roomId));
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return [];
     const source: Array<Object> = asArray(data['list']);

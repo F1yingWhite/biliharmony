@@ -1,6 +1,7 @@
 import { BiliApi } from '../api/BiliApi';
 import { MsgFeedUnread } from '../model/Models';
 import { UserStore } from './UserStore';
+import { MessageApi } from '../api/MessageApi';
 
 /**
  * 首页消息入口未读角标：与 HotSearchStore 同款“共享请求去重”，
@@ -16,7 +17,7 @@ export class MsgUnreadStore {
       return;
     }
     if (MsgUnreadStore.pending !== null) return MsgUnreadStore.pending;
-    const request: Promise<void> = BiliApi.getMsgFeedUnread().then((data: MsgFeedUnread) => {
+    const request: Promise<void> = MessageApi.getMsgFeedUnread().then((data: MsgFeedUnread) => {
       MsgUnreadStore.unread = data;
       MsgUnreadStore.publish();
     });
