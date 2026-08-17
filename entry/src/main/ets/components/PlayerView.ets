@@ -4,6 +4,7 @@
 import { media } from '@kit.MediaKit';
 import { avSession } from '@kit.AVSessionKit';
 import { PlayerAvSessionHelper } from './PlayerAvSessionHelper';
+import { PlayerSubtitleController } from './PlayerSubtitleController';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
@@ -145,9 +146,7 @@ export struct PlayerView {
   private lastAudioSyncBucket: number = -1;
   private sponsorSegments: Array<SponsorSegment> = [];
   private lastSponsorUuid: string = '';
-  private subtitleCues: Array<SubtitleCue> = [];
-  private subtitleBusy: boolean = false;
-  private subtitleRequestSeq: number = 0;
+  private subtitleCtl: PlayerSubtitleController | null = null;
   private avSessionHelper: PlayerAvSessionHelper | null = null;
   private dmListSource: BasicDataSource<DanmakuItem> = new BasicDataSource<DanmakuItem>();
   private dmFilterRuleSource: BasicDataSource<DmFilterRule> = new BasicDataSource<DmFilterRule>();
@@ -304,96 +303,49 @@ export struct PlayerView {
 
 
   onSubtitlesChanged(): void {
-    if (this.subtitles.length === 0) {
-      this.subtitleIndex = -1;
-      this.subtitleOn = false;
-      this.subtitleText = '';
-      this.subtitleCues = [];
-      return;
+    if (this.subtitleCtl === null) {
+      this.subtitleCtl = new PlayerSubtitleController(() => this.syncSubtitleState());
     }
-    if (this.subtitleIndex < 0 || this.subtitleIndex >= this.subtitles.length) {
-      this.subtitleIndex = 0;
-    }
-    this.loadSubtitleTrack(this.subtitleIndex);
+    this.subtitleCtl.setTracks(this.subtitles, this.playheadSec);
   }
 
   private subtitleLabel(): string {
-    if (this.subtitleIndex < 0 || this.subtitleIndex >= this.subtitles.length) return '关闭';
-    return this.subtitles[this.subtitleIndex].lanDoc.length > 0 ?
-      this.subtitles[this.subtitleIndex].lanDoc : this.subtitles[this.subtitleIndex].lan;
+    if (this.subtitleCtl === null) return '关闭';
+    return this.subtitleCtl.label();
   }
 
-  private async loadSubtitleTrack(index: number): Promise<void> {
-    if (index < 0 || index >= this.subtitles.length) {
-      this.subtitleCues = [];
-      this.subtitleText = '';
-      return;
-    }
-    const track: SubtitleTrack = this.subtitles[index];
-    this.subtitleLoading = true;
-    const seq: number = ++this.subtitleRequestSeq;
-    try {
-      const cues: Array<SubtitleCue> = await BiliApi.getSubtitleCues(track.url);
-      if (seq !== this.subtitleRequestSeq || this.subtitleIndex !== index) return;
-      this.subtitleCues = cues;
-      this.updateSubtitle(this.playheadSec);
-    } catch (e) {
-      if (seq === this.subtitleRequestSeq) {
-        this.subtitleCues = [];
-        this.subtitleText = '';
-      }
-    } finally {
-      if (seq === this.subtitleRequestSeq) this.subtitleLoading = false;
-    }
+  private loadSubtitleTrack(index: number): void {
+    this.subtitleCtl?.load(index, this.playheadSec);
   }
 
-  /** 二分查找当前秒数命中的 CC 字幕行，内容未变不写状态。 */
   private updateSubtitle(timeSec: number): void {
-    const nextText: string = this.matchSubtitleText(timeSec);
-    if (nextText !== this.subtitleText) {
-      this.subtitleText = nextText;
-    }
+    this.subtitleCtl?.update(timeSec);
   }
 
   private matchSubtitleText(timeSec: number): string {
-    if (this.subtitleOn === false || this.subtitleCues.length === 0) return '';
-    let lo: number = 0;
-    let hi: number = this.subtitleCues.length - 1;
-    let hit: number = -1;
-    while (lo <= hi) {
-      const mid: number = Math.floor((lo + hi) / 2);
-      const cue: SubtitleCue = this.subtitleCues[mid];
-      if (timeSec < cue.from) {
-        hi = mid - 1;
-      } else if (timeSec >= cue.to) {
-        lo = mid + 1;
-      } else {
-        hit = mid;
-        break;
-      }
-    }
-    if (hit < 0) {
-      // 前后两条字幕之间的间隙不显示；拖回开头也不显示上一句。
-      return '';
-    }
-    return this.subtitleCues[hit].content;
+    const ctl: PlayerSubtitleController | null = this.subtitleCtl;
+    if (ctl === null) return '';
+    ctl.update(timeSec);
+    return ctl.text;
   }
 
   private changeSubtitle(index: number): void {
-    if (this.subtitleLoading && index === this.subtitleIndex) return;
-    this.subtitleIndex = index;
-    if (index < 0) {
-      this.subtitleOn = false;
-      this.subtitleText = '';
-      this.subtitleCues = [];
-      this.closeSettingPanels();
-      return;
-    }
-    this.subtitleOn = true;
-    this.subtitleText = '';
-    this.loadSubtitleTrack(index);
+    const ctl: PlayerSubtitleController | null = this.subtitleCtl;
+    if (ctl === null) return;
+    if (ctl.loading && index === ctl.index) return;
+    ctl.changeSubtitle(index);
     this.closeSettingPanels();
   }
+
+  private syncSubtitleState(): void {
+    const ctl: PlayerSubtitleController | null = this.subtitleCtl;
+    if (ctl === null) return;
+    this.subtitleOn = ctl.enabled;
+    this.subtitleIndex = ctl.index;
+    this.subtitleText = ctl.text;
+    this.subtitleLoading = ctl.loading;
+  }
+
 
   private toast(message: string): void {
     try {
@@ -537,8 +489,7 @@ export struct PlayerView {
     this.runtimeQualityOptions = this.qualityOptions;
     this.activeQuality = this.currentQuality;
     this.subtitleText = '';
-    this.subtitleCues = [];
-    this.subtitleRequestSeq++;
+    this.subtitleCtl?.reset();
     this.stopDmLoop(true);
     this.dmEngine.list = [];
     this.dmEngine.cursor = 0;
