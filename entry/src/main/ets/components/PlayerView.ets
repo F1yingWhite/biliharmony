@@ -6,6 +6,7 @@ import { avSession } from '@kit.AVSessionKit';
 import { PlayerAvSessionHelper } from './PlayerAvSessionHelper';
 import { PlayerSubtitleController } from './PlayerSubtitleController';
 import { PlayerSeekController } from './PlayerSeekController';
+import { PlayerSpeedController } from './PlayerSpeedController';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
@@ -156,7 +157,7 @@ export struct PlayerView {
   private shouldPlayAfterPrepare: boolean = true;
   // seek 采用“并发请求获胜”的串行状态机，由 PlayerSeekController 管理音视频双轨 seek 合并。
   private seekCtl: PlayerSeekController | null = null;
-  private holdPreviousRate: number = 1.0;
+  private speedCtl: PlayerSpeedController | null = null;
   private panStartTime: number = 0;
   private panGestureActive: boolean = false;
   private panMode: string = '';
@@ -220,6 +221,17 @@ export struct PlayerView {
         },
         (video: media.AVPlayer | null, targetMs: number): void => {
           if (video !== null) this.recoverPlayersAfterSeekStall(video, targetMs);
+        },
+      );
+    }
+
+    if (this.speedCtl === null) {
+      this.speedCtl = new PlayerSpeedController(
+        (rate: number): void => {
+          this.applyTemporarySpeed(rate);
+        },
+        (active: boolean): void => {
+          this.holdSpeedActive = active;
         },
       );
     }
@@ -1068,15 +1080,11 @@ export struct PlayerView {
 
   private beginHoldSpeed(): void {
     if (!this.playing || !this.prepared || this.holdSpeedActive) return;
-    this.holdPreviousRate = this.playbackRate;
-    this.holdSpeedActive = true;
-    this.applyTemporarySpeed(2.0);
+    this.speedCtl?.beginHold(this.playbackRate);
   }
 
   private endHoldSpeed(): void {
-    if (!this.holdSpeedActive) return;
-    this.holdSpeedActive = false;
-    this.applyTemporarySpeed(this.holdPreviousRate);
+    this.speedCtl?.endHold();
   }
 
   private beginHorizontalSeek(): void {
