@@ -9,6 +9,7 @@ import { BiliApi } from '../api/BiliApi';
 import { HttpClient } from './HttpClient';
 import { LiveChatMessage, LiveDanmakuInfo, LiveDanmakuServer } from '../model/LiveModels';
 import { asObject, asString, asNumber } from './Utils';
+import { LiveApi } from '../api/LiveApi';
 
 export class LiveDanmakuClient {
   private roomId: number = 0;
@@ -25,7 +26,7 @@ export class LiveDanmakuClient {
     this.roomId = roomId;
     this.closed = false;
     try {
-      const info: LiveDanmakuInfo | null = await BiliApi.getLiveDanmakuInfo(roomId);
+      const info: LiveDanmakuInfo | null = await LiveApi.getLiveDanmakuInfo(roomId);
       if (this.closed || info === null || info.servers.length === 0) {
         this.onConnected(false);
         return;

@@ -7,7 +7,7 @@ import { WbiSign } from '../common/WbiSign';
 import { Api, Constants, RecommendParams } from '../common/Constants';
 import { asObject, asArray, asString, asNumber } from '../common/Utils';
 import { VideoItem } from '../model/Models';
-import { getData } from './internal/ApiCommon';
+import { getData, webGet } from './internal/ApiCommon';
 
 export class FeedApi {
   /** 登录用户优先请求 Web 个性化推荐；接口失败时再回退到 App 公共推荐流。 */
@@ -36,8 +36,7 @@ export class FeedApi {
       'fresh_type': '4',
     };
     await WbiSign.encWbi(params);
-    const url: string = Api.recommendListWeb + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.recommendListWeb, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return [];
     const source: Array<Object> = asArray(data['item']);
@@ -81,8 +80,7 @@ export class FeedApi {
   // ===== 热门 =====
   static async getHot(pn: number, ps: number): Promise<Array<VideoItem>> {
     const params: Record<string, string> = { 'pn': String(pn), 'ps': String(ps) };
-    const url: string = Api.hotList + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.hotList, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return [];

@@ -3,7 +3,6 @@
  * 移植自 PiliPlus lib/http/*.dart
  */
 import { HttpClient, HttpResponse } from '../common/HttpClient';
-import { hilog } from '@kit.PerformanceAnalysisKit';
 import { WbiSign } from '../common/WbiSign';
 import { appSign } from '../common/AppSign';
 import { RsaUtil } from '../common/RsaUtil';
@@ -30,18 +29,10 @@ import { LiveApi } from './LiveApi';
 import { MessageApi } from './MessageApi';
 import { SearchApi } from './SearchApi';
 import { UserApi } from './UserApi';
+import { ActionResult, getData, actionWithCsrf, postVideoAction, webGet, webPost } from './internal/ApiCommon';
 
-export class ActionResult {
-  ok: boolean = false;
-  message: string = '';
-  code: number = 0;
-
-  constructor(ok: boolean, message: string, code: number = 0) {
-    this.ok = ok;
-    this.message = message;
-    this.code = code;
-  }
-}
+// 统一走 internal/ApiCommon 的 ActionResult（唯一类型来源），此处 re-export 保持调用方 import 不变。
+export { ActionResult };
 
 // 弹幕屏蔽规则（x/dm/filter/user 的 rule 项；type 0 关键词 / 1 正则 / 2 用户）
 export class DmFilterRule {
@@ -91,26 +82,6 @@ export class VideoChapter {
   image: string = '';
 }
 
-class SpaceDecorationInfo {
-  light: string = '';
-  dark: string = '';
-  pendant: string = '';
-  collectionHeaders: Array<UserSpaceHeaderItem> = [];
-}
-
-// ===== 通用：解析 code/data =====
-function getData(resp: HttpResponse): Record<string, Object> | null {
-  if (!resp.ok) {
-    return null;
-  }
-  const json: Record<string, Object> = resp.json();
-  const code: number = asNumber(json['code'], -1);
-  if (code !== 0) {
-    return null;
-  }
-  return asObject(json['data']);
-}
-
 export class BiliApi {
   /** 当前分 P 同时在看人数；接口失败返回空串，UI 不伪造 0。 */
   static async getOnlineTotal(aid: number, bvid: string, cid: number): Promise<string> {
@@ -118,75 +89,18 @@ export class BiliApi {
     const params: Record<string, string> = { 'cid': String(cid) };
     if (aid > 0) params['aid'] = String(aid);
     if (bvid.length > 0) params['bvid'] = bvid;
-    const resp: HttpResponse = await HttpClient.get(Api.onlineTotal + '?' + HttpClient.buildQuery(params),
-      Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.onlineTotal, params);
     const data: Record<string, Object> | null = getData(resp);
     return data === null ? '' : str(data, 'total', '');
   }
 
   // ===== 推荐/热门（委托 FeedApi） =====
-  static async getRecommend(idx: number): Promise<Array<VideoItem>> {
-    return FeedApi.getRecommend(idx);
-  }
-
-  static async getRecommendApp(idx: number): Promise<Array<VideoItem>> {
-    return FeedApi.getRecommendApp(idx);
-  }
-
-  static async getHot(pn: number, ps: number): Promise<Array<VideoItem>> {
-    return FeedApi.getHot(pn, ps);
-  }
-
   // ===== 直播（委托 LiveApi） =====
-  static async getLiveRooms(page: number, pageSize: number = 20): Promise<Array<LiveRoomItem>> {
-    return LiveApi.getLiveRooms(page, pageSize);
-  }
-
-  static async getLiveZones(): Promise<Array<LiveZone>> {
-    return LiveApi.getLiveZones();
-  }
-
-  static async getLiveZoneRooms(zoneId: number, page: number, pageSize: number = 20): Promise<Array<LiveRoomItem>> {
-    return LiveApi.getLiveZoneRooms(zoneId, page, pageSize);
-  }
-
-  static async getLiveStatusByUids(uids: Array<number>): Promise<Array<LiveStatusItem>> {
-    return LiveApi.getLiveStatusByUids(uids);
-  }
-
-  static async getLiveRoomInfo(roomId: number, uid: number = 0): Promise<LiveRoomInfo | null> {
-    return LiveApi.getLiveRoomInfo(roomId, uid);
-  }
-
-  static async getLivePlayInfo(roomId: number, qn: number = 10000): Promise<LivePlayInfo | null> {
-    return LiveApi.getLivePlayInfo(roomId, qn);
-  }
-
-  static async getLiveDanmakuInfo(roomId: number): Promise<LiveDanmakuInfo | null> {
-    return LiveApi.getLiveDanmakuInfo(roomId);
-  }
-
-  static async getLiveDanmakuHistory(roomId: number): Promise<Array<LiveChatMessage>> {
-    return LiveApi.getLiveDanmakuHistory(roomId);
-  }
-
-  static async getLiveEmoticons(roomId: number): Promise<Array<LiveEmotePackage>> {
-    return LiveApi.getLiveEmoticons(roomId);
-  }
-
-  static async sendLiveDanmaku(roomId: number, message: string, emote: LiveEmoteItem | null = null): Promise<ActionResult> {
-    return LiveApi.sendLiveDanmaku(roomId, message, emote);
-  }
-
-  static async getLiveSuperChats(roomId: number): Promise<Array<LiveChatMessage>> {
-    return LiveApi.getLiveSuperChats(roomId);
-  }
-
   // ===== 视频详情（aid 与 bvid 二选一） =====
   static async getVideoDetail(aid: number, bvid: string): Promise<VideoDetail | null> {
     const params: Record<string, string> = bvid.length > 0 ? { 'bvid': bvid } : { 'aid': String(aid) };
     const url: string = Api.videoIntro + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(url);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return null;
@@ -264,38 +178,12 @@ export class BiliApi {
   static async getVideoRelation(aid: number, bvid: string): Promise<VideoRelationState | null> {
     const params: Record<string, string> = { 'aid': String(aid) };
     if (bvid.length > 0) params['bvid'] = bvid;
-    const resp: HttpResponse = await HttpClient.get(Api.videoRelation + '?' + HttpClient.buildQuery(params),
-      Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.videoRelation, params);
     const data: Record<string, Object> | null = getData(resp);
     return data === null ? null : VideoRelationState.from(data);
   }
 
-  /** 互动接口公共骨架：取 bili_jct 判空 → 发请求 → ok/code/message 统一转结果文案。 */
-  private static async actionWithCsrf(csrfError: string, okMessage: string, failMessage: string,
-    doRequest: (csrf: string) => Promise<HttpResponse>): Promise<ActionResult> {
-    if (HttpClient.getCookie('SESSDATA').length === 0) {
-      return new ActionResult(false, '登录状态已失效，请重新登录', -101);
-    }
-    const csrf: string = HttpClient.getCookie('bili_jct');
-    if (csrf.length === 0) return new ActionResult(false, csrfError, -111);
-    const resp: HttpResponse = await doRequest(csrf);
-    if (!resp.ok) return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
-    const json: Record<string, Object> = resp.json();
-    const code: number = asNumber(json['code'], -1);
-    const ok: boolean = code === 0;
-    const serverMessage: string = str(json, 'message', '');
-    const message: string = ok ? okMessage :
-      ((serverMessage.length > 0 && serverMessage !== '0' ? serverMessage : failMessage) + ' (' + String(code) + ')');
-    return new ActionResult(ok, message, code);
-  }
-
-  private static async postVideoAction(url: string, params: Record<string, string>): Promise<ActionResult> {
-    return BiliApi.actionWithCsrf('登录状态缺少 CSRF，请重新登录', '操作成功', '操作失败',
-      (csrf: string): Promise<HttpResponse> => {
-        params['csrf'] = csrf;
-        return HttpClient.post(url, HttpClient.buildQuery(params), Constants.webHeaders);
-      });
-  }
+  /** 互动接口公共骨架与 POST 交互归 ApiCommon（actionWithCsrf / postVideoAction 保持 import 自 internal/ApiCommon）。 */
 
   static async likeVideo(aid: number, bvid: string, like: boolean): Promise<ActionResult> {
     const params: Record<string, string> = {
@@ -304,13 +192,13 @@ export class BiliApi {
       'like': like ? '1' : '2',
     };
     if (bvid.length > 0) params['bvid'] = bvid;
-    return BiliApi.postVideoAction(Api.likeVideo, params);
+    return postVideoAction(Api.likeVideo, params);
   }
 
   /** 一键三连（点赞+投一币+收藏）：web_normal 协议，返回 0 表示成功（data 有 like/coin/fav 计数）。 */
   static async likeTriple(aid: number): Promise<ActionResult> {
     if (aid <= 0) return new ActionResult(false, '参数无效');
-    return BiliApi.postVideoAction(Api.likeTriple, {
+    return postVideoAction(Api.likeTriple, {
       'aid': String(aid),
       'eab_x': '2',
       'ramval': '0',
@@ -353,18 +241,18 @@ export class BiliApi {
       'select_like': selectLike ? '1' : '0',
     };
     if (bvid.length > 0) params['bvid'] = bvid;
-    return BiliApi.postVideoAction(Api.coinVideo, params);
+    return postVideoAction(Api.coinVideo, params);
   }
 
   static async reportShare(aid: number, bvid: string): Promise<ActionResult> {
     const params: Record<string, string> = { 'aid': String(aid) };
     if (bvid.length > 0) params['bvid'] = bvid;
-    return BiliApi.postVideoAction(Api.shareVideo, params);
+    return postVideoAction(Api.shareVideo, params);
   }
 
   /** 弹幕屏蔽规则列表（type 0 关键词 / 1 正则 / 2 用户）。 */
   static async getDanmakuFilter(): Promise<Array<DmFilterRule>> {
-    const resp: HttpResponse = await HttpClient.get(Api.danmakuFilter, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.danmakuFilter);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return [];
     const rule: Array<Object> = asArray(data['rule']);
@@ -379,28 +267,28 @@ export class BiliApi {
   /** 添加弹幕屏蔽词/正则/用户（type 0 关键词 / 1 正则 / 2 用户）。 */
   static async addDanmakuFilter(type: number, filter: string): Promise<ActionResult> {
     if (filter.trim().length === 0) return new ActionResult(false, '屏蔽内容不能为空');
-    return BiliApi.actionWithCsrf('登录状态缺少 CSRF，请重新登录', '屏蔽规则已添加', '添加屏蔽失败',
+    return actionWithCsrf('登录状态缺少 CSRF，请重新登录', '屏蔽规则已添加', '添加屏蔽失败',
       (csrf: string): Promise<HttpResponse> => {
         const params: Record<string, string> = {
           'type': String(type),
           'filter': filter.trim(),
           'csrf': csrf,
         };
-        return HttpClient.post(Api.danmakuFilterAdd, HttpClient.buildQuery(params), Constants.webHeaders);
+        return webPost(Api.danmakuFilterAdd, params);
       });
   }
 
   /** 删除弹幕屏蔽规则；ids 由服务端规则 id 组成。 */
   static async delDanmakuFilter(ids: Array<number>): Promise<ActionResult> {
     if (ids.length === 0) return new ActionResult(false, '请先选择要删除的规则');
-    return BiliApi.actionWithCsrf('登录状态缺少 CSRF，请重新登录', '屏蔽规则已删除', '删除屏蔽失败',
+    return actionWithCsrf('登录状态缺少 CSRF，请重新登录', '屏蔽规则已删除', '删除屏蔽失败',
       (csrf: string): Promise<HttpResponse> => {
         const idList: string = ids.join(',');
         const params: Record<string, string> = {
           'ids': idList,
           'csrf': csrf,
         };
-        return HttpClient.post(Api.danmakuFilterDel, HttpClient.buildQuery(params), Constants.webHeaders);
+        return webPost(Api.danmakuFilterDel, params);
       });
   }
 
@@ -421,7 +309,7 @@ export class BiliApi {
     } else {
       params['aid'] = String(aid);
     }
-    await HttpClient.post(Api.heartBeat, HttpClient.buildQuery(params), Constants.webHeaders);
+    await webPost(Api.heartBeat, params);
   }
 
   /** 发送普通滚动弹幕；progress 使用毫秒，与官方 Web 接口一致。 */
@@ -442,7 +330,7 @@ export class BiliApi {
     };
     if (aid > 0) params['aid'] = String(aid);
     if (bvid.length > 0) params['bvid'] = bvid;
-    return BiliApi.postVideoAction(Api.sendDanmaku, params);
+    return postVideoAction(Api.sendDanmaku, params);
   }
 
   /** 弹幕举报（需登录；reason 参考: 1 违法违规 2 色情 3 低俗 5 人身攻击 6 垃圾广告 7 引战 10 其他） */
@@ -450,7 +338,7 @@ export class BiliApi {
     if (cid <= 0 || dmid <= 0) {
       return new ActionResult(false, '弹幕数据不完整，当前分段弹幕暂不支持举报');
     }
-    return BiliApi.postVideoAction(Api.reportDanmaku, {
+    return postVideoAction(Api.reportDanmaku, {
       'cid': String(cid),
       'dmid': String(dmid),
       'reason': String(reason),
@@ -470,7 +358,7 @@ export class BiliApi {
       params['ep_id'] = String(epId);
     }
     const url: string = Api.bangumiSeason + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(url);
     if (!resp.ok) {
       return null;
     }
@@ -490,7 +378,7 @@ export class BiliApi {
     if (seasonId <= 0) {
       return new ActionResult(false, '番剧信息无效');
     }
-    return BiliApi.postVideoAction(follow ? Api.bangumiFollowAdd : Api.bangumiFollowDel, {
+    return postVideoAction(follow ? Api.bangumiFollowAdd : Api.bangumiFollowDel, {
       'season_id': String(seasonId),
     });
   }
@@ -504,8 +392,7 @@ export class BiliApi {
       'follow_status': '0',
       'pn': String(Math.max(1, page)),
     };
-    const resp: HttpResponse = await HttpClient.get(
-      Api.bangumiFollowList + '?' + HttpClient.buildQuery(params), Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.bangumiFollowList, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return [];
@@ -533,7 +420,7 @@ export class BiliApi {
     const headers: Record<string, string> = HttpClient.merge(Constants.webHeaders, {
       'Referer': 'https://www.bilibili.com/anime/',
     });
-    const resp: HttpResponse = await HttpClient.get(Api.bangumiIndex + '?' + HttpClient.buildQuery(params), headers);
+    const resp: HttpResponse = await webGet(Api.bangumiIndex, params, undefined, headers);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return result;
@@ -558,8 +445,7 @@ export class BiliApi {
       'before': String(before),
       'after': String(after),
     };
-    const resp: HttpResponse = await HttpClient.get(Api.pgcTimeline + '?' + HttpClient.buildQuery(params),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://www.bilibili.com/anime/timeline/' }));
+    const resp: HttpResponse = await webGet(Api.pgcTimeline, params, 'https://www.bilibili.com/anime/timeline/');
     const json: Record<string, Object> = resp.json();
     if (asNumber(json['code'], -1) !== 0) return out;
     const result: Array<Object> = asArray(json['result']);
@@ -581,14 +467,14 @@ export class BiliApi {
   static async getUserRelation(mid: number): Promise<number | null> {
     if (mid <= 0) return null;
     const url: string = Api.userRelation + '?' + HttpClient.buildQuery({ 'fid': String(mid) });
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(url);
     const data: Record<string, Object> | null = getData(resp);
     return data === null ? null : asNumber(data['attribute'], 0);
   }
 
   static async modifyUserRelation(mid: number, follow: boolean): Promise<ActionResult> {
     if (mid <= 0) return new ActionResult(false, 'UP 主信息无效');
-    return BiliApi.postVideoAction(Api.modifyUserRelation, {
+    return postVideoAction(Api.modifyUserRelation, {
       'fid': String(mid),
       'act': follow ? '1' : '2',
       're_src': '11',
@@ -603,7 +489,7 @@ export class BiliApi {
       'pn': String(Math.max(1, page)),
       'ps': '30',
     };
-    const resp: HttpResponse = await HttpClient.get(Api.blackList + '?' + HttpClient.buildQuery(params), Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.blackList, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return result;
@@ -619,7 +505,7 @@ export class BiliApi {
 
   static async blockUser(mid: number, block: boolean): Promise<ActionResult> {
     if (mid <= 0) return new ActionResult(false, '用户信息无效');
-    return BiliApi.postVideoAction(Api.modifyUserRelation, {
+    return postVideoAction(Api.modifyUserRelation, {
       'fid': String(mid),
       'act': block ? '5' : '6',
       're_src': '11',
@@ -631,7 +517,7 @@ export class BiliApi {
   static async getRelated(aid: number, bvid: string): Promise<Array<VideoItem>> {
     const params: Record<string, string> = bvid.length > 0 ? { 'bvid': bvid } : { 'aid': String(aid) };
     const url: string = Api.relatedList + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(url);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return [];
@@ -645,110 +531,38 @@ export class BiliApi {
   }
 
   // ===== 评论（委托 CommentApi） =====
-  static async getReplies(oid: number, type: number, cursor: string, mode: number = 3): Promise<ReplyData> {
-    return CommentApi.getReplies(oid, type, cursor, mode);
-  }
-
-  static async addReply(oid: number, type: number, message: string, root: number = 0, parent: number = 0): Promise<ActionResult> {
-    return CommentApi.addReply(oid, type, message, root, parent);
-  }
-
-  static async likeReply(oid: number, type: number, rpid: number, liked: boolean): Promise<ActionResult> {
-    return CommentApi.likeReply(oid, type, rpid, liked);
-  }
-
-  static async hateReply(oid: number, type: number, rpid: number, hate: boolean): Promise<ActionResult> {
-    return CommentApi.hateReply(oid, type, rpid, hate);
-  }
-
-  static async reportReply(oid: number, type: number, rpid: number, reason: string): Promise<ActionResult> {
-    return CommentApi.reportReply(oid, type, rpid, reason);
-  }
-
-  static async deleteReply(oid: number, type: number, rpid: number): Promise<ActionResult> {
-    return CommentApi.deleteReply(oid, type, rpid);
-  }
-
-  static async getUserEmotes(business: string = 'reply'): Promise<Array<BiliEmotePackage>> {
-    return CommentApi.getUserEmotes(business);
-  }
-
-  static async getReplyReplies(oid: number, type: number, root: number, page: number): Promise<ReplyPageData> {
-    return CommentApi.getReplyReplies(oid, type, root, page);
-  }
-
   // ===== 历史/稍后再看（委托 HistoryApi） =====
-  static async getHistory(max: number = 0, viewAt: number = 0): Promise<HistoryPageData> {
-    return HistoryApi.getHistory(max, viewAt);
-  }
 
   /** 删除单条观看历史（按 bvid）。 */
   static async deleteHistoryItem(bvid: string): Promise<ActionResult> {
     if (bvid.length === 0) return new ActionResult(false, '参数无效');
-    return BiliApi.postVideoAction(Api.historyDelete, {
+    return postVideoAction(Api.historyDelete, {
       'aid': '', 'kid': bvid, 'platform': 'web',
     });
   }
 
   /** 清空全部观看历史（需二次确认）。 */
   static async clearHistory(): Promise<ActionResult> {
-    return BiliApi.postVideoAction(Api.historyClear, { 'platform': 'web' });
-  }
-
-  static async getWatchLaterList(): Promise<Array<WatchLaterItem>> {
-    return HistoryApi.getWatchLaterList();
-  }
-
-  static async addWatchLater(aid: number, bvid: string): Promise<ActionResult> {
-    return HistoryApi.addWatchLater(aid, bvid);
-  }
-
-  static async delWatchLater(aids: Array<number>): Promise<ActionResult> {
-    return HistoryApi.delWatchLater(aids);
-  }
-
-  static async clearWatchLater(): Promise<ActionResult> {
-    return HistoryApi.clearWatchLater();
+    return postVideoAction(Api.historyClear, { 'platform': 'web' });
   }
 
   // ===== 动态（委托 DynamicApi） =====
-  static async getDynamicDetail(id: string): Promise<DynamicItem | null> {
-    return DynamicApi.getDynamicDetail(id);
-  }
-
-  static async getDynamicFeed(offset: string, dynType: string = 'all'): Promise<DynamicPageData> {
-    return DynamicApi.getDynamicFeed(offset, dynType);
-  }
-
-  static async likeDynamic(dynId: string, like: boolean): Promise<ActionResult> {
-    return DynamicApi.likeDynamic(dynId, like);
-  }
-
-  static async repostDynamic(dynId: string): Promise<ActionResult> {
-    return DynamicApi.repostDynamic(dynId);
-  }
-
   // ===== 发布动态（纯文字，需登录；type=4 纯文字；未登录由 csrf 校验失败兜底） =====
   static async publishDynamic(content: string): Promise<ActionResult> {
     const text: string = content.trim();
     if (text.length === 0) return new ActionResult(false, '动态内容不能为空');
     if (text.length > 2000) return new ActionResult(false, '动态内容过长（最多 2000 字）');
-    return BiliApi.postVideoAction(Api.createDynamic, {
+    return postVideoAction(Api.createDynamic, {
       'dynamic': text,
       'type': '4',
       'at_uids': '',
       'topic_id': '',
     });
   }
-
-  static async getUserDynamicFeed(mid: number, offset: string): Promise<DynamicPageData> {
-    return DynamicApi.getUserDynamicFeed(mid, offset);
-  }
-
   /** 动态举报（需要 dynId + reason；reason 参考：1 违法违规 2 色情低俗 … 99 其他）。 */
   static async reportDynamic(dynId: string, reason: string): Promise<ActionResult> {
     if (dynId.length === 0) return new ActionResult(false, '动态信息不完整');
-    return BiliApi.postVideoAction(Api.dynamicReport, {
+    return postVideoAction(Api.dynamicReport, {
       'dyn_id': dynId,
       'reason': reason,
       'content': '',
@@ -757,201 +571,13 @@ export class BiliApi {
 
 
   // ===== 收藏夹/合集（委托 FavoriteApi） =====
-  static async getFavoriteFolders(mid: number, page: number): Promise<FavoriteFolderPageData> {
-    return FavoriteApi.getFavoriteFolders(mid, page);
-  }
-
-  static async getFavoriteFoldersForVideo(aid: number, mid: number): Promise<Array<FavoriteFolderItem>> {
-    return FavoriteApi.getFavoriteFoldersForVideo(aid, mid);
-  }
-
-  static async modifyVideoFavorite(aid: number, addIds: Array<number>, deleteIds: Array<number>): Promise<ActionResult> {
-    return FavoriteApi.modifyVideoFavorite(aid, addIds, deleteIds);
-  }
-
-  static async getFavoriteVideos(mediaId: number, page: number): Promise<FavoriteVideoPageData> {
-    return FavoriteApi.getFavoriteVideos(mediaId, page);
-  }
-
-  static async sortFavoriteFolders(folderIds: Array<number>): Promise<ActionResult> {
-    return FavoriteApi.sortFavoriteFolders(folderIds);
-  }
-
-  static async sortFavoriteVideos(mediaId: number, videoIds: Array<number>): Promise<ActionResult> {
-    return FavoriteApi.sortFavoriteVideos(mediaId, videoIds);
-  }
-
-  static async getAllFavoriteFolders(mid: number): Promise<Array<FavoriteFolderItem>> {
-    return FavoriteApi.getAllFavoriteFolders(mid);
-  }
-
-  static async addFavoriteFolder(title: string, intro: string = ''): Promise<ActionResult> {
-    return FavoriteApi.addFavoriteFolder(title, intro);
-  }
-
-  static async editFavoriteFolder(mediaId: number, title: string, isPublic: boolean, intro: string = ''): Promise<ActionResult> {
-    return FavoriteApi.editFavoriteFolder(mediaId, title, isPublic, intro);
-  }
-
-  static async delFavoriteFolder(mediaIds: Array<number>): Promise<ActionResult> {
-    return FavoriteApi.delFavoriteFolder(mediaIds);
-  }
-
-  static async delFavoriteResources(mediaId: number, aids: Array<number>): Promise<ActionResult> {
-    return FavoriteApi.delFavoriteResources(mediaId, aids);
-  }
-
-  static async moveFavoriteResources(srcMediaId: number, tarMediaId: number, aids: Array<number>): Promise<ActionResult> {
-    return FavoriteApi.moveFavoriteResources(srcMediaId, tarMediaId, aids);
-  }
-
-  static async getCollectedFolders(mid: number, page: number): Promise<FavoriteFolderPageData> {
-    return FavoriteApi.getCollectedFolders(mid, page);
-  }
-
-  static async getCollectionVideos(seasonId: number, page: number): Promise<FavoriteVideoPageData> {
-    return FavoriteApi.getCollectionVideos(seasonId, page);
-  }
-
   // ===== 私信/消息通知（委托 MessageApi） =====
-  static async getMessageSessions(beginTs: number = 0): Promise<MessageSessionPageData> {
-    return MessageApi.getMessageSessions(beginTs);
-  }
-
-  static async removeMessageSession(talkerId: number): Promise<ActionResult> {
-    return MessageApi.removeSession(talkerId);
-  }
-
-  static async reportPrivateMessage(accusedUid: number, reasonType: number, reasonDesc: string): Promise<ActionResult> {
-    return MessageApi.reportImMessage(accusedUid, reasonType, reasonDesc);
-  }
-
-  static async getPrivateMessages(talkerId: number, beginSeqno: number = 0): Promise<PrivateMessagePageData> {
-    return MessageApi.getPrivateMessages(talkerId, beginSeqno);
-  }
-
-  static async markPrivateMessagesRead(talkerId: number, ackSeqno: number): Promise<ActionResult> {
-    return MessageApi.markPrivateMessagesRead(talkerId, ackSeqno);
-  }
-
-  static async sendPrivateMessage(senderId: number, receiverId: number, content: string): Promise<ActionResult> {
-    return MessageApi.sendPrivateMessage(senderId, receiverId, content);
-  }
-
-  static async getMsgFeedUnread(): Promise<MsgFeedUnread> {
-    return MessageApi.getMsgFeedUnread();
-  }
-
-  static async getMsgFeedNotify(kind: string, cursorId: string = '', cursorTime: string = ''): Promise<MsgNotifyPageData> {
-    return MessageApi.getMsgFeedNotify(kind, cursorId, cursorTime);
-  }
-
-  static async getSysNotifications(cursor: string = ''): Promise<MsgNotifyPageData> {
-    return MessageApi.getSysNotifications(cursor);
-  }
-
-  static async updateSysMsgCursor(cursor: string): Promise<ActionResult> {
-    return MessageApi.updateSysMsgCursor(cursor);
-  }
-
-  static async delNotify(kind: string, id: number): Promise<ActionResult> {
-    return MessageApi.delNotify(kind, id);
-  }
-
-  static async delSysNotify(ids: Array<number>): Promise<ActionResult> {
-    return MessageApi.delSysNotify(ids);
-  }
-
-
   // ===== 搜索/排行（委托 SearchApi） =====
-  static async getHotSearch(): Promise<Array<HotSearchItem>> {
-    return SearchApi.getHotSearch();
-  }
-
-  static async getSearchTrending(): Promise<Array<HotSearchItem>> {
-    return SearchApi.getSearchTrending();
-  }
-
-  static async getSearchDefault(): Promise<string> {
-    return SearchApi.getSearchDefault();
-  }
-
-  static async search(keyword: string, page: number): Promise<Array<VideoItem>> {
-    return SearchApi.search(keyword, page);
-  }
-
-  static async searchAll(keyword: string, page: number): Promise<SearchAllResult> {
-    return SearchApi.searchAll(keyword, page);
-  }
-
-  static async searchByType(keyword: string, searchType: string, page: number, order: string = '',
-    extra?: Record<string, string>): Promise<Record<string, Object> | null> {
-    return SearchApi.searchByType(keyword, searchType, page, order, extra);
-  }
-
-  static async searchVideosByType(keyword: string, page: number, order: string, duration: number,
-    pubtimeBegin: number, tids: number): Promise<VideoSearchResult> {
-    return SearchApi.searchVideosByType(keyword, page, order, duration, pubtimeBegin, tids);
-  }
-
-  static async searchUsers(keyword: string, page: number, order: string, userType: number = 0): Promise<UserSearchResult> {
-    return SearchApi.searchUsers(keyword, page, order, userType);
-  }
-
-  static async searchMedia(keyword: string, searchType: string, page: number): Promise<PgcSearchResult> {
-    return SearchApi.searchMedia(keyword, searchType, page);
-  }
-
-  static async searchLiveRooms(keyword: string, page: number, order: string): Promise<LiveSearchResult> {
-    return SearchApi.searchLiveRooms(keyword, page, order);
-  }
-
-  static async searchArticles(keyword: string, page: number): Promise<ArticleSearchResult> {
-    return SearchApi.searchArticles(keyword, page);
-  }
-
-  static async getRankVideos(rid: number = 0): Promise<Array<VideoItem>> {
-    return SearchApi.getRankVideos(rid);
-  }
-
-  static async getPopularSeriesList(): Promise<Array<PopularSeriesItem>> {
-    return SearchApi.getPopularSeriesList();
-  }
-
-  static async getPopularSeriesOne(number: number): Promise<PopularSeriesData> {
-    return SearchApi.getPopularSeriesOne(number);
-  }
-
-  static async getPopularPrecious(page: number = 1): Promise<Array<VideoItem>> {
-    return SearchApi.getPopularPrecious(page);
-  }
-
-  static async searchSuggest(term: string): Promise<Array<string>> {
-    return SearchApi.searchSuggest(term);
-  }
-
-  // ===== 用户（委托 UserApi） =====
-  static async getNav(): Promise<UserInfo> {
-    return UserApi.getNav();
-  }
-
-  static async getUserStat(mid: number): Promise<UserStat> {
-    return UserApi.getUserStat(mid);
-  }
-
-  static async getRelationUsers(mid: number, mode: string, page: number): Promise<RelationUserPageData> {
-    return UserApi.getRelationUsers(mid, mode, page);
-  }
-
-  static async getUserSpaceInfo(mid: number): Promise<UserSpaceInfo | null> {
-    return UserApi.getUserSpaceInfo(mid);
-  }
-
+    // ===== 用户（委托 UserApi） =====
   // ===== 关注分组（关注标签） =====
   /** 我的关注分组列表（x/relation/tags），返回 {tagid, name, count}。 */
   static async getFollowTags(): Promise<Array<FollowTagItem>> {
-    const resp: HttpResponse = await HttpClient.get(Api.followTags,
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://space.bilibili.com/' }));
+    const resp: HttpResponse = await webGet(Api.followTags, undefined, 'https://space.bilibili.com/');
     const data: Record<string, Object> | null = getData(resp);
     const result: Array<FollowTagItem> = [];
     if (data === null) return result;
@@ -972,9 +598,7 @@ export class BiliApi {
     if (tagName.length === 0) return 0;
     const csrf: string = HttpClient.getCookie('bili_jct');
     if (csrf.length === 0) return 0;
-    const resp: HttpResponse = await HttpClient.post(Api.followTagCreate,
-      HttpClient.buildQuery({ 'tag': tagName, 'csrf': csrf }),
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://space.bilibili.com/' }));
+    const resp: HttpResponse = await webPost(Api.followTagCreate, { 'tag': tagName, 'csrf': csrf }, 'https://space.bilibili.com/');
     const json: Record<string, Object> = resp.json();
     if (asNumber(json['code'], -1) !== 0) return 0;
     const data: Record<string, Object> = asObject(json['data']);
@@ -983,7 +607,7 @@ export class BiliApi {
 
   /** 设置某 UP 所属关注分组：tagids 为空串 = 默认分组。 */
   static async addUserToTags(mid: number, tagIds: Array<number>): Promise<ActionResult> {
-    return BiliApi.postVideoAction(Api.followTagsAddUsers, {
+    return postVideoAction(Api.followTagsAddUsers, {
       'fids': String(mid),
       'tagids': tagIds.map((id: number) => String(id)).join(','),
     });
@@ -1003,19 +627,12 @@ export class BiliApi {
       'reason_v2': '5',
       'csrf': csrf,
     };
-    const resp: HttpResponse = await HttpClient.post(Api.reportMember + '?' + HttpClient.buildQuery(params),
-      HttpClient.buildQuery({}),
-      HttpClient.merge(Constants.webHeaders, { 'Origin': 'https://space.bilibili.com' }));
+    const resp: HttpResponse = await webPost(Api.reportMember, params, undefined, { 'Origin': 'https://space.bilibili.com' });
     if (!resp.ok) return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
     const json: Record<string, Object> = resp.json();
     const ok: boolean = json['status'] === true || Number(json['status'] ?? 0) === 1;
     return new ActionResult(ok, ok ? '已提交举报，感谢反馈' : (String(json['data'] ?? '举报失败')), ok ? 0 : -1);
   }
-
-  static async getUserSpaceArcs(mid: number, pn: number, order: string): Promise<SpaceArcData> {
-    return UserApi.getUserSpaceArcs(mid, pn, order);
-  }
-
   static async getSponsorSegments(bvid: string, cid: number): Promise<Array<SponsorSegment>> {
     if (bvid.length === 0) return [];
     const url: string = Api.sponsorSegments + '?' + HttpClient.buildQuery({ 'videoID': bvid, 'cid': String(cid) });
@@ -1055,7 +672,7 @@ export class BiliApi {
     else params['aid'] = String(aid);
     await WbiSign.encWbi(params);
     const url: string = Api.playerInfo + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(url);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return [];
     const points: Array<Object> = asArray(data['view_points']);

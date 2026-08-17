@@ -6,6 +6,7 @@ import { BiliApi, CookiePair } from '../api/BiliApi';
 import { HttpClient } from './HttpClient';
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
+import { UserApi } from '../api/UserApi';
 
 export class UserStore {
   private static readonly COOKIE_STORAGE_KEY: string = 'loginCookieJar';
@@ -102,14 +103,14 @@ export class UserStore {
 
   /** 刷新登录态（nav 接口） */
   static async refresh(): Promise<UserInfo> {
-    const u: UserInfo = await BiliApi.getNav();
+    const u: UserInfo = await UserApi.getNav();
     UserStore.user = u;
     UserStore.loaded = true;
     AppStorage.setOrCreate<string>('userAvatar', u.isLogin ? u.face : '');
     AppStorage.setOrCreate<string>('userPendant', u.isLogin ? u.pendant : '');
     // nav 通常不返回头像挂件：先恢复登录与头像，再异步补齐空间装扮，避免阻塞首页首屏。
     if (u.isLogin && u.mid > 0 && u.pendant.length === 0) {
-      BiliApi.getUserSpaceInfo(u.mid).then((space: UserSpaceInfo | null) => {
+      UserApi.getUserSpaceInfo(u.mid).then((space: UserSpaceInfo | null) => {
         if (space === null || space.pendant.length === 0 || UserStore.user !== u) return;
         u.pendant = space.pendant;
         AppStorage.setOrCreate<string>('userPendant', space.pendant);

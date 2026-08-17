@@ -10,6 +10,7 @@ import { colorWithAlpha, formatRelativeTime } from '../common/Utils';
 import { MsgNotifyItem, MsgNotifyPageData } from '../model/Models';
 import { LoadingView } from './LoadingView';
 import { LoadMoreFooter } from './LoadMoreFooter';
+import { MessageApi } from '../api/MessageApi';
 
 @Component
 export struct MsgNotifyList {
@@ -39,8 +40,8 @@ export struct MsgNotifyList {
     this.loading = true;
     try {
       const data: MsgNotifyPageData = this.tab === 'sys' ?
-        await BiliApi.getSysNotifications(reset ? '' : this.sysCursor) :
-        await BiliApi.getMsgFeedNotify(this.tab, reset ? '' : this.cursorId, reset ? '' : this.cursorTime);
+        await MessageApi.getSysNotifications(reset ? '' : this.sysCursor) :
+        await MessageApi.getMsgFeedNotify(this.tab, reset ? '' : this.cursorId, reset ? '' : this.cursorTime);
       if (data.error.length > 0) {
         // 失败不清空已有列表；首次加载失败时由 LoadingView 展示原因与重试。
         if (reset) this.error = data.error;
@@ -59,7 +60,7 @@ export struct MsgNotifyList {
       this.sysCursor = data.sysCursor;
       if (this.tab === 'sys' && !this.sysReadReported && data.items.length > 0) {
         this.sysReadReported = true;
-        BiliApi.updateSysMsgCursor(data.items[0].sysCursor).catch(() => {
+        MessageApi.updateSysMsgCursor(data.items[0].sysCursor).catch(() => {
         });
       }
     } finally {
@@ -188,7 +189,7 @@ export struct MsgNotifyList {
   private async deleteItem(item: MsgNotifyItem): Promise<void> {
     try {
       const result = this.tab === 'sys' ?
-        await BiliApi.delSysNotify([item.id]) : await BiliApi.delNotify(this.tab, item.id);
+        await MessageApi.delSysNotify([item.id]) : await MessageApi.delNotify(this.tab, item.id);
       if (result.ok) {
         // 本地移除该行（按 id 过滤重建数组触发刷新）。
         const all: Array<MsgNotifyItem> = this.source.getAll();
@@ -218,7 +219,8 @@ export struct MsgNotifyList {
         List() {
           LazyForEach(this.source, (item: MsgNotifyItem) => {
             ListItem() { this.NotifyRow(item) }
-          }, (item: MsgNotifyItem, index: number) => this.tab + '-' + String(item.id) + '-' + String(index))
+          }, (item: MsgNotifyItem, index: number) =>
+            this.tab + '-' + String(item.id) + (item.id > 0 ? '' : '-' + String(index)))
           ListItem() {
             LoadMoreFooter({
               loading: this.loading,

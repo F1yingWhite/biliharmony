@@ -1,5 +1,6 @@
 import { BiliApi } from '../api/BiliApi';
 import { HotSearchItem } from '../model/Models';
+import { SearchApi } from '../api/SearchApi';
 
 /** 首页头栏与搜索页共享一份热搜请求和内存缓存。 */
 export class HotSearchStore {
@@ -9,7 +10,7 @@ export class HotSearchStore {
   static async load(force: boolean = false): Promise<Array<HotSearchItem>> {
     if (!force && HotSearchStore.items.length > 0) return HotSearchStore.items;
     if (!force && HotSearchStore.pending !== null) return HotSearchStore.pending;
-    const request: Promise<Array<HotSearchItem>> = BiliApi.getHotSearch();
+    const request: Promise<Array<HotSearchItem>> = SearchApi.getHotSearch();
     HotSearchStore.pending = request;
     let list: Array<HotSearchItem> = [];
     try {

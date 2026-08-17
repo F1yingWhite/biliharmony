@@ -6,7 +6,7 @@ import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
 import { asArray, asObject } from '../common/Utils';
 import { BiliEmotePackage, ReplyData, ReplyPageData } from '../model/Models';
-import { ActionResult, getData, postVideoAction } from './internal/ApiCommon';
+import { ActionResult, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
 
 export class CommentApi {
   // ===== 评论（游客模式，WBI 签名 /wbi/main） =====
@@ -18,8 +18,7 @@ export class CommentApi {
         'oid': String(oid), 'type': String(type), 'pn': String(pageNumber), 'ps': '20',
         'sort': mode === 3 ? '1' : '0',
       };
-      const legacyResp: HttpResponse = await HttpClient.get(Api.replyList + '?' + HttpClient.buildQuery(legacyParams),
-        HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://www.bilibili.com/' }));
+      const legacyResp: HttpResponse = await webGet(Api.replyList, legacyParams, 'https://www.bilibili.com/');
       const legacyData: Record<string, Object> | null = getData(legacyResp);
       if (legacyData !== null) return ReplyData.fromLegacy(legacyData, pageNumber);
     }
@@ -30,9 +29,7 @@ export class CommentApi {
       'pagination_str': JSON.stringify({ 'offset': cursor }),
     };
     // 对齐当前 PiliPlus：游客/通用评论流使用 /main 与 next_offset，不对该端点追加 WBI 参数。
-    const url: string = Api.replyList + '/main?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url,
-      HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://www.bilibili.com/' }));
+    const resp: HttpResponse = await webGet(Api.replyList + '/main', params, 'https://www.bilibili.com/');
     let data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       // 部分网络会对匿名 /main 返回 -352；回退到签名端点，避免评论区完全不可用。
@@ -41,8 +38,7 @@ export class CommentApi {
         'pagination_str': JSON.stringify({ 'offset': cursor }), 'web_location': '1315875',
       };
       await WbiSign.encWbi(fallback);
-      const fallbackResp: HttpResponse = await HttpClient.get(Api.replyList + '/wbi/main?' + HttpClient.buildQuery(fallback),
-        HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://www.bilibili.com/' }));
+      const fallbackResp: HttpResponse = await webGet(Api.replyList + '/wbi/main', fallback, 'https://www.bilibili.com/');
       data = getData(fallbackResp);
     }
     if (data === null) {
@@ -113,8 +109,7 @@ export class CommentApi {
       'web_location': '1315875',
     };
     await WbiSign.encWbi(params);
-    const resp: HttpResponse = await HttpClient.post(Api.replyReport + '?' + HttpClient.buildQuery(params),
-      HttpClient.buildQuery({}), Constants.webHeaders);
+    const resp: HttpResponse = await webPost(Api.replyReport, params);
     if (!resp.ok) return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
     const json: Record<string, Object> = resp.json();
     const code: number = Number(json['code'] ?? -1);
@@ -129,8 +124,7 @@ export class CommentApi {
       'business': business,
       'web_location': '333.1245',
     };
-    const resp: HttpResponse = await HttpClient.get(Api.userEmotes + '?' + HttpClient.buildQuery(params),
-      Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.userEmotes, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return [];
     const packages: Array<Object> = asArray(data['packages']);
@@ -151,8 +145,7 @@ export class CommentApi {
       'pn': String(page),
       'ps': '20',
     };
-    const url: string = Api.replyReplyList + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await HttpClient.get(url, Constants.webHeaders);
+    const resp: HttpResponse = await webGet(Api.replyReplyList, params);
     const data: Record<string, Object> | null = getData(resp);
     return data === null ? new ReplyPageData() : ReplyPageData.from(data);
   }
