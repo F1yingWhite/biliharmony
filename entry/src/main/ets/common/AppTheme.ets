@@ -7,12 +7,15 @@ import { Constants } from './Constants';
 import { uiMaterial } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
+import { deviceInfo } from '@kit.BasicServicesKit';
 
 export class AppTheme {
   /** 预设主题色（用户自选） */
   static readonly PRESET_COLORS: Array<string> = [
     '#FB7299', '#008AC5', '#43A047', '#FF8F00', '#8E24AA', '#E53935', '#00897B', '#FFCC00',
   ];
+  /** 危险/删除/清空等否定操作的统一红，取代历史遗留的 #FA4B4B / #FB4A4A 两套红。 */
+  static readonly DANGER: string = '#FB4A4A';
   static readonly KEY_ACCENT: string = 'accentColor';
   static readonly KEY_DARK: string = 'isDarkMode';
   static readonly KEY_THEME_MODE: string = 'themeMode';
@@ -31,46 +34,44 @@ export class AppTheme {
 
   /** 初始化主题状态 */
   static init(context: common.UIAbilityContext): void {
+    // persistentProp 负责将偏好持久化到 AppStorage；ensure* 只补启动首帧默认值，
+    // 避免 13 段 if (AppStorage.get(...) === undefined) 样板。
     PersistentStorage.persistProp<string>(AppTheme.KEY_THEME_MODE, AppTheme.MODE_SYSTEM);
     PersistentStorage.persistProp<string>(AppTheme.KEY_ACCENT, Constants.brandPink);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_DARK, false);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_GLASS_ENABLED, true);
-    if (AppStorage.get<string>(AppTheme.KEY_ACCENT) === undefined) {
-      AppStorage.setOrCreate<string>(AppTheme.KEY_ACCENT, Constants.brandPink);
-    }
-    if (AppStorage.get<boolean>(AppTheme.KEY_DARK) === undefined) {
-      AppStorage.setOrCreate<boolean>(AppTheme.KEY_DARK, false);
-    }
-    if (AppStorage.get<string>(AppTheme.KEY_THEME_MODE) === undefined) {
-      AppStorage.setOrCreate<string>(AppTheme.KEY_THEME_MODE, AppTheme.MODE_SYSTEM);
-    }
-    if (AppStorage.get<boolean>(AppTheme.KEY_SYSTEM_DARK) === undefined) {
-      AppStorage.setOrCreate<boolean>(AppTheme.KEY_SYSTEM_DARK, false);
-    }
-    if (AppStorage.get<number>(AppTheme.KEY_HEADER_FADE) === undefined) {
-      AppStorage.setOrCreate<number>(AppTheme.KEY_HEADER_FADE, 0);
-    }
-    if (AppStorage.get<boolean>(AppTheme.KEY_GLASS_ENABLED) === undefined) {
-      AppStorage.setOrCreate<boolean>(AppTheme.KEY_GLASS_ENABLED, true);
-    }
-    if (AppStorage.get<boolean>('autoContinuePlay') === undefined) {
-      AppStorage.setOrCreate<boolean>('autoContinuePlay', true);
-    }
-    if (AppStorage.get<boolean>('sponsorSkipEnabled') === undefined) {
-      AppStorage.setOrCreate<boolean>('sponsorSkipEnabled', true);
-    }
+    AppTheme.ensureString(AppTheme.KEY_THEME_MODE, AppTheme.MODE_SYSTEM);
+    AppTheme.ensureString(AppTheme.KEY_ACCENT, Constants.brandPink);
+    AppTheme.ensureBool(AppTheme.KEY_DARK, false);
+    AppTheme.ensureBool(AppTheme.KEY_SYSTEM_DARK, false);
+    AppTheme.ensureNumber(AppTheme.KEY_HEADER_FADE, 0);
+    AppTheme.ensureBool(AppTheme.KEY_GLASS_ENABLED, true);
+    AppTheme.ensureBool('autoContinuePlay', true);
+    AppTheme.ensureBool('sponsorSkipEnabled', true);
     // 定时深色：默认关闭；时段默认 19:00 - 07:00（跨午夜）。
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_AUTO_DARK, false);
     PersistentStorage.persistProp<string>(AppTheme.KEY_AUTO_DARK_START, '19:00');
     PersistentStorage.persistProp<string>(AppTheme.KEY_AUTO_DARK_END, '07:00');
-    if (AppStorage.get<boolean>(AppTheme.KEY_AUTO_DARK) === undefined) {
-      AppStorage.setOrCreate<boolean>(AppTheme.KEY_AUTO_DARK, false);
+    AppTheme.ensureBool(AppTheme.KEY_AUTO_DARK, false);
+    AppTheme.ensureString(AppTheme.KEY_AUTO_DARK_START, '19:00');
+    AppTheme.ensureString(AppTheme.KEY_AUTO_DARK_END, '07:00');
+  }
+
+  private static ensureString(key: string, value: string): void {
+    if (AppStorage.get<string>(key) === undefined) {
+      AppStorage.setOrCreate<string>(key, value);
     }
-    if (AppStorage.get<string>(AppTheme.KEY_AUTO_DARK_START) === undefined) {
-      AppStorage.setOrCreate<string>(AppTheme.KEY_AUTO_DARK_START, '19:00');
+  }
+
+  private static ensureBool(key: string, value: boolean): void {
+    if (AppStorage.get<boolean>(key) === undefined) {
+      AppStorage.setOrCreate<boolean>(key, value);
     }
-    if (AppStorage.get<string>(AppTheme.KEY_AUTO_DARK_END) === undefined) {
-      AppStorage.setOrCreate<string>(AppTheme.KEY_AUTO_DARK_END, '07:00');
+  }
+
+  private static ensureNumber(key: string, value: number): void {
+    if (AppStorage.get<number>(key) === undefined) {
+      AppStorage.setOrCreate<number>(key, value);
     }
   }
 
@@ -331,11 +332,18 @@ export class AppTheme {
   }
 
   /**
-   * L2 浮层原生沉浸光感材质（systemMaterial 用）；总开关关闭时返回 undefined（退化为 floatBg 实底）。
+   * API 26 才提供 barFloatingStyle/systemMaterial/uiMaterial.ImmersiveStyle；低版本需退化为普通实底样式。
+   */
+  static isImmersiveUiSupported(): boolean {
+    return deviceInfo.apiAvailable('26.0.0');
+  }
+
+  /**
+   * L2 浮层原生沉浸光感材质（systemMaterial 用）；总开关关闭或低版本时返回 undefined（退化为 floatBg 实底）。
    * interactive 按压弹性形变 + lightEffect 触控光晕，即原生光感交互反馈。
    */
   static floatMaterial(on: boolean): uiMaterial.ImmersiveMaterial | undefined {
-    if (!on) {
+    if (!on || !AppTheme.isImmersiveUiSupported()) {
       return undefined;
     }
     return new uiMaterial.ImmersiveMaterial({

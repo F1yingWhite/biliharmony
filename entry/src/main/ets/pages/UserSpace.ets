@@ -2,6 +2,7 @@
  * 用户空间页（P3）：banner 氛围头部 + 资料卡 + 投稿 Tab（排序 chips + 双列流分页）
  * 入口：搜索用户卡片 / 视频详情 UP 主条
  */
+import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, ImageViewerParam, LiveRoomParam, NAV_IMAGE_VIEWER, NAV_LIVE_ROOM, NAV_LOGIN,
   NAV_RELATION_LIST, NAV_SEARCH, RelationListParam, UserSpaceParam } from '../common/AppRouter';
@@ -571,7 +572,7 @@ export struct UserSpacePage {
         message: '对 ' + this.info.name + ' 进行什么操作？',
         buttons: [
           { text: '取消', color: '#9499A0' },
-          { text: '拉黑', color: '#FB4A4A' },
+          { text: '拉黑', color: AppTheme.DANGER },
           { text: '举报', color: this.accent },
         ],
       }).then((dialogResult) => {

@@ -1,3 +1,4 @@
+import { AppTheme } from '../common/AppTheme';
 import { AppNavStack, ImageViewerParam, NAV_IMAGE_VIEWER, NAV_USER_SPACE, NAV_VIDEO_DETAIL,
   UserSpaceParam, VideoDetailParam } from '../common/AppRouter';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
@@ -388,7 +389,7 @@ export struct ReplyCard {
     const values: Array<string> = ['21', '22', '23', '24', '25', '26', '99'];
     const buttons: Array<ReportButtonItem> = [];
     if (isMine) {
-      buttons.push({ text: '删除这条评论', color: '#FB4A4A' });
+      buttons.push({ text: '删除这条评论', color: AppTheme.DANGER });
     } else {
       for (let i: number = 0; i < reasons.length; i++) {
         buttons.push({ text: reasons[i], color: this.isDark ? '#CCFFFFFF' : '#18191C' });
@@ -433,7 +434,7 @@ export struct ReplyCard {
         message: '删除后无法恢复，确定删除这条评论吗？',
         buttons: [
           { text: '取消', color: '#9499A0' },
-          { text: '删除', color: '#FB4A4A' },
+          { text: '删除', color: AppTheme.DANGER },
         ],
       }).then((dialogResult) => {
         if (Number(dialogResult.index) !== 1) return;

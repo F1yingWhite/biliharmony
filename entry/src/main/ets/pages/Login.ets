@@ -2,6 +2,7 @@
  * 登录页：扫码（TV）/ 密码 / 短信验证码 三种方式
  * 密码与短信登录移植自 PiliPlus lib/pages/login/controller.dart
  */
+import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
 import { AppNavStack } from '../common/AppRouter';
 import { BiliApi, CookiePair, LoginResult, SmsSendResult, TVCodeResult } from '../api/BiliApi';
@@ -91,7 +92,7 @@ export struct LoginPage {
     if (result === null) {
       this.qrError = true;
       this.statusText = '获取二维码失败，请检查网络后点击重试';
-      this.statusColor = '#FB4A4A';
+      this.statusColor = AppTheme.DANGER;
       return;
     }
     this.authCode = result.authCode;
@@ -156,7 +157,7 @@ export struct LoginPage {
         this.stopPoll();
         this.expired = true;
         this.statusText = '二维码已过期，点击刷新';
-        this.statusColor = '#FB4A4A';
+        this.statusColor = AppTheme.DANGER;
       } else {
         this.statusText = result.message.length > 0 ? result.message : '登录失败，请重试';
       }
@@ -450,7 +451,7 @@ export struct LoginPage {
                 Column({ space: 10 }) {
                   Text(this.qrError ? '⚠' : '↻')
                     .fontSize(44)
-                    .fontColor(this.qrError ? '#FB4A4A' : this.accent)
+                    .fontColor(this.qrError ? AppTheme.DANGER : this.accent)
                   Text(this.qrError ? '点击重新获取' : (this.expired ? '二维码已过期' : '加载中...'))
                     .fontSize(13)
                     .fontColor('#9499A0')

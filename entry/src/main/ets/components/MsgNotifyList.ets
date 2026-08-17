@@ -3,6 +3,7 @@
  * 头像跳用户空间；能解析出视频 aid/bvid 的通知点击跳视频详情，否则不跳。
  */
 import { BiliApi } from '../api/BiliApi';
+import { AppTheme } from '../common/AppTheme';
 import { AppNavStack, NAV_USER_SPACE, NAV_VIDEO_DETAIL, UserSpaceParam, VideoDetailParam } from '../common/AppRouter';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { MsgUnreadStore } from '../common/MsgUnreadStore';
@@ -175,7 +176,7 @@ export struct MsgNotifyList {
         message: '删除后将无法恢复，确定删除这条通知吗？',
         buttons: [
           { text: '取消', color: '#9499A0' },
-          { text: '删除', color: '#FB4A4A' },
+          { text: '删除', color: AppTheme.DANGER },
         ],
       }).then((dialogResult) => {
         if (Number(dialogResult.index) !== 1) return;

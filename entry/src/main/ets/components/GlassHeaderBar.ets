@@ -137,7 +137,7 @@ export struct GlassHeaderBar {
             .margin({ top: 9 })
           if (this.msgUnread > 0) {
             Text(this.msgUnread > 99 ? '99+' : String(this.msgUnread))
-              .fontSize(9).fontColor('#FFFFFF').backgroundColor('#FA4B4B')
+              .fontSize(9).fontColor('#FFFFFF').backgroundColor(AppTheme.DANGER)
               .padding({ left: 4, right: 4, top: 1, bottom: 1 }).borderRadius(8)
               .translate({ x: 10, y: 2 })
           }
