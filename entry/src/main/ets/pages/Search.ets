@@ -18,6 +18,7 @@ import { LoadingView } from '../components/LoadingView';
 import { BackButton } from '../components/BackButton';
 import { FilterChip } from '../components/FilterChip';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
+import { SearchResultList } from '../components/SearchResultList';
 import { VideoRowCard } from '../components/VideoRowCard';
 import { VideoCard } from '../components/VideoCard';
 import { LiveRoomCard } from '../components/LiveRoomCard';
@@ -868,59 +869,44 @@ export struct SearchPage {
 
   // ===== 结果态：视频 Tab 内容 =====
   @Builder
+  VideoListContent() {
+    LazyForEach(this.resultsSource, (item: VideoItem) => {
+      ListItem() {
+        VideoRowCard({
+          cover: item.cover,
+          title: item.title,
+          upName: item.upName,
+          overlayText: item.playText + ' · ' + item.danmakuText,
+          compact: true,
+          onTap: () => {
+            const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
+            AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+          },
+        })
+      }
+    }, (item: VideoItem) => item.bvid + String(item.aid))
+  }
+
+  @Builder
   VideoResultTab() {
     Column() {
       this.VideoSortRow()
-      if (this.loading) {
-        LoadingView({ loading: true })
-      } else if (this.resultsSource.totalCount() === 0) {
-        LoadingView({
-          loading: false,
-          empty: true,
-          emptyText: '没有找到相关视频',
-          onRetry: () => {
-            this.doSearch(true).catch(() => {
-            });
-          },
-        })
-      } else {
-        List() {
-          LazyForEach(this.resultsSource, (item: VideoItem) => {
-            ListItem() {
-              VideoRowCard({
-                cover: item.cover,
-                title: item.title,
-                upName: item.upName,
-                overlayText: item.playText + ' · ' + item.danmakuText,
-                compact: true,
-                onTap: () => {
-                  const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
-                  AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
-                },
-              })
-            }
-          }, (item: VideoItem) => item.bvid + String(item.aid))
-          ListItem() {
-            LoadMoreFooter({
-              loading: this.loadingMore,
-              hasMore: true,
-              moreText: this.loadingMore ? '' : '上滑加载更多',
-              endText: '',
-              fixedHeight: 44,
-              onLoadMore: () => {
-                this.loadMoreSearch();
-              },
-            })
-          }
-        }
-        .width('100%')
-        .height('100%')
-        .cachedCount(5)
-        .scrollBar(BarState.Off)
-        .onReachEnd(() => {
+      SearchResultList({
+        loading: this.loading,
+        loadingMore: this.loadingMore,
+        count: this.resultsSource.totalCount(),
+        emptyText: '没有找到相关视频',
+        onRetry: (): void => {
+          this.doSearch(true).catch(() => {
+          });
+        },
+        onLoadMore: (): void => {
           this.loadMoreSearch();
-        })
-      }
+        },
+        content: (): void => {
+          this.VideoListContent()
+        },
+      })
     }
     .width('100%')
     .height('100%')
@@ -928,49 +914,34 @@ export struct SearchPage {
 
   // ===== 结果态：用户 Tab 内容 =====
   @Builder
+  UserListContent() {
+    LazyForEach(this.userSource, (item: UserSearchItem) => {
+      ListItem() {
+        this.UserRow(item)
+      }
+    }, (item: UserSearchItem) => String(item.mid))
+  }
+
+  @Builder
   UserResultTab() {
     Column() {
       this.UserSortRow()
-      if (this.loading) {
-        LoadingView({ loading: true })
-      } else if (this.userSource.totalCount() === 0) {
-        LoadingView({
-          loading: false,
-          empty: true,
-          emptyText: '没有找到相关用户',
-          onRetry: () => {
-            this.doSearch(true).catch(() => {
-            });
-          },
-        })
-      } else {
-        List() {
-          LazyForEach(this.userSource, (item: UserSearchItem) => {
-            ListItem() {
-              this.UserRow(item)
-            }
-          }, (item: UserSearchItem) => String(item.mid))
-          ListItem() {
-            LoadMoreFooter({
-              loading: this.loadingMore,
-              hasMore: true,
-              moreText: this.loadingMore ? '' : '上滑加载更多',
-              endText: '',
-              fixedHeight: 44,
-              onLoadMore: () => {
-                this.loadMoreSearch();
-              },
-            })
-          }
-        }
-        .width('100%')
-        .height('100%')
-        .cachedCount(5)
-        .scrollBar(BarState.Off)
-        .onReachEnd(() => {
+      SearchResultList({
+        loading: this.loading,
+        loadingMore: this.loadingMore,
+        count: this.userSource.totalCount(),
+        emptyText: '没有找到相关用户',
+        onRetry: (): void => {
+          this.doSearch(true).catch(() => {
+          });
+        },
+        onLoadMore: (): void => {
           this.loadMoreSearch();
-        })
-      }
+        },
+        content: (): void => {
+          this.UserListContent()
+        },
+      })
     }
     .width('100%')
     .height('100%')
@@ -1047,50 +1018,48 @@ export struct SearchPage {
     })
   }
 
-  // ===== 结果态：番剧/影视 Tab 内容（isBangumi 区分 search_type 与数据源） =====
+  // ===== 结果态：番剧 / 影视 Tab 内容（isBangumi 区分 search_type 与数据源） =====
+  @Builder
+  BangumiListContent() {
+    LazyForEach(this.bangumiSource, (item: PgcSearchItem) => {
+      ListItem() {
+        this.PgcRow(item)
+      }
+    }, (item: PgcSearchItem) => String(item.seasonId))
+  }
+
+  @Builder
+  FtListContent() {
+    LazyForEach(this.ftSource, (item: PgcSearchItem) => {
+      ListItem() {
+        this.PgcRow(item)
+      }
+    }, (item: PgcSearchItem) => String(item.seasonId))
+  }
+
   @Builder
   MediaResultTab(isBangumi: boolean, emptyText: string) {
     Column() {
-      if (this.loading) {
-        LoadingView({ loading: true })
-      } else if (this.mediaSource(isBangumi).totalCount() === 0) {
-        LoadingView({
-          loading: false,
-          empty: true,
-          emptyText: emptyText,
-          onRetry: () => {
-            this.doSearch(true).catch(() => {
-            });
-          },
-        })
-      } else {
-        List() {
-          LazyForEach(this.mediaSource(isBangumi), (item: PgcSearchItem) => {
-            ListItem() {
-              this.PgcRow(item)
-            }
-          }, (item: PgcSearchItem) => String(item.seasonId))
-          ListItem() {
-            LoadMoreFooter({
-              loading: this.loadingMore,
-              hasMore: true,
-              moreText: this.loadingMore ? '' : '上滑加载更多',
-              endText: '',
-              fixedHeight: 44,
-              onLoadMore: () => {
-                this.loadMoreSearch();
-              },
-            })
-          }
-        }
-        .width('100%')
-        .height('100%')
-        .cachedCount(5)
-        .scrollBar(BarState.Off)
-        .onReachEnd(() => {
+      SearchResultList({
+        loading: this.loading,
+        loadingMore: this.loadingMore,
+        count: this.mediaSource(isBangumi).totalCount(),
+        emptyText: emptyText,
+        onRetry: (): void => {
+          this.doSearch(true).catch(() => {
+          });
+        },
+        onLoadMore: (): void => {
           this.loadMoreSearch();
-        })
-      }
+        },
+        content: (): void => {
+          if (isBangumi) {
+            this.BangumiListContent()
+          } else {
+            this.FtListContent()
+          }
+        },
+      })
     }
     .width('100%')
     .height('100%')
@@ -1098,51 +1067,37 @@ export struct SearchPage {
 
   // ===== 结果态：直播 Tab 内容（双列直播间卡片 + 排序 chips） =====
   @Builder
+  LiveListContent() {
+    LazyForEach(this.liveSource, (item: LiveRoomItem) => {
+      ListItem() {
+        LiveRoomCard({ room: item })
+      }
+    }, (item: LiveRoomItem) => String(item.roomId))
+  }
+
+  @Builder
   LiveResultTab() {
     Column() {
       this.LiveSortRow()
-      if (this.loading) {
-        LoadingView({ loading: true })
-      } else if (this.liveSource.totalCount() === 0) {
-        LoadingView({
-          loading: false,
-          empty: true,
-          emptyText: '没有找到相关直播间',
-          onRetry: () => {
-            this.doSearch(true).catch(() => {
-            });
-          },
-        })
-      } else {
-        List({ space: 10 }) {
-          LazyForEach(this.liveSource, (item: LiveRoomItem) => {
-            ListItem() {
-              LiveRoomCard({ room: item })
-            }
-          }, (item: LiveRoomItem) => String(item.roomId))
-          ListItem() {
-            LoadMoreFooter({
-              loading: this.loadingMore,
-              hasMore: true,
-              moreText: this.loadingMore ? '' : '上滑加载更多',
-              endText: '',
-              fixedHeight: 44,
-              onLoadMore: () => {
-                this.loadMoreSearch();
-              },
-            })
-          }
-        }
-        .width('100%')
-        .height('100%')
-        .lanes(2, 10)
-        .padding({ left: 12, right: 12 })
-        .cachedCount(5)
-        .scrollBar(BarState.Off)
-        .onReachEnd(() => {
+      SearchResultList({
+        loading: this.loading,
+        loadingMore: this.loadingMore,
+        count: this.liveSource.totalCount(),
+        emptyText: '没有找到相关直播间',
+        listSpace: 10,
+        lanes: 2,
+        horizontalPadding: 12,
+        onRetry: (): void => {
+          this.doSearch(true).catch(() => {
+          });
+        },
+        onLoadMore: (): void => {
           this.loadMoreSearch();
-        })
-      }
+        },
+        content: (): void => {
+          this.LiveListContent()
+        },
+      })
     }
     .width('100%')
     .height('100%')
@@ -1197,48 +1152,33 @@ export struct SearchPage {
 
   // ===== 结果态：专栏 Tab 内容 =====
   @Builder
+  ArticleListContent() {
+    LazyForEach(this.articleSource, (item: ArticleSearchItem) => {
+      ListItem() {
+        this.ArticleRow(item)
+      }
+    }, (item: ArticleSearchItem) => String(item.id))
+  }
+
+  @Builder
   ArticleResultTab() {
     Column() {
-      if (this.loading) {
-        LoadingView({ loading: true })
-      } else if (this.articleSource.totalCount() === 0) {
-        LoadingView({
-          loading: false,
-          empty: true,
-          emptyText: '没有找到相关专栏',
-          onRetry: () => {
-            this.doSearch(true).catch(() => {
-            });
-          },
-        })
-      } else {
-        List() {
-          LazyForEach(this.articleSource, (item: ArticleSearchItem) => {
-            ListItem() {
-              this.ArticleRow(item)
-            }
-          }, (item: ArticleSearchItem) => String(item.id))
-          ListItem() {
-            LoadMoreFooter({
-              loading: this.loadingMore,
-              hasMore: true,
-              moreText: this.loadingMore ? '' : '上滑加载更多',
-              endText: '',
-              fixedHeight: 44,
-              onLoadMore: () => {
-                this.loadMoreSearch();
-              },
-            })
-          }
-        }
-        .width('100%')
-        .height('100%')
-        .cachedCount(5)
-        .scrollBar(BarState.Off)
-        .onReachEnd(() => {
+      SearchResultList({
+        loading: this.loading,
+        loadingMore: this.loadingMore,
+        count: this.articleSource.totalCount(),
+        emptyText: '没有找到相关专栏',
+        onRetry: (): void => {
+          this.doSearch(true).catch(() => {
+          });
+        },
+        onLoadMore: (): void => {
           this.loadMoreSearch();
-        })
-      }
+        },
+        content: (): void => {
+          this.ArticleListContent()
+        },
+      })
     }
     .width('100%')
     .height('100%')
