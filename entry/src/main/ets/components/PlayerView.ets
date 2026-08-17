@@ -5,6 +5,7 @@ import { media } from '@kit.MediaKit';
 import { avSession } from '@kit.AVSessionKit';
 import { PlayerAvSessionHelper } from './PlayerAvSessionHelper';
 import { PlayerSubtitleController } from './PlayerSubtitleController';
+import { PlayerSeekController } from './PlayerSeekController';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
@@ -153,18 +154,8 @@ export struct PlayerView {
   private runtimeQualityOptions: Array<VideoQualityOption> = [];
   private resumeAfterPrepare: number = -1;
   private shouldPlayAfterPrepare: boolean = true;
-  // seek 采用“末次请求获胜”的串行状态机，避免视频/音频两个 DASH 播放器堆积并发 seek。
-  private seekDispatchTimer: number = -1;
-  private seekSpinnerTimer: number = -1;
-  private seekWatchdogTimer: number = -1;
-  private pendingSeekMs: number = -1;
-  private pendingSeekPrecise: boolean = false;
-  private activeSeekMs: number = -1;
-  private activeAudioSeekMs: number = -1;
-  private seekInFlight: boolean = false;
-  private videoSeekDone: boolean = false;
-  private audioSeekDone: boolean = false;
-  private seekResumePlaying: boolean = false;
+  // seek 采用“并发请求获胜”的串行状态机，由 PlayerSeekController 管理音视频双轨 seek 合并。
+  private seekCtl: PlayerSeekController | null = null;
   private holdPreviousRate: number = 1.0;
   private panStartTime: number = 0;
   private panGestureActive: boolean = false;
@@ -203,6 +194,35 @@ export struct PlayerView {
     this.showControls = false;
     AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
     AppStorage.setOrCreate<number>('videoFullscreenExitRequest', 0);
+    if (this.seekCtl === null) {
+      this.seekCtl = new PlayerSeekController(
+        (): media.AVPlayer | null => this.player,
+        (): media.AVPlayer | null => this.audioPlayer,
+        (): boolean => this.prepared,
+        (): boolean => this.audioPrepared,
+        (): void => {
+          this.stopDmLoop(false);
+        },
+        (on: boolean): void => {
+          this.buffering = on;
+        },
+        (resume: boolean): void => {
+          const video: media.AVPlayer | null = this.player;
+          if (resume && video !== null && this.prepared) {
+            try {
+              if (!this.playing) video.play();
+              if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.play();
+            } catch (e) {
+            }
+          }
+          this.buffering = false;
+          if (this.playing) this.startDmLoop();
+        },
+        (video: media.AVPlayer | null, targetMs: number): void => {
+          if (video !== null) this.recoverPlayersAfterSeekStall(video, targetMs);
+        },
+      );
+    }
     if (this.runtimeSources.length === 0) {
       this.runtimeSources = this.videoUrls.length > 0 ? this.videoUrls : (this.videoUrl.length > 0 ? [this.videoUrl] : []);
       this.runtimeAudioSources = this.audioUrls;
@@ -790,7 +810,7 @@ export struct PlayerView {
         this.handlePlayerError(p, err.message);
       });
       p.on('seekDone', (position: number) => {
-        this.onVideoSeekDone(p, position);
+        this.onVideoSeekDone(p);
       });
       p.on('timeUpdate', (t: number) => {
         if (this.player !== p) return;
@@ -812,7 +832,7 @@ export struct PlayerView {
         const audio: media.AVPlayer | null = this.audioPlayer;
         // 双 DASH 轨只在明显失步时兜底校时；原先每 5 秒、220ms 阈值会制造周期性顿挫。
         const syncBucket: number = Math.floor(nextTime / 30);
-        if (!this.seekInFlight && audio !== null && this.audioPrepared && syncBucket !== this.lastAudioSyncBucket &&
+        if ((this.seekCtl?.seekInFlight ?? true) === false && audio !== null && this.audioPrepared && syncBucket !== this.lastAudioSyncBucket &&
           Math.abs(audio.currentTime - t) > 900) {
           this.lastAudioSyncBucket = syncBucket;
           audio.seek(t, media.SeekMode.SEEK_CLOSEST);
@@ -825,11 +845,11 @@ export struct PlayerView {
       p.on('bufferingUpdate', (infoType: media.BufferingInfoType, value: number) => {
         if (infoType === media.BufferingInfoType.BUFFERING_START) {
           // seek 的短暂缓冲由延迟提示管理，快速定位不闪 loading。
-          if (!this.seekInFlight) this.buffering = true;
+          if ((this.seekCtl?.seekInFlight ?? true) === false) this.buffering = true;
           this.pauseDmLoop();
         } else if (infoType === media.BufferingInfoType.BUFFERING_END) {
           // seek 尚未完成音轨对齐时不能提前隐藏 loading 或恢复弹幕时钟。
-          if (!this.seekInFlight) {
+          if ((this.seekCtl?.seekInFlight ?? true) === false) {
             this.buffering = false;
             this.startDmLoop();
           }
@@ -952,7 +972,7 @@ export struct PlayerView {
       const resumePlaying: boolean = this.shouldPlayAfterPrepare;
       this.resumeAfterPrepare = -1;
       this.shouldPlayAfterPrepare = false;
-      this.seekResumePlaying = resumePlaying;
+      if (this.seekCtl !== null) this.seekCtl.seekResumePlaying = resumePlaying;
       // 重建/切清晰度后也走同一串行 seek，不能在 seekDone 前让两条轨道各自起播。
       this.seekTo(resumeAt, true);
       return;
@@ -1328,9 +1348,7 @@ export struct PlayerView {
 
   seekTo(positionSec: number, precise: boolean = false): void {
     const p: media.AVPlayer | null = this.player;
-    if (p === null || !this.prepared) {
-      return;
-    }
+    if (p === null || !this.prepared) return;
     const clamped: number = Math.max(0, Math.min(this.duration > 0 ? this.duration : positionSec, positionSec));
     const targetMs: number = Math.floor(clamped * 1000);
     this.resetDanmakuAt(clamped);
@@ -1339,127 +1357,22 @@ export struct PlayerView {
     this.onProgress(clamped);
     this.updateSubtitle(clamped);
     this.updateAVSessionPlaybackState();
-    this.pendingSeekMs = targetMs;
-    this.pendingSeekPrecise = precise;
-    this.seekResumePlaying = this.seekResumePlaying || this.playing;
     this.lastAudioSyncBucket = -1;
-    if (this.seekInFlight) return;
-    if (this.seekDispatchTimer >= 0) clearTimeout(this.seekDispatchTimer);
-    // 合并短时间内连续点击/滑动，只让底层解码器处理最后一次目标。
-    this.seekDispatchTimer = setTimeout(() => {
-      this.seekDispatchTimer = -1;
-      this.dispatchPendingSeek();
-    }, 90);
+    this.seekCtl?.request(targetMs, precise, this.playing);
   }
 
-  private dispatchPendingSeek(): void {
-    const video: media.AVPlayer | null = this.player;
-    if (video === null || !this.prepared || this.pendingSeekMs < 0) return;
-    const targetMs: number = this.pendingSeekMs;
-    const precise: boolean = this.pendingSeekPrecise;
-    this.pendingSeekMs = -1;
-    this.activeSeekMs = targetMs;
-    this.activeAudioSeekMs = -1;
-    this.videoSeekDone = false;
-    this.audioSeekDone = this.audioPlayer === null || !this.audioPrepared;
-    this.seekInFlight = true;
-    const mode: media.SeekMode = precise ? media.SeekMode.SEEK_CLOSEST :
-      (targetMs < video.currentTime ? media.SeekMode.SEEK_NEXT_SYNC : media.SeekMode.SEEK_PREV_SYNC);
-    this.stopDmLoop(false);
-    const audio: media.AVPlayer | null = this.audioPlayer;
-    if (audio !== null && this.audioPrepared) {
-      try {
-        audio.pause();
-        this.activeAudioSeekMs = targetMs;
-        this.audioSeekDone = false;
-        // 经过请求合并后，每次事务只并行提交一组音视频 seek，降低最终定位延迟。
-        audio.seek(targetMs, mode);
-      } catch (e) {
-        this.audioSeekDone = true;
-      }
-    }
-    try {
-      video.seek(targetMs, mode);
-    } catch (e) {
-      this.seekInFlight = false;
-      this.recoverPlayersAfterSeekStall(video, targetMs);
-      return;
-    }
-    if (this.seekSpinnerTimer >= 0) clearTimeout(this.seekSpinnerTimer);
-    this.seekSpinnerTimer = setTimeout(() => {
-      this.seekSpinnerTimer = -1;
-      if (this.seekInFlight && this.player === video) this.buffering = true;
-    }, 180);
-    this.armSeekWatchdog(video, targetMs);
+  onVideoSeekDone(video: media.AVPlayer): void {
+    this.seekCtl?.onVideoSeekDone(video);
   }
 
-  private onVideoSeekDone(video: media.AVPlayer, position: number): void {
-    if (this.player !== video || !this.seekInFlight) return;
-    this.videoSeekDone = true;
-    this.finishSeek();
-  }
-
-  private onAudioSeekDone(audio: media.AVPlayer, position: number): void {
-    if (this.audioPlayer !== audio || !this.seekInFlight || this.activeAudioSeekMs < 0) return;
-    // 丢弃其他周期校时产生的旧回调，避免错误地提前结束当前 seek。
-    if (Math.abs(position - this.activeAudioSeekMs) > 8000) return;
-    this.audioSeekDone = true;
-    this.finishSeek();
-  }
-
-  private finishSeek(): void {
-    if (!this.seekInFlight || !this.videoSeekDone || !this.audioSeekDone) return;
-    this.clearSeekWatchdog();
-    this.clearSeekSpinner();
-    this.seekInFlight = false;
-    this.activeSeekMs = -1;
-    this.activeAudioSeekMs = -1;
-    if (this.pendingSeekMs >= 0) {
-      this.dispatchPendingSeek();
-      return;
-    }
-    const video: media.AVPlayer | null = this.player;
-    const audio: media.AVPlayer | null = this.audioPlayer;
-    if (this.seekResumePlaying && video !== null && this.prepared) {
-      try {
-        if (!this.playing) video.play();
-        if (audio !== null && this.audioPrepared) audio.play();
-      } catch (e) {
-      }
-    }
-    this.seekResumePlaying = false;
-    this.buffering = false;
-    if (this.playing) this.startDmLoop();
-  }
-
-  private armSeekWatchdog(video: media.AVPlayer, targetMs: number): void {
-    this.clearSeekWatchdog();
-    this.seekWatchdogTimer = setTimeout(() => {
-      this.seekWatchdogTimer = -1;
-      if (this.player === video && this.seekInFlight) {
-        const latestTarget: number = this.pendingSeekMs >= 0 ? this.pendingSeekMs : targetMs;
-        this.pendingSeekMs = -1;
-        this.recoverPlayersAfterSeekStall(video, latestTarget);
-      }
-    }, 4000);
-  }
-
-  private clearSeekWatchdog(): void {
-    if (this.seekWatchdogTimer >= 0) {
-      clearTimeout(this.seekWatchdogTimer);
-      this.seekWatchdogTimer = -1;
-    }
-  }
-
-  private clearSeekSpinner(): void {
-    if (this.seekSpinnerTimer >= 0) {
-      clearTimeout(this.seekSpinnerTimer);
-      this.seekSpinnerTimer = -1;
-    }
+  onAudioSeekDone(audio: media.AVPlayer, position: number): void {
+    this.seekCtl?.onAudioSeekDone(audio, position);
   }
 
   private async recoverPlayersAfterSeekStall(stalledVideo: media.AVPlayer, targetMs: number): Promise<void> {
     if (this.player !== stalledVideo) return;
+    const resume: boolean = this.seekCtl?.seekResumePlaying ?? false;
+    this.seekCtl?.cancel();
     this.invalidatePlayerCreation();
     const stalledAudio: media.AVPlayer | null = this.audioPlayer;
     this.player = null;
@@ -1467,14 +1380,9 @@ export struct PlayerView {
     this.prepared = false;
     this.audioPrepared = false;
     this.playing = false;
-    this.seekInFlight = false;
-    this.videoSeekDone = false;
-    this.audioSeekDone = false;
     this.resumeAfterPrepare = Math.max(0, targetMs / 1000);
-    this.shouldPlayAfterPrepare = this.seekResumePlaying;
-    this.seekResumePlaying = false;
+    this.shouldPlayAfterPrepare = resume;
     this.buffering = true;
-    this.clearSeekSpinner();
     try {
       await stalledVideo.release();
     } catch (e) {
@@ -1485,7 +1393,6 @@ export struct PlayerView {
       } catch (e) {
       }
     }
-    // 看门狗触发后组件可能已销毁，避免重建出无人释放的播放器。
     if (this.destroyed) return;
     await this.initPlayer();
   }
@@ -1596,10 +1503,7 @@ export struct PlayerView {
       clearTimeout(this.hideTimer);
       this.hideTimer = -1;
     }
-    if (this.seekDispatchTimer >= 0) {
-      clearTimeout(this.seekDispatchTimer);
-      this.seekDispatchTimer = -1;
-    }
+    this.seekCtl?.cancel();
     if (this.volumeRestoreTimer >= 0) {
       clearTimeout(this.volumeRestoreTimer);
       this.volumeRestoreTimer = -1;
@@ -1612,11 +1516,6 @@ export struct PlayerView {
       clearTimeout(this.doubleTapFeedbackTimer);
       this.doubleTapFeedbackTimer = -1;
     }
-    this.clearSeekWatchdog();
-    this.clearSeekSpinner();
-    this.pendingSeekMs = -1;
-    this.seekInFlight = false;
-    this.seekResumePlaying = false;
     this.stopDmLoop(true);
     this.dmEngine.clearCaches();
     Immersive.setKeepScreenOn(false);
