@@ -1990,18 +1990,18 @@ if (this.runtimeSources.length === 0) {
   private pinDanmaku(hit: ActiveDm): void {
     this.dmEngine.pin(hit);
     this.dmPinnedText = hit.renderText;
-    // 弹幕视口是 canvas 像素坐标，UI 叠层用 vp：统一经密度换算。
+    // 弹幕引擎视口坐标与 UI 叠层渲染都在同一 vp 坐标系（onAreaChange 提供 vp 尺寸），
+    // 直接复用 rect 的 vp 值定位气泡，切勿再做 px 换算（会缩 3.3x 跑到左上角）。
     const rect = this.dmEngine.dmViewportOf(hit);
-    const uiCtx: UIContext = this.getUIContext();
     const bubbleW: number = 100;  // vp
     const bubbleH: number = 34;   // vp
     const gap: number = 4;        // vp：贴近弹幕
-    const rx: number = uiCtx.px2vp(rect.x + rect.w / 2); // 弹幕水平中心（vp）
-    const ry: number = uiCtx.px2vp(rect.y);              // 弹幕顶（vp）
-    const rh: number = uiCtx.px2vp(rect.h);            // 弹幕高（vp）
+    const rx: number = rect.x + rect.w / 2; // 弹幕水平中心（vp）
+    const ry: number = rect.y;              // 弹幕顶（vp）
+    const rh: number = rect.h;            // 弹幕高（vp）
     // 默认放弹幕上方；贴顶（<60vp）则放下方。
     let bx: number = rx - bubbleW / 2;
-    const maxX: number = uiCtx.px2vp(this.dmEngine.width) - bubbleW - 4;
+    const maxX: number = this.dmEngine.width - bubbleW - 4;
     bx = Math.max(4, Math.min(bx, maxX));
     let by: number = ry - gap - bubbleH;
     if (by < 60) {
