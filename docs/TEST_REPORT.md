@@ -56,3 +56,15 @@
 - 产物：`entry/build/default/outputs/default/entry-default-signed.hap`（最新 HEAD）
 - 模拟器运行：冷启动正常、Tab 稳定、无崩溃
 - 文档：README（功能）/ CHANGELOG（交付）/ Roadmap-对照网页端（对齐）
+## 六、本轮重构回归补充（2026-08-17 下午）
+
+- 构建：`CompileArkTS` 通过，仅因本机签名路径缺失在 `SignHap` 阶段失败（与代码无关）。
+- 兼容性临时构建：`compatibleSdkVersion=6.1.1(24)` 成功出包，安装到 4090 模拟器 API24 正常。
+- 冷启动/重装后：`com.piliplus.harmony` 进程存活、无崩溃。
+- 搜索重构回归：
+  1. 首页点击搜索胶囊进入搜索页，热搜榜/趋势榜正常渲染；
+  2. 点击热词“华尔街投资人再买中概股”，视频结果 Tab 正常渲染（2.0万 / 45 / 3:40 等卡片数据齐全）；
+  3. 切到“用户”Tab，空态“没有找到相关用户”正常显示，无异常退出；
+  4. `SearchResultList` 通用壳覆盖的视频/用户 Tab 均通过 `uitest dumpLayout` 验证，未破坏原列表触底加载与空态逻辑。
+- `VideoRowCard` @Reusable 字段改 `@Prop` 后，搜索/历史/收藏列表复用路径编译通过；暂未发现复用残留。
+- 直播控件跟随全局强调色：编译通过，未实点直播间（直播页由 live 数据依赖，本轮仅代码走读 + 编译验证）。
