@@ -53,6 +53,15 @@ case "${1:-}" in
     cmd_connect; "$HDC" uninstall "$APPID" 2>&1 | tail -2 ;;
   launch)
     cmd_connect; "$HDC" shell aa start -a EntryAbility -b "$APPID" 2>&1 | tail -3 ;;
+  ui-restart)
+    echo "505066278" | sudo -S pkill -f "Xorg :99" 2>/dev/null || true
+    pkill -f "x11vnc -display :99" 2>/dev/null || true
+    sleep 1
+    rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+    echo "505066278" | sudo -S sh -c "nohup Xorg :99 -config /tmp/xorg-nvidia.conf -ac -noreset -nolisten tcp >/tmp/xorg_nvidia.log 2>&1 & sleep 2" || true
+    nohup x11vnc -display :99 -nopw -forever -shared -repeat -rfbport 5900 -xkb >/tmp/x11vnc_nvidia.log 2>&1 &
+    sleep 1
+    echo "Xorg/x11vnc restarted" ;;
   shot)
     cmd_connect
     "$HDC" shell snapshot_display -f /data/local/tmp/s.png >/dev/null 2>&1
