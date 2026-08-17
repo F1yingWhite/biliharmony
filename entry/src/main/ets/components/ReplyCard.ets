@@ -1,5 +1,6 @@
 import { AppTheme } from '../common/AppTheme';
 import { ReplyActionBar } from './ReplyActionBar';
+import { ReplyRichText } from './ReplyRichText';
 import { AppNavStack, ImageViewerParam, NAV_IMAGE_VIEWER, NAV_USER_SPACE, NAV_VIDEO_DETAIL,
   UserSpaceParam, VideoDetailParam } from '../common/AppRouter';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
@@ -206,32 +207,6 @@ export struct ReplyCard {
   private decorationReserve(): number {
     if (this.item.cardBackground.length === 0) return 0;
     return this.threadDepth > 0 ? 40 : 48;
-  }
-
-  @Builder
-  ContentParts(reply: ReplyItem, fontSize: number, lineHeight: number, emoteSize: number) {
-    Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-      ForEach(parseReplyContent(reply), (part: ReplyRenderPart) => {
-        if (part.image.length > 0) {
-          Image(part.image)
-            .width(part.imageSize > 1 ? emoteSize * 2 : emoteSize)
-            .height(part.imageSize > 1 ? emoteSize * 2 : emoteSize)
-            .objectFit(ImageFit.Contain)
-            .margin({ right: 2 })
-            // 长楼列表中的表情图异步解码（syncLoad=false 即异步）。
-            .syncLoad(false)
-        } else {
-          Text(part.text)
-            .fontSize(fontSize)
-            .lineHeight(lineHeight)
-            .constraintSize({ minHeight: lineHeight })
-            .fontColor(part.mentionMid > 0 || part.seekSeconds >= 0 || part.bvid.length > 0 || part.aid > 0 ?
-              '#008AC5' : (this.isDark ? '#F0F0F0' : '#18191C'))
-            .priorityGesture(TapGesture().onAction(() => this.openPart(part)))
-        }
-      }, (part: ReplyRenderPart) => part.key)
-    }
-    .width('100%')
   }
 
   @Builder
@@ -538,8 +513,15 @@ export struct ReplyCard {
             .borderRadius(8)
             .backgroundColor(this.isDark ? '#26343C' : '#EAF5FA')
         }
-        this.ContentParts(this.item, this.threadDepth > 0 ? 14 : 15, this.threadDepth > 0 ? 21 : 22,
-          this.threadDepth > 0 ? 22 : 24)
+        ReplyRichText({
+          reply: this.item,
+          fontSize: this.threadDepth > 0 ? 14 : 15,
+          lineHeight: this.threadDepth > 0 ? 21 : 22,
+          emoteSize: this.threadDepth > 0 ? 22 : 24,
+          onOpenPart: (part: ReplyRenderPart): void => {
+            this.openPart(part);
+          },
+        })
         if (this.item.pictures.length > 0) {
           Flex({ wrap: FlexWrap.Wrap }) {
             ForEach(this.item.pictures, (picture: string, index: number) => {
