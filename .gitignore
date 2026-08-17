@@ -31,3 +31,5 @@
 # 本地测试临时目录
 /tool/
 /dist/
+screenshot
+.emulator
