@@ -50,7 +50,9 @@ export struct ReplyRichText {
   }
 
   build() {
-    Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+    // 行内底对齐：表情图底部与文字行底对齐（Text 有 minHeight=lineHeight 兜底），
+    // 避免 Center 对齐下表情上下悬空。
+    Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.End }) {
       ForEach(parseReplyContent(this.reply), (part: ReplyRenderPart) => {
         if (part.image.length > 0) {
           Image(this.imageSrc(part.image))

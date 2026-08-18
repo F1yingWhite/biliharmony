@@ -15,6 +15,7 @@ import { VideoDetail, VideoItem, ReplyItem, PlayUrlInfo, VideoPage, VideoQuality
   BiliEmote, BiliEmotePackage, FavoriteFolderItem, UserStat, SpaceArcData, SubtitleTrack, UgcSeasonEpisode } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { PlayerView } from '../components/PlayerView';
+import { PlayerDanmakuEngine } from '../components/PlayerDanmakuEngine';
 import { LoadingView } from '../components/LoadingView';
 import { ImageColor, ImagePalette } from '../common/ImageColor';
 import { UserStore } from '../common/UserStore';
@@ -124,11 +125,11 @@ export struct VideoDetailPage {
   @State coinWithLike: boolean = true;
   @State following: boolean = false;
   @State followLoading: boolean = false;
-  @State playerFullscreen: boolean = false;
+  @State @Watch('onPlayerGeomChanged') playerFullscreen: boolean = false;
   @State playerPlaying: boolean = false;
   /** 播放器上报的在线观看人数（"X人正在看"），展示在播放量信息行的时间后面。 */
   @State playerOnlineTotal: string = '';
-  @State playerCollapse: number = 0;
+  @State @Watch('onPlayerGeomChanged') playerCollapse: number = 0;
   /** AVPlayer 解码后回传的真实视频尺寸；未拿到前先用接口 dimension 兜底。 */
   @State realVideoWidth: number = 0;
   @State realVideoHeight: number = 0;
@@ -164,6 +165,10 @@ export struct VideoDetailPage {
   private screenHeightVp: number = 0;
   private playerHeightKey: string = '';
   private playerHeightValue: number = 0;
+  /** 页面级弹幕独立层的画布上下文：下移给 PlayerView 换绑其弹幕引擎，画布移出被收起动画
+   *  逐帧 resize 的播放器容器，消除动画期 Canvas 清缓冲导致的弹幕闪烁。 */
+  private danmakuCtx: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
+  private dmEngineRef: PlayerDanmakuEngine | null = null;
   // playerCollapse 的未量化原值；@State 只按阈值量化写入，降低滚动期整页重排频率。
   private playerCollapseRaw: number = 0;
   private replySource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();
@@ -214,6 +219,8 @@ export struct VideoDetailPage {
       const screen: display.Display = display.getDefaultDisplaySync();
       this.screenWidthVp = this.getUIContext().px2vp(screen.width);
       this.screenHeightVp = this.getUIContext().px2vp(screen.height);
+      // 旋转/分屏后屏幕尺寸变化，弹幕视口一并同步。
+      this.syncDanmakuViewport();
     } catch (e) {
       // 读取失败保留旧值，playerHeight 会回退到默认高度。
     }
@@ -242,6 +249,8 @@ export struct VideoDetailPage {
     this.realVideoWidth = width;
     this.realVideoHeight = height;
     this.playerHeightValue = 0;
+    // 真实画幅变化会改变播放区高度，弹幕视口一并同步。
+    this.syncDanmakuViewport();
   }
 
   private computePlayerHeight(): number {
@@ -336,6 +345,36 @@ export struct VideoDetailPage {
     }
     const base: number = this.playerHeight();
     return Math.max(this.minPlayerHeight(), base - this.playerCollapse);
+  }
+
+  /** 弹幕独立层画布高度：收起动画期间保持恒定（展开态高度），只有外层裁剪窗口收缩。 */
+  private danmakuCanvasHeight(): number {
+    if (this.playerFullscreen) {
+      return this.screenHeightVp > 0 ? this.screenHeightVp : 640;
+    }
+    return this.playerHeight();
+  }
+
+  /**
+   * 弹幕引擎视口同步：视口恒等于画布尺寸（展开态/全屏高度），收起/展开只改外层裁剪窗口，
+   * 弹幕轨道不重排、不跳变；超出可视区的弹幕留在原处被裁掉，重新拉大时原位显示。
+   * setViewport 内部幂等（变化 <0.5vp 直接返回），可高频调用。
+   */
+  private syncDanmakuViewport(): void {
+    const engine: PlayerDanmakuEngine | null = this.dmEngineRef;
+    if (engine === null) return;
+    if (this.screenWidthVp <= 0 || this.screenHeightVp <= 0) this.refreshScreenSize();
+    if (this.screenWidthVp <= 0) return;
+    const h: number = this.playerFullscreen ? this.screenHeightVp : this.playerHeight();
+    if (h <= 0) return;
+    engine.setViewport(this.screenWidthVp, h);
+    // 暂停/缓冲时没有渲染循环，视口变化后补一帧避免画布空置（播放中由循环下一帧自然覆盖）。
+    if (!this.playerPlaying && engine.active.length > 0) engine.drawFrame(false);
+  }
+
+  /** 播放器几何相关 @State（收起量/全屏）变化时同步弹幕视口。 */
+  private onPlayerGeomChanged(): void {
+    this.syncDanmakuViewport();
   }
 
   /** 回复详情只占用播放器下方的评论区，不再覆盖视频。 */
@@ -691,7 +730,10 @@ export struct VideoDetailPage {
     if (this.emoteLoading || this.emotePackages.length > 0 || !UserStore.isLogin) return;
     this.emoteLoading = true;
     try {
-      const packages: Array<BiliEmotePackage> = await CommentApi.getUserEmotes('reply');
+      let packages: Array<BiliEmotePackage> = await CommentApi.getUserEmotes('reply');
+      // 'reply' 为空时回退 'dynamic'（与 EmoteResolver.ensureLoaded 的回退一致），
+      // 部分账号默认包只在某一 business 下下发。
+      if (packages.length === 0) packages = await CommentApi.getUserEmotes('dynamic');
       if (this.destroyed) return;
       this.emotePackages = packages;
       if (this.emotePackageIndex >= this.emotePackages.length) this.emotePackageIndex = 0;
@@ -1162,6 +1204,7 @@ export struct VideoDetailPage {
   private onPlayerEnded(): void {
     // 播完：播放区收敛到统一高度（visiblePlayerHeight 读取 playerEnded）。
     this.playerEnded = true;
+    this.syncDanmakuViewport();
     // 播完：自动填入"推荐列表第一条"作为结束画面的推荐卡。
     // 优先合集下一集（合集里连续观看），否则用相关推荐第一条。
     const next: UgcSeasonEpisode | null = this.nextUgcEpisode();
@@ -2621,6 +2664,11 @@ export struct VideoDetailPage {
               coined: this.coinCountByMe > 0,
               favorited: this.favorited,
               externalDanmakuOn: this.danmakuOn,
+              externalDanmakuCtx: this.danmakuCtx,
+              onDanmakuEngineReady: (engine: PlayerDanmakuEngine) => {
+                this.dmEngineRef = engine;
+                this.syncDanmakuViewport();
+              },
               localDanmakuText: this.localDanmakuText,
               localDanmakuToken: this.localDanmakuToken,
               compactMode: !this.playerFullscreen && this.visiblePlayerHeight() < 176,
@@ -2764,6 +2812,27 @@ export struct VideoDetailPage {
         .backgroundColor('#000000')
         .hitTestBehavior(HitTestMode.None)
 
+      }
+
+      // 弹幕独立层：移出被收起动画逐帧 resize 的播放器容器。画布节点尺寸恒定
+      // （展开态/全屏高度），收起/展开只收缩外层裁剪窗口，避免 Canvas 后备缓冲
+      // 被反复清空造成的弹幕闪烁。整层不拦截触摸（弹幕点按由 PlayerView 根手势处理，
+      // 两者坐标系一致：均以播放区左上角为原点）。
+      if (this.playUrl.length > 0) {
+        // alignContent TopStart：画布与视频一律顶边对齐（引擎坐标原点 = 播放区左上角），
+        // 收起时画布超高部分从底部裁掉，而不是居中导致弹幕整体下偏。
+        Stack({ alignContent: Alignment.TopStart }) {
+          Canvas(this.danmakuCtx)
+            .width('100%')
+            .height(this.danmakuCanvasHeight())
+            .hitTestBehavior(HitTestMode.None)
+        }
+        .width('100%')
+        .height(this.playerFullscreen ? '100%' : this.visiblePlayerHeight())
+        .margin({ top: this.playerFullscreen ? 0 : Immersive.statusBarHeight() })
+        .clip(true)
+        .hitTestBehavior(HitTestMode.None)
+        .visibility(this.danmakuOn ? Visibility.Visible : Visibility.Hidden)
       }
 
       if (this.coinSheetOpen) {

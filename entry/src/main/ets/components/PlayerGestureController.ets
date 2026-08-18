@@ -59,6 +59,8 @@ export class PlayerGestureController {
   }
 
   updatePan(offsetX: number, offsetY: number, viewWidth: number, duration: number): void {
+    // 注意：不能在这里刷新 lastGestureApplyMs，否则下面的 16ms 节流永假，
+    // onBrightnessApply/onVolumeApply 永远触发不到（亮度调节失效的根因）。
     if (this.panMode.length === 0) {
       const absX: number = Math.abs(offsetX);
       const absY: number = Math.abs(offsetY);

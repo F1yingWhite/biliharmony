@@ -7,6 +7,7 @@ import { Api, Constants } from '../common/Constants';
 import { asArray, asObject } from '../common/Utils';
 import { BiliEmotePackage, ReplyData, ReplyPageData } from '../model/Models';
 import { ActionResult, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 
 export class CommentApi {
   // ===== 评论（游客模式，WBI 签名 /wbi/main） =====
@@ -124,15 +125,35 @@ export class CommentApi {
       'business': business,
       'web_location': '333.1245',
     };
-    const resp: HttpResponse = await webGet(Api.userEmotes, params);
-    const data: Record<string, Object> | null = getData(resp);
-    if (data === null) return [];
+    const resp: HttpResponse = await webGet(Api.userEmotes, params, 'https://www.bilibili.com/');
+    if (!resp.ok) {
+      // 诊断日志：区分"网络/HTTP 失败"与"业务 code 失败"，此前失败全静默无法排查。
+      hilog.warn(0x0000, 'BiliApi', 'getUserEmotes http failed: business=%{public}s status=%{public}d',
+        business, resp.status);
+      return [];
+    }
+    const json: Record<string, Object> = resp.json();
+    const code: number = Number(json['code'] ?? -1);
+    if (code !== 0) {
+      hilog.warn(0x0000, 'BiliApi', 'getUserEmotes biz failed: business=%{public}s code=%{public}d message=%{public}s',
+        business, code, String(json['message'] ?? ''));
+      return [];
+    }
+    const data: Record<string, Object> = asObject(json['data']);
     const packages: Array<Object> = asArray(data['packages']);
     const result: Array<BiliEmotePackage> = [];
+    let droppedEmpty: number = 0;
     for (let i: number = 0; i < packages.length; i++) {
       const pkg: BiliEmotePackage = BiliEmotePackage.from(packages[i]);
-      if (pkg.emotes.length > 0) result.push(pkg);
+      if (pkg.emotes.length > 0) {
+        result.push(pkg);
+      } else {
+        droppedEmpty++;
+      }
     }
+    hilog.info(0x0000, 'BiliApi',
+      'getUserEmotes ok: business=%{public}s packages=%{public}d kept=%{public}d droppedEmpty=%{public}d',
+      business, packages.length, result.length, droppedEmpty);
     return result;
   }
 
