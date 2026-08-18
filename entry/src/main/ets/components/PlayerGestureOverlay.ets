@@ -60,20 +60,20 @@ export struct PlayerGestureOverlay {
   HintBubble() {
     Row({ space: 7 }) {
       if (this.holdSpeedActive) {
-        // 三个右向三角形逐个亮起：亮 = 白，灭 = 半透明，间隔刷新实现循环。
-        Row({ space: 3 }) {
-          Text('›').fontSize(15).fontWeight(FontWeight.Bold)
+        // 三个右向实心三角逐个亮起：亮 = 白，灭 = 半透明，间隔刷新实现循环（对齐官方样式）。
+        Row({ space: 2 }) {
+          Text('▶').fontSize(10)
             .fontColor(this.holdAnimStep >= 0 ? '#FFFFFF' : '#59FFFFFF')
             .animation({ duration: 160, curve: Curve.EaseOut })
-          Text('›').fontSize(15).fontWeight(FontWeight.Bold)
+          Text('▶').fontSize(10)
             .fontColor(this.holdAnimStep >= 1 ? '#FFFFFF' : '#59FFFFFF')
             .animation({ duration: 160, curve: Curve.EaseOut })
-          Text('›').fontSize(15).fontWeight(FontWeight.Bold)
+          Text('▶').fontSize(10)
             .fontColor(this.holdAnimStep >= 2 ? '#FFFFFF' : '#59FFFFFF')
             .animation({ duration: 160, curve: Curve.EaseOut })
         }
-        Text('2× 快速播放')
-          .fontSize(12)
+        Text('倍速播放中')
+          .fontSize(14)
           .fontWeight(FontWeight.Medium)
           .fontColor('#FFFFFF')
       } else {
@@ -85,12 +85,12 @@ export struct PlayerGestureOverlay {
           .fontColor('#FFFFFF')
       }
     }
-    .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-    .borderRadius(14)
-    .backgroundColor('#A6000000')
+    .padding({ left: 16, right: 16, top: 9, bottom: 9 })
+    .borderRadius(8)
+    .backgroundColor('#8C000000')
     .backdropBlur(10)
     // 顶部居中：位置 x 用百分比锚左侧，translate 回移一半实现水平居中。
-    .position({ x: '50%', y: this.fullscreen ? 96 : 66 })
+    .position({ x: '50%', y: this.fullscreen ? 60 : 44 })
     .translate({ x: '-50%' })
     // 进入倍速态时启动动画；退出时停止并复位。
     .onAppear(() => {
