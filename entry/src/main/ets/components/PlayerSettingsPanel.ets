@@ -12,8 +12,8 @@ export struct PlayerSettingsPanel {
   @StorageProp('isDarkMode') isDark: boolean = false;
   @Prop dmOpacity: number = 0.85;
   @Prop dmSpeed: number = 1;
-  @Prop dmFontScale: number = 1.3;
-  @Prop dmDensity: number = 18;
+  @Prop dmFontScale: number = 1.0;
+  @Prop dmDensity: number = 22;
   @Prop dmBlockLevel: number = 0;
   @Prop blockScrollDm: boolean = false;
   @Prop blockTopDm: boolean = false;

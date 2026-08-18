@@ -722,7 +722,8 @@ export class BiliEmote {
     const j: Record<string, Object> = asObject(o);
     const item: BiliEmote = new BiliEmote();
     item.text = str(j, 'text', '');
-    item.url = toHttps(str(j, 'url', str(j, 'webp_url', str(j, 'gif_url', str(j, 'icon_url', '')))));
+    // GIF 优先：动图表情取 gif_url 才能动起来；静图表情的 gif_url 为空，自然回退静态图。
+    item.url = toHttps(str(j, 'gif_url', str(j, 'url', str(j, 'webp_url', str(j, 'icon_url', '')))));
     const meta: Record<string, Object> = asObject(j['meta']);
     item.size = Math.max(1, asNumber(meta['size'], asNumber(j['size'], 1)));
     return item;
