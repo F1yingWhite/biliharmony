@@ -71,7 +71,9 @@ export class PlayerGestureController {
     }
     if (this.panMode === 'seek') {
       this.panGestureActive = true;
-      const secondsPerVp: number = duration / 1.6;
+      // 横滑 seek 应“一个屏幕宽度 ≈ 拖动整个视频”，而不是用一个近似常数 1.6vp
+      // 把小幅度手势放大成首/尾跳变。viewWidth 是手势所在区域的 vp 宽度。
+      const secondsPerVp: number = viewWidth > 0 ? duration / viewWidth : duration;
       // 手势 seek 目标最多到结尾前 0.5s：拖到头不触发"自然播完"，防止误切下一个视频。
       const maxPreview: number = duration > 0 ? Math.max(0, duration - 0.5) : duration;
       const preview: number = Math.max(0, Math.min(maxPreview, this.panStartTime + offsetX * secondsPerVp));

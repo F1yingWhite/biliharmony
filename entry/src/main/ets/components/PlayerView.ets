@@ -21,6 +21,7 @@ import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
 import { AppTheme } from '../common/AppTheme';
+import { Haptic } from '../common/Haptic';
 import { Immersive } from '../common/Immersive';
 import { formatDuration } from '../common/Utils';
 import { PlayUrlInfo, SubtitleCue, SubtitleTrack, VideoQualityOption } from '../model/Models';
@@ -1127,6 +1128,7 @@ if (this.runtimeSources.length === 0) {
   private beginHoldSpeed(): void {
     this.pendingDm = null;
     if (!this.playing || !this.prepared || this.holdSpeedActive) return;
+    Haptic.seek();
     this.speedCtl?.beginHold(this.playbackRate);
   }
 
@@ -1182,6 +1184,7 @@ if (this.runtimeSources.length === 0) {
     const preview: number = this.gestureSeekPreview;
     ctl.endPan();
     if (preview >= 0) {
+      Haptic.seek();
       this.seekTo(preview, true);
       this.gestureSeekPreview = -1;
     }
@@ -2337,6 +2340,7 @@ if (this.runtimeSources.length === 0) {
     } else {
       this.sliderDragging = false;
       if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
+        Haptic.seek();
         this.seekTo(value, true);
       }
     }

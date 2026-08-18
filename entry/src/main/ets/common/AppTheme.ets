@@ -289,6 +289,31 @@ export class AppTheme {
     return p['background'];
   }
 
+  /** 卡片/分组底色（从当前封面主题种子派生，替代散落的硬编码 #FFFFFF/#2A2C31）。 */
+  static surface(): string {
+    return AppTheme.palette()['surface'];
+  }
+
+  /** 次要卡片/暗色块底色 */
+  static surfaceAlt(): string {
+    return AppTheme.palette()['surfaceAlt'];
+  }
+
+  /** 主文字色 */
+  static onSurface(): string {
+    return AppTheme.palette()['onSurface'];
+  }
+
+  /** 次要文字色 */
+  static onSurfaceSub(): string {
+    return AppTheme.palette()['onSurfaceSub'];
+  }
+
+  /** 分割线色 */
+  static divider(): string {
+    return AppTheme.palette()['line'];
+  }
+
   /** 强调色是否属于深色 */
   static accentIsDark(): boolean {
     return isDarkColor(AppTheme.getAccent());

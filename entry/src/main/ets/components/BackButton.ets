@@ -5,6 +5,7 @@
  * - DARK：黑底圆形（直播间等深色场景）
  */
 import { AppNavStack } from '../common/AppRouter';
+import { Haptic } from '../common/Haptic';
 
 export enum BackButtonVariant {
   TEXT,
@@ -45,6 +46,7 @@ export struct BackButton {
       .backdropBlur(this.glassOn ? 10 : 0)
       .justifyContent(FlexAlign.Center)
       .onClick(() => {
+        Haptic.light();
         this.onBack();
       })
     } else if (this.variant === BackButtonVariant.DARK) {
@@ -59,6 +61,7 @@ export struct BackButton {
       .borderRadius(18)
       .backgroundColor('#73000000')
       .onClick(() => {
+        Haptic.light();
         this.onBack();
       })
     } else {
@@ -72,6 +75,7 @@ export struct BackButton {
       .height(this.triggerHeight)
       .justifyContent(FlexAlign.Center)
       .onClick(() => {
+        Haptic.light();
         this.onBack();
       })
     }

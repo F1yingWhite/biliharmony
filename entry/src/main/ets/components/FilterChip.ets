@@ -2,6 +2,8 @@
  * 统一筛选/排序 chip：选中主题色填充白字，未选灰底。
  * selected 为 @Prop，父组件切换选中态时单 chip 刷新。
  */
+import { Haptic } from '../common/Haptic';
+
 @Component
 export struct FilterChip {
   label: string = '';
@@ -23,6 +25,7 @@ export struct FilterChip {
       .margin({ right: 8, bottom: this.bottomMargin })
       .animation({ duration: 180, curve: Curve.EaseOut })
       .onClick(() => {
+        Haptic.light();
         this.onTap();
       })
   }

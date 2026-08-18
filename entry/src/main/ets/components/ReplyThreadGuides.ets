@@ -7,11 +7,24 @@ export struct ReplyThreadGuides {
   @Prop threadDepth: number = 0;
   @Prop threadGuides: Array<boolean> = [];
   @Prop threadHasChildren: boolean = false;
-  @Prop threadCollapsed: boolean = false;
+  @Prop @Watch('onThreadCollapsedChanged') threadCollapsed: boolean = false;
   @Prop measuredHeight: number = 72;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   onToggle: () => void = () => {};
+  /** 子组件本地镜像折叠态，让 +/ - 图标变化在 ReplyThreadGuides 内部用 animateTo 驱动，
+   * 不再依赖父 List/ForEach 是否保留原组件实例。 */
+  @State visualCollapsed: boolean = false;
+
+  aboutToAppear(): void {
+    this.visualCollapsed = this.threadCollapsed;
+  }
+
+  onThreadCollapsedChanged(): void {
+    this.getUIContext().animateTo({ duration: 160, curve: Curve.EaseInOut }, () => {
+      this.visualCollapsed = this.threadCollapsed;
+    });
+  }
 
   private visualDepth(): number {
     return Math.min(3, Math.max(0, this.threadDepth));
@@ -86,18 +99,18 @@ export struct ReplyThreadGuides {
               .width(12)
               .height(12)
               .fill(this.treeNodeFillColor())
-              .stroke(this.threadCollapsed ? this.accent : this.treeLineColor())
+              .stroke(this.visualCollapsed ? this.accent : this.treeLineColor())
               .strokeWidth(1.2)
             Row()
               .width(6)
               .height(1.4)
-              .backgroundColor(this.threadCollapsed ? this.accent : '#9BA0A8')
+              .backgroundColor(this.visualCollapsed ? this.accent : '#9BA0A8')
             Column()
               .width(1.4)
               .height(6)
               .backgroundColor(this.accent)
-              .opacity(this.threadCollapsed ? 1 : 0)
-              .scale({ x: 1, y: this.threadCollapsed ? 1 : 0.1 })
+              .opacity(this.visualCollapsed ? 1 : 0)
+              .scale({ x: 1, y: this.visualCollapsed ? 1 : 0.1 })
               .animation({ duration: 130, curve: Curve.EaseInOut })
           }
           .width(28)

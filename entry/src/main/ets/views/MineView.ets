@@ -129,14 +129,14 @@ export struct MineView {
     }
   }
 
-  /** 分组容器底色（浅色白底 / 深色 #2A2C31） */
+  /** 分组容器底色：统一走 AppTheme 语义色，随封面取色/明暗模式联动。 */
   private groupBg(): string {
-    return this.isDark ? '#2A2C31' : '#FFFFFF';
+    return AppTheme.surface();
   }
 
-  /** 行内主文字色 */
+  /** 行内主文字色：统一走 AppTheme 语义色，避免散落硬编码。 */
   private itemColor(): string {
-    return this.isDark ? '#E6E6E6' : '#18191C';
+    return AppTheme.onSurface();
   }
 
   private themeModeAt(index: number): string {

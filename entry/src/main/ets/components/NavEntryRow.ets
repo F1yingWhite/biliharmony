@@ -2,6 +2,9 @@
  * 通用列表入口行：图标 + 标题 + 箭头（首页热门/分区/番剧/直播入口共用）。
  * 图标与标题一次传入（静态即可，无需响应式）；主题色/深色走 AppStorage。
  */
+import { AppTheme } from '../common/AppTheme';
+import { Haptic } from '../common/Haptic';
+
 @Component
 export struct NavEntryRow {
   /** 左侧图标资源 */
@@ -38,8 +41,9 @@ export struct NavEntryRow {
     .height(44)
     .padding({ left: 14, right: 14 })
     .borderRadius(12)
-    .backgroundColor(this.isDark ? '#212225' : '#FFFFFF')
+    .backgroundColor(AppTheme.surface())
     .onClick(() => {
+      Haptic.light();
       this.onTap();
     })
   }

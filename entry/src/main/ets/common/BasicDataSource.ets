@@ -61,13 +61,15 @@ export class BasicDataSource<T> implements IDataSource {
     this.notifyItemChanged(index);
   }
 
-  /** 尾部追加（分页加载） */
+  /** 尾部追加（分页加载）：使用 push 原地追加，避免每页都复制整条大数组，降低长列表 O(n²) 开销。 */
   public append(items: Array<T>): void {
     if (items.length === 0) {
       return;
     }
     const start = this.items.length;
-    this.items = this.items.concat(items);
+    for (let i = 0; i < items.length; i++) {
+      this.items.push(items[i]);
+    }
     for (let i = 0; i < items.length; i++) {
       this.listeners.forEach((listener: DataChangeListener) => {
         listener.onDataAdd(start + i);
