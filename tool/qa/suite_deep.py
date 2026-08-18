@@ -149,9 +149,13 @@ def test_d4():
         else:
             report.fail('番剧索引空')
         snapshot_shot('d4_bangumi_index')
-        card = first_text_cards(t2)
-        if card:
-            tap_bounds(node_bounds(card[0]), 3000)
+        # 番剧索引页卡片在没有标题文本时可点 ListItem 的封面区域；避免点到"共 N 部"计数行。
+        cards = [n for n in find_nodes(t2, lambda x: (
+            node_type(x) == 'ListItem' and
+            (parse_bounds(node_bounds(x)) or {}).get('y1', -1) > 600
+        ))]
+        if cards:
+            tap_bounds(node_bounds(cards[0]), 3000)
             t3 = load_ui_tree(dump_ui('d4_bangumi_detail'))
             if has_text(t3, '追番') or has_text(t3, '选集'):
                 report.pass_('番剧详情打开')
