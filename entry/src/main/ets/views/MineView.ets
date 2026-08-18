@@ -129,9 +129,10 @@ export struct MineView {
     }
   }
 
-  /** 分组容器底色：统一走 AppTheme 语义色，随封面取色/明暗模式联动。 */
+  /** 分组容器底色：中性灰底（深色 #26272B / 浅色白），不跟随主题色派生——
+   *  粉色种子派生的表面色在大面积分组上观感偏脏，与首页卡片中性底对齐。 */
   private groupBg(): string {
-    return AppTheme.surface();
+    return this.isDark ? '#26272B' : '#FFFFFF';
   }
 
   /** 行内主文字色：统一走 AppTheme 语义色，避免散落硬编码。 */
@@ -610,7 +611,8 @@ export struct MineView {
           .width('100%')
           .height('100%')
           .contentStartOffset(Immersive.statusBarHeight() + 56)
-          .contentEndOffset(Immersive.bottomInset() + 56)
+          // 悬浮 Dock 高 52 + 底部边距 16，末端留白必须大于 68 才能完整露出末行。
+          .contentEndOffset(Immersive.bottomInset() + 76)
           .padding({ left: 10, right: 10 })
           .scrollBar(BarState.Off)
           .onScroll((offset: number) => {

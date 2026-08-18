@@ -92,16 +92,18 @@ export struct VideoCard {
       }
       .width('100%')
       .clip(true)
-      .borderRadius(12)
-      // 淡色细边框增强卡片边缘感：浅色模式淡黑、深色模式淡白（透明度低，不压过封面）。
-      .border({
-        width: 0.6,
-        color: this.isDark ? '#26FFFFFF' : '#1C000000',
-      })
-      .shadow({ radius: 12, color: this.isDark ? '#59000000' : '#1F000000', offsetX: 0, offsetY: 4 })
+      // 卡片整体由外层白色卡片承载边界，封面自身不再描边/投影。
+      .aspectRatio(16 / 9)
 
-      // 标题
-      FeedCardTitle({ title: this.video.title, isDark: this.isDark })
+      // 标题（@Builder 不能链式修饰，用 Row 承载左右内缩）
+      // 固定两行高度：卡片高度不随标题长短变化，双列网格每张卡片严格等大、间距一致。
+      Row() {
+        FeedCardTitle({ title: this.video.title, isDark: this.isDark })
+      }
+      .width('100%')
+      .height(38)
+      .alignItems(VerticalAlign.Top)
+      .padding({ left: 10, right: 10 })
 
       // UP 主 + 推荐理由 / 分区
       if (!this.compact) {
@@ -123,12 +125,19 @@ export struct VideoCard {
             .visibility(this.video.rcmdReason.length > 0 || this.video.tname.length > 0 ? Visibility.Visible : Visibility.None)
         }
         .width('100%')
+        .height(18)
         .alignItems(VerticalAlign.Center)
+        .padding({ left: 10, right: 10 })
       }
     }
     .width('100%')
-    .padding({ bottom: 8 })
+    .padding({ bottom: 10 })
     .alignItems(HorizontalAlign.Start)
+    // 白色卡片承载边界：封面通顶、文字区内缩，浅色白底/深色深灰底。
+    .backgroundColor(this.isDark ? '#26272B' : '#FFFFFF')
+    .borderRadius(12)
+    .clip(true)
+    .shadow({ radius: 10, color: this.isDark ? '#59000000' : '#14000000', offsetX: 0, offsetY: 3 })
     .stateStyles({
       pressed: {
         opacity: 0.85,

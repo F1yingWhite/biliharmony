@@ -491,7 +491,8 @@ export struct HomeView {
     .cachedCount(3)
     // 首屏卡片默认位于搜索栏下方。这个间距属于可滚动内容，滚走后不会因头栏重新出现而顶动卡片。
     .contentStartOffset(Immersive.statusBarHeight() + 94)
-    .contentEndOffset(Immersive.bottomInset() + 56)
+    // 悬浮 Dock 高 52 + 底部边距 16，末端留白必须大于 68 才能完整露出末行。
+    .contentEndOffset(Immersive.bottomInset() + 76)
     .padding({ left: LayoutTokens.horizontalPadding(this.viewportWidth),
       right: LayoutTokens.horizontalPadding(this.viewportWidth) })
     .constraintSize({ maxWidth: LayoutTokens.feedMaxWidth })
@@ -542,7 +543,8 @@ export struct HomeView {
     .width('100%').height('100%').lanes(LayoutTokens.feedColumns(this.viewportWidth), 10)
     .cachedCount(3)
     .contentStartOffset(Immersive.statusBarHeight() + 94)
-    .contentEndOffset(Immersive.bottomInset() + 56)
+    // 悬浮 Dock 高 52 + 底部边距 16，末端留白必须大于 68 才能完整露出末行。
+    .contentEndOffset(Immersive.bottomInset() + 76)
     .padding({ left: LayoutTokens.horizontalPadding(this.viewportWidth),
       right: LayoutTokens.horizontalPadding(this.viewportWidth) })
     .constraintSize({ maxWidth: LayoutTokens.feedMaxWidth })
