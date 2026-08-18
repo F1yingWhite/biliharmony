@@ -716,16 +716,27 @@ export class FavoriteVideoPageData {
 export class BiliEmote {
   text: string = '';
   url: string = '';
+  /** 动态表情地址（GIF/APNG，可为空）；有值时展示用它，Image 自动播放。 */
+  gifUrl: string = '';
+  /** 1 = 单行高，2 = 双行高。 */
   size: number = 1;
 
   static from(o: Object): BiliEmote {
     const j: Record<string, Object> = asObject(o);
     const item: BiliEmote = new BiliEmote();
     item.text = str(j, 'text', '');
-    item.url = toHttps(str(j, 'url', str(j, 'webp_url', str(j, 'gif_url', str(j, 'icon_url', '')))));
+    // url 回退链：静态图优先；gif_url 兜底 —— 接口里纯动图表情只有 gif_url，
+    // 不兜底的包会因 url 为空整包被丢弃，单行动图包因此消失。
+    item.url = toHttps(str(j, 'url', str(j, 'webp_url', str(j, 'icon_url', str(j, 'gif_url', '')))));
+    item.gifUrl = toHttps(str(j, 'gif_url', str(j, 'gif', '')));
     const meta: Record<string, Object> = asObject(j['meta']);
     item.size = Math.max(1, asNumber(meta['size'], asNumber(j['size'], 1)));
     return item;
+  }
+
+  /** 实际展示地址：有动态图用动态图，否则用静态图。 */
+  displayUrl(): string {
+    return this.gifUrl.length > 0 ? this.gifUrl : this.url;
   }
 }
 
@@ -738,8 +749,11 @@ export class BiliEmotePackage {
     const j: Record<string, Object> = asObject(o);
     const pkg: BiliEmotePackage = new BiliEmotePackage();
     pkg.title = str(j, 'text', str(j, 'name', str(j, 'title', '表情')));
-    pkg.icon = toHttps(str(j, 'url', ''));
-    const list: Array<Object> = asArray(j['emote']);
+    pkg.icon = toHttps(str(j, 'url', str(j, 'icon', str(j, 'icon_url', ''))));
+    // 接口不同版本的表情数组字段名不一（emote / emotes / list），取最长的那个。
+    let list: Array<Object> = asArray(j['emote']);
+    if (list.length === 0) list = asArray(j['emotes']);
+    if (list.length === 0) list = asArray(j['list']);
     for (let i: number = 0; i < list.length; i++) {
       const emote: BiliEmote = BiliEmote.from(list[i]);
       if (emote.text.length > 0 && emote.url.length > 0) pkg.emotes.push(emote);

@@ -1,5 +1,6 @@
 import { BiliEmote, BiliEmotePackage } from '../model/Models';
 import { LayoutTokens } from '../common/LayoutTokens';
+import { EmoteImageCache } from '../common/EmoteImageCache';
 import { colorWithAlpha } from '../common/Utils';
 
 /**
@@ -8,8 +9,10 @@ import { colorWithAlpha } from '../common/Utils';
  */
 @Component
 export struct ReplyEmotePanel {
-  @Prop packages: Array<BiliEmotePackage> = [];
-  @Prop currentIndex: number = 0;
+  @Prop @Watch('onPackagesChanged') packages: Array<BiliEmotePackage> = [];
+  /** 表情图本地缓存映射：网络 URL → cacheDir 内本地路径（离线可显示）。 */
+  @State emoteLocal: Map<string, string> = new Map<string, string>();
+  @Prop @Watch('onCurrentIndexChanged') currentIndex: number = 0;
   @Prop loading: boolean = false;
   @Prop panelHeight: number = 300;
   @Prop screenWidth: number = 360;
@@ -17,6 +20,48 @@ export struct ReplyEmotePanel {
   @StorageProp('accentColor') accent: string = '#FB7299';
   onPackageChange: (index: number) => void = () => {};
   onSelect: (item: BiliEmote) => void = () => {};
+
+  aboutToAppear(): void {
+    this.primeCurrentPackage();
+  }
+
+  onPackagesChanged(): void {
+    this.primeCurrentPackage();
+  }
+
+  onCurrentIndexChanged(): void {
+    // 切到别的包时只预取那个包，避免一次把上百张图全拉垮。
+    this.primeCurrentPackage();
+  }
+
+  /** 预取当前正在看的那个表情包的图片（其余包等被切到再下载）。 */
+  private primeCurrentPackage(): void {
+    const index: number = this.currentIndex;
+    if (index < 0 || index >= this.packages.length) return;
+    const pkg: BiliEmotePackage = this.packages[index];
+    if (pkg.icon.length > 0) this.primeOne(pkg.icon);
+    for (let j: number = 0; j < pkg.emotes.length; j++) {
+      const emote: BiliEmote = pkg.emotes[j];
+      if (emote.url.length > 0) this.primeOne(emote.url);
+      if (emote.gifUrl.length > 0) this.primeOne(emote.gifUrl);
+    }
+  }
+
+  private primeOne(url: string): void {
+    if (url.length === 0 || this.emoteLocal.has(url)) return;
+    EmoteImageCache.ensure(url).then((local: string) => {
+      if (local !== url) {
+        this.emoteLocal.set(url, local);
+      }
+    }).catch(() => {
+    });
+  }
+
+  private imageSrc(url: string): string {
+    if (url.length === 0) return '';
+    const local: string | undefined = this.emoteLocal.get(url);
+    return local !== undefined && local.length > 0 ? local : url;
+  }
 
   private contentHeight(): number {
     return Math.max(190, this.panelHeight - 44);
@@ -35,9 +80,9 @@ export struct ReplyEmotePanel {
       ForEach(pkg.emotes, (item: BiliEmote) => {
         GridItem() {
           Column({ space: 2 }) {
-            Image(item.url)
-              .width(item.size > 1 ? 56 : 50)
-              .height(item.size > 1 ? 56 : 50)
+            Image(this.imageSrc(item.gifUrl.length > 0 ? item.gifUrl : item.url))
+              .width(item.size > 1 ? 72 : 50)
+              .height(item.size > 1 ? 72 : 50)
               .objectFit(ImageFit.Contain)
             Text(this.emoteLabel(item))
               .fontSize(10)
@@ -104,7 +149,7 @@ export struct ReplyEmotePanel {
             ForEach(this.packages, (pkg: BiliEmotePackage, index: number) => {
               Row() {
                 if (pkg.icon.length > 0) {
-                  Image(pkg.icon).width(27).height(27).objectFit(ImageFit.Contain)
+                  Image(this.imageSrc(pkg.icon)).width(27).height(27).objectFit(ImageFit.Contain)
                 } else {
                   Text(pkg.title)
                     .fontSize(11)

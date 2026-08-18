@@ -19,6 +19,7 @@ import { LayoutTokens } from '../common/LayoutTokens';
 import { Haptic } from '../common/Haptic';
 import { DynamicApi } from '../api/DynamicApi';
 import { EmoteResolver } from '../common/EmoteResolver';
+import { EmoteImageCache } from '../common/EmoteImageCache';
 import { LiveApi } from '../api/LiveApi';
 import { UserApi } from '../api/UserApi';
 
@@ -32,6 +33,8 @@ class DynamicContentPart {
   text: string = '';
   image: string = '';
   key: string = '';
+  /** 1 = 单行高，2 = 双行高（动态卡片行内表情放大 2 倍）。 */
+  imageSize: number = 1;
 }
 
 // 表情拆分结果按动态 id 缓存（内容不可变），避免每次 build 重算 O(内容×表情数) 扫描。
@@ -83,7 +86,8 @@ function contentPartsOf(item: DynamicItem, emoteVersion: number): Array<DynamicC
       part.text = rest.substring(0, foundAt); part.key = item.dynId + '-t' + String(keyIndex++); result.push(part);
     }
     const emotePart: DynamicContentPart = new DynamicContentPart();
-    emotePart.image = found !== null ? found.url : fallbackUrl;
+    emotePart.image = found !== null ? found.displayUrl() : fallbackUrl;
+    emotePart.imageSize = found !== null ? found.size : 1;
     emotePart.key = item.dynId + '-e' + String(keyIndex++);
     result.push(emotePart);
     rest = rest.substring(foundAt + (found !== null ? found.text.length : fallbackToken.length));
@@ -109,6 +113,8 @@ export struct DynCard {
   @State likeCount: number = 0;
   @State forwardCount: number = 0;
   @State actionBusy: boolean = false;
+  /** 表情图本地缓存映射：原网络 URL → cacheDir 内本地路径（落盘缓存，离线可显示）。 */
+  @State emoteLocal: Map<string, string> = new Map<string, string>();
   /** 图片宫格可用宽（onAreaChange 实测），用于按官方三列正方形单元计算高度。 */
   @State gridWidth: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
@@ -139,6 +145,30 @@ export struct DynCard {
     this.liked = this.item.liked;
     this.likeCount = this.item.like;
     this.forwardCount = this.item.forward;
+    this.primeEmoteLocalCache();
+  }
+
+  /** 把内容里出现的表情 URL 逐一下载到本地缓存；完成后触发重渲染走本地路径。 */
+  private primeEmoteLocalCache(): void {
+    const parts: Array<DynamicContentPart> = contentPartsOf(this.item, this.emoteVer);
+    for (let i: number = 0; i < parts.length; i++) {
+      const image: string = parts[i].image;
+      if (image.length === 0 || this.emoteLocal.has(image)) continue;
+      EmoteImageCache.ensure(image).then((local: string) => {
+        // 与 image 相同表示命中失败回退网络；只有拿到了本地路径才更新。
+        if (local !== image) {
+          this.emoteLocal.set(image, local);
+        }
+      }).catch(() => {
+      });
+    }
+  }
+
+  /** 表情图渲染源：已缓存用本地路径，否则用网络 URL。 */
+  private emoteSrc(image: string): string {
+    if (image.length === 0) return '';
+    const local: string | undefined = this.emoteLocal.get(image);
+    return local !== undefined && local.length > 0 ? local : image;
   }
 
   private toast(message: string): void {
@@ -367,7 +397,7 @@ export struct DynCard {
         Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
           ForEach(contentPartsOf(item, this.emoteVer), (part: DynamicContentPart) => {
             if (part.image.length > 0) {
-              Image(part.image).width(23).height(23).objectFit(ImageFit.Contain).margin({ right: 2 })
+              Image(this.emoteSrc(part.image)).width(part.imageSize > 1 ? 46 : 23).height(part.imageSize > 1 ? 46 : 23).objectFit(ImageFit.Contain).margin({ right: 2 })
             } else {
               Text(part.text).fontSize(13).lineHeight(20)
                 .fontColor(this.isDark ? '#D8D8DC' : '#303236')
@@ -469,7 +499,7 @@ export struct DynCard {
         Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
           ForEach(contentPartsOf(this.item, this.emoteVer), (part: DynamicContentPart) => {
             if (part.image.length > 0) {
-              Image(part.image).width(25).height(25).objectFit(ImageFit.Contain).margin({ right: 2 })
+              Image(this.emoteSrc(part.image)).width(part.imageSize > 1 ? 50 : 25).height(part.imageSize > 1 ? 50 : 25).objectFit(ImageFit.Contain).margin({ right: 2 })
             } else {
               Text(part.text).fontSize(14).fontColor(this.isDark ? '#D0D0D0' : '#222222').lineHeight(21)
             }
@@ -1157,6 +1187,8 @@ export struct DynamicView {
   build() {
     Stack({ alignContent: Alignment.Top }) {
       // 动态分类 Tabs：左右滑动在 全部/视频/番剧/专栏 之间切换，与首页推荐/热门/直播一致。
+      // 内嵌模式（用户空间"动态"页）禁用内层横向滑动：让外层"主页/动态/投稿"Tabs 收到手势，
+      // 避免两层横向 Tabs 抢手势导致从中间页滑不出去；分类切换在独立动态页内仍可用。
       Tabs({ index: $$this.dynTab, controller: this.dynTabsController }) {
         TabContent() { this.DynBody() }.tabBar('')
         TabContent() { this.DynBody() }.tabBar('')
@@ -1165,6 +1197,7 @@ export struct DynamicView {
       }
       .width('100%')
       .height('100%')
+      .scrollable(!this.embedded)
       .barHeight(0)
       .cachedMaxCount(1, TabsCacheMode.CACHE_BOTH_SIDE)
       .animationMode(AnimationMode.CONTENT_FIRST)

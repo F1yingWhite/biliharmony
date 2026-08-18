@@ -8,6 +8,8 @@ export class LayoutTokens {
   static readonly readingMaxWidth: number = 760;
   static readonly pageMaxWidth: number = 960;
   static readonly feedMaxWidth: number = 1180;
+  /** 首页信息流卡片间距：竖向行距与双列横向槽宽共用，保持卡片网格呼吸感。 */
+  static readonly feedGap: number = 7;
 
   static horizontalPadding(width: number): number {
     return width >= 600 ? LayoutTokens.widePadding : LayoutTokens.phonePadding;

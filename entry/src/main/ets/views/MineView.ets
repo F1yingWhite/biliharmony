@@ -8,8 +8,9 @@ import { common } from '@kit.AbilityKit';
 import { AppNavStack, NAV_FAVORITES, NAV_HISTORY, NAV_LOGIN, NAV_RELATION_LIST, NAV_USER_SPACE, NAV_WATCH_LATER,
   NAV_BANGUMI_LIST, NAV_BANGUMI_INDEX, NAV_BLACK_LIST,
   RelationListParam, UserSpaceParam } from '../common/AppRouter';
-import { UserInfo, UserStat } from '../model/Models';
+import { UserInfo, UserStat, BiliEmotePackage } from '../model/Models';
 import { BiliApi } from '../api/BiliApi';
+import { CommentApi } from '../api/CommentApi';
 import { UserStore } from '../common/UserStore';
 import { AppTheme } from '../common/AppTheme';
 import { Haptic } from '../common/Haptic';
@@ -24,6 +25,10 @@ export struct MineView {
   @State loading: boolean = true;
   @State user: UserInfo = new UserInfo();
   @State stat: UserStat = new UserStat();
+  /** 清空缓存后 +1，触发“清空缓存”行的缓存数字重新计算。 */
+  @State cacheSizeTick: number = 0;
+  /** 缓存大小展示串（@State 显式驱动文本，清空后同步更新，不依赖构建重算）。 */
+  @State cacheSizeDisplay: string = '0 B';
   @State autoDark: boolean = false;
   /** 定时深色：每分钟应用一次，跨时刻后自动切换明暗（无需重启）。 */
   private autoTimer: number = -1;
@@ -55,6 +60,7 @@ export struct MineView {
 
   aboutToAppear(): void {
     this.autoDark = AppTheme.isAutoDarkEnabled();
+    this.cacheSizeDisplay = this.cacheSizeText();
     this.init().catch(() => {
     });
     if (this.autoTimer < 0) {
@@ -490,18 +496,49 @@ export struct MineView {
       // ===== 组3：关于 / 清空缓存 / 退出登录 =====
       Column() {
         this.NavRow('关于', 'v1.0.0', () => {
-          promptAction.showDialog({
-            title: 'BiliHaromny',
-            message: '基于开源项目 PiliPlus 移植的鸿蒙原生哔哩哔哩第三方客户端（API 26）。\n支持沉浸式全屏、封面取色动态主题、环境光自适应。\n仅供学习交流使用。',
-            buttons: [{ text: '知道了', color: this.accent }],
+          // 临时诊断：打开“关于”时顺带拉一次表情包接口，把 包数/表情数 附在文案里，
+          // 用于确认“默认包消失”是接口没返回还是解析丢包。
+          CommentApi.getUserEmotes('reply').then((pkgs: Array<BiliEmotePackage>) => {
+            let total: number = 0;
+            for (let i: number = 0; i < pkgs.length; i++) total += pkgs[i].emotes.length;
+            promptAction.showDialog({
+              title: 'BiliHaromny',
+              message: '基于开源项目 PiliPlus 移植的鸿蒙原生哔哩哔哩第三方客户端（API 26）。\n支持沉浸式全屏、封面取色动态主题、环境光自适应。\n仅供学习交流使用。\n\n[诊断] 表情包：' + String(pkgs.length) + ' 个，表情：' + String(total) + ' 个',
+              buttons: [{ text: '知道了', color: this.accent }],
+            });
+          }).catch(() => {
+            promptAction.showDialog({
+              title: 'BiliHaromny',
+              message: '基于开源项目 PiliPlus 移植的鸿蒙原生哔哩哔哩第三方客户端（API 26）。\n[诊断] 表情接口请求失败',
+              buttons: [{ text: '知道了', color: this.accent }],
+            });
           });
         })
 
         this.GroupDivider()
 
-        this.NavRow('清空缓存', this.cacheSizeText(), () => {
-          this.clearCache();
-        })
+        //「清空缓存」行内联渲染：数值绑定 @State cacheSizeDisplay，清空后显式更新文本。
+      Row({ space: 14 }) {
+        Text('清空缓存')
+          .fontSize(15)
+          .fontColor(this.itemColor())
+        Blank()
+        Text(this.cacheSizeDisplay)
+          .fontSize(13)
+          .fontColor('#9499A0')
+        Image($r('app.media.ic_arrow_right'))
+          .width(18)
+          .height(18)
+          .fillColor('#C1C2C5')
+      }
+      .width('100%')
+      .height(48)
+      .padding({ left: 14, right: 14 })
+      .alignItems(VerticalAlign.Center)
+      .onClick(() => {
+        Haptic.light();
+        this.confirmClearCache();
+      })
 
         if (this.user.isLogin) {
           this.GroupDivider()
@@ -533,16 +570,43 @@ export struct MineView {
     .width('100%')
   }
 
-  /** 估算缓存文件总大小，展示在菜单行右侧。 */
+  /** 估算缓存文件总大小，展示在菜单行右侧（统计目录内文件总和，不是目录本身的大小）。 */
   private cacheSizeText(): string {
     try {
-      const dir: string = this.cacheDirPath();
-      const stat: fs.Stat | null = fs.statSync(dir);
-      if (stat === null) return '0 B';
-      return this.formatBytes(stat.size);
+      return this.formatBytes(this.cacheTotalBytes());
     } catch (e) {
       return '0 B';
     }
+  }
+
+  /** 缓存目录内所有文件的大小总和（递归子目录，与清空逻辑同一口径）。 */
+  private cacheTotalBytes(): number {
+    const dir: string = this.cacheDirPath();
+    if (dir.length === 0) return 0;
+    return this.dirBytes(dir);
+  }
+
+  private dirBytes(dir: string): number {
+    let total: number = 0;
+    try {
+      const entries: Array<string> = fs.listFileSync(dir);
+      for (let i: number = 0; i < entries.length; i++) {
+        try {
+          const st: fs.Stat | null = fs.statSync(dir + '/' + entries[i]);
+          if (st === null) continue;
+          if (st.isDirectory()) {
+            total += this.dirBytes(dir + '/' + entries[i]);
+          } else {
+            total += st.size;
+          }
+        } catch (e) {
+          // 单个文件统计失败忽略
+        }
+      }
+    } catch (e) {
+      // 目录不可读按 0 处理
+    }
+    return total;
   }
 
   private cacheDirPath(): string {
@@ -552,7 +616,29 @@ export struct MineView {
     return context.cacheDir;
   }
 
-  /** 清空应用缓存目录（图片/弹幕等临时文件），保留登录态。 */
+  /** 清空缓存前二次确认：必须由用户明确点「清空」才执行，不点击立即删除。 */
+  private confirmClearCache(): void {
+    try {
+      const sizeText: string = this.cacheSizeText();
+      promptAction.showDialog({
+        title: '清空缓存',
+        message: sizeText === '0 B'
+          ? '缓存目录里没有可清除的文件，仍要执行一次清理吗？'
+          : '将清除缓存文件（共 ' + sizeText + '），仅影响图片/弹幕等临时文件，登录态不受影响。确定清空吗？',
+        buttons: [
+          { text: '取消', color: '#9499A0' },
+          { text: '清空', color: AppTheme.DANGER },
+        ],
+      }).then((dialogResult) => {
+        if (Number(dialogResult.index) !== 1) return;
+        this.clearCache();
+      });
+    } catch (e) {
+      // 弹窗失败不阻塞。
+    }
+  }
+
+  /** 清空应用缓存目录（图片/弹幕/表情图等临时文件，递归子目录），保留登录态。 */
   private clearCache(): void {
     const dir: string = this.cacheDirPath();
     if (dir.length === 0) {
@@ -560,21 +646,45 @@ export struct MineView {
       return;
     }
     try {
+      const before: number = this.cacheTotalBytes();
+      this.clearDir(dir);
+      // 同步更新展示串（@State 显式绑定，文本立即变化）。
+      this.cacheSizeDisplay = this.cacheSizeText();
+      this.cacheSizeTick++;
+      // 诊断：清完后立即重算剩余，若还有剩余说明删除被文件占用等卡住，直接把根因亮出来。
+      const after: number = this.cacheTotalBytes();
+      if (after > 0) {
+        this.toast(`已清除 ${this.formatBytes(before)}，仍剩 ${this.formatBytes(after)}（部分文件可能被占用）`);
+      } else {
+        this.toast(before > 0 ? `已清空 ${this.formatBytes(before)}` : '缓存已是空的');
+      }
+    } catch (e) {
+      this.toast('清空失败，请稍后重试');
+    }
+  }
+
+  private clearDir(dir: string): void {
+    try {
       const entries: Array<string> = fs.listFileSync(dir);
-      let total: number = 0;
       for (let i: number = 0; i < entries.length; i++) {
         const p: string = dir + '/' + entries[i];
         try {
           const st: fs.Stat | null = fs.statSync(p);
-          if (st !== null) total += st.size;
-          fs.unlinkSync(p);
+          if (st !== null && st.isDirectory()) {
+            this.clearDir(p);
+            try {
+              fs.rmdirSync(p);
+            } catch (e) {
+            }
+          } else {
+            fs.unlinkSync(p);
+          }
         } catch (e) {
           // 单个文件删除失败不影响其余清理
         }
       }
-      this.toast(total > 0 ? `已清空 ${this.formatBytes(total)}` : '缓存已是空的');
     } catch (e) {
-      this.toast('清空失败，请稍后重试');
+      // 目录清空失败忽略
     }
   }
 

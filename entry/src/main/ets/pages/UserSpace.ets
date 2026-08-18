@@ -849,6 +849,8 @@ export struct UserSpacePage {
               }
               .barHeight(40)
               .divider(null)
+              // Tabs 嵌在垂直 List 里时手势易被外层吞掉，显式开启滑动切页。
+              .scrollable(true)
               .cachedMaxCount(1, TabsCacheMode.CACHE_BOTH_SIDE)
               .animationMode(AnimationMode.CONTENT_FIRST)
               .animationDuration(300)
