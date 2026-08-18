@@ -313,8 +313,9 @@ export class PlayerDanmakuEngine {
           continue;
         }
         this.ctx.fillStyle = dm.renderColor;
-        const x: number = (this.width - dm.textWidth) / 2;
-        const y: number = dm.lane * laneH + itemFont;
+        // 整数坐标：位置锁死后浮点亚像素每帧取齐会原地抖动，取整避免文字闪烁。
+        const x: number = Math.round((this.width - dm.textWidth) / 2);
+        const y: number = Math.round(dm.lane * laneH + itemFont);
         this.ctx.strokeText(dm.renderText, x, y);
         this.ctx.fillText(dm.renderText, x, y);
         keep.push(dm);
@@ -325,9 +326,10 @@ export class PlayerDanmakuEngine {
           continue;
         }
         this.ctx.fillStyle = dm.renderColor;
-        const y: number = dm.lane * laneH + itemFont;
-        this.ctx.strokeText(dm.renderText, dm.x, y);
-        this.ctx.fillText(dm.renderText, dm.x, y);
+        const x: number = Math.round(dm.x);
+        const y: number = Math.round(dm.lane * laneH + itemFont);
+        this.ctx.strokeText(dm.renderText, x, y);
+        this.ctx.fillText(dm.renderText, x, y);
         keep.push(dm);
       } else {
         // 滚动弹幕：被冻结时停在当前位置不再前进。
@@ -336,9 +338,10 @@ export class PlayerDanmakuEngine {
           continue;
         }
         this.ctx.fillStyle = dm.renderColor;
-        const y: number = dm.lane * laneH + itemFont;
-        this.ctx.strokeText(dm.renderText, dm.x, y);
-        this.ctx.fillText(dm.renderText, dm.x, y);
+        const x: number = Math.round(dm.x);
+        const y: number = Math.round(dm.lane * laneH + itemFont);
+        this.ctx.strokeText(dm.renderText, x, y);
+        this.ctx.fillText(dm.renderText, x, y);
         keep.push(dm);
       }
     }
@@ -367,8 +370,8 @@ export class PlayerDanmakuEngine {
       progress = -progress * (progress - 2);
     }
     progress = Math.max(0, Math.min(1, progress));
-    const x: number = (track.fromX + (track.toX - track.fromX) * progress) * this.width;
-    const y: number = (track.fromY + (track.toY - track.fromY) * progress) * this.height;
+    const x: number = Math.round((track.fromX + (track.toX - track.fromX) * progress) * this.width);
+    const y: number = Math.round((track.fromY + (track.toY - track.fromY) * progress) * this.height);
     this.ctx.save();
     this.ctx.translate(x, y);
     if (track.rotateZ !== 0) {

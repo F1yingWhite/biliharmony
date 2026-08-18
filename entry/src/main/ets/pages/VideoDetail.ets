@@ -126,6 +126,8 @@ export struct VideoDetailPage {
   @State followLoading: boolean = false;
   @State playerFullscreen: boolean = false;
   @State playerPlaying: boolean = false;
+  /** 播放器上报的在线观看人数（"X人正在看"），展示在播放量信息行的时间后面。 */
+  @State playerOnlineTotal: string = '';
   @State playerCollapse: number = 0;
   /** AVPlayer 解码后回传的真实视频尺寸；未拿到前先用接口 dimension 兜底。 */
   @State realVideoWidth: number = 0;
@@ -1789,10 +1791,15 @@ export struct VideoDetailPage {
             .fontSize(12)
             .fontColor('#9499A0')
             .margin({ left: 4 })
-          Text(this.detail.tname.length > 0 ? formatDate(this.detail.pubdate) + ' · ' + this.detail.tname : formatDate(this.detail.pubdate))
+          Text((formatDate(this.detail.pubdate)) +
+            (this.playerOnlineTotal.length > 0 ? ' · ' + this.playerOnlineTotal + '人正在看' : '') +
+            (this.detail.tname.length > 0 ? ' · ' + this.detail.tname : ''))
             .fontSize(12)
             .fontColor('#9499A0')
-            .margin({ left: 10 })
+            .margin({ left: 10, right: 10 })
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
         }
         .width('100%')
         .alignItems(VerticalAlign.Center)
@@ -2648,6 +2655,9 @@ export struct VideoDetailPage {
               onProgress: (seconds: number) => {
                 this.videoProgressSeconds = seconds;
                 this.reportVideoHeartbeat(seconds);
+              },
+              onOnlineCount: (value: string) => {
+                this.playerOnlineTotal = value;
               },
               onEnded: () => {
                 this.onPlayerEnded();

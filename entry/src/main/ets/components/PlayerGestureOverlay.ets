@@ -38,7 +38,8 @@ export struct PlayerGestureOverlay {
 
   build() {
     Stack({ alignContent: Alignment.Center }) {
-      if (this.onlineTotal.length > 0 && !this.compactMode && this.showControls) {
+      // 竖屏不再悬浮显示在线人数（已移到详情页"播放量"信息行的时间后面），横屏全屏保留。
+      if (this.onlineTotal.length > 0 && !this.compactMode && this.showControls && this.fullscreen) {
         Text(this.onlineTotal + '人正在看')
           .fontSize(10)
           .fontColor('#CFFFFFFF')

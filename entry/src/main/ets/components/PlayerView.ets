@@ -2,6 +2,7 @@
  * 播放器组件：AVPlayer + XComponent 渲染 + Canvas 弹幕引擎 + 手势控制
  */
 import { media } from '@kit.MediaKit';
+import { displaySync } from '@kit.ArkGraphics2D';
 import { avSession } from '@kit.AVSessionKit';
 import { PlayerAvSessionHelper } from './PlayerAvSessionHelper';
 import { PlayerSubtitleController } from './PlayerSubtitleController';
@@ -86,6 +87,8 @@ export struct PlayerView {
   onDmDraftChange: (value: string) => void = () => {};
   onDmSend: () => void = () => {};
   onProgress: (seconds: number) => void = () => {};
+  /** 在线观看人数变化上报：详情页把"X人正在看"显示在信息行（竖屏播放器不再悬浮）。 */
+  onOnlineCount: (value: string) => void = () => {};
   onEnded: () => void = () => {};
   onLike: () => void = () => {};
   onCoin: () => void = () => {};
@@ -169,10 +172,17 @@ export struct PlayerView {
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
   private dmEngine: PlayerDanmakuEngine = new PlayerDanmakuEngine(this.ctx);
   private dmTick: number = -1;
+  /** 弹幕 vsync 渲染：与屏幕刷新对齐，避免 setInterval 被主线程繁忙挤掉帧导致弹幕闪烁。 */
+  private dmSync: displaySync.DisplaySync | null = null;
   /** 弹幕视口尺寸高频回调合并：pending 尺寸 + 尾随一次应用。 */
   private dmResizeTimer: number = -1;
   private dmPendingW: number = 0;
   private dmPendingH: number = 0;
+  /** 开屏基准弹幕视口：页面打开时首次布局的尺寸，之后非全屏缩放一律不重排。 */
+  private dmBaseW: number = 0;
+  private dmBaseH: number = 0;
+  /** 开屏布局是否已应用；未应用前允许初次跟随，应用后仅全屏态跟随。 */
+  private dmLayoutApplied: boolean = false;
   private hideTimer: number = -1;
   private sourceIndex: number = 0;
   private retryingSource: boolean = false;
@@ -206,6 +216,9 @@ export struct PlayerView {
   @State sliderDragging: boolean = false;
   @State sliderDragValue: number = 0;
   private volumeRestoreTimer: number = -1;
+  /** 音画对齐：音频等待视频首个 timeUpdate（首帧上屏）后再 play 的挂起标记与兜底计时。 */
+  private audioStartPending: boolean = false;
+  private audioStartTimer: number = -1;
   private fullscreenExitTimer: number = -1;
   // AVPlayer 创建本身是异步的：代次使离页/换源前发起的 createAVPlayer 结果失效并立即释放。
   private playerCreateGeneration: number = 0;
@@ -241,7 +254,8 @@ export struct PlayerView {
           if (resume && video !== null && this.prepared) {
             try {
               if (!this.playing) video.play();
-              if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.play();
+              // 音频仍按首帧对齐节奏启动（若已播放则幂等无副作用）。
+              this.gateAudioStart();
             } catch (e) {
             }
           }
@@ -899,6 +913,19 @@ if (this.runtimeSources.length === 0) {
         }
         this.dmEngine.lastPlayerTime = nextTime;
         this.playheadSec = nextTime;
+        // 音画对齐：视频首帧已上屏（首个播放时刻）后启动音频。
+        if (this.audioStartPending && nextTime > 0.05) {
+          this.audioStartPending = false;
+          if (this.audioStartTimer >= 0) {
+            clearTimeout(this.audioStartTimer);
+            this.audioStartTimer = -1;
+          }
+          try {
+            const a: media.AVPlayer | null = this.audioPlayer;
+            if (a !== null && this.audioPrepared) a.play();
+          } catch (e) {
+          }
+        }
         // seek 锁定时 AVPlayer 仍会上报 seek 前的位置，忽略这些旧回写，让进度条钉在目标值。
         if (!this.seekLocked && Math.floor(nextTime) !== Math.floor(this.curTime)) this.curTime = nextTime;
         this.onProgress(nextTime);
@@ -1052,8 +1079,28 @@ if (this.runtimeSources.length === 0) {
     this.resumeAfterPrepare = -1;
     if (this.shouldPlayAfterPrepare) {
       video.play();
-      if (audio !== null) audio.play();
+      // 音频不随视频同时 play：等视频首帧上屏后再启动，避免先闻其声。
+      this.gateAudioStart();
     }
+  }
+
+  /** 起播时将音频延迟到视频首帧（首个 timeUpdate > 0）后再播放，防止声音先于画面；1.2s 兜底。 */
+  private gateAudioStart(): void {
+    const audio: media.AVPlayer | null = this.audioPlayer;
+    if (audio === null || !this.audioPrepared) return;
+    if (this.audioStartTimer >= 0) {
+      clearTimeout(this.audioStartTimer);
+    }
+    this.audioStartPending = true;
+    this.audioStartTimer = setTimeout(() => {
+      this.audioStartTimer = -1;
+      this.audioStartPending = false;
+      // 兜底：视频首帧迟迟不来（长时间缓冲等）也不再继续等待，1.2s 后强制让音频跟上。
+      try {
+        if (this.audioPlayer === audio && this.audioPrepared) audio.play();
+      } catch (e) {
+      }
+    }, 1200);
   }
 
   async changeQuality(qn: number): Promise<void> {
@@ -1166,9 +1213,15 @@ if (this.runtimeSources.length === 0) {
     const request: number = ++this.onlineRequest;
     const cid: number = this.cid;
     BiliApi.getOnlineTotal(this.aid, this.bvid, cid).then((total: string) => {
-      if (!this.destroyed && request === this.onlineRequest && this.cid === cid) this.onlineTotal = total;
+      if (!this.destroyed && request === this.onlineRequest && this.cid === cid) {
+        this.onlineTotal = total;
+        this.onOnlineCount(total);
+      }
     }).catch(() => {
-      if (!this.destroyed && request === this.onlineRequest) this.onlineTotal = '';
+      if (!this.destroyed && request === this.onlineRequest) {
+        this.onlineTotal = '';
+        this.onOnlineCount('');
+      }
     });
   }
 
@@ -1334,7 +1387,8 @@ if (this.runtimeSources.length === 0) {
       this.onResumeRequest();
       try {
         p.play();
-        if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.play();
+        // 音频等视频首帧上屏后再启动（同一节奏，避免先闻其声）。
+        this.gateAudioStart();
         this.playing = true;
         this.onPlayingChange(true);
         this.scheduleControlsHide();
@@ -1457,6 +1511,10 @@ if (this.runtimeSources.length === 0) {
     this.fullscreen = false;
     this.fullscreenPortrait = false;
     this.dmEngine.fullscreen = false;
+    // 退出全屏：弹幕布局回到开屏基准尺寸（之后非全屏缩放不再跟随，只裁剪）。
+    if (this.dmBaseW > 0 && this.dmBaseH > 0) {
+      this.dmEngine.setViewport(this.dmBaseW, this.dmBaseH);
+    }
     this.showSideDrawer = false;
     this.restartDmLoopForViewport();
     this.applyVideoScaleType();
@@ -1563,6 +1621,11 @@ if (this.runtimeSources.length === 0) {
       clearTimeout(this.volumeRestoreTimer);
       this.volumeRestoreTimer = -1;
     }
+    if (this.audioStartTimer >= 0) {
+      clearTimeout(this.audioStartTimer);
+      this.audioStartTimer = -1;
+    }
+    this.audioStartPending = false;
     if (this.fullscreenExitTimer >= 0) {
       clearTimeout(this.fullscreenExitTimer);
       this.fullscreenExitTimer = -1;
@@ -1605,22 +1668,42 @@ if (this.runtimeSources.length === 0) {
   }
 
   startDmLoop(): void {
-    if (this.dmTick >= 0 || !this.danmakuOn || this.dmEngine.active.length === 0) {
+    if (this.dmSync !== null || this.dmTick >= 0 || !this.danmakuOn || this.dmEngine.active.length === 0) {
       return;
     }
     this.dmEngine.lastDrawMs = Date.now();
-    this.dmTick = setInterval(() => {
-      if (this.playing && this.danmakuOn && this.dmEngine.active.length > 0) {
-        this.renderDanmakuFrame();
-      }
-    // 仅在存在活动弹幕时运行：普通 30fps、全屏 40fps，兼顾连续性与功耗。
-    }, this.fullscreen ? 25 : 33);
+    // 优先用 displaySync 按屏幕 vsync 重绘：主线程再忙也不会把弹幕帧挤丢，
+    // 帧与帧之间不跳帧，弹幕文字不再出现“消失再补”的闪烁。
+    try {
+      const sync: displaySync.DisplaySync = displaySync.create();
+      sync.setExpectedFrameRateRange({ min: 30, max: 60, expected: 60 });
+      sync.on('frame', () => {
+        if (this.playing && this.danmakuOn && this.dmEngine.active.length > 0) {
+          this.renderDanmakuFrame();
+        } else {
+          this.stopDmLoop(false);
+        }
+      });
+      sync.start();
+      this.dmSync = sync;
+    } catch (e) {
+      // 极老设备不支持 displaySync 时回退固定节拍。
+      this.dmSync = null;
+      this.dmTick = setInterval(() => {
+        if (this.playing && this.danmakuOn && this.dmEngine.active.length > 0) {
+          this.renderDanmakuFrame();
+        } else {
+          this.stopDmLoop(false);
+        }
+      }, 16);
+    }
   }
 
   private onDanmakuAreaChange(newV: Area): void {
-    // onAreaChange 在横屏/竖屏/缩放/迷你态切换期间高频触发，逐次全量重排弹幕
-    // 会瞬间拉满 CPU 并掉帧。这里把「应用新尺寸」合并到定时器尾：16ms 内只应用最后一次，
-    // 期间渲染循环仍在按旧视口画，视觉无感。
+    // 弹幕布局在「播放页开屏时」定稿一次（基准尺寸 = 首个有效视口）：
+    // 之后收起/展开/滚动带动播放器缩放时**不再重排**，弹幕按基准尺寸原样渲染，
+    // 画布变小/变大产生的溢出部分交给 Canvas 自身裁剪——零重算开销。
+    // 只有「全屏态」跟随屏幕尺寸重排（进入/退出全屏会重新计算轨道布局）。
     // 新 SDK 的 Area 宽高是带单位的 Length 字符串（如 "440.00vp"），直接 as number 强转
     // 运行时仍是字符串，会让弹幕引擎宽度变成 NaN/1vp：横滑 seek 的 secondsPerVp = duration/width
     // 被放大成任意滑动都跳到首/尾。统一 parseFloat 取数值（vp）。
@@ -1628,22 +1711,58 @@ if (this.runtimeSources.length === 0) {
     const newH: number = Number.parseFloat(String(newV.height));
     this.dmPendingW = newW;
     this.dmPendingH = newH;
-    if (this.dmResizeTimer < 0) {
-      this.dmResizeTimer = setTimeout(() => {
-        this.dmResizeTimer = -1;
-        if (this.destroyed) return;
-        this.dmEngine.setViewport(this.dmPendingW, this.dmPendingH);
-        // 渲染循环运行中由下一帧自然重绘；暂停/缓冲时无循环，
-        // Canvas 可能已被尺寸变化清空，补一帧避免白屏。
-        if (this.dmTick < 0 && this.dmEngine.active.length > 0) {
-          this.dmEngine.drawFrame(false);
-        }
-      }, 16);
+    if (!this.dmLayoutApplied && newW > 1 && newH > 1 && !Number.isNaN(newW) && !Number.isNaN(newH)) {
+      // 开屏首次：锁下基准尺寸并布局
+      this.dmBaseW = newW;
+      this.dmBaseH = newH;
+      this.dmEngine.setViewport(newW, newH);
+      this.dmLayoutApplied = true;
+      this.redrawDanmakuIfIdle();
+      return;
     }
+    // 非全屏：忽略一切尺寸变化（保持开屏布局）
+    if (!this.fullscreen) {
+      return;
+    }
+    // 全屏态：跟随屏幕尺寸（尾部防抖，切换动画期间只裁不重排）
+    if (this.dmResizeTimer >= 0) {
+      clearTimeout(this.dmResizeTimer);
+    }
+    this.dmResizeTimer = setTimeout(() => {
+      this.dmResizeTimer = -1;
+      if (this.destroyed) return;
+      this.dmEngine.setViewport(this.dmPendingW, this.dmPendingH);
+      this.redrawDanmakuIfIdle();
+    }, 60);
+  }
+
+  /** 渲染循环正常运行时由下一帧自绘；暂停/缓冲时无循环，补一帧避免白屏。 */
+  private redrawDanmakuIfIdle(): void {
+    if (this.dmSync === null && this.dmTick < 0 && this.dmEngine.active.length > 0) {
+      this.dmEngine.drawFrame(false);
+    }
+  }
+
+  /** 弹幕画布规格：非全屏钉死为开屏基准尺寸（缩放过程中画布不重建，溢出交给外层 clip 裁剪）；全屏铺满。 */
+  private dmCanvasW(): string {
+    if (this.fullscreen) return '100%';
+    return this.dmBaseW > 0 ? String(this.dmBaseW) + 'vp' : '100%';
+  }
+
+  private dmCanvasH(): string {
+    if (this.fullscreen) return '100%';
+    return this.dmBaseH > 0 ? String(this.dmBaseH) + 'vp' : '100%';
   }
 
   /** 暂停/缓冲时只停时钟，保留已上屏弹幕；恢复播放后从当前帧继续推进。 */
   private pauseDmLoop(): void {
+    if (this.dmSync !== null) {
+      try {
+        this.dmSync.stop();
+      } catch {
+      }
+      this.dmSync = null;
+    }
     if (this.dmTick >= 0) {
       clearInterval(this.dmTick);
       this.dmTick = -1;
@@ -1652,6 +1771,14 @@ if (this.runtimeSources.length === 0) {
   }
 
   stopDmLoop(clearActive: boolean): void {
+    // vsync 与固定节拍两条通道统一停，避免渲染时钟空转。
+    if (this.dmSync !== null) {
+      try {
+        this.dmSync.stop();
+      } catch {
+      }
+      this.dmSync = null;
+    }
     if (this.dmTick >= 0) {
       clearInterval(this.dmTick);
       this.dmTick = -1;
@@ -1685,7 +1812,7 @@ if (this.runtimeSources.length === 0) {
   }
 
   restartDmLoopForViewport(): void {
-    const shouldRestart: boolean = this.dmTick >= 0;
+    const shouldRestart: boolean = this.dmSync !== null || this.dmTick >= 0;
     this.stopDmLoop(false);
     this.dmEngine.clearCaches();
     // 横竖屏字号和轨道数不同，切换时立即重排，避免旋转后沿用旧坐标产生抽搐。
@@ -1891,27 +2018,35 @@ if (this.runtimeSources.length === 0) {
 
   build() {
     Stack({ alignContent: Alignment.Center }) {
-      // 视频画面
-      XComponent({
-        id: 'playerSurface',
-        type: XComponentType.SURFACE,
-        controller: this.xcController,
-      })
-        .width('100%')
-        .height('100%')
-        .onLoad(() => {
-          this.onSurfaceReady();
+      // 视频 + 弹幕 共用一层容器：外层 clip(true) 裁剪溢出，
+      // 弹幕 Canvas 尺寸钉死在开屏基准（全屏时放开 100%），
+      // 收起/展开动画期间 Canvas 底层缓冲不再被逐帧重建 → 杜绝过程中闪烁。
+      Stack({ alignContent: Alignment.TopStart }) {
+        // 视频画面
+        XComponent({
+          id: 'playerSurface',
+          type: XComponentType.SURFACE,
+          controller: this.xcController,
         })
+          .width('100%')
+          .height('100%')
+          .onLoad(() => {
+            this.onSurfaceReady();
+          })
 
-      // 弹幕层
-      Canvas(this.ctx)
-        .width('100%')
-        .height('100%')
-        .visibility(this.danmakuOn ? Visibility.Visible : Visibility.Hidden)
-        .onReady(() => {})
-        .onAreaChange((oldV: Area, newV: Area) => {
-          this.onDanmakuAreaChange(newV);
-        })
+        // 弹幕层（实时渲染：不冻结、不隐藏，缩放溢出由父元素裁剪）
+        Canvas(this.ctx)
+          .width(this.dmCanvasW())
+          .height(this.dmCanvasH())
+          .visibility(this.danmakuOn ? Visibility.Visible : Visibility.Hidden)
+          .onReady(() => {})
+          .onAreaChange((oldV: Area, newV: Area) => {
+            this.onDanmakuAreaChange(newV);
+          })
+      }
+      .width('100%')
+      .height('100%')
+      .clip(true)
 
       // 弹幕交互气泡：点击弹幕停住后，在弹幕上方/下方显示一个黑色半透明小气泡
       // （点赞/复制/举报三个线性图标，无文字，弹幕本身保持原大小和位置）。

@@ -5,6 +5,8 @@ import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
 import { UserStore } from '../common/UserStore';
 import { SearchHistoryStore } from '../common/SearchHistoryStore';
+import { EmoteResolver } from '../common/EmoteResolver';
+import { EmoteImageCache } from '../common/EmoteImageCache';
 
 const DOMAIN: number = 0x0000;
 const TAG: string = 'BiliHarmony';
@@ -13,6 +15,10 @@ export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     UserStore.initPersistence(this.context);
     SearchHistoryStore.init(this.context);
+    // 表情占位符映射表磁盘缓存：冷启动即恢复，不依赖网络。
+    EmoteResolver.attach(this.context);
+    // 表情图片本地文件缓存（cacheDir/emotes）落盘入口。
+    EmoteImageCache.attach(this.context);
     AppTheme.init(this.context);
     AppTheme.initThemeStore(this.context).catch(() => {
       // 主题偏好恢复失败不影响启动；PersistentStorage 默认值兜底。
