@@ -127,6 +127,9 @@ export struct VideoDetailPage {
   @State playerFullscreen: boolean = false;
   @State playerPlaying: boolean = false;
   @State playerCollapse: number = 0;
+  /** AVPlayer 解码后回传的真实视频尺寸；未拿到前先用接口 dimension 兜底。 */
+  @State realVideoWidth: number = 0;
+  @State realVideoHeight: number = 0;
   @State danmakuOn: boolean = true;
   @State danmakuDraft: string = '';
   @State danmakuSending: boolean = false;
@@ -216,12 +219,27 @@ export struct VideoDetailPage {
 
   private playerHeight(): number {
     const key: string = String(this.currentCid) + '|' + String(this.detail.aid) + '|' +
-      String(this.screenWidthVp) + 'x' + String(this.screenHeightVp);
+      String(this.screenWidthVp) + 'x' + String(this.screenHeightVp) + '|' +
+      String(this.realVideoWidth) + 'x' + String(this.realVideoHeight);
     if (key === this.playerHeightKey && this.playerHeightValue > 0) return this.playerHeightValue;
     const value: number = this.computePlayerHeight();
     this.playerHeightKey = key;
     this.playerHeightValue = value;
     return value;
+  }
+
+  private resetPlaybackSize(): void {
+    this.realVideoWidth = 0;
+    this.realVideoHeight = 0;
+    this.playerHeightValue = 0;
+  }
+
+  private onVideoSizeChange(width: number, height: number): void {
+    if (width <= 0 || height <= 0) return;
+    if (this.realVideoWidth === width && this.realVideoHeight === height) return;
+    this.realVideoWidth = width;
+    this.realVideoHeight = height;
+    this.playerHeightValue = 0;
   }
 
   private computePlayerHeight(): number {
@@ -231,23 +249,25 @@ export struct VideoDetailPage {
       const widthVp: number = this.screenWidthVp;
       const usableHeight: number = Math.max(480,
         this.screenHeightVp - Immersive.statusBarHeight() - Immersive.bottomInset());
-      // 至少保留常规横屏视频的控制空间；竖屏按原始比例增高，但最多占可用高度 68%，
-      // 且在大屏设备上不超过 520vp，确保下方简介/评论仍然可操作。
+      // 常规横屏按 16:9；竖屏按真实比例增高，最高不超过可用高度，优先避免被 AVPlayer 裁掉上下区域。
       const regularHeight: number = widthVp * 9 / 16;
-      const maximumHeight: number = Math.max(regularHeight, Math.min(520, usableHeight * 0.68));
-      let videoWidth: number = this.detail.width;
-      let videoHeight: number = this.detail.height;
+      // 竖屏视频封顶到可用高度的 60%：避免几乎占满整屏挤没评论区，想看大图可走竖屏全屏。
+      const maximumHeight: number = Math.max(regularHeight, Math.floor(usableHeight * 0.6));
+      let videoWidth: number = this.realVideoWidth > 0 ? this.realVideoWidth : this.detail.width;
+      let videoHeight: number = this.realVideoHeight > 0 ? this.realVideoHeight : this.detail.height;
       let videoRotate: number = this.detail.rotate;
       for (let i: number = 0; i < this.detail.pages.length; i++) {
         if (this.detail.pages[i].cid === this.currentCid && this.detail.pages[i].width > 0 &&
           this.detail.pages[i].height > 0) {
-          videoWidth = this.detail.pages[i].width;
-          videoHeight = this.detail.pages[i].height;
+          if (this.realVideoWidth <= 0 || this.realVideoHeight <= 0) {
+            videoWidth = this.detail.pages[i].width;
+            videoHeight = this.detail.pages[i].height;
+          }
           videoRotate = this.detail.pages[i].rotate;
           break;
         }
       }
-      if (Math.abs(videoRotate) % 180 !== 0) {
+      if ((this.realVideoWidth <= 0 || this.realVideoHeight <= 0) && Math.abs(videoRotate) % 180 !== 0) {
         const rotatedWidth: number = videoHeight;
         videoHeight = videoWidth;
         videoWidth = rotatedWidth;
@@ -283,19 +303,21 @@ export struct VideoDetailPage {
   /** 播放中仅长屏/竖向画幅收缩；暂停后任何画幅都可收成继续播放横幅。 */
   private shouldCollapsePlayer(): boolean {
     if (!this.playerPlaying) return true;
-    let width: number = this.detail.width;
-    let height: number = this.detail.height;
+    let width: number = this.realVideoWidth > 0 ? this.realVideoWidth : this.detail.width;
+    let height: number = this.realVideoHeight > 0 ? this.realVideoHeight : this.detail.height;
     let rotate: number = this.detail.rotate;
     for (let i: number = 0; i < this.detail.pages.length; i++) {
       if (this.detail.pages[i].cid === this.currentCid && this.detail.pages[i].width > 0 &&
         this.detail.pages[i].height > 0) {
-        width = this.detail.pages[i].width;
-        height = this.detail.pages[i].height;
+        if (this.realVideoWidth <= 0 || this.realVideoHeight <= 0) {
+          width = this.detail.pages[i].width;
+          height = this.detail.pages[i].height;
+        }
         rotate = this.detail.pages[i].rotate;
         break;
       }
     }
-    if (Math.abs(rotate) % 180 !== 0) {
+    if ((this.realVideoWidth <= 0 || this.realVideoHeight <= 0) && Math.abs(rotate) % 180 !== 0) {
       const oldWidth: number = width;
       width = height;
       height = oldWidth;
@@ -519,6 +541,7 @@ export struct VideoDetailPage {
   private async loadInitialPlayback(detail: VideoDetail): Promise<void> {
     const initialCid: number = detail.cid > 0 ? detail.cid : (detail.pages.length > 0 ? detail.pages[0].cid : 0);
     let targetCid: number = initialCid;
+    this.resetPlaybackSize();
     this.currentCid = initialCid;
     this.currentPageIndex = 0;
     for (let i: number = 0; i < detail.pages.length; i++) {
@@ -1076,6 +1099,7 @@ export struct VideoDetailPage {
       this.currentQuality = info.quality;
       this.initialSeekSeconds = 0;
       this.lastHeartbeatSeconds = -1;
+      this.resetPlaybackSize();
       this.currentCid = page.cid;
       this.currentPageIndex = index;
       this.playerCollapseRaw = 0;
@@ -2601,6 +2625,9 @@ export struct VideoDetailPage {
               onPlayingChange: (playing: boolean) => {
                 this.onPlayerPlayingChange(playing);
               },
+              onVideoSizeChange: (width: number, height: number) => {
+                this.onVideoSizeChange(width, height);
+              },
               onResumeRequest: () => {
                 this.expandPlayerForResume();
               },
@@ -2681,6 +2708,12 @@ export struct VideoDetailPage {
 
         // 信息区
         if (!this.playerFullscreen) {
+          // 黑色衬底条：垫在信息区圆角背后，圆角缝隙露出的是黑底而不是视频画面（竖屏视频播放区很高，缝里会透出画面）。
+          Row()
+            .width('100%')
+            .height(12)
+            .backgroundColor('#000000')
+            .margin({ bottom: -12 })
           if (this.loading) {
             LoadingView({ loading: true })
           } else if (this.errorText.length > 0) {
@@ -2699,8 +2732,7 @@ export struct VideoDetailPage {
             }
             .width('100%')
             .layoutWeight(1)
-            // 小圆角上沿：向上叠进播放区 12vp，圆角才能衬在黑色播放区上显出来。
-            .margin({ top: -12 })
+            // 小圆角上沿：面板顶部与播放区底边齐平，圆角缝只露出上方黑色衬底条。
             .borderRadius({ topLeft: 12, topRight: 12 })
             .clip(true)
             .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')

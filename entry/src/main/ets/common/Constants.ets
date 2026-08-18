@@ -241,6 +241,8 @@ export class Api {
   static readonly sendDanmaku: string = HttpString.apiBaseUrl + '/x/v2/dm/post';
   // 弹幕举报（dmid + cid + reason，需登录）
   static readonly reportDanmaku: string = HttpString.apiBaseUrl + '/x/v2/dm/report/add';
+  // 弹幕点赞（dmid + oid=cid，op 1 点赞 / 2 取消，需登录）
+  static readonly danmakuThumbup: string = HttpString.apiBaseUrl + '/x/v2/dm/thumbup/add';
   // 弹幕屏蔽词/正则/用户（x/dm/filter/user；type 0 关键词 / 1 正则 / 2 用户）
   static readonly danmakuFilter: string = HttpString.apiBaseUrl + '/x/dm/filter/user';
   static readonly danmakuFilterAdd: string = HttpString.apiBaseUrl + '/x/dm/filter/user/add';

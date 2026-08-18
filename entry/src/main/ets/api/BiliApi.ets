@@ -353,6 +353,19 @@ export class BiliApi {
     });
   }
 
+  /** 弹幕点赞（需登录；op 1 点赞 / 2 取消点赞；platform=web_player 与网页端一致） */
+  static async likeDanmaku(cid: number, dmid: number, op: number): Promise<ActionResult> {
+    if (cid <= 0 || dmid <= 0) {
+      return new ActionResult(false, '弹幕数据不完整，当前分段弹幕暂不支持点赞');
+    }
+    return postVideoAction(Api.danmakuThumbup, {
+      'dmid': String(dmid),
+      'oid': String(cid),
+      'op': String(op),
+      'platform': 'web_player',
+    });
+  }
+
   // ===== 番剧/影视（PGC）详情：season_id 与 ep_id 二选一；该接口数据主体在 result 而非 data =====
   static async getBangumiSeason(seasonId: number, epId: number): Promise<BangumiSeason | null> {
     if (seasonId <= 0 && epId <= 0) {
