@@ -9,15 +9,19 @@ import { BackButton, BackButtonVariant } from '../components/BackButton';
 import { LiveChatMessage, LiveEmoteItem, LiveEmotePackage, LivePlayInfo, LiveRoomInfo } from '../model/LiveModels';
 import { UserStore } from '../common/UserStore';
 import { LiveApi } from '../api/LiveApi';
+import { colorHex } from '../components/PlayerDanmakuSupport';
 
 @Component
 export struct LiveRoomPage {
   param: LiveRoomParam = { roomId: 0, uid: 0, title: '', uname: '', face: '', cover: '' };
   @State roomInfo: LiveRoomInfo = new LiveRoomInfo();
   @State playInfo: LivePlayInfo = new LivePlayInfo();
-  // messages 保持时间正序（LivePlayerView 弹幕浮层取尾部 N 条）；chatList 为渲染用倒序（新消息在前）
+  // messages 保持时间正序（LivePlayerView 弹幕浮层取尾部 N 条）；chatList 同为正序（新消息在底部，自动贴底）
   @State messages: Array<LiveChatMessage> = [];
   @State chatList: Array<LiveChatMessage> = [];
+  private chatScroller: Scroller = new Scroller();
+  /** 用户是否停留在弹幕列表底部附近（在底部新消息才自动跟滚）。 */
+  private chatAtBottom: boolean = true;
   @State superChats: Array<LiveChatMessage> = [];
   @State loading: boolean = true;
   @State qualityLoading: boolean = false;
@@ -95,7 +99,9 @@ export struct LiveRoomPage {
       this.knownMessageIds.clear();
       for (let i: number = 0; i < history.length; i++) this.knownMessageIds.add(history[i].id);
       this.messages = history;
-      this.chatList = history.slice().reverse().slice(0, 200);
+      this.chatList = history.slice(-200);
+      this.chatAtBottom = true;
+      this.scrollChatToEnd();
       this.lastLiveMessageAt = Date.now();
       // 先建立首屏历史基线再挂播放器，避免把历史消息一次性灌入画面轨道。
       this.playInfo = play;
@@ -162,7 +168,9 @@ export struct LiveRoomPage {
       if (emote !== null) local.emotes.push(emote);
       this.knownMessageIds.add(local.id);
       this.messages = this.messages.concat([local]);
-      this.chatList = [local].concat(this.chatList).slice(0, 200);
+      this.chatList = this.chatList.concat([local]).slice(-200);
+      this.chatAtBottom = true;
+      this.scrollChatToEnd();
       this.draft = '';
       this.emotePanelOpen = false;
       this.getUIContext().getPromptAction().showToast({ message: '弹幕发送成功' });
@@ -209,7 +217,7 @@ export struct LiveRoomPage {
     }
   }
 
-  /** 合帧落盘：正序 messages 供播放器浮层，倒序 chatList 供弹幕列表直接渲染（不再 slice().reverse()）。 */
+  /** 合帧落盘：正序 messages 供播放器浮层；chatList 同为正序，新消息追加在底部。 */
   private flushMessages(): void {
     if (this.destroyed || this.pendingMsgs.length === 0) {
       return;
@@ -218,38 +226,42 @@ export struct LiveRoomPage {
     this.pendingMsgs = [];
     const next: Array<LiveChatMessage> = this.messages.concat(batch);
     this.messages = next.length > 240 ? next.slice(next.length - 200) : next;
-    this.chatList = batch.slice().reverse().concat(this.chatList).slice(0, 200);
+    this.chatList = this.chatList.concat(batch).slice(-200);
+    // 用户本就在底部时才跟滚；翻上去读历史不打断。
+    if (this.chatAtBottom) this.scrollChatToEnd();
+  }
+
+  /** 列表贴底（等一帧让新内容完成布局再滚）。 */
+  private scrollChatToEnd(): void {
+    setTimeout(() => {
+      if (!this.destroyed) this.chatScroller.scrollEdge(Edge.End);
+    }, 60);
   }
 
   @Builder
   RoomHeader() {
-    Column({ space: 10 }) {
-      Row({ space: 10 }) {
-        Image(this.roomInfo.face.length > 0 ? this.roomInfo.face : $r('app.media.placeholder_avatar_noface'))
-          .width(42).height(42).borderRadius(21).objectFit(ImageFit.Cover)
-        Column({ space: 3 }) {
-          Text(this.roomInfo.uname.length > 0 ? this.roomInfo.uname : this.param.uname)
-            .fontSize(14).fontWeight(FontWeight.Medium)
-            .fontColor(this.isDark ? '#E6E6E6' : '#18191C').maxLines(1)
-          Row({ space: 6 }) {
-            Circle().width(7).height(7).fill(this.connected ? '#45D483' : '#9499A0')
-            Text(this.connected ? '弹幕已连接' : '弹幕连接中')
-              .fontSize(10).fontColor(this.isDark ? '#8A8A8E' : '#9499A0')
-            if (this.roomInfo.areaName.length > 0) {
-              Text(this.roomInfo.areaName).fontSize(10).fontColor(this.accent)
-            }
+    // 对齐官方直播间顶栏：头像 + 名字/直播状态，右侧人气；标题交由全屏页头呈现。
+    Row({ space: 10 }) {
+      Image(this.roomInfo.face.length > 0 ? this.roomInfo.face : $r('app.media.placeholder_avatar_noface'))
+        .width(46).height(46).borderRadius(23).objectFit(ImageFit.Cover)
+      Column({ space: 4 }) {
+        Text(this.roomInfo.uname.length > 0 ? this.roomInfo.uname : this.param.uname)
+          .fontSize(15).fontWeight(FontWeight.Medium)
+          .fontColor(this.isDark ? '#F1F2F3' : '#18191C').maxLines(1)
+        Row({ space: 6 }) {
+          Circle().width(6).height(6).fill(this.connected ? '#45D483' : '#9499A0')
+          Text(this.connected ? '直播中' : '连接中')
+            .fontSize(10).fontColor(this.isDark ? '#8A8A8E' : '#9499A0')
+          if (this.roomInfo.areaName.length > 0) {
+            Text(this.roomInfo.areaName).fontSize(10).fontColor(this.accent)
           }
-        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-        Text(this.roomInfo.watched)
-          .fontSize(11).fontColor(this.isDark ? '#8A8A8E' : '#9499A0')
-      }
-      .width('100%').alignItems(VerticalAlign.Center)
-      Text(this.roomInfo.title.length > 0 ? this.roomInfo.title : this.param.title)
-        .width('100%').fontSize(16).fontWeight(FontWeight.Bold)
-        .fontColor(this.isDark ? '#F1F2F3' : '#18191C').maxLines(2)
+        }
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      Text(this.roomInfo.watched)
+        .fontSize(11).fontColor(this.isDark ? '#8A8A8E' : '#9499A0')
     }
-    .width('100%').padding({ left: 14, right: 14, top: 13, bottom: 12 })
-    .alignItems(HorizontalAlign.Start)
+    .width('100%').padding({ left: 14, right: 14, top: 12, bottom: 11 })
+    .alignItems(VerticalAlign.Center)
   }
 
   @Builder
@@ -284,47 +296,68 @@ export struct LiveRoomPage {
     return text.trim();
   }
 
+  /** 官方样式弹幕行：UL 等级牌 + 粉丝团牌子 + 蓝色「名字:」+ 白色内容（表情消息内联图片）。 */
   @Builder
-  ChatMessageContent(msg: LiveChatMessage) {
-    if (msg.emotes.length > 0) {
-      Flex({ wrap: FlexWrap.Wrap, direction: FlexDirection.Row, alignItems: ItemAlign.Center }) {
-        if (this.cleanEmoteText(msg).length > 0) {
-          Text(this.cleanEmoteText(msg))
-            .fontSize(13).fontColor(this.isDark ? '#E1E2E3' : '#303236').maxLines(3)
-        }
-        ForEach(msg.emotes, (emote: LiveEmoteItem) => {
-          Image(emote.url)
-            .width(emote.unique.startsWith('official_') ? 18 : 22)
-            .height(emote.unique.startsWith('official_') ? 18 : 22)
-            .objectFit(ImageFit.Contain)
-        }, (emote: LiveEmoteItem) => emote.unique + emote.url)
+  ChatBadgeRow(msg: LiveChatMessage) {
+    Row({ space: 6 }) {
+      if (msg.ulLevel > 0) {
+        Text('⌄ ' + String(msg.ulLevel))
+          .fontSize(9).fontColor('#C9CDD4')
+          .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+          .backgroundColor('#3A3D44')
+          .borderRadius(4)
       }
-      .layoutWeight(1)
-    } else {
-      Text(msg.text)
-        .fontSize(13).fontColor(this.isDark ? '#E1E2E3' : '#303236')
+      if (msg.medalName.length > 0) {
+        Text(msg.medalName + ' ' + String(msg.medalLevel))
+          .fontSize(9).fontColor('#FFFFFF')
+          .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+          .backgroundColor(msg.medalColor > 0 ? colorHex(msg.medalColor) : '#5B7EA6')
+          .borderRadius(4)
+      }
+      if (msg.emotes.length > 0) {
+        Flex({ wrap: FlexWrap.Wrap, direction: FlexDirection.Row, alignItems: ItemAlign.Center }) {
+          Text((msg.uname.length > 0 ? msg.uname : '观众') + ': ')
+            .fontSize(13).fontColor('#7EB6E8')
+          if (this.cleanEmoteText(msg).length > 0) {
+            Text(this.cleanEmoteText(msg))
+              .fontSize(13).fontColor(this.isDark ? '#F1F2F3' : '#303236').maxLines(3)
+          }
+          ForEach(msg.emotes, (emote: LiveEmoteItem) => {
+            Image(emote.url)
+              .width(emote.unique.startsWith('official_') ? 18 : 22)
+              .height(emote.unique.startsWith('official_') ? 18 : 22)
+              .objectFit(ImageFit.Contain)
+          }, (emote: LiveEmoteItem) => emote.unique + emote.url)
+        }
+        .layoutWeight(1)
+      } else {
+        Text() {
+          Span((msg.uname.length > 0 ? msg.uname : '观众') + ': ')
+            .fontSize(13).fontColor('#7EB6E8')
+          Span(msg.text)
+            .fontSize(13).fontColor(this.isDark ? '#F1F2F3' : '#303236')
+        }
         .layoutWeight(1).maxLines(3)
+      }
     }
+    .width('100%').padding({ left: 14, right: 14 })
+    .alignItems(VerticalAlign.Center)
   }
 
   @Builder
   DanmakuList() {
-    List({ space: 8 }) {
+    List({ space: 8, scroller: this.chatScroller }) {
       ForEach(this.chatList, (msg: LiveChatMessage) => {
         ListItem() {
-          Row({ space: 7 }) {
-            Text(msg.uname.length > 0 ? msg.uname : '观众')
-              .fontSize(11).fontColor(this.accent).maxLines(1)
-              .constraintSize({ maxWidth: 110 })
-            this.ChatMessageContent(msg)
-          }
-          .width('100%').padding({ left: 14, right: 14 })
-          .alignItems(VerticalAlign.Center)
+          this.ChatBadgeRow(msg)
         }
       }, (msg: LiveChatMessage) => msg.id)
     }
     .width('100%').layoutWeight(1).scrollBar(BarState.Off)
     .contentEndOffset(Immersive.bottomInset() + 18)
+    .onScrollIndex((first: number, last: number) => {
+      this.chatAtBottom = last >= this.chatList.length - 2;
+    })
   }
 
   @Builder
@@ -380,7 +413,7 @@ export struct LiveRoomPage {
   DanmakuComposer() {
     Column() {
       Row({ space: 7 }) {
-        TextInput({ placeholder: this.sending ? '发送中…' : '发一条直播弹幕', text: this.draft })
+        TextInput({ placeholder: this.sending ? '发送中…' : '发个弹幕呗~', text: this.draft })
           .height(38).layoutWeight(1).fontSize(13)
           .fontColor(this.isDark ? '#FFFFFF' : '#18191C').placeholderColor('#9499A0')
           .backgroundColor(this.isDark ? '#292A2E' : '#EEF0F2').borderRadius(19)

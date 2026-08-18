@@ -62,19 +62,24 @@ export class LiveDanmakuRenderer {
   /** 新消息增量进入：基线之后新增的弹幕先入待喷队列，由渲染循环按节奏逐条释放。 */
   onMessagesChanged(messages: Array<LiveChatMessage>): void {
     if (!this.messageBaselineReady) return;
-    let added: boolean = false;
+    const fresh: Array<LiveChatMessage> = [];
     for (let i: number = 0; i < messages.length; i++) {
       const message: LiveChatMessage = messages[i];
       if (this.seenMessageIds.has(message.id)) continue;
       this.seenMessageIds.add(message.id);
-      this.pending.push(message);
-      added = true;
+      fresh.push(message);
     }
     if (this.seenMessageIds.size > 600) {
       this.seenMessageIds.clear();
       for (let i = 0; i < messages.length; i++) this.seenMessageIds.add(messages[i].id);
     }
-    if (added && this.playing && this.enabled) this.startLoop();
+    // 一次涌入 ≥6 条视为历史/重放（重连快照、低频补拉、高热度房间 WS 整帧）：
+    // 只喷最新 2 条，其余标记已见直接跳过，避免一批一批糊上屏。
+    const spray: Array<LiveChatMessage> = fresh.length >= 6 ? fresh.slice(fresh.length - 2) : fresh;
+    for (let i = 0; i < spray.length; i++) {
+      this.pending.push(spray[i]);
+    }
+    if (spray.length > 0 && this.playing && this.enabled) this.startLoop();
   }
 
   /**
@@ -85,8 +90,9 @@ export class LiveDanmakuRenderer {
     if (this.pending.length === 0) return;
     const now: number = Date.now();
     if (now - this.lastReleaseMs < 130) return;
-    if (this.pending.length > 30) {
-      this.pending.splice(0, this.pending.length - 30);
+    // 积压超过 14 条丢弃最旧：直播弹幕讲时效，放旧的不如放新的。
+    if (this.pending.length > 14) {
+      this.pending.splice(0, this.pending.length - 14);
     }
     const burst: number = this.pending.length > 8 ? 2 : 1;
     let released: boolean = false;
@@ -159,8 +165,10 @@ export class LiveDanmakuRenderer {
 
   private spawnMessage(message: LiveChatMessage): void {
     if (!this.enabled || this.width <= 1 || message.text.length === 0 || this.active.length >= this.maxActive) return;
-    const text: string = message.type === 'sc' ? 'SC ¥' + String(message.price) + '  ' + message.text :
+    // 对齐官方浮层样式：普通弹幕渲染为「名字: 内容」；SC 保留金额前缀。
+    const body: string = message.type === 'sc' ? 'SC ¥' + String(message.price) + '  ' + message.text :
       (message.emotes.length > 0 && message.text === message.emotes[0].unique ? '[直播表情]' : message.text);
+    const text: string = message.type === 'sc' || message.uname.length === 0 ? body : message.uname + ': ' + body;
     this.ctx.font = '600 ' + String(this.fontSize()) + 'px sans-serif';
     const width: number = Math.max(24, this.ctx.measureText(text).width);
     const spawnX: number = this.width + 10;

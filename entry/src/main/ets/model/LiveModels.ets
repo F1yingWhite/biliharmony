@@ -164,6 +164,12 @@ export class LiveChatMessage {
   uname: string = '';
   text: string = '';
   color: number = 0xFFFFFF;
+  /** 用户等级（UL，info[4][0]）；0 表示未知不展示。 */
+  ulLevel: number = 0;
+  /** 粉丝团牌子（info[3]）：名称为空不展示。 */
+  medalName: string = '';
+  medalLevel: number = 0;
+  medalColor: number = 0;
   price: number = 0;
   face: string = '';
   emotes: Array<LiveEmoteItem> = [];
@@ -180,6 +186,20 @@ export class LiveChatMessage {
     if (info.length > 2) {
       const user: Array<Object> = asArray(info[2]);
       if (user.length > 1) msg.uname = asString(user[1], '');
+    }
+    // 粉丝团牌子 info[3] = [等级, 牌子名, 主播名, 房间号, 颜色, …]；未佩戴为空数组。
+    if (info.length > 3) {
+      const medal: Array<Object> = asArray(info[3]);
+      if (medal.length > 1) {
+        msg.medalLevel = asNumber(medal[0], 0);
+        msg.medalName = asString(medal[1], '');
+        if (medal.length > 4) msg.medalColor = asNumber(medal[4], 0);
+      }
+    }
+    // 用户等级 info[4] = [UL 等级, …]。
+    if (info.length > 4) {
+      const ul: Array<Object> = asArray(info[4]);
+      if (ul.length > 0) msg.ulLevel = asNumber(ul[0], 0);
     }
     if (info.length > 0) {
       const meta: Array<Object> = asArray(info[0]);
