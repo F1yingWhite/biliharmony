@@ -151,10 +151,13 @@ export struct BangumiIndexPage {
   @Builder
   CoverCard(item: BangumiIndexItem) {
     Column({ space: 6 }) {
+      // 高度必须由外层 Stack 的 aspectRatio 给定：若只标在 Image 上，
+      // 内层 height('100%') 的评分覆盖层会让 Stack 测量成列表可视高度，
+      // 造成卡片上方一大片空白、封面被挤到底部。
       Stack({ alignContent: Alignment.BottomStart }) {
         Image(item.cover.length > 0 ? biliImageThumbnail(item.cover, 300) : item.cover)
           .width('100%')
-          .aspectRatio(0.7)
+          .height('100%')
           .objectFit(ImageFit.Cover)
           .borderRadius(8)
           .backgroundColor(this.isDark ? '#26272B' : '#EEF0F2')
@@ -186,6 +189,7 @@ export struct BangumiIndexPage {
         .hitTestBehavior(HitTestMode.None)
       }
       .width('100%')
+      .aspectRatio(0.7)
       .clip(true)
       Text(item.title)
         .fontSize(13)

@@ -88,13 +88,7 @@ export struct HistoryPage {
       PageHeader({
         title: '历史记录',
         trailing: (): void => {
-          Text('清空')
-            .fontSize(13)
-            .fontColor(this.itemsSource.totalCount() > 0 ? AppTheme.DANGER : '#9499A0')
-            .padding({ left: 18, right: 2, top: 8, bottom: 8 })
-            .onClick(() => {
-              if (this.itemsSource.totalCount() > 0) this.confirmClearHistory();
-            })
+          this.ClearHistoryAction()
         },
       })
       if (this.itemCount === 0) {
@@ -188,6 +182,18 @@ export struct HistoryPage {
     } catch (e) {
       // 弹窗失败不阻塞。
     }
+  }
+
+  /** 页头右侧「清空」按钮（@BuilderParam 必须传 @Builder 方法，内联组件会崩）。 */
+  @Builder
+  ClearHistoryAction() {
+    Text('清空')
+      .fontSize(13)
+      .fontColor(this.itemsSource.totalCount() > 0 ? AppTheme.DANGER : '#9499A0')
+      .padding({ left: 18, right: 2, top: 8, bottom: 8 })
+      .onClick(() => {
+        if (this.itemsSource.totalCount() > 0) this.confirmClearHistory();
+      })
   }
 
   /** 清空全部历史：二次确认。 */

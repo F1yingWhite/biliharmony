@@ -178,8 +178,8 @@ export class Immersive {
     if (Immersive.brightnessPending >= -1) Immersive.flushWindowBrightness();
   }
 
-  /** 视频播放页全屏：隐藏系统栏；退出恢复 */
-  static setFullscreen(landscape: boolean): void {
+  /** 视频播放页全屏：隐藏系统栏；退出恢复。keepPortrait 为竖屏视频保持竖屏全屏（不转横屏）。 */
+  static setFullscreen(landscape: boolean, keepPortrait: boolean = false): void {
     const win: window.Window | null = Immersive.mainWindow;
     if (win === null) {
       return;
@@ -191,7 +191,7 @@ export class Immersive {
         // ignore
       }
       try {
-        win.setPreferredOrientation(window.Orientation.LANDSCAPE);
+        win.setPreferredOrientation(keepPortrait ? window.Orientation.PORTRAIT : window.Orientation.LANDSCAPE);
       } catch (e) {
         // ignore
       }

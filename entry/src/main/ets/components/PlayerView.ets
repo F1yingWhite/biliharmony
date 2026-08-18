@@ -69,10 +69,17 @@ export struct PlayerView {
   @Prop @Watch('onLocalDanmakuRequested') localDanmakuToken: number = 0;
   @Prop @Watch('onCompactModeChanged') compactMode: boolean = false;
   onBack: () => void = () => {};
+  /** AVPlayer 回报的真实画幅：全屏时判断竖屏视频保持竖屏。 */
+  private realVideoWidth: number = 0;
+  private realVideoHeight: number = 0;
+  /** 当前全屏是否为竖屏全屏（竖屏视频）：决定顶栏让出状态栏高度。 */
+  private fullscreenPortrait: boolean = false;
   onFullscreenChange: (fullscreen: boolean) => void = () => {};
   onPlayingChange: (playing: boolean) => void = () => {};
   onResumeRequest: () => void = () => {};
   onDanmakuChange: (enabled: boolean) => void = () => {};
+  /** AVPlayer 解码后的真实视频尺寸，详情页据此重算高度，避免竖屏长视频被裁切。 */
+  onVideoSizeChange: (width: number, height: number) => void = () => {};
   /** 横屏底栏弹幕输入：草稿与发送由业务页（VideoDetail）持有 */
   @Prop dmDraft: string = '';
   @Prop dmSending: boolean = false;
@@ -101,7 +108,7 @@ export struct PlayerView {
   @State curTime: number = 0;
   @State duration: number = 0;
   @State danmakuOn: boolean = true;
-  /** 被点击停住的弹幕（操作条：点赞/点踩/举报）。null 表示无选中。 */
+  /** 被点击停住的弹幕（操作条：点赞/复制/举报）。null 表示无选中。 */
   @State dmPinnedText: string = '';
   @State dmPinnedVisible: boolean = false;
   /** 气泡锚点（vp）：定位在弹幕上方/下方。 */
@@ -840,6 +847,7 @@ if (this.runtimeSources.length === 0) {
           this.prepared = true;
           this.errorText = '';
           this.applyVideoScaleType();
+          this.reportVideoSize(p);
           try {
             p.setPlaybackRate(this.playbackRate);
             p.setVolume((this.gestureCtl?.gestureVolume ?? 100) / 100);
@@ -924,6 +932,10 @@ if (this.runtimeSources.length === 0) {
             this.startDmLoop();
           }
         }
+      });
+      p.on('videoSizeChange', (width: number, height: number) => {
+        if (this.player !== p || height <= 0 || width <= 0) return;
+        this.onVideoSizeChange(width, height);
       });
       const sourceUrl: string = this.currentSourceUrl();
       if (sourceUrl.length === 0) {
@@ -1427,7 +1439,9 @@ if (this.runtimeSources.length === 0) {
       this.applyVideoScaleType();
       // 先让详情页播放器占满窗口，再旋转；整个过程中不会重新创建 AVPlayer。
       this.onFullscreenChange(true);
-      Immersive.setFullscreen(true);
+      // 竖屏视频全屏保持竖屏：转横屏只会让画面瘦成中间一条，体验更差。
+      this.fullscreenPortrait = this.realVideoHeight > this.realVideoWidth && this.realVideoWidth > 0;
+      Immersive.setFullscreen(true, this.fullscreenPortrait);
     }
   }
 
@@ -1436,6 +1450,7 @@ if (this.runtimeSources.length === 0) {
       return;
     }
     this.fullscreen = false;
+    this.fullscreenPortrait = false;
     this.dmEngine.fullscreen = false;
     this.showSideDrawer = false;
     this.restartDmLoopForViewport();
@@ -1459,6 +1474,17 @@ if (this.runtimeSources.length === 0) {
     }
     // 所有模式都完整等比显示：不拉伸，也不为了填满屏幕裁掉画面上下或左右内容。
     p.videoScaleType = media.VideoScaleType.VIDEO_SCALE_TYPE_SCALED_ASPECT;
+  }
+
+  private reportVideoSize(p: media.AVPlayer): void {
+    // AVPlayer 在 prepared 后可读真实视频宽高。接口里的 dimension 有时缺失或只到上一个分 P，
+    // 这里把解码结果回传给详情页，让播放器容器按真实画幅重新算高度，避免上下被裁。
+    if (this.player !== p || p.width <= 0 || p.height <= 0) {
+      return;
+    }
+    this.realVideoWidth = p.width;
+    this.realVideoHeight = p.height;
+    this.onVideoSizeChange(p.width, p.height);
   }
 
   toggleControls(): void {
@@ -1883,10 +1909,10 @@ if (this.runtimeSources.length === 0) {
         })
 
       // 弹幕交互气泡：点击弹幕停住后，在弹幕上方/下方显示一个黑色半透明小气泡
-      // （点踩/复制/举报三个线性图标，无文字，弹幕本身保持原大小和位置）。
+      // （点赞/复制/举报三个线性图标，无文字，弹幕本身保持原大小和位置）。
       if (this.dmPinnedVisible) {
         Row({ space: 0 }) {
-          this.DmActionCell($r('app.media.ic_dislike'), () => this.dmDislike(), true)
+          this.DmActionCell($r('app.media.ic_like'), () => this.dmLike(), true)
           this.DmActionCell($r('app.media.ic_copy'), () => this.dmCopy(), true)
           this.DmActionCell($r('app.media.ic_report_flag'), () => this.dmReport(), true)
         }
@@ -2040,17 +2066,22 @@ if (this.runtimeSources.length === 0) {
                 onFavorite: () => this.onFavorite(),
                 onShare: () => this.onShare(),
               })
+              // 竖屏全屏时顶栏让出状态栏高度，避免融进状态栏区域难点难看。
+              .padding({ top: this.fullscreenPortrait ? Immersive.statusBarHeight() : 0 })
             } else {
-              // 竖屏右上角 ⋮：清晰度/倍速/空降/分段/弹幕设置全部收纳在这里，
+              // 竖屏顶栏：左上返回、右上 ⋮：清晰度/倍速/空降/分段/弹幕设置全部收纳在这里，
               // 底栏只保留 播放-进度-全屏，减少对画面内容的遮挡。
               Row() {
+                this.IconButton($r('app.media.ic_back'), 20, 36, 36, '#FFFFFF', false, () => {
+                  this.onBack();
+                })
                 Blank()
                 this.IconButton($r('app.media.ic_more'), 20, 36, 36, '#FFFFFF', false, () => {
                   this.toggleMoreMenu();
                 })
               }
               .width('100%')
-              .padding({ top: 6, right: 4 })
+              .padding({ top: 6, left: 4, right: 4 })
             }
             Blank()
             PlayerBottomControls({
@@ -2151,7 +2182,7 @@ if (this.runtimeSources.length === 0) {
   /** 按下时命中的弹幕（可能被 Pan 接管后丢弃）。 */
   private pendingDm: ActiveDm | null = null;
 
-  /** 单击播放画面：命中的弹幕先"停住"并显示点赞/点踩/举报操作条（B 站交互）；否则照常切控件。 */
+  /** 单击播放画面：命中的弹幕先"停住"并显示点赞/复制/举报操作条（B 站交互）；否则照常切控件。 */
   private handleCanvasTap(event: GestureEvent): void {
     // 播完结束画面打开时接管整块画面，手势不再切换控件/停弹幕。
     if (this.endScreenOpen) return;
@@ -2185,7 +2216,7 @@ if (this.runtimeSources.length === 0) {
     this.toggleControls();
   }
 
-  /** 停住被点中的弹幕并显示其旁的小气泡（内含点赞/点踩/举报，弹幕本身不变形不移动）。 */
+  /** 停住被点中的弹幕并显示其旁的小气泡（内含点赞/复制/举报，弹幕本身不变形不移动）。 */
   private pinDanmaku(hit: ActiveDm): void {
     this.dmEngine.pin(hit);
     this.dmPinnedText = hit.renderText;
@@ -2232,13 +2263,28 @@ if (this.runtimeSources.length === 0) {
     if (this.playing) this.scheduleControlsHide();
   }
 
-  /** 弹幕点踩：B 站未开放媒体弹幕打分接口，本地乐观反馈。 */
-  private dmDislike(): void {
+  /** 弹幕点赞：x/v2/dm/thumbup/add（dmid + cid）；XML 兜底协议无 dmid，只能本地反馈。 */
+  private dmLike(): void {
+    const pinned = this.dmEngine.pinned;
     this.unpinDanmaku();
-    try {
-      this.getUIContext().getPromptAction().showToast({ message: '已点踩这条弹幕' });
-    } catch (e) {
+    if (pinned === null) {
+      return;
     }
+    if (pinned.item.id <= 0) {
+      this.toast('该弹幕来自兼容协议，暂不支持点赞');
+      return;
+    }
+    if (UserStore.isLogin === false) {
+      this.toast('请先登录后再点赞弹幕');
+      return;
+    }
+    BiliApi.likeDanmaku(this.cid, pinned.item.id, 1)
+      .then((r: ActionResult) => {
+        this.toast(r.ok ? '已点赞这条弹幕' : r.message);
+      })
+      .catch(() => {
+        this.toast('点赞失败，请稍后重试');
+      });
   }
 
   /** 复制弹幕文本到系统剪贴板。 */
@@ -2267,7 +2313,7 @@ if (this.runtimeSources.length === 0) {
     if (pinned !== null) this.promptReportDanmaku(pinned.item);
   }
 
-  /** 弹幕气泡按钮：黑色半透明圆底 + 线性图标（点赞/点踩/举报），按压反馈。 */
+  /** 弹幕气泡按钮：黑色半透明圆底 + 线性图标（点赞/复制/举报），按压反馈。 */
   @Builder
   DmActionCell(icon: Resource, onTap: () => void, ignore: boolean) {
     Stack({ alignContent: Alignment.Center }) {
