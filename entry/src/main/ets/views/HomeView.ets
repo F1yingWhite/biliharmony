@@ -308,13 +308,18 @@ export struct HomeView {
     .width(62)
     .height(30)
     .borderRadius(15)
-    .backgroundColor(this.visualTab === index ? (this.isDark ? '#33FB7299' : '#1FFB7299') : '#00000000')
+    .backgroundColor(this.visualTab === index ? this.accentBg() : '#00000000')
     .scale({ x: this.visualTab === index ? 1.0 : 1.0, y: this.visualTab === index ? 1.0 : 1.0 })
     .animation({ duration: 180, curve: Curve.EaseOut })
     .onClick(() => {
       Haptic.light();
       this.switchTab(index);
     })
+  }
+
+  private accentBg(): string {
+    // 选中项胶囊底色：用当前主题强调色加透明度，替代原来的硬编码品牌粉。
+    return this.isDark ? '#33' + this.accent.substring(1) : '#1F' + this.accent.substring(1);
   }
 
   private switchTab(index: number): void {

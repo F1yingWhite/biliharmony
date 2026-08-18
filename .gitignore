@@ -38,3 +38,5 @@ screenshot
 .emulator
 .hvigor
 .hvigor_work
+# Python
+**/__pycache__/

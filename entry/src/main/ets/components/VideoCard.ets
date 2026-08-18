@@ -6,6 +6,7 @@
 import { VideoItem } from '../model/Models';
 import { formatDuration } from '../common/Utils';
 import { AppNavStack, NAV_VIDEO_DETAIL, VideoDetailParam } from '../common/AppRouter';
+import { Haptic } from '../common/Haptic';
 import { FeedCardTitle, FeedCoverImage, FeedGradientMask } from './FeedCardParts';
 
 @Reusable
@@ -137,6 +138,7 @@ export struct VideoCard {
       },
     })
     .onClick(() => {
+      Haptic.light();
       if (this.video.bvid.length > 0 || this.video.aid > 0) {
         const param: VideoDetailParam = { bvid: this.video.bvid, aid: this.video.aid, title: this.video.title };
         AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);

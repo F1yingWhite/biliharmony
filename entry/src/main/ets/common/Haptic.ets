@@ -23,6 +23,11 @@ export class Haptic {
     Haptic.vibrate(12);
   }
 
+  /** 拖动进度/快进/倍速切换等连续操作：5ms 极短脉冲，避免震手。 */
+  static seek(): void {
+    Haptic.vibrate(5);
+  }
+
   private static vibrate(duration: number): void {
     try {
       vibrator.startVibration({ type: 'time', duration: duration }, { usage: 'physicalFeedback' }).catch(() => {

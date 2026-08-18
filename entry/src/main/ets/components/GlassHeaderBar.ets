@@ -8,6 +8,7 @@ import { UserStore } from '../common/UserStore';
 import { AppTheme } from '../common/AppTheme';
 import { colorWithAlpha } from '../common/Utils';
 import { HotSearchStore } from '../common/HotSearchStore';
+import { Haptic } from '../common/Haptic';
 import { MsgUnreadStore } from '../common/MsgUnreadStore';
 import { DecoratedAvatar } from './UserDecorations';
 
@@ -125,6 +126,7 @@ export struct GlassHeaderBar {
         // Block 在当前系统版本会截断子 Text/Image 到父 Row 的点击冒泡。
         .hitTestBehavior(HitTestMode.Default)
         .onClick(() => {
+          Haptic.light();
           AppStorage.setOrCreate<string>('searchSuggestedKeyword', this.hotSearch);
           AppNavStack.pushPathByName(NAV_SEARCH, null);
         })
@@ -146,6 +148,7 @@ export struct GlassHeaderBar {
         .width(40)
         .height(40)
         .onClick(() => {
+          Haptic.light();
           if (UserStore.isLogin) {
             AppNavStack.pushPathByName(NAV_MESSAGES, null);
           } else {
@@ -174,6 +177,7 @@ export struct GlassHeaderBar {
       })
         .margin({ left: 7, top: Immersive.statusBarHeight() - 1 })
         .onClick(() => {
+          Haptic.light();
           this.onAvatarTap();
         })
     }
