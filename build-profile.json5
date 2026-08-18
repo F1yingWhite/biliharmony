@@ -5,13 +5,13 @@
         "name": "default",
         "type": "HarmonyOS",
         "material": {
-          "certpath": "C:\\Users\\f1yin\\.ohos\\config\\default_biliharmony_1w9J4asWbdJapm-91Ty0_oEvgB2DuW_6CctCqXhCLb0=.cer",
+          "certpath": "/Users/flyingwhite/.ohos/config/default_BiliHaromny_clsH0gQVnpwMqUX0G0BSyJzeNYoOCYL9x7tLUEnaDA8=.cer",
           "keyAlias": "debugKey",
-          "keyPassword": "0000001B55BF92ADA6530F1D7A5135762EDDEBC03B257373D818B1A7599FF9C09454370DCA67DD1D9D1CEB",
-          "profile": "C:\\Users\\f1yin\\.ohos\\config\\default_biliharmony_1w9J4asWbdJapm-91Ty0_oEvgB2DuW_6CctCqXhCLb0=.p7b",
+          "keyPassword": "0000001BCB07F4B0D114828AD4B8F8A137A6D0A779F7C54CB8DEEEDF9BA14DED5CC4B255FF4A8A2D0E01C9",
+          "profile": "/Users/flyingwhite/.ohos/config/default_BiliHaromny_clsH0gQVnpwMqUX0G0BSyJzeNYoOCYL9x7tLUEnaDA8=.p7b",
           "signAlg": "SHA256withECDSA",
-          "storeFile": "C:\\Users\\f1yin\\.ohos\\config\\default_biliharmony_1w9J4asWbdJapm-91Ty0_oEvgB2DuW_6CctCqXhCLb0=.p12",
-          "storePassword": "0000001B8F802539EAE1E4E7825FEC4660CC33BADAD0148E4DCF2542DBA92F1C161A258FC8780CECC1A78B"
+          "storeFile": "/Users/flyingwhite/.ohos/config/default_BiliHaromny_clsH0gQVnpwMqUX0G0BSyJzeNYoOCYL9x7tLUEnaDA8=.p12",
+          "storePassword": "0000001B17B6AA1AA557E138208A1BBC8054C0AF7363EB1D52BB85C7A58EBF1AF85E10FDFF3BE3FE0A6164"
         }
       }
     ],

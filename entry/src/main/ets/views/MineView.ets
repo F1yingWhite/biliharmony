@@ -5,6 +5,7 @@
 import { promptAction } from '@kit.ArkUI';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { AppNavStack, NAV_FAVORITES, NAV_HISTORY, NAV_LOGIN, NAV_RELATION_LIST, NAV_USER_SPACE, NAV_WATCH_LATER,
   NAV_BANGUMI_LIST, NAV_BANGUMI_INDEX, NAV_BLACK_LIST,
   RelationListParam, UserSpaceParam } from '../common/AppRouter';
@@ -19,12 +20,21 @@ import { Immersive } from '../common/Immersive';
 import { DecoratedAvatar } from '../components/UserDecorations';
 import { UserApi } from '../api/UserApi';
 
+/** NavRow 的按引用传参包裹类型：@Builder 按值参数不随状态刷新，必须传对象引用。 */
+interface NavRowValue {
+  value: string;
+}
+
 @Component
 export struct MineView {
   @State loading: boolean = true;
   @State user: UserInfo = new UserInfo();
   @State stat: UserStat = new UserStat();
   @State autoDark: boolean = false;
+  // 清空缓存后自增，驱动 cacheSizeText 重算并刷新菜单行显示。
+  @State cacheVersion: number = 0;
+  // 主 Tab 索引广播：切回「我的」时重算缓存大小（Tabs 保活，aboutToAppear 只首次触发）。
+  @StorageProp('mainTabIndex') @Watch('onMainTabIndexChanged') mainTabIndex: number = 0;
   /** 定时深色：每分钟应用一次，跨时刻后自动切换明暗（无需重启）。 */
   private autoTimer: number = -1;
   /** 定时深色时段编辑（TimePicker 抽屉）状态；以小时/分钟数字存储，跨组件直接赋值驱动刷新。 */
@@ -198,13 +208,13 @@ export struct MineView {
 
   /** 菜单行：文案 + 右侧值 + 箭头（关于） */
   @Builder
-  NavRow(label: string, value: string, onTap: () => void) {
+  NavRow(label: string, $$: NavRowValue, onTap: () => void) {
     Row({ space: 14 }) {
       Text(label)
         .fontSize(15)
         .fontColor(this.itemColor())
       Blank()
-      Text(value)
+      Text($$.value)
         .fontSize(13)
         .fontColor('#9499A0')
       Image($r('app.media.ic_arrow_right'))
@@ -489,7 +499,7 @@ export struct MineView {
 
       // ===== 组3：关于 / 清空缓存 / 退出登录 =====
       Column() {
-        this.NavRow('关于', 'v1.0.0', () => {
+        this.NavRow('关于', { value: 'v1.0.0' }, () => {
           promptAction.showDialog({
             title: 'BiliHaromny',
             message: '基于开源项目 PiliPlus 移植的鸿蒙原生哔哩哔哩第三方客户端（API 26）。\n支持沉浸式全屏、封面取色动态主题、环境光自适应。\n仅供学习交流使用。',
@@ -499,8 +509,8 @@ export struct MineView {
 
         this.GroupDivider()
 
-        this.NavRow('清空缓存', this.cacheSizeText(), () => {
-          this.clearCache();
+        this.NavRow('清空缓存', { value: this.cacheSizeText() }, () => {
+          this.confirmClearCache();
         })
 
         if (this.user.isLogin) {
@@ -533,16 +543,67 @@ export struct MineView {
     .width('100%')
   }
 
-  /** 估算缓存文件总大小，展示在菜单行右侧。 */
+  /** 递归统计缓存目录总大小，展示在菜单行右侧。 */
   private cacheSizeText(): string {
+    // 引用 cacheVersion 建立依赖：清空缓存自增后本行自动重算刷新。
+    if (this.cacheVersion < 0) return '0 B';
     try {
       const dir: string = this.cacheDirPath();
-      const stat: fs.Stat | null = fs.statSync(dir);
-      if (stat === null) return '0 B';
-      return this.formatBytes(stat.size);
+      if (dir.length === 0) return '0 B';
+      return this.formatBytes(this.dirSize(dir));
     } catch (e) {
       return '0 B';
     }
+  }
+
+  /** 递归累加目录下所有文件的字节数（statSync 目录只给目录项大小，不等于内容总大小）。 */
+  private dirSize(path: string): number {
+    let total: number = 0;
+    let entries: Array<string> = [];
+    try {
+      entries = fs.listFileSync(path);
+    } catch (e) {
+      return 0;
+    }
+    for (let i: number = 0; i < entries.length; i++) {
+      const p: string = path + '/' + entries[i];
+      try {
+        const st: fs.Stat | null = fs.statSync(p);
+        if (st === null) continue;
+        total += st.isDirectory() ? this.dirSize(p) : st.size;
+      } catch (e) {
+        // 单个条目失败不影响整体统计
+      }
+    }
+    return total;
+  }
+
+  /** 递归删除目录内容（文件 unlink，子目录递归后 rmdir），返回释放的字节数。 */
+  private clearDir(path: string): number {
+    let freed: number = 0;
+    let entries: Array<string> = [];
+    try {
+      entries = fs.listFileSync(path);
+    } catch (e) {
+      return 0;
+    }
+    for (let i: number = 0; i < entries.length; i++) {
+      const p: string = path + '/' + entries[i];
+      try {
+        const st: fs.Stat | null = fs.statSync(p);
+        if (st === null) continue;
+        if (st.isDirectory()) {
+          freed += this.clearDir(p);
+          fs.rmdirSync(p);
+        } else {
+          freed += st.size;
+          fs.unlinkSync(p);
+        }
+      } catch (e) {
+        // 单个条目删除失败不影响其余清理
+      }
+    }
+    return freed;
   }
 
   private cacheDirPath(): string {
@@ -552,7 +613,30 @@ export struct MineView {
     return context.cacheDir;
   }
 
-  /** 清空应用缓存目录（图片/弹幕等临时文件），保留登录态。 */
+  /** 切回「我的」（索引 2）时重算缓存大小：Tabs 保活，aboutToAppear 只在首次触发。 */
+  private onMainTabIndexChanged(): void {
+    if (this.mainTabIndex !== 2) return;
+    this.cacheVersion++;
+    hilog.info(0x0000, 'BiliCache', 'cache size on mine-tab enter: %{public}d bytes',
+      this.dirSize(this.cacheDirPath()));
+  }
+
+  /** 清空缓存前的确认弹窗。 */
+  private confirmClearCache(): void {    promptAction.showDialog({
+      title: '清空缓存',
+      message: `将删除 ${this.cacheSizeText()} 的图片/弹幕等临时文件，不影响登录态。`,
+      buttons: [
+        { text: '取消', color: '#9499A0' },
+        { text: '清空', color: this.accent },
+      ],
+    }).then((result: promptAction.ShowDialogSuccessResponse) => {
+      if (result.index === 1) this.clearCache();
+    }).catch(() => {
+      // 用户侧滑关闭弹窗，无需处理。
+    });
+  }
+
+  /** 清空应用缓存目录（图片/弹幕等临时文件，含子目录），保留登录态。 */
   private clearCache(): void {
     const dir: string = this.cacheDirPath();
     if (dir.length === 0) {
@@ -560,19 +644,10 @@ export struct MineView {
       return;
     }
     try {
-      const entries: Array<string> = fs.listFileSync(dir);
-      let total: number = 0;
-      for (let i: number = 0; i < entries.length; i++) {
-        const p: string = dir + '/' + entries[i];
-        try {
-          const st: fs.Stat | null = fs.statSync(p);
-          if (st !== null) total += st.size;
-          fs.unlinkSync(p);
-        } catch (e) {
-          // 单个文件删除失败不影响其余清理
-        }
-      }
-      this.toast(total > 0 ? `已清空 ${this.formatBytes(total)}` : '缓存已是空的');
+      const freed: number = this.clearDir(dir);
+      this.cacheVersion++;
+      hilog.info(0x0000, 'BiliCache', 'clearCache done: freed=%{public}d bytes from %{public}s', freed, dir);
+      this.toast(freed > 0 ? `已清空 ${this.formatBytes(freed)}` : '缓存已是空的');
     } catch (e) {
       this.toast('清空失败，请稍后重试');
     }
