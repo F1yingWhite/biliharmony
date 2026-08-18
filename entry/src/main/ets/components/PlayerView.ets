@@ -442,7 +442,7 @@ if (this.runtimeSources.length === 0) {
       this.toast('请先登录后再举报弹幕');
       return;
     }
-    if (item.id <= 0) {
+    if (item.idStr.length === 0) {
       this.toast('该弹幕来自兼容协议，暂不支持举报');
       return;
     }
@@ -465,7 +465,7 @@ if (this.runtimeSources.length === 0) {
           return;
         }
         const reasonValues: Array<number> = [1, 2, 3, 5, 6, 7, 10];
-        BiliApi.reportDanmaku(this.cid, item.id, reasonValues[pick])
+        BiliApi.reportDanmaku(this.cid, item.idStr, reasonValues[pick])
           .then((r: ActionResult) => {
             this.toast(r.ok ? '已提交举报，感谢反馈' : r.message);
           })
@@ -2270,7 +2270,7 @@ if (this.runtimeSources.length === 0) {
     if (pinned === null) {
       return;
     }
-    if (pinned.item.id <= 0) {
+    if (pinned.item.idStr.length === 0) {
       this.toast('该弹幕来自兼容协议，暂不支持点赞');
       return;
     }
@@ -2278,7 +2278,7 @@ if (this.runtimeSources.length === 0) {
       this.toast('请先登录后再点赞弹幕');
       return;
     }
-    BiliApi.likeDanmaku(this.cid, pinned.item.id, 1)
+    BiliApi.likeDanmaku(this.cid, pinned.item.idStr, 1)
       .then((r: ActionResult) => {
         this.toast(r.ok ? '已点赞这条弹幕' : r.message);
       })

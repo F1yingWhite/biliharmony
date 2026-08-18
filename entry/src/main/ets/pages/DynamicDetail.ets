@@ -18,6 +18,7 @@ import { ReplySortChips } from '../components/ReplySortChips';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { CommentApi } from '../api/CommentApi';
 import { DynamicApi } from '../api/DynamicApi';
+import { EmoteResolver } from '../common/EmoteResolver';
 import {
   ReplyCloneResult, ReplyReactionHooks, mutateReplyInArray, mutatedReplyClone, runReplyDislike, runReplyLike
 } from '../common/ReplyMutation';
@@ -62,6 +63,7 @@ export struct DynamicDetailPage {
   }
 
   aboutToAppear(): void {
+    EmoteResolver.ensureLoaded();
     this.destroyed = false;
     this.item = this.param.item as DynamicItem;
     if (this.item.commentId > 0 && this.item.commentType > 0) {
@@ -279,6 +281,9 @@ export struct DynamicDetailPage {
       upMid: this.item.mid,
       qr: this.shareCardQr,
       linkLabel: 't.bilibili.com/' + this.item.dynId,
+      sourceCover: this.item.cover,
+      sourceTitle: this.item.title.length > 0 ? this.item.title : this.item.content,
+      sourceUpName: this.item.uname,
     })
   }
 

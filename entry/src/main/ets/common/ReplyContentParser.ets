@@ -2,6 +2,9 @@ import { BiliEmote, ReplyItem, ReplyJump, ReplyMention } from '../model/Models';
 
 // 模块级正则与结果缓存：列表重渲染会反复解析同一条评论，避免重复建正则与重复解析
 const BVID_REGEX: RegExp = /BV[0-9A-Za-z]{10}/;
+// 整条视频链接（含协议与域名前缀）作为一个片段：拆成“白字前缀+蓝 BV”两半时，
+// Flex/Text 会在两片之间换行，出现上半行白下半行蓝的断裂感。
+const VIDEO_URL_REGEX: RegExp = /https?:\/\/(?:www\.)?bilibili\.com\/video\/(?:BV[0-9A-Za-z]{10}|av\d{1,18})\/?/i;
 const AID_REGEX: RegExp = /(?:^|[^A-Za-z])av(\d{1,18})/i;
 const ACTION_REGEX: RegExp = /(BV[0-9A-Za-z]{10}|(?:^|\s|[（(【\[])(?:\d{1,2}:)?[0-5]?\d:[0-5]\d|(?:^|[^A-Za-z])av\d{1,18})/i;
 const LEADING_BRACKET_REGEX: RegExp = /^[（(【\[]/;
@@ -112,6 +115,15 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
         foundMention = item.mentions[i];
         foundToken = '';
       }
+    }
+    const urlMatch: RegExpExecArray | null = VIDEO_URL_REGEX.exec(rest);
+    if (urlMatch !== null && urlMatch.index < foundAt) {
+      foundAt = urlMatch.index;
+      foundLength = urlMatch[0].length;
+      foundEmote = null;
+      foundJump = null;
+      foundMention = null;
+      foundToken = urlMatch[0];
     }
     const actionMatch: RegExpExecArray | null = ACTION_REGEX.exec(rest);
     if (actionMatch !== null) {

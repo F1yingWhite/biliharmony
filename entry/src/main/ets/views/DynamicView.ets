@@ -18,6 +18,7 @@ import { DecoratedAvatar, UserDecorationBanner } from '../components/UserDecorat
 import { LayoutTokens } from '../common/LayoutTokens';
 import { Haptic } from '../common/Haptic';
 import { DynamicApi } from '../api/DynamicApi';
+import { EmoteResolver } from '../common/EmoteResolver';
 import { LiveApi } from '../api/LiveApi';
 import { UserApi } from '../api/UserApi';
 
@@ -37,13 +38,14 @@ class DynamicContentPart {
 const DYN_PARTS_CACHE_LIMIT: number = 100;
 const dynPartsCache: Map<string, Array<DynamicContentPart>> = new Map<string, Array<DynamicContentPart>>();
 
-function contentPartsOf(item: DynamicItem): Array<DynamicContentPart> {
+function contentPartsOf(item: DynamicItem, emoteVersion: number): Array<DynamicContentPart> {
   // 同一 dynId 的 feed 简版与 detail 完整版可能拥有不同表情节点，缓存键必须包含节点签名。
   let emoteSignature: string = '';
   for (let i: number = 0; i < item.emotes.length; i++) {
     emoteSignature += '|' + item.emotes[i].text + '=' + item.emotes[i].url;
   }
-  const cacheKey: string = item.dynId + '|' + item.content + emoteSignature;
+  // 版本号纳入缓存键：表情表加载完成后用旧缓存会永远拿不到表情图。
+  const cacheKey: string = item.dynId + '|v' + String(emoteVersion) + '|' + item.content + emoteSignature;
   const cached: Array<DynamicContentPart> | undefined = dynPartsCache.get(cacheKey);
   if (cached !== undefined) {
     return cached;
@@ -58,7 +60,21 @@ function contentPartsOf(item: DynamicItem): Array<DynamicContentPart> {
       const at: number = rest.indexOf(item.emotes[i].text);
       if (at >= 0 && at < foundAt) { foundAt = at; found = item.emotes[i]; }
     }
+    // 兜底：接口没下发 emoji 节点时（直播预告等），用通用表情表解析 [xxx] 占位符。
+    let fallbackUrl: string = '';
+    let fallbackToken: string = '';
     if (found === null) {
+      const tokenMatch: RegExpExecArray | null = /\[[^\[\]]{1,16}\]/.exec(rest);
+      if (tokenMatch !== null) {
+        const url: string = EmoteResolver.lookup(tokenMatch[0]);
+        if (url.length > 0) {
+          foundAt = tokenMatch.index;
+          fallbackUrl = url;
+          fallbackToken = tokenMatch[0];
+        }
+      }
+    }
+    if (found === null && fallbackUrl.length === 0) {
       const part: DynamicContentPart = new DynamicContentPart();
       part.text = rest; part.key = item.dynId + '-t' + String(keyIndex++); result.push(part); break;
     }
@@ -67,8 +83,10 @@ function contentPartsOf(item: DynamicItem): Array<DynamicContentPart> {
       part.text = rest.substring(0, foundAt); part.key = item.dynId + '-t' + String(keyIndex++); result.push(part);
     }
     const emotePart: DynamicContentPart = new DynamicContentPart();
-    emotePart.image = found.url; emotePart.key = item.dynId + '-e' + String(keyIndex++); result.push(emotePart);
-    rest = rest.substring(foundAt + found.text.length);
+    emotePart.image = found !== null ? found.url : fallbackUrl;
+    emotePart.key = item.dynId + '-e' + String(keyIndex++);
+    result.push(emotePart);
+    rest = rest.substring(foundAt + (found !== null ? found.text.length : fallbackToken.length));
   }
   if (dynPartsCache.size >= DYN_PARTS_CACHE_LIMIT) {
     const oldest: IteratorResult<string> = dynPartsCache.keys().next();
@@ -95,8 +113,11 @@ export struct DynCard {
   @State gridWidth: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
+  // 表情表加载完成后版本号 +1：引用它的 build 会重跑，拆分缓存键也随之失效。
+  @StorageProp('emoteResolverVersion') emoteVer: number = 0;
 
   aboutToAppear(): void {
+    EmoteResolver.ensureLoaded();
     this.syncFromItem();
   }
 
@@ -344,7 +365,7 @@ export struct DynCard {
         })
       if (item.content.length > 0) {
         Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-          ForEach(contentPartsOf(item), (part: DynamicContentPart) => {
+          ForEach(contentPartsOf(item, this.emoteVer), (part: DynamicContentPart) => {
             if (part.image.length > 0) {
               Image(part.image).width(23).height(23).objectFit(ImageFit.Contain).margin({ right: 2 })
             } else {
@@ -446,7 +467,7 @@ export struct DynCard {
       // 内容
       if (this.item.content.length > 0) {
         Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-          ForEach(contentPartsOf(this.item), (part: DynamicContentPart) => {
+          ForEach(contentPartsOf(this.item, this.emoteVer), (part: DynamicContentPart) => {
             if (part.image.length > 0) {
               Image(part.image).width(25).height(25).objectFit(ImageFit.Contain).margin({ right: 2 })
             } else {
@@ -661,6 +682,7 @@ export struct DynamicView {
   }
 
   aboutToAppear(): void {
+    EmoteResolver.ensureLoaded();
     // 切到动态 Tab 时强制回到顶部状态，避免残留 fade 导致搜索栏和搜索球同时出现。
     AppTheme.resetHeaderFade();
     this.init().catch(() => {

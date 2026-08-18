@@ -9,8 +9,6 @@ import { common } from '@kit.AbilityKit';
 import { systemShare } from '@kit.ShareKit';
 import { generateBarcode, scanCore } from '@kit.ScanKit';
 import { parseReplyContent, ReplyRenderPart } from '../common/ReplyContentParser';
-import { formatCount } from '../common/Utils';
-import { formatReplyMeta } from '../common/ReplyMeta';
 import { ReplyItem } from '../model/Models';
 
 /** 生成评论分享二维码；失败时返回 null，卡片退化为一行链接文字。 */
@@ -77,24 +75,32 @@ export struct ReplyShareCard {
   @Prop upMid: number = 0;
   @Prop qr: image.PixelMap | null = null;
   @Prop linkLabel: string = 'www.bilibili.com';
+  /** 评论来源（视频/番剧/动态）卡片：封面 + 标题 + UP 主；标题为空则不显示。 */
+  @Prop sourceCover: string = '';
+  @Prop sourceTitle: string = '';
+  @Prop sourceUpName: string = '';
 
-  private metaText(): string {
-    return formatReplyMeta(this.item);
+  private shareDate(): string {
+    const d: Date = new Date();
+    const month: number = d.getMonth() + 1;
+    const day: number = d.getDate();
+    return String(d.getFullYear()) + '/' + (month < 10 ? '0' : '') + String(month) +
+      '/' + (day < 10 ? '0' : '') + String(day);
   }
 
   build() {
     Column() {
-      // 头部：头像 + 昵称 + 时间
+      // 头部：头像 + 昵称 + "发表了评论"（对齐官方分享图）
       Row({ space: 10 }) {
         Image(this.item.avatar.length > 0 ? this.item.avatar : $r('app.media.bilix_empty_2233'))
-          .width(40)
-          .height(40)
-          .borderRadius(20)
+          .width(44)
+          .height(44)
+          .borderRadius(22)
           .objectFit(ImageFit.Cover)
-        Column({ space: 3 }) {
+        Column({ space: 4 }) {
           Row({ space: 5 }) {
             Text(this.item.uname)
-              .fontSize(14)
+              .fontSize(16)
               .fontWeight(FontWeight.Medium)
               .fontColor('#18191C')
             if (this.upMid > 0 && this.item.mid === this.upMid) {
@@ -106,8 +112,8 @@ export struct ReplyShareCard {
                 .backgroundColor('#1AFB7299')
             }
           }
-          Text(this.metaText())
-            .fontSize(10)
+          Text('发表了评论')
+            .fontSize(12)
             .fontColor('#9499A0')
         }
         .alignItems(HorizontalAlign.Start)
@@ -117,91 +123,124 @@ export struct ReplyShareCard {
       .alignItems(VerticalAlign.Center)
 
       // 正文（固定白底卡片，文字恒为深色）。用 Text + Span 渲染富文本，
-      // maxLines=4 截断长评论，防止分享图被拉成超长条（对齐 B 站 App 固定比例分享图）。
+      // maxLines=5 截断长评论，防止分享图被拉成超长条。
       Text() {
         ForEach(parseReplyContent(this.item), (part: ReplyRenderPart) => {
           if (part.image.length > 0) {
             ImageSpan(part.image)
-              .width(part.imageSize > 1 ? 30 : 16)
-              .height(part.imageSize > 1 ? 30 : 16)
+              .width(part.imageSize > 1 ? 30 : 18)
+              .height(part.imageSize > 1 ? 30 : 18)
               .verticalAlign(ImageSpanAlignment.CENTER)
           } else {
             Span(part.text)
-              .fontSize(15)
+              .fontSize(16)
               .fontColor(part.mentionMid > 0 || part.seekSeconds >= 0 || part.bvid.length > 0 || part.aid > 0 ?
                 '#008AC5' : '#18191C')
           }
         }, (part: ReplyRenderPart) => part.key)
       }
-      .fontSize(15)
-      .lineHeight(23)
+      .fontSize(16)
+      .lineHeight(24)
       .width('100%')
-      .maxLines(4)
+      .maxLines(5)
       .textOverflow({ overflow: TextOverflow.Ellipsis })
-      .margin({ top: 10 })
-
-      // 评论附图：最多展示 1 张、88 高度，保持分享图紧凑。
-      if (this.item.pictures.length > 0) {
-        Row({ space: 6 }) {
-          Image(this.item.pictures[0])
-            .width(88)
-            .height(88)
-            .objectFit(ImageFit.Cover)
-            .borderRadius(6)
-        }
-        .width('100%')
-        .margin({ top: 8 })
-      }
-
-      // 点赞 / 回复数
-      Row({ space: 14 }) {
-        Row({ space: 4 }) {
-          Image($r('app.media.ic_like'))
-            .width(14)
-            .height(14)
-            .renderMode(ImageRenderMode.Template)
-            .fillColor('#9499A0')
-          Text(formatCount(this.item.like))
-            .fontSize(11)
-            .fontColor('#9499A0')
-        }
-        if (this.item.count > 0) {
-          Text('共 ' + formatCount(this.item.count) + ' 条回复')
-            .fontSize(11)
-            .fontColor('#9499A0')
-        }
-      }
-      .width('100%')
       .margin({ top: 12 })
 
-      Divider().color('#E3E5E7').strokeWidth(0.5).margin({ top: 14, bottom: 12 })
+      // 评论附图：最多 3 张。
+      if (this.item.pictures.length > 0) {
+        Row({ space: 6 }) {
+          ForEach(this.item.pictures.slice(0, 3), (pic: string) => {
+            Image(pic)
+              .width(96)
+              .height(96)
+              .objectFit(ImageFit.Cover)
+              .borderRadius(6)
+          }, (pic: string) => pic)
+        }
+        .width('100%')
+        .margin({ top: 10 })
+      }
 
-      // 底部：App 标识 + 二维码
-      Row({ space: 8 }) {
+      // UP 主赞过标记（官方样式：一行灰字）
+      if (this.item.upLiked) {
+        Text('UP主觉得很赞')
+          .fontSize(12)
+          .fontColor('#9499A0')
+          .width('100%')
+          .margin({ top: 10 })
+      }
+
+      // 来源内容卡：封面 + 标题 + UP 主（对齐官方分享图的视频卡）
+      if (this.sourceTitle.length > 0) {
+        Row({ space: 10 }) {
+          if (this.sourceCover.length > 0) {
+            Image(this.sourceCover)
+              .width(96)
+              .height(60)
+              .objectFit(ImageFit.Cover)
+              .borderRadius(6)
+          }
+          Column({ space: 6 }) {
+            Text(this.sourceTitle)
+              .fontSize(13)
+              .fontColor('#18191C')
+              .maxLines(2)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            if (this.sourceUpName.length > 0) {
+              Row({ space: 4 }) {
+                Text('UP')
+                  .fontSize(9)
+                  .fontColor('#FB7299')
+                  .padding({ left: 3, right: 3 })
+                  .border({ width: 0.5, color: '#FB7299', radius: 3 })
+                Text(this.sourceUpName)
+                  .fontSize(11)
+                  .fontColor('#9499A0')
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+              }
+              .alignItems(VerticalAlign.Center)
+            }
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
+        }
+        .width('100%')
+        .padding(8)
+        .backgroundColor('#F7F8FA')
+        .borderRadius(10)
+        .margin({ top: 12 })
+      }
+
+      // 底部：App 标识 + 提示文案 + 二维码
+      Row() {
         Image($r('app.media.bilix_logo'))
-          .width(30)
-          .height(30)
+          .height(26)
           .objectFit(ImageFit.Contain)
+        Blank()
         Column({ space: 2 }) {
-          Text('哔哩哔哩 ( ゜- ゜)つロ 干杯')
+          Text('保存图片至相册')
             .fontSize(12)
-            .fontWeight(FontWeight.Medium)
-            .fontColor('#18191C')
-          Text(this.qr !== null ? '扫码查看这条评论' : this.linkLabel)
+            .fontColor('#61666D')
+          Text(this.qr !== null ? '长按扫码查看内容' : this.linkLabel)
+            .fontSize(12)
+            .fontColor('#61666D')
+          Text('分享于' + this.shareDate())
             .fontSize(10)
             .fontColor('#9499A0')
         }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
+        .alignItems(HorizontalAlign.End)
+        .margin({ right: 8 })
         if (this.qr !== null) {
           Image(this.qr)
-            .width(56)
-            .height(56)
+            .width(64)
+            .height(64)
             .objectFit(ImageFit.Contain)
         }
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
+      .margin({ top: 16 })
     }
     .width(340)
     .padding({ left: 16, right: 16, top: 16, bottom: 16 })
