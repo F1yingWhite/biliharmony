@@ -70,8 +70,9 @@ def main():
         rc_all = 0
         rc_deep = 0
     else:
-        rc_all = run_py('suite_all.py')
-        rc_deep = run_py('suite_deep.py')
+        suite_args = ['--skip-install'] if args.skip_install else []
+        rc_all = run_py('suite_all.py', suite_args)
+        rc_deep = run_py('suite_deep.py', suite_args)
     rc_audit = run_py('audit_ui.py', ['--all'] if not args.only_audit else [])
 
     report_all = QA_DIR / 'qa_report.md'
