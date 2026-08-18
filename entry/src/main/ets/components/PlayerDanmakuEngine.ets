@@ -30,8 +30,8 @@ export class PlayerDanmakuEngine {
   lastPlayerTime: number = 0;
   opacity: number = 0.85;
   speed: number = 1.0;
-  fontScale: number = 1.3;
-  density: number = 18;
+  fontScale: number = 1.0;
+  density: number = 22;
   fullscreen: boolean = false;
   enabled: boolean = true;
   blockScrollDm: boolean = false;
@@ -205,7 +205,7 @@ export class PlayerDanmakuEngine {
     }
     // 数量同时受用户密度、实际轨道数和 Canvas 性能上限约束。
     const maxActive: number = this.maxActive();
-    const spawnBudget: number = this.fullscreen ? 12 : 8;
+    const spawnBudget: number = this.fullscreen ? 24 : 16;
     let spawned: number = 0;
     while (this.cursor < this.list.length && this.list[this.cursor].time <= now + 0.1 && spawned < spawnBudget) {
       // 当前屏已满时暂停消费游标，待滚动弹幕出屏后再继续，避免把繁忙时段弹幕永久丢掉。
@@ -470,15 +470,15 @@ export class PlayerDanmakuEngine {
   }
 
   private laneCount(): number {
-    // 弹幕只覆盖画面上方约 86%，给进度条/字幕留出底部安全区。
-    const usableHeight: number = Math.max(this.lineHeight(), this.height * 0.86);
+    // 弹幕覆盖画面约 94%（对齐 B 站密度观感），只给进度条/字幕留一条窄安全区。
+    const usableHeight: number = Math.max(this.lineHeight(), this.height * 0.94);
     return Math.max(1, Math.floor(usableHeight / this.lineHeight()));
   }
 
   private maxActive(): number {
-    const byDensity: number = this.fullscreen ? this.density * 3 : this.density * 2;
-    const byLane: number = this.laneCount() * 5;
-    return Math.max(5, Math.min(this.fullscreen ? 60 : 40, byDensity, byLane));
+    const byDensity: number = this.fullscreen ? this.density * 4 : this.density * 3;
+    const byLane: number = this.laneCount() * (this.fullscreen ? 8 : 6);
+    return Math.max(5, Math.min(this.fullscreen ? 96 : 64, byDensity, byLane));
   }
 
   private laneSafeForScroll(lane: number, spawnX: number, newSpeed: number): boolean {

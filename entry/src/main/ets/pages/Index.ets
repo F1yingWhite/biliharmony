@@ -56,7 +56,7 @@ function stdDestination(onShownCb: () => void, onWillDisappearCb: () => void) {
 @Entry
 @Component
 struct Index {
-  @State currentTab: number = 0;
+  @State @Watch('onCurrentTabChanged') currentTab: number = 0;
   @StorageProp('accentColor') @Watch('onThemeChanged') accent: string = '#FB7299';
   @StorageProp('isDarkMode') @Watch('onThemeChanged') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
@@ -101,6 +101,11 @@ struct Index {
   switchTab(index: number): void {
     this.currentTab = index;
     AppTheme.resetHeaderFade();
+  }
+
+  /** 广播主 Tab 索引：「我的」页借此在切回时重算缓存大小（Tabs 保活不重走 aboutToAppear）。 */
+  private onCurrentTabChanged(): void {
+    AppStorage.setOrCreate('mainTabIndex', this.currentTab);
   }
 
   /** 路由参数守卫：非法参数返回 null，页面渲染为空态而不是裸强转崩溃。 */
