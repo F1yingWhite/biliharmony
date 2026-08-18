@@ -945,9 +945,14 @@ if (this.runtimeSources.length === 0) {
         return;
       }
       const source: media.MediaSource = media.createMediaSourceWithUrl(sourceUrl, this.playbackHeaders());
-      if (this.runtimeAudioSources.length > 0) await this.initAudioPlayer(generation);
+      // 音轨初始化不再 await：音/视频两条握手并行，起播耗时从“串行之和”降为“较慢一路”。
+      // tryStartPreparedPlayers 会等到两条轨都 prepared 才开播，并行不会引入竞态。
+      if (this.runtimeAudioSources.length > 0) {
+        this.initAudioPlayer(generation).catch(() => {
+        });
+      }
       if (this.destroyed || generation !== this.playerCreateGeneration || this.player !== p) return;
-      await p.setMediaSource(source, this.videoPlaybackStrategy());
+      await p.setMediaSource(source, this.videoPlaybackStrategy(this.resumeAfterPrepare <= 0 && this.initialSeekSeconds <= 0));
     } catch (e) {
       if (generation === this.playerCreateGeneration) this.playerCreating = false;
       if (this.destroyed || generation !== this.playerCreateGeneration) return;
@@ -973,8 +978,8 @@ if (this.runtimeSources.length === 0) {
     return PlayerPlaybackConfig.sourceUrl(this.runtimeAudioSources, this.audioSourceIndex);
   }
 
-  private videoPlaybackStrategy(): media.PlaybackStrategy {
-    return PlayerPlaybackConfig.videoStrategy();
+  private videoPlaybackStrategy(showFirstFrame: boolean = true): media.PlaybackStrategy {
+    return PlayerPlaybackConfig.videoStrategy(showFirstFrame);
   }
 
   private audioPlaybackStrategy(): media.PlaybackStrategy {
