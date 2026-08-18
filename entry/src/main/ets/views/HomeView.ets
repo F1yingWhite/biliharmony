@@ -458,7 +458,7 @@ export struct HomeView {
 
   @Builder
   VideoFeedList(feedTab: number) {
-    List({ space: 10, scroller: feedTab === 0 ? this.recScroller : this.hotScroller }) {
+    List({ space: 12, scroller: feedTab === 0 ? this.recScroller : this.hotScroller }) {
       // 热门频道首个卡片为排行榜入口，随列表一起滚动。
       if (feedTab === 1) {
         ListItem() {
@@ -487,7 +487,7 @@ export struct HomeView {
     }
     .width('100%')
     .height('100%')
-    .lanes(LayoutTokens.feedColumns(this.viewportWidth), 10)
+    .lanes(LayoutTokens.feedColumns(this.viewportWidth), 12)
     .cachedCount(3)
     // 首屏卡片默认位于搜索栏下方。这个间距属于可滚动内容，滚走后不会因头栏重新出现而顶动卡片。
     .contentStartOffset(Immersive.statusBarHeight() + 94)
@@ -520,7 +520,7 @@ export struct HomeView {
 
   @Builder
   LiveFeedList() {
-    List({ space: 10, scroller: this.liveScroller }) {
+    List({ space: 12, scroller: this.liveScroller }) {
       ListItem() {
         this.LiveZoneEntry()
       }
@@ -540,7 +540,7 @@ export struct HomeView {
         })
       }
     }
-    .width('100%').height('100%').lanes(LayoutTokens.feedColumns(this.viewportWidth), 10)
+    .width('100%').height('100%').lanes(LayoutTokens.feedColumns(this.viewportWidth), 12)
     .cachedCount(3)
     .contentStartOffset(Immersive.statusBarHeight() + 94)
     // 悬浮 Dock 高 52 + 底部边距 16，末端留白必须大于 68 才能完整露出末行。

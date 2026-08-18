@@ -9,7 +9,8 @@ import { util } from '@kit.ArkTS';
 
 /** 分段弹幕单条数据；time 已换算为秒，与 XML 解析结果（DanmakuItem）语义一致。 */
 export class ProtoDanmaku {
-  id: number = 0;       // int64，超过 2^53 会有精度损失；当前仅调试用不参与业务
+  id: number = 0;       // int64，超过 2^53 会有精度损失；仅作是否存在判断，业务一律用 idStr
+  idStr: string = '';   // dmid 十进制原串：点赞/举报必须用它，number 精度丢失会报“该弹幕已被删除”
   time: number = 0;     // 出现时间（秒）
   mode: number = 1;     // 1-3 滚动, 4 底部, 5 顶部
   fontsize: number = 25;
@@ -18,6 +19,41 @@ export class ProtoDanmaku {
   text: string = '';
   ctime: number = 0;
   weight: number = 0;
+}
+
+/** 十进制串乘小整数（手算进位），供 varint 十进制展开用。 */
+function decMulSmall(dec: string, m: number): string {
+  if (m === 0 || dec === '0') {
+    return '0';
+  }
+  let carry: number = 0;
+  let out: string = '';
+  for (let i: number = dec.length - 1; i >= 0; i--) {
+    const v: number = (dec.charCodeAt(i) - 48) * m + carry;
+    out = String.fromCharCode(48 + (v % 10)) + out;
+    carry = Math.floor(v / 10);
+  }
+  while (carry > 0) {
+    out = String.fromCharCode(48 + (carry % 10)) + out;
+    carry = Math.floor(carry / 10);
+  }
+  return out;
+}
+
+/** 十进制串相加。 */
+function decAdd(a: string, b: string): string {
+  let i: number = a.length - 1;
+  let j: number = b.length - 1;
+  let carry: number = 0;
+  let out: string = '';
+  while (i >= 0 || j >= 0 || carry > 0) {
+    const da: number = i >= 0 ? a.charCodeAt(i--) - 48 : 0;
+    const db: number = j >= 0 ? b.charCodeAt(j--) - 48 : 0;
+    const v: number = da + db + carry;
+    out = String.fromCharCode(48 + (v % 10)) + out;
+    carry = Math.floor(v / 10);
+  }
+  return out;
 }
 
 const WIRE_VARINT: number = 0;
@@ -42,6 +78,23 @@ class ProtoReader {
   }
 
   /** 读 varint；移位用乘法实现（位移运算只有 32 位），最多容纳 2^53 精度。 */
+  /** 读 varint 并返回十进制原串：int64 dmid（约 3.5e16）超过 2^53，number 会丢尾数。 */
+  readVarintString(): string {
+    let decimal: string = '0';
+    let power: string = '1'; // 128^i 的十进制串
+    while (this.pos < this.limit) {
+      const b: number = this.bytes[this.pos++];
+      decimal = decAdd(decimal, decMulSmall(power, b & 0x7F));
+      if ((b & 0x80) === 0) {
+        return decimal;
+      }
+      power = decMulSmall(power, 128);
+      if (power.length > 25) {
+        break; // 坏数据保护：int64 varint 最多 10 字节
+      }
+    }
+    return decimal;
+  }
   readVarint(): number {
     let result: number = 0;
     let shift: number = 0;
@@ -93,7 +146,8 @@ function parseDanmakuElem(bytes: Uint8Array): ProtoDanmaku {
     const field: number = tag >> 3;
     const wire: number = tag & 7;
     if (field === 1 && wire === WIRE_VARINT) {
-      item.id = reader.readVarint();
+      item.idStr = reader.readVarintString();
+      item.id = Number(item.idStr);
     } else if (field === 2 && wire === WIRE_VARINT) {
       item.time = reader.readVarint() / 1000;
     } else if (field === 3 && wire === WIRE_VARINT) {
