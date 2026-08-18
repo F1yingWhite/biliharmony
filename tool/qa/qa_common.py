@@ -75,6 +75,11 @@ class Hdc:
 
     def run(self, args: Sequence[str], retries: int = 3, timeout: int = 20,
             check: bool = False, fire_and_forget: bool = False) -> str:
+        # 多设备连接时（模拟器+真机）hdc 必须带 -t 指定 connect-key，否则会报
+        # "need connect-key"。用 QA_TARGET 环境变量显式指定目标设备。
+        target = os.environ.get('QA_TARGET', '')
+        if target and (not args or args[0] != '-t'):
+            args = ['-t', target] + list(args)
         last_err = ''
         for _ in range(retries):
             try:

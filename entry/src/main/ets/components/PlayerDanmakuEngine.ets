@@ -42,7 +42,7 @@ export class PlayerDanmakuEngine {
   minWeight: number = 0;
   /** 有序弹幕列表消费游标。 */
   cursor: number = 0;
-  /** 被点击"停住"的弹幕：绘制暂停（不前进、不过期），等待用户点赞/点踩/举报后解冻。 */
+  /** 被点击"停住"的弹幕：绘制暂停（不前进、不过期），等待用户点赞/复制/举报后解冻。 */
   pinned: ActiveDm | null = null;
 
   private ctx: CanvasRenderingContext2D;
@@ -141,7 +141,7 @@ export class PlayerDanmakuEngine {
     return hit !== null ? hit.item : null;
   }
 
-  /** 命中测试（返回运行态实例）：点击弹幕时先冻结该条，供弹幕操作条点赞/点踩/举报。 */
+  /** 命中测试（返回运行态实例）：点击弹幕时先冻结该条，供弹幕操作条点赞/复制/举报。 */
   hitTestActive(x: number, y: number): ActiveDm | null {
     if (x < 0 || y < 0 || x > this.width || y > this.height) {
       return null;
@@ -166,7 +166,7 @@ export class PlayerDanmakuEngine {
     return hit;
   }
 
-  /** 停住某条被点中的弹幕（B 站交互：点一下弹幕冻结，上方显示点赞/点踩/举报）。 */
+  /** 停住某条被点中的弹幕（B 站交互：点一下弹幕冻结，上方显示点赞/复制/举报）。 */
   pin(dm: ActiveDm | null): void {
     this.pinned = dm;
     this.drawFrame(false);
