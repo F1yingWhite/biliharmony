@@ -1,7 +1,6 @@
 import { formatDuration } from '../common/Utils';
-import { PlayerPlaybackIndicator } from './PlayerPlaybackIndicator';
 
-/** 在线人数、长按倍速、横滑预览、音量/亮度与双击反馈的轻量叠层。 */
+/** 在线人数、长按倍速、横滑预览、音量/亮度的轻量叠层。 */
 @Component
 export struct PlayerGestureOverlay {
   @Prop onlineTotal: string = '';
@@ -14,10 +13,6 @@ export struct PlayerGestureOverlay {
   @Prop gestureAdjustPercent: number = -1;
   @Prop panStartTime: number = 0;
   @Prop duration: number = 0;
-  @Prop doubleTapVisible: boolean = false;
-  @Prop doubleTapPlaying: boolean = false;
-  @Prop doubleTapScale: number = 1;
-  @Prop doubleTapOpacity: number = 0;
   /** 长按倍速：三个右向小三角逐个亮起的循环动画步（0/1/2）。 */
   @State holdAnimStep: number = 0;
   private holdAnimTimer: number = -1;
@@ -53,16 +48,6 @@ export struct PlayerGestureOverlay {
 
       if (this.holdSpeedActive || this.gestureSeekPreview >= 0 || this.gestureAdjustPercent >= 0) {
         this.HintBubble()
-      }
-
-      if (this.doubleTapVisible) {
-        PlayerPlaybackIndicator({
-          playAction: this.doubleTapPlaying,
-          showLabel: true,
-          feedbackScale: this.doubleTapScale,
-          opacityValue: this.doubleTapOpacity,
-          interactive: false,
-        })
       }
     }
     .width('100%')

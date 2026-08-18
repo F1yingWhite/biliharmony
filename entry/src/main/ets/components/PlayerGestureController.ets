@@ -82,10 +82,11 @@ export class PlayerGestureController {
     }
     if (this.panMode === 'brightness') {
       this.panGestureActive = false;
-      this.onAdjust('brightness', Math.abs(offsetY / 100));
       const travel: number = viewWidth * 0.8;
       const value: number = Math.max(0.02, Math.min(1, this.panStartBrightness - offsetY / travel));
       this.gestureBrightness = value;
+      // 提示气泡展示整数百分比（0~100），不能把原始小数/偏移量直接拼进文本。
+      this.onAdjust('brightness', Math.round(value * 100));
       this.onBrightness(value);
       const now: number = Date.now();
       if (now - this.lastGestureApplyMs >= 16) this.onBrightnessApply(value);
@@ -93,10 +94,10 @@ export class PlayerGestureController {
     }
     if (this.panMode === 'volume') {
       this.panGestureActive = false;
-      this.onAdjust('volume', offsetY / 100);
       const travel: number = viewWidth * 0.8;
       const value: number = Math.max(0, Math.min(100, this.panStartVolume - offsetY * 100 / travel));
       this.gestureVolume = value;
+      this.onAdjust('volume', Math.round(value));
       this.onVolume(value);
       const now: number = Date.now();
       if (now - this.lastGestureApplyMs >= 16) {

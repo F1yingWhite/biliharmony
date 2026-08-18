@@ -15,6 +15,8 @@ struct ZoomableImage {
   @Prop transitionId: string = '';
   onLongPress: () => void = () => {};
   onZoomChange: (zoomed: boolean) => void = () => {};
+  /** 单击（含黑色留白区）退出查看器。 */
+  onSingleTap: () => void = () => {};
   @State scaleValue: number = 1;
   @State offsetX: number = 0;
   @State offsetY: number = 0;
@@ -134,16 +136,21 @@ struct ZoomableImage {
                 this.offsetX = this.clampX(this.panBaseX + event.offsetX * followRate, this.scaleValue);
                 this.offsetY = this.clampY(this.panBaseY + event.offsetY * followRate, this.scaleValue);
               }),
-            TapGesture({ count: 2 })
-              .onAction((event: GestureEvent) => {
-                if (this.scaleValue > 1.05) this.resetTransform(true);
-                else {
-                  const finger: FingerInfo | undefined = event.fingerList.length > 0 ? event.fingerList[0] : undefined;
-                  const focusX: number = finger !== undefined ? finger.localX : this.viewportWidth * 0.5;
-                  const focusY: number = finger !== undefined ? finger.localY : this.viewportHeight * 0.5;
-                  this.zoomAt(2.5, focusX, focusY, true);
-                }
-            })
+            // 单击/双击互斥识别：双击缩放优先，单击等待双击超时后退出查看器。
+            GestureGroup(GestureMode.Exclusive,
+              TapGesture({ count: 2 })
+                .onAction((event: GestureEvent) => {
+                  if (this.scaleValue > 1.05) this.resetTransform(true);
+                  else {
+                    const finger: FingerInfo | undefined = event.fingerList.length > 0 ? event.fingerList[0] : undefined;
+                    const focusX: number = finger !== undefined ? finger.localX : this.viewportWidth * 0.5;
+                    const focusY: number = finger !== undefined ? finger.localY : this.viewportHeight * 0.5;
+                    this.zoomAt(2.5, focusX, focusY, true);
+                  }
+                }),
+              TapGesture({ count: 1 })
+                .onAction(() => this.onSingleTap())
+            )
           )
         )
         // Swiper 的横滑识别会与图片长按竞争；高优先级长按保证按住图片一定弹出操作菜单。
@@ -433,6 +440,7 @@ export struct ImageViewerPage {
               transitionId: this.transitionIdFor(index),
               onLongPress: () => this.actionMenuOpen = true,
               onZoomChange: (zoomed: boolean) => this.currentZoomed = zoomed,
+              onSingleTap: () => this.goBack(),
             })
           }, (source: string, index: number) => source + String(index))
         }

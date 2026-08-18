@@ -76,6 +76,8 @@ export struct VideoDetailPage {
   @State endRecPlayText: string = '';
   @State endRecDuration: number = 0;
   @State endRecToken: number = 0;
+  /** 播完态：播放区高度收敛为统一的推荐画面高度；重播/换视频/恢复播放时复位。 */
+  @State playerEnded: boolean = false;
   @State upFollowerCount: number = -1;
   @State upVideoCount: number = -1;
   @State replyCursor: string = '';
@@ -259,7 +261,12 @@ export struct VideoDetailPage {
   }
 
   private minPlayerHeight(): number {
-    // 播放与暂停共用稳定下限；112vp 能完整容纳暂停黑幕和居中继续播放提示。
+    // 播放中下限抬高到屏幕高的 1/4：竖屏/长屏视频在播放时不会被收成一条细横幅，
+    // 画幅未知的加载期也能保持稳定高度，避免“有时很小有时很大”的跳变感。
+    // 暂停后才允许收成 112vp 的继续播放横幅（能完整容纳暂停黑幕和居中继续播放提示）。
+    if (this.playerPlaying && this.screenHeightVp > 0) {
+      return Math.max(160, Math.floor(this.screenHeightVp / 4));
+    }
     return 112;
   }
 
@@ -297,6 +304,12 @@ export struct VideoDetailPage {
   }
 
   private visiblePlayerHeight(): number {
+    // 播完推荐画面与原画幅解耦：统一收敛到一个固定合适高度（接近常规 16:9 播放区），
+    // 竖屏长视频播完时不再拖着一整条高黑屏。
+    if (this.playerEnded) {
+      const widthVp: number = this.screenWidthVp > 0 ? this.screenWidthVp : 360;
+      return Math.max(220, widthVp * 9 / 16);
+    }
     const base: number = this.playerHeight();
     return Math.max(this.minPlayerHeight(), base - this.playerCollapse);
   }
@@ -311,6 +324,8 @@ export struct VideoDetailPage {
   onPlayerPlayingChange(playing: boolean): void {
     if (this.playerPlaying === playing) return;
     this.playerPlaying = playing;
+    // 重播/恢复播放：退出播完态，播放区恢复原画幅高度。
+    if (playing) this.playerEnded = false;
     if (playing === false) this.reportVideoHeartbeat(this.videoProgressSeconds, true);
   }
 
@@ -1065,6 +1080,7 @@ export struct VideoDetailPage {
       this.currentPageIndex = index;
       this.playerCollapseRaw = 0;
       this.playerCollapse = 0;
+      this.playerEnded = false;
       // 所有播放源属性先更新，最后递增版本号，让播放器一次性读取同一分 P 的完整数据。
       this.playerSourceVersion++;
     } catch (e) {
@@ -1118,6 +1134,8 @@ export struct VideoDetailPage {
   }
 
   private onPlayerEnded(): void {
+    // 播完：播放区收敛到统一高度（visiblePlayerHeight 读取 playerEnded）。
+    this.playerEnded = true;
     // 播完：自动填入"推荐列表第一条"作为结束画面的推荐卡。
     // 优先合集下一集（合集里连续观看），否则用相关推荐第一条。
     const next: UgcSeasonEpisode | null = this.nextUgcEpisode();
@@ -1744,7 +1762,7 @@ export struct VideoDetailPage {
             .fontSize(12)
             .fontColor('#9499A0')
             .margin({ left: 4 })
-          Text(formatDate(this.detail.pubdate) + ' · ' + this.detail.tname)
+          Text(this.detail.tname.length > 0 ? formatDate(this.detail.pubdate) + ' · ' + this.detail.tname : formatDate(this.detail.pubdate))
             .fontSize(12)
             .fontColor('#9499A0')
             .margin({ left: 10 })
@@ -2681,7 +2699,9 @@ export struct VideoDetailPage {
             }
             .width('100%')
             .layoutWeight(1)
-            .borderRadius({ topLeft: 18, topRight: 18 })
+            // 小圆角上沿：向上叠进播放区 12vp，圆角才能衬在黑色播放区上显出来。
+            .margin({ top: -12 })
+            .borderRadius({ topLeft: 12, topRight: 12 })
             .clip(true)
             .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
           }
