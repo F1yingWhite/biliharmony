@@ -217,7 +217,13 @@ export struct SearchPage {
         if (reset) {
           this.resultsSource.reset(res.videos);
         } else {
-          this.resultsSource.append(res.videos);
+          // 分类搜索同样可能跨页重复（排序漂移），追加前去重防 ForEach 键冲突。
+          const existing: Set<string> = new Set<string>();
+          const cur: Array<VideoItem> = this.resultsSource.getAll();
+          for (let i: number = 0; i < cur.length; i++) {
+            existing.add(cur[i].bvid + String(cur[i].aid));
+          }
+          this.resultsSource.append(res.videos.filter((v: VideoItem) => !existing.has(v.bvid + String(v.aid))));
         }
         this.videoTotal = res.numResults;
         this.videoPage = page + 1;
@@ -328,9 +334,16 @@ export struct SearchPage {
     for (let i: number = 0; i < current.length; i++) {
       const section: SearchAllSection = current[i];
       if (section.type === SearchTypes.video) {
+        // 搜索排序漂移会让相邻页返回重复稿件；合并时按键去重，
+        // 否则 ForEach 键冲突会导致整个视频分区停止渲染。
+        const existing: Set<string> = new Set<string>();
+        for (let k: number = 0; k < section.videos.length; k++) {
+          existing.add(section.videos[k].bvid + String(section.videos[k].aid));
+        }
+        const fresh: Array<VideoItem> = videos.filter((v: VideoItem) => !existing.has(v.bvid + String(v.aid)));
         const ns: SearchAllSection = new SearchAllSection();
         ns.type = section.type;
-        ns.videos = section.videos.concat(videos);
+        ns.videos = section.videos.concat(fresh);
         out.push(ns);
         merged = true;
       } else {

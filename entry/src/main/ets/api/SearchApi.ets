@@ -107,6 +107,12 @@ export class SearchApi {
       section.type = rtype;
       if (rtype === SearchTypes.video) {
         for (let j: number = 0; j < items.length; j++) {
+          const entry: Record<string, Object> = asObject(items[j]);
+          // 视频分区会混入 live_room/广告卡（无 bvid，aid=0），
+          // 渲染键会撞 '0' 导致 ForEach 键冲突、列表停更，直接跳过。
+          if (asString(entry['type'], 'video') !== 'video') {
+            continue;
+          }
           section.videos.push(VideoItem.fromSearchItem(items[j]));
         }
         result.sections.push(section);
