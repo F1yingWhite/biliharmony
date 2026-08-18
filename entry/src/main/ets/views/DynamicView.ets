@@ -225,6 +225,7 @@ export struct DynCard {
         .height(this.gridCell(inset) * 2 + 4)
         .objectFit(ImageFit.Cover)
         .borderRadius(8)
+        .id('dynamic-img-' + item.dynId + '-0')
         .geometryTransition('image-viewer-dynamic-' + item.dynId + '-0')
         .onClick(() => {
           this.openItemImage(item, 0);
@@ -239,6 +240,8 @@ export struct DynCard {
                 .width('100%')
                 .aspectRatio(1)
                 .objectFit(ImageFit.Cover)
+                .id('dynamic-img-' + item.dynId + '-' + String(index))
+                .geometryTransition('image-viewer-dynamic-' + item.dynId + '-' + String(index))
               if (index === 8 && item.images.length > 9) {
                 Column() {
                   Text('+' + String(item.images.length - 9))
@@ -256,7 +259,6 @@ export struct DynCard {
             .width('100%')
             .clip(true)
             .borderRadius(6)
-            .geometryTransition('image-viewer-dynamic-' + item.dynId + '-' + String(index))
             .onClick(() => {
               this.openItemImage(item, index);
             })
