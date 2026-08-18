@@ -1026,6 +1026,8 @@ export class ReplyItem {
   like: number = 0;
   liked: boolean = false;
   disliked: boolean = false;
+  /** UP 主赞过这条评论（up_action.like）；分享图展示"UP主觉得很赞"。 */
+  upLiked: boolean = false;
   ctime: number = 0;
   count: number = 0;
   level: number = 0;
@@ -1061,6 +1063,7 @@ export class ReplyItem {
     r.like = this.like;
     r.liked = this.liked;
     r.disliked = this.disliked;
+    r.upLiked = this.upLiked;
     r.ctime = this.ctime;
     r.count = this.count;
     r.level = this.level;
@@ -1099,6 +1102,8 @@ export class ReplyItem {
     r.like = asNumber(j['like'], 0);
     r.liked = asNumber(j['action'], 0) === 1;
     r.disliked = asNumber(j['action'], 0) === 2;
+    const upAction: Record<string, Object> = asObject(j['up_action']);
+    r.upLiked = asBool(upAction['like'], false);
     r.ctime = asNumber(j['ctime'], 0);
     r.count = asNumber(j['count'], 0);
     const levelInfo: Record<string, Object> = asObject(member['level_info']);

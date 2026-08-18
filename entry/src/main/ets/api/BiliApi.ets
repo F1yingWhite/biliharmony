@@ -56,20 +56,23 @@ export class DanmakuItem {
   mode: number = 1;    // 1-3 滚动, 4 底部, 5 顶部, 6 逆向滚动, 7 高级弹幕
   color: number = 0xFFFFFF;
   text: string = '';
-  /** 弹幕 id（dmid），protobuf 分段来源有值，弹幕举报用；XML 兜底无此字段为 0 */
+  /** 弹幕 id（dmid），protobuf 分段来源有值；超过 2^53 有精度损失，仅作是否存在判断 */
   id: number = 0;
+  /** dmid 十进制原串：弹幕点赞/举报必须传它；XML 兜底为空串 */
+  idStr: string = '';
   /** 发送字号档位：18 小 / 25 标准 / 36 大；渲染时按 25 为基准缩放。 */
   fontsize: number = 25;
   /** 智能云屏蔽权重 0-10（越大越优质）；低于用户设定屏蔽等级的弹幕不喷出。 */
   weight: number = 10;
 
   constructor(time: number, mode: number, color: number, text: string, id: number = 0,
-    fontsize: number = 25, weight: number = 10) {
+    fontsize: number = 25, weight: number = 10, idStr: string = '') {
     this.time = time;
     this.mode = mode;
     this.color = color;
     this.text = text;
     this.id = id;
+    this.idStr = idStr;
     this.fontsize = fontsize;
     this.weight = weight;
   }
@@ -341,25 +344,25 @@ export class BiliApi {
   }
 
   /** 弹幕举报（需登录；reason 参考: 1 违法违规 2 色情 3 低俗 5 人身攻击 6 垃圾广告 7 引战 10 其他） */
-  static async reportDanmaku(cid: number, dmid: number, reason: number): Promise<ActionResult> {
-    if (cid <= 0 || dmid <= 0) {
+  static async reportDanmaku(cid: number, dmid: string, reason: number): Promise<ActionResult> {
+    if (cid <= 0 || dmid.length === 0) {
       return new ActionResult(false, '弹幕数据不完整，当前分段弹幕暂不支持举报');
     }
     return postVideoAction(Api.reportDanmaku, {
       'cid': String(cid),
-      'dmid': String(dmid),
+      'dmid': dmid,
       'reason': String(reason),
       'type': '1',
     });
   }
 
   /** 弹幕点赞（需登录；op 1 点赞 / 2 取消点赞；platform=web_player 与网页端一致） */
-  static async likeDanmaku(cid: number, dmid: number, op: number): Promise<ActionResult> {
-    if (cid <= 0 || dmid <= 0) {
+  static async likeDanmaku(cid: number, dmid: string, op: number): Promise<ActionResult> {
+    if (cid <= 0 || dmid.length === 0) {
       return new ActionResult(false, '弹幕数据不完整，当前分段弹幕暂不支持点赞');
     }
     return postVideoAction(Api.danmakuThumbup, {
-      'dmid': String(dmid),
+      'dmid': dmid,
       'oid': String(cid),
       'op': String(op),
       'platform': 'web_player',
@@ -751,7 +754,7 @@ export class BiliApi {
       const result: Array<DanmakuItem> = [];
       for (let i: number = 0; i < elems.length; i++) {
         result.push(new DanmakuItem(elems[i].time, elems[i].mode, elems[i].color, elems[i].text,
-          elems[i].id, elems[i].fontsize, elems[i].weight));
+          elems[i].id, elems[i].fontsize, elems[i].weight, elems[i].idStr));
       }
       return result;
     } catch (e) {

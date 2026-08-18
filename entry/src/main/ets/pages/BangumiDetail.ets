@@ -381,6 +381,9 @@ export struct BangumiDetailPage {
       upMid: 0,
       qr: this.shareCardQr,
       linkLabel: 'bangumi/play/ep' + String(this.currentEpId),
+      sourceCover: this.season.poster.length > 0 ? this.season.poster : this.season.cover,
+      sourceTitle: this.season.title,
+      sourceUpName: '',
     })
   }
 

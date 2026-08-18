@@ -1700,6 +1700,9 @@ export struct VideoDetailPage {
       upMid: this.detail.upMid,
       qr: this.shareCardQr,
       linkLabel: 'www.bilibili.com/video/' + this.detail.bvid,
+      sourceCover: this.detail.cover,
+      sourceTitle: this.detail.title,
+      sourceUpName: this.detail.upName,
     })
   }
 

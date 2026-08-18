@@ -134,7 +134,7 @@ export struct VideoCard {
     .padding({ bottom: 10 })
     .alignItems(HorizontalAlign.Start)
     // 白色卡片承载边界：封面通顶、文字区内缩，浅色白底/深色深灰底。
-    .backgroundColor(this.isDark ? '#26272B' : '#FFFFFF')
+    .backgroundColor(this.isDark ? '#2B2D34' : '#FFFFFF')
     .borderRadius(12)
     .clip(true)
     .shadow({ radius: 10, color: this.isDark ? '#59000000' : '#14000000', offsetX: 0, offsetY: 3 })
