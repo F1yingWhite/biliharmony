@@ -91,6 +91,8 @@ export struct DynCard {
   @State likeCount: number = 0;
   @State forwardCount: number = 0;
   @State actionBusy: boolean = false;
+  /** 图片宫格可用宽（onAreaChange 实测），用于按官方三列正方形单元计算高度。 */
+  @State gridWidth: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
 
@@ -198,21 +200,86 @@ export struct DynCard {
     }
   }
 
-  private shownImages(): Array<string> {
-    return this.item.images;
+  /** 宫格单元边长：官方图文动态为三列正方形单元，间距 4vp；inset 为卡片内层额外左右留白之和。 */
+  private gridCell(inset: number = 0): number {
+    if (this.gridWidth <= 0) return 104;
+    return (this.gridWidth - inset - 8) / 3;
   }
 
-  /** 图片网格高度随图片数量自适应，避免多图动态只显示前两行。 */
-  private imageGridHeightFor(images: Array<string>): number {
+  /** 图片网格高度：>=2 图按三列正方形单元；单图约占 2/3 宽的正方形。 */
+  private imageGridHeightFor(images: Array<string>, inset: number = 0): number {
     const count: number = images.length;
-    if (count <= 1) return 210;
-    if (count <= 3) return 118;
+    const cell: number = this.gridCell(inset);
+    if (count <= 1) return cell * 2 + 4;
     const rows: number = Math.ceil(count / 3);
-    return rows * 118 + (rows - 1) * 4;
+    return rows * cell + (rows - 1) * 4;
   }
 
-  private imageGridHeight(): number {
-    return this.imageGridHeightFor(this.shownImages());
+  /** 图文动态宫格：单图 2/3 宽正方形，多图三列正方形单元（对齐官方客户端）。
+   *  超过 9 张时只展示前 9 张，第 9 张压暗并叠加 +N（官方同款处理）。 */
+  @Builder
+  ImageGrid(item: DynamicItem, inset: number) {
+    if (item.images.length === 1) {
+      Image(biliImageThumbnail(item.images[0], 900))
+        .width(this.gridCell(inset) * 2 + 4)
+        .height(this.gridCell(inset) * 2 + 4)
+        .objectFit(ImageFit.Cover)
+        .borderRadius(8)
+        .geometryTransition('image-viewer-dynamic-' + item.dynId + '-0')
+        .onClick(() => {
+          this.openItemImage(item, 0);
+        })
+    } else {
+      Grid() {
+        ForEach(item.images.slice(0, 9), (src: string, index: number) => {
+          GridItem() {
+            Stack({ alignContent: Alignment.Center }) {
+              // 宫格缩略图（320w webp）：动态流大批图片时避免原图占满内存。
+              Image(src.length > 0 ? biliImageThumbnail(src, 320) : src)
+                .width('100%')
+                .aspectRatio(1)
+                .objectFit(ImageFit.Cover)
+              if (index === 8 && item.images.length > 9) {
+                Column() {
+                  Text('+' + String(item.images.length - 9))
+                    .fontSize(20)
+                    .fontWeight(FontWeight.Medium)
+                    .fontColor('#FFFFFF')
+                }
+                .width('100%')
+                .aspectRatio(1)
+                .justifyContent(FlexAlign.Center)
+                .backgroundColor('#59000000')
+                .hitTestBehavior(HitTestMode.None)
+              }
+            }
+            .width('100%')
+            .clip(true)
+            .borderRadius(6)
+            .geometryTransition('image-viewer-dynamic-' + item.dynId + '-' + String(index))
+            .onClick(() => {
+              this.openItemImage(item, index);
+            })
+          }
+        }, (src: string, index: number) => item.dynId + '-' + src + String(index))
+      }
+      .columnsTemplate('1fr 1fr 1fr')
+      .rowsTemplate(this.gridRowsTemplate(Math.min(9, item.images.length)))
+      .rowsGap(4)
+      .columnsGap(4)
+      .height(this.imageGridHeightFor(item.images.slice(0, 9), inset))
+      .width('100%')
+      .scrollBar(BarState.Off)
+    }
+  }
+
+  private gridRowsTemplate(count: number): string {
+    const rows: number = Math.max(1, Math.ceil(count / 3));
+    let tpl: string = '1fr';
+    for (let i: number = 1; i < rows; i++) {
+      tpl += ' 1fr';
+    }
+    return tpl;
   }
 
   private openDetail(focusComments: boolean = false): void {
@@ -290,21 +357,7 @@ export struct DynCard {
         })
       }
       if (item.images.length > 0) {
-        Grid() {
-          ForEach(item.images, (src: string, index: number) => {
-            GridItem() {
-              // 九宫格缩略图（320w webp）：动态流大批图片时避免原图占满内存。
-              Image(src.length > 0 ? biliImageThumbnail(src, 320) : src)
-                .width('100%').height('100%').objectFit(ImageFit.Cover).borderRadius(6)
-                .geometryTransition('image-viewer-dynamic-' + item.dynId + '-' + String(index))
-                .onClick(() => {
-                  this.openItemImage(item, index);
-                })
-            }
-          }, (src: string, index: number) => 'forward-' + src + String(index))
-        }
-        .columnsTemplate(item.images.length === 1 ? '1fr' : (item.images.length === 2 ? '1fr 1fr' : '1fr 1fr 1fr'))
-        .columnsGap(4).height(this.imageGridHeightFor(item.images)).width('100%')
+        this.ImageGrid(item, 20)
       }
       if (item.title.length > 0) {
         Row({ space: 9 }) {
@@ -332,66 +385,53 @@ export struct DynCard {
 
   build() {
     Column({ space: 8 }) {
-      // 头部：头像 + 昵称 + 时间
-      Row({ space: this.item.decorationCard.length > 0 ? 4 : 8 }) {
+      // 头部：头像 + 昵称 + 时间；有装扮时装扮小卡按原始比例显示在行右端（官方动态卡片样式）。
+      Row({ space: 8 }) {
         DecoratedAvatar({
           face: this.item.face,
           pendant: this.item.pendant,
           avatarSize: 36,
           containerSize: 52,
         })
-        Stack({ alignContent: Alignment.TopStart }) {
-          if (this.item.decorationCard.length > 0) {
-            UserDecorationBanner({
-              imageUrl: this.item.decorationCard,
-              numberText: this.item.decorationNumber,
-              numberColor: this.item.decorationColor.length > 0 ? this.item.decorationColor : '#FFFFFF',
-              bannerHeight: 46,
-              renderNumber: false,
-            })
-          }
-          Row({ space: 8 }) {
-            Column({ space: 2 }) {
-              Row({ space: 4 }) {
-                Text(this.item.uname)
-                  .fontSize(14)
-                  .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-                  .fontWeight(FontWeight.Medium)
-                  .maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-                if (this.item.decorationNumber.length > 0) {
-                  Text(this.decorationNumberLabel())
-                    .fontSize(10)
-                    .fontWeight(FontWeight.Bold)
-                    .fontColor(this.item.decorationColor.length > 0 ? this.item.decorationColor : this.accent)
-                    .maxLines(1)
-                }
-              }
-              .width('100%')
-              .alignItems(VerticalAlign.Center)
-              Text(formatRelativeTime(this.item.pubtime))
-                .fontSize(11)
-                .fontColor('#9499A0')
-            }
-            .alignItems(HorizontalAlign.Start)
-            .layoutWeight(1)
-            if (!this.embedded && this.item.decorationCard.length === 0) {
-              Text('已关注')
-                .fontSize(12)
-                .fontColor('#9499A0')
-                .backgroundColor(this.isDark ? '#34363B' : '#EEF0F2')
-                .padding({ left: 10, right: 10, top: 4, bottom: 4 })
-                .borderRadius(12)
+        Column({ space: 2 }) {
+          Row({ space: 4 }) {
+            Text(this.item.uname)
+              .fontSize(14)
+              .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+              .fontWeight(FontWeight.Medium)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            if (this.item.decorationNumber.length > 0 && this.item.decorationCard.length === 0) {
+              Text(this.decorationNumberLabel())
+                .fontSize(10)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(this.item.decorationColor.length > 0 ? this.item.decorationColor : this.accent)
+                .maxLines(1)
             }
           }
-          .width('100%')
-          .height(this.item.decorationCard.length > 0 ? 46 : 52)
-          .padding({ left: this.item.decorationCard.length > 0 ? 8 : 0,
-            right: this.item.decorationCard.length > 0 ? 8 : 0 })
           .alignItems(VerticalAlign.Center)
+          Text(formatRelativeTime(this.item.pubtime))
+            .fontSize(11)
+            .fontColor('#9499A0')
         }
+        .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
-        .height(52)
+        if (this.item.decorationCard.length > 0) {
+          UserDecorationBanner({
+            imageUrl: this.item.decorationCard,
+            numberText: this.item.decorationNumber,
+            numberColor: this.item.decorationColor.length > 0 ? this.item.decorationColor : '#FFFFFF',
+            bannerHeight: 44,
+            fitWidth: true,
+          })
+        } else if (!this.embedded) {
+          Text('已关注')
+            .fontSize(12)
+            .fontColor('#9499A0')
+            .backgroundColor(this.isDark ? '#34363B' : '#EEF0F2')
+            .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+            .borderRadius(12)
+        }
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
@@ -420,37 +460,9 @@ export struct DynCard {
         this.ForwardedCard(this.item.original)
       }
 
-      // 图文/专栏动态图片卡片（详情态也走缩略图，内存友好；点击进 ImageViewer 时再拉原图）。
+      // 图文/专栏动态图片宫格（详情态也走缩略图，内存友好；点击进 ImageViewer 时再拉原图）。
       if (this.item.images.length > 0) {
-        Grid() {
-          ForEach(this.shownImages(), (src: string, index: number) => {
-            GridItem() {
-              Image(src.length > 0 ? biliImageThumbnail(src, 900) : src)
-                .width('100%')
-                .height('100%')
-                .objectFit(ImageFit.Cover)
-                .borderRadius(6)
-                .id('dyn-img-' + this.item.dynId + '-' + String(index))
-                .geometryTransition('image-viewer-dynamic-' + this.item.dynId + '-' + String(index))
-                .onClick(() => {
-                  const viewer: ImageViewerParam = {
-                    images: this.shownImages(),
-                    initialIndex: index,
-                    transitionId: 'image-viewer-dynamic-' + this.item.dynId + '-' + String(index),
-                  };
-                  // 一镜到底：关默认转场 + animateTo，geometryTransition 接管
-                  this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
-                    AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
-                  });
-                })
-            }
-          }, (src: string, index: number) => src + String(index))
-        }
-        .columnsTemplate(this.item.images.length === 1 ? '1fr' : (this.item.images.length === 2 ? '1fr 1fr' : '1fr 1fr 1fr'))
-        .rowsGap(4)
-        .columnsGap(4)
-        .height(this.imageGridHeight())
-        .width('100%')
+        this.ImageGrid(this.item, 0)
       }
 
       // 视频卡片
@@ -554,6 +566,13 @@ export struct DynCard {
     .padding(12)
     .borderRadius(10)
     .backgroundColor(this.isDark ? '#2A2C31' : '#FFFFFF')
+    .onAreaChange((oldV: Area, newV: Area) => {
+      // 实测卡片内容宽（减去自身 padding 24），供图片宫格计算正方形单元边长。
+      const w: number = Number.parseFloat(String(newV.width));
+      if (Number.isFinite(w) && w > 24 && Math.abs(w - 24 - this.gridWidth) > 1) {
+        this.gridWidth = w - 24;
+      }
+    })
   }
 
   /** 动态举报：原因选择弹窗（showDialog 不支持回调，用 index 回读）。 */
@@ -1019,7 +1038,8 @@ export struct DynamicView {
         .cachedCount(3)
         // 与首页对齐：非内嵌时列表从玻璃头栏下方开始，滚动时内容可直接顶到最上方。
         .contentStartOffset(this.embedded ? 4 : Immersive.statusBarHeight() + 94)
-        .contentEndOffset(this.embedded ? 16 : Immersive.bottomInset() + 56)
+        // 悬浮 Dock 高 52 + 底部边距 16，末端留白必须大于 68 才能完整露出末行。
+        .contentEndOffset(this.embedded ? 16 : Immersive.bottomInset() + 76)
         .padding({ left: LayoutTokens.phonePadding, right: LayoutTokens.phonePadding })
         .scrollBar(BarState.Off)
         .nestedScroll({

@@ -34,7 +34,6 @@ import { PlayerFullscreenHeader } from './PlayerFullscreenHeader';
 import { CONTROLS_GRADIENT_COLORS, DM_SEGMENT_SECONDS, ActiveDm } from './PlayerDanmakuSupport';
 import { PlayerDanmakuEngine } from './PlayerDanmakuEngine';
 import { PlayerBottomControls } from './PlayerBottomControls';
-import { PlayerPlaybackIndicator } from './PlayerPlaybackIndicator';
 
 /** showDialog 按钮的声明类型（promptAction 的 Button 命名空间类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -144,10 +143,6 @@ export struct PlayerView {
   @State gestureSeekPreview: number = -1;
   @State gestureAdjustKind: string = '';
   @State gestureAdjustPercent: number = -1;
-  @State doubleTapFeedbackVisible: boolean = false;
-  @State doubleTapFeedbackPlaying: boolean = false;
-  @State doubleTapFeedbackScale: number = 0.78;
-  @State doubleTapFeedbackOpacity: number = 0;
   @State resumeTransitionActive: boolean = false;
   @State onlineTotal: string = '';
   @StorageProp('accentColor') accent: string = '#FB7299';
@@ -203,7 +198,6 @@ export struct PlayerView {
   @State sliderDragValue: number = 0;
   private volumeRestoreTimer: number = -1;
   private fullscreenExitTimer: number = -1;
-  private doubleTapFeedbackTimer: number = -1;
   // AVPlayer 创建本身是异步的：代次使离页/换源前发起的 createAVPlayer 结果失效并立即释放。
   private playerCreateGeneration: number = 0;
   private playerCreating: boolean = false;
@@ -1203,27 +1197,8 @@ if (this.runtimeSources.length === 0) {
   private handleDoubleTap(): void {
     this.pendingDm = null;
     if (!this.prepared || this.player === null || this.endScreenOpen) return;
-    const willPlay: boolean = !this.playing;
-    this.doubleTapFeedbackPlaying = willPlay;
-    this.doubleTapFeedbackVisible = true;
-    this.doubleTapFeedbackScale = 0.78;
-    this.doubleTapFeedbackOpacity = 0;
-    if (this.doubleTapFeedbackTimer >= 0) clearTimeout(this.doubleTapFeedbackTimer);
-    this.getUIContext().animateTo({ duration: 120, curve: Curve.EaseOut }, () => {
-      this.doubleTapFeedbackScale = 1;
-      this.doubleTapFeedbackOpacity = 1;
-    });
+    // 双击只切换播放/暂停，不再在屏幕中央弹图标；播放键状态由左下角按钮直接反映。
     this.togglePlay();
-    this.doubleTapFeedbackTimer = setTimeout(() => {
-      this.doubleTapFeedbackTimer = -1;
-      this.getUIContext().animateTo({ duration: 160, curve: Curve.EaseIn }, () => {
-        this.doubleTapFeedbackScale = 1.08;
-        this.doubleTapFeedbackOpacity = 0;
-      });
-      setTimeout(() => {
-        if (!this.destroyed) this.doubleTapFeedbackVisible = false;
-      }, 170);
-    }, 420);
   }
 
   qualityLabel(): string {
@@ -1559,10 +1534,6 @@ if (this.runtimeSources.length === 0) {
       clearTimeout(this.fullscreenExitTimer);
       this.fullscreenExitTimer = -1;
     }
-    if (this.doubleTapFeedbackTimer >= 0) {
-      clearTimeout(this.doubleTapFeedbackTimer);
-      this.doubleTapFeedbackTimer = -1;
-    }
     this.stopDmLoop(true);
     this.dmEngine.clearCaches();
     Immersive.setKeepScreenOn(false);
@@ -1617,8 +1588,11 @@ if (this.runtimeSources.length === 0) {
     // onAreaChange 在横屏/竖屏/缩放/迷你态切换期间高频触发，逐次全量重排弹幕
     // 会瞬间拉满 CPU 并掉帧。这里把「应用新尺寸」合并到定时器尾：16ms 内只应用最后一次，
     // 期间渲染循环仍在按旧视口画，视觉无感。
-    const newW: number = newV.width as number;
-    const newH: number = newV.height as number;
+    // 新 SDK 的 Area 宽高是带单位的 Length 字符串（如 "440.00vp"），直接 as number 强转
+    // 运行时仍是字符串，会让弹幕引擎宽度变成 NaN/1vp：横滑 seek 的 secondsPerVp = duration/width
+    // 被放大成任意滑动都跳到首/尾。统一 parseFloat 取数值（vp）。
+    const newW: number = Number.parseFloat(String(newV.width));
+    const newH: number = Number.parseFloat(String(newV.height));
     this.dmPendingW = newW;
     this.dmPendingH = newH;
     if (this.dmResizeTimer < 0) {
@@ -1721,31 +1695,33 @@ if (this.runtimeSources.length === 0) {
     this.dmEngine.syncCursor(time);
   }
 
-  /** 播完结束画面：推荐卡片（照推荐列表第一条排布）+ 右侧「立即播放」 + 左下角重播/分享。 */
+  /** 播完结束画面：对齐官方客户端 —— 全播放区深色蒙版，左上「推荐视频」+ 推荐行（封面带三角播放键、
+   *  标题/UP/数据、右侧胶囊「立即播放」），底部左侧重播/分享。 */
   @Builder
   PlayerEndScreen() {
-    Stack({ alignContent: Alignment.Center }) {
-      // 半透明遮罩：点空白处关闭回到剧终画面
-      Column()
+    Column() {
+      // 推荐视频
+      Text('推荐视频')
+        .fontSize(13)
+        .fontColor('#8E9399')
         .width('100%')
-        .height('100%')
-        .backgroundColor('#99000000')
-        .onClick(() => this.closeEndScreen())
-      // 推荐视频卡片（点击封面/标题也直接开播）
-      Column({ space: 14 }) {
-        Row({ space: 10 }) {
-          // 封面（点击即开播）
-          Stack({ alignContent: Alignment.BottomEnd }) {
-            Image(this.endRecCover)
-              .width(110)
-              .height(70)
-              .objectFit(ImageFit.Cover)
-              .borderRadius(6)
-              .onClick(() => {
-                this.endScreenOpen = false;
-                this.onEndPlayNow();
-              })
-            if (this.endRecDuration > 0) {
+        .margin({ bottom: 10 })
+      Row({ space: 10 }) {
+        // 封面：居中白色三角 + 右下时长（点击即开播）
+        Stack({ alignContent: Alignment.Center }) {
+          Image(this.endRecCover)
+            .width(110)
+            .height(70)
+            .objectFit(ImageFit.Cover)
+          Image($r('app.media.ic_play'))
+            .width(26)
+            .height(26)
+            .renderMode(ImageRenderMode.Template)
+            .fillColor('#E6FFFFFF')
+            .shadow({ radius: 4, color: '#66000000', offsetX: 0, offsetY: 1 })
+          if (this.endRecDuration > 0) {
+            Row() {
+              Blank()
               Text(formatDuration(this.endRecDuration))
                 .fontSize(10)
                 .fontColor('#FFFFFF')
@@ -1754,108 +1730,123 @@ if (this.runtimeSources.length === 0) {
                 .borderRadius(3)
                 .margin({ right: 5, bottom: 5 })
             }
-          }
-          .width(110)
-          .clip(true)
-          // 标题 + 简介
-          Column({ space: 6 }) {
-            Text(this.endRecTitle.length > 0 ? this.endRecTitle : '为你推荐')
-              .fontSize(14)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.endRecTitle.length > 0 ? '#FFFFFF' : this.accent)
-              .maxLines(2)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .lineHeight(18)
-              .onClick(() => {
-                this.endScreenOpen = false;
-                this.onEndPlayNow();
-              })
-            Row({ space: 8 }) {
-              if (this.endRecUpName.length > 0) {
-                Text(this.endRecUpName)
-                  .fontSize(11)
-                  .fontColor('#C0C4CC')
-                  .maxLines(1)
-              }
-              if (this.endRecPlayText.length > 0) {
-                Row({ space: 3 }) {
-                  Image($r('app.media.ic_play'))
-                    .width(11)
-                    .height(11)
-                    .renderMode(ImageRenderMode.Template)
-                    .fillColor('#C0C4CC')
-                  Text(this.endRecPlayText)
-                    .fontSize(10)
-                    .fontColor('#C0C4CC')
-                }
-              }
-            }
             .width('100%')
+            .height('100%')
+            .alignItems(VerticalAlign.Bottom)
+            .hitTestBehavior(HitTestMode.None)
+          }
+        }
+        .width(110)
+        .height(70)
+        .clip(true)
+        .borderRadius(6)
+        .onClick(() => {
+          this.endScreenOpen = false;
+          this.onEndPlayNow();
+        })
+        // 标题 + UP + 数据
+        Column({ space: 5 }) {
+          Text(this.endRecTitle.length > 0 ? this.endRecTitle : '为你推荐')
+            .fontSize(14)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.endRecTitle.length > 0 ? '#FFFFFF' : this.accent)
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .lineHeight(18)
+            .width('100%')
+            .onClick(() => {
+              this.endScreenOpen = false;
+              this.onEndPlayNow();
+            })
+          if (this.endRecUpName.length > 0) {
+            Row({ space: 4 }) {
+              Text('UP')
+                .fontSize(8)
+                .fontColor('#C0C4CC')
+                .border({ width: 0.6, color: '#8E9399', radius: 2 })
+                .padding({ left: 2, right: 2 })
+              Text(this.endRecUpName)
+                .fontSize(11)
+                .fontColor('#C0C4CC')
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+            }
             .alignItems(VerticalAlign.Center)
           }
-          .alignItems(HorizontalAlign.Start)
-          .layoutWeight(1)
-          // 右侧「立即播放」：灰色小字，与封面底部对齐
-          Column() {
-            Text('立即播放')
-              .fontSize(11)
-              .fontColor('#8E9399')
+          if (this.endRecPlayText.length > 0) {
+            Row({ space: 3 }) {
+              Image($r('app.media.ic_play'))
+                .width(11)
+                .height(11)
+                .renderMode(ImageRenderMode.Template)
+                .fillColor('#C0C4CC')
+              Text(this.endRecPlayText)
+                .fontSize(10)
+                .fontColor('#C0C4CC')
+            }
+            .alignItems(VerticalAlign.Center)
           }
-          .height(70)
-          .justifyContent(FlexAlign.End)
-          .padding({ top: 0 })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        // 右侧胶囊「立即播放」
+        Text('立即播放')
+          .fontSize(12)
+          .fontColor('#FFFFFF')
+          .padding({ left: 14, right: 14, top: 7, bottom: 7 })
+          .borderRadius(17)
+          .backgroundColor('#33FFFFFF')
           .onClick(() => {
             this.endScreenOpen = false;
             this.onEndPlayNow();
           })
-        }
-        .width('100%')
-        .alignItems(VerticalAlign.Top)
-        // 左下角：重播 / 分享（无边框小按钮）
-        Row({ space: 24 }) {
-          // 重播
-          Row({ space: 5 }) {
-            Image($r('app.media.ic_video_replay'))
-              .width(15)
-              .height(15)
-              .renderMode(ImageRenderMode.Template)
-              .fillColor('#C2C6CC')
-            Text('重播')
-              .fontSize(12)
-              .fontColor('#C2C6CC')
-          }
-          .padding({ left: 2, right: 8, top: 4, bottom: 4 })
-          .onClick(() => this.endReplay())
-          // 分享
-          Row({ space: 5 }) {
-            Image($r('app.media.ic_share'))
-              .width(15)
-              .height(15)
-              .renderMode(ImageRenderMode.Template)
-              .fillColor('#C2C6CC')
-            Text('分享')
-              .fontSize(12)
-              .fontColor('#C2C6CC')
-          }
-          .padding({ left: 2, right: 8, top: 4, bottom: 4 })
-          .onClick(() => {
-            this.endScreenOpen = false;
-            this.onShare();
-          })
-        }
-        .width('100%')
-        .justifyContent(FlexAlign.Start)
-        .alignItems(VerticalAlign.Center)
       }
-      .width('86%')
-      .padding(16)
-      .borderRadius(14)
-      .backgroundColor('#B3000000')
-      .onClick(() => {
-      })
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      Blank()
+
+      // 底部左侧：重播 / 分享
+      Row({ space: 28 }) {
+        Row({ space: 6 }) {
+          Image($r('app.media.ic_video_replay'))
+            .width(18)
+            .height(18)
+            .renderMode(ImageRenderMode.Template)
+            .fillColor('#E6E6E6')
+          Text('重播')
+            .fontSize(14)
+            .fontColor('#E6E6E6')
+        }
+        .alignItems(VerticalAlign.Center)
+        .padding({ left: 2, right: 8, top: 6, bottom: 6 })
+        .onClick(() => this.endReplay())
+        Row({ space: 6 }) {
+          Image($r('app.media.ic_share'))
+            .width(18)
+            .height(18)
+            .renderMode(ImageRenderMode.Template)
+            .fillColor('#E6E6E6')
+          Text('分享')
+            .fontSize(14)
+            .fontColor('#E6E6E6')
+        }
+        .alignItems(VerticalAlign.Center)
+        .padding({ left: 2, right: 8, top: 6, bottom: 6 })
+        .onClick(() => {
+          this.endScreenOpen = false;
+          this.onShare();
+        })
+      }
+      .width('100%')
+      .justifyContent(FlexAlign.Start)
+      .alignItems(VerticalAlign.Center)
     }
     .width('100%')
     .height('100%')
+    .padding({ left: 16, right: 16, top: 14, bottom: 14 })
+    .backgroundColor('#E6000000')
+    .onClick(() => this.closeEndScreen())
   }
 
   build() {
@@ -1955,13 +1946,9 @@ if (this.runtimeSources.length === 0) {
         gestureAdjustPercent: this.gestureAdjustPercent,
         panStartTime: this.gestureCtl?.panStartTime ?? 0,
         duration: this.duration,
-        doubleTapVisible: this.doubleTapFeedbackVisible,
-        doubleTapPlaying: this.doubleTapFeedbackPlaying,
-        doubleTapScale: this.doubleTapFeedbackScale,
-        doubleTapOpacity: this.doubleTapFeedbackOpacity,
       })
-      // 控件层
-      if ((this.showControls || (!this.playing && this.compactMode && !this.fullscreen)) && this.errorText.length === 0) {
+      // 控件层（播完结束画面为整幅蒙版，不再叠加控制条）
+      if ((this.showControls || (!this.playing && this.compactMode && !this.fullscreen)) && this.errorText.length === 0 && !this.endScreenOpen) {
         Column() {
           if (this.compactMode && !this.fullscreen) {
             if (!this.playing) {

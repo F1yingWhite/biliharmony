@@ -610,7 +610,8 @@ export struct MineView {
           .width('100%')
           .height('100%')
           .contentStartOffset(Immersive.statusBarHeight() + 56)
-          .contentEndOffset(Immersive.bottomInset() + 56)
+          // 悬浮 Dock 高 52 + 底部边距 16，末端留白必须大于 68 才能完整露出末行。
+          .contentEndOffset(Immersive.bottomInset() + 76)
           .padding({ left: 10, right: 10 })
           .scrollBar(BarState.Off)
           .onScroll((offset: number) => {

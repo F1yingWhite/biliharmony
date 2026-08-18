@@ -29,7 +29,7 @@ export function FeedCoverImage($$: FeedCoverParam) {
     .width('100%')
     .aspectRatio(16 / 9)
     .objectFit(ImageFit.Cover)
-    .borderRadius(12)
+    // 圆角由外层卡片容器 clip 承载，封面自身不再重复圆角（避免白底下露出圆角缝隙）。
     .backgroundColor($$.isDark ? '#2A2C31' : '#E5E7EB')
     .draggable(false)
     .alt($r('app.media.placeholder_cover'))
