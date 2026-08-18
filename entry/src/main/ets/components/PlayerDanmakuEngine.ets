@@ -5,7 +5,7 @@
  * 双缓冲推进、文本测量缓存与 Canvas 绘制。组件层只保留定时器、生命周期和设置项同步。
  */
 import { DanmakuItem } from '../api/BiliApi';
-import { ActiveDm, colorHex } from './PlayerDanmakuSupport';
+import { ActiveDm, colorHex, parseSpecialDanmaku, SpecialTrack } from './PlayerDanmakuSupport';
 
 /** 弹幕视口矩形（Canvas 像素坐标），供点击气泡定位。 */
 export class DmViewportRect {
@@ -38,6 +38,8 @@ export class PlayerDanmakuEngine {
   blockTopDm: boolean = false;
   blockBottomDm: boolean = false;
   blockColorDm: boolean = false;
+  /** 智能云屏蔽等级 0-10：weight 低于该值的弹幕不喷出（B 站 app 同款，0 为关闭）。 */
+  minWeight: number = 0;
   /** 有序弹幕列表消费游标。 */
   cursor: number = 0;
   /** 被点击"停住"的弹幕：绘制暂停（不前进、不过期），等待用户点赞/点踩/举报后解冻。 */
@@ -144,13 +146,15 @@ export class PlayerDanmakuEngine {
     if (x < 0 || y < 0 || x > this.width || y > this.height) {
       return null;
     }
-    const fontSize: number = this.fontSize();
     const laneH: number = this.lineHeight();
     let hit: ActiveDm | null = null;
     for (let i: number = 0; i < this.active.length; i++) {
       const dm: ActiveDm = this.active[i];
+      // 高级弹幕自由定位且通常转瞬即逝，不参与点按冻结。
+      if (dm.special !== null) continue;
+      const itemFont: number = dm.fontSizePx > 0 ? dm.fontSizePx : this.fontSize();
       const top: number = dm.lane * laneH;
-      if (y < top || y > top + fontSize) continue;
+      if (y < top || y > top + itemFont) continue;
       let left: number = dm.x;
       if (dm.isFixed) {
         left = (this.width - dm.textWidth) / 2;
@@ -170,7 +174,7 @@ export class PlayerDanmakuEngine {
 
   /** 弹幕视口矩形（px/pv 统一）：x/w 是水平范围，y 为轨道顶（≈文字顶），h 为字号。 */
   dmViewportOf(dm: ActiveDm): DmViewportRect {
-    const fs: number = this.fontSize();
+    const fs: number = dm.fontSizePx > 0 ? dm.fontSizePx : this.fontSize();
     const top: number = dm.lane * this.lineHeight();
     const w: number = dm.textWidth;
     const rect: DmViewportRect = new DmViewportRect();
@@ -211,29 +215,66 @@ export class PlayerDanmakuEngine {
       const item: DanmakuItem = this.list[this.cursor];
       this.cursor++;
       spawned++;
+      // mode 8 代码弹幕 / 9 BAS 弹幕 / 0 等非法类型不按文本渲染（B 站客户端同样不显示原始内容）。
+      if (item.mode < 1 || item.mode > 7) {
+        continue;
+      }
       const isTop: boolean = item.mode === 5;
       const isBottom: boolean = item.mode === 4;
       const isScroll: boolean = isTop === false && isBottom === false;
       if ((isScroll && this.blockScrollDm) || (isTop && this.blockTopDm) ||
-        (isBottom && this.blockBottomDm) || (this.blockColorDm && item.color !== 16777215)) {
+        (isBottom && this.blockBottomDm) || (this.blockColorDm && item.color !== 16777215) ||
+        item.weight < this.minWeight) {
         continue;
       }
+      // mode 7 高级弹幕：自由定位 + 运动轨道，不占滚动/固定弹道，不做碰撞管理（与 B 站一致）。
+      if (item.mode === 7) {
+        const parsed: [string, SpecialTrack] | null = parseSpecialDanmaku(item.text);
+        if (parsed !== null) {
+          const special: SpecialTrack = parsed[1];
+          const dm: ActiveDm = new ActiveDm(item, 0, 0, 0, 0, false, now, 0, parsed[0],
+            this.colorFor(item.color));
+          dm.special = special;
+          dm.fontSizePx = Math.max(14, Math.min(90, special.sizePct / 100 * this.height));
+          dm.textWidth = this.measure(dm.renderText, dm.fontSizePx);
+          this.active.push(dm);
+          continue;
+        }
+        // JSON 解析失败按普通滚动弹幕兜底（脏数据不丢弹幕）。
+      }
+      const sizePx: number = this.sizeFor(item);
       const renderText: string = item.text.length > 80 ? item.text.substring(0, 79) + '…' : item.text;
-      const textW: number = this.measureText(renderText);
+      const textW: number = this.measure(renderText, sizePx);
       const renderColor: string = this.colorFor(item.color);
       if (item.mode === 4 || item.mode === 5) {
         // 固定弹幕：顶部/底部居中，停留 4 秒
         const fixedLane: number = this.allocFixedLane(item.mode);
         if (fixedLane < 0) continue;
-        this.active.push(new ActiveDm(item, -1, fixedLane, 0, now + 4, true, now, textW, renderText, renderColor));
+        const dm: ActiveDm = new ActiveDm(item, -1, fixedLane, 0, now + 4, true, now, textW, renderText, renderColor);
+        dm.fontSizePx = sizePx;
+        this.active.push(dm);
+      } else if (item.mode === 6) {
+        // 逆向滚动弹幕（mode 6）：从左向右过屏，与正向分轨（避免对向相撞）。
+        const textWm: number = textW;
+        const spawnX: number = -textWm - Math.max(10, sizePx * 0.3);
+        const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / Math.max(0.5, this.speed);
+        const speed: number = (this.width - spawnX) / travelSeconds;
+        const lane: number = this.allocReverseLane(spawnX + textWm, speed);
+        if (lane < 0) continue;
+        const dm: ActiveDm = new ActiveDm(item, spawnX, lane, speed, 0, false, now, textWm, renderText, renderColor);
+        dm.reverse = true;
+        dm.fontSizePx = sizePx;
+        this.active.push(dm);
       } else {
         // 所有弹幕保持近似相同的过屏时间；长文本虽然速度更快，但分轨时会预判追尾。
-        const spawnX: number = this.width + Math.max(10, this.fontSize() * 0.3);
+        const spawnX: number = this.width + Math.max(10, sizePx * 0.3);
         const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / Math.max(0.5, this.speed);
         const speed: number = (spawnX + textW) / travelSeconds;
         const lane: number = this.allocLane(spawnX, speed);
         if (lane < 0) continue;
-        this.active.push(new ActiveDm(item, spawnX, lane, speed, 0, false, now, textW, renderText, renderColor));
+        const dm: ActiveDm = new ActiveDm(item, spawnX, lane, speed, 0, false, now, textW, renderText, renderColor);
+        dm.fontSizePx = sizePx;
+        this.active.push(dm);
       }
     }
   }
@@ -257,6 +298,15 @@ export class PlayerDanmakuEngine {
     for (let i: number = 0; i < this.active.length; i++) {
       const dm: ActiveDm = this.active[i];
       const frozen: boolean = dm === this.pinned;
+      // 高级弹幕：自由定位 + 运动轨道，独立绘制路径（不占弹道、不参与命中）。
+      if (dm.special !== null) {
+        if (this.drawSpecial(dm, now)) {
+          keep.push(dm);
+        }
+        continue;
+      }
+      const itemFont: number = dm.fontSizePx > 0 ? dm.fontSizePx : fontSize;
+      this.ctx.font = '600 ' + itemFont + 'px sans-serif';
       if (dm.isFixed) {
         // 固定弹幕：被点击冻结时不过期（保持停住），否则按 fixedUntil 过期。
         if (!frozen && now > dm.fixedUntil) {
@@ -264,9 +314,20 @@ export class PlayerDanmakuEngine {
         }
         this.ctx.fillStyle = dm.renderColor;
         const x: number = (this.width - dm.textWidth) / 2;
-        const y: number = dm.lane * laneH + fontSize;
+        const y: number = dm.lane * laneH + itemFont;
         this.ctx.strokeText(dm.renderText, x, y);
         this.ctx.fillText(dm.renderText, x, y);
+        keep.push(dm);
+      } else if (dm.reverse) {
+        // 逆向滚动（mode 6）：从左向右推进。
+        if (!frozen) dm.x += dm.speed * deltaSec;
+        if (!frozen && dm.x - dm.textWidth > this.width + 10) {
+          continue;
+        }
+        this.ctx.fillStyle = dm.renderColor;
+        const y: number = dm.lane * laneH + itemFont;
+        this.ctx.strokeText(dm.renderText, dm.x, y);
+        this.ctx.fillText(dm.renderText, dm.x, y);
         keep.push(dm);
       } else {
         // 滚动弹幕：被冻结时停在当前位置不再前进。
@@ -275,7 +336,7 @@ export class PlayerDanmakuEngine {
           continue;
         }
         this.ctx.fillStyle = dm.renderColor;
-        const y: number = dm.lane * laneH + fontSize;
+        const y: number = dm.lane * laneH + itemFont;
         this.ctx.strokeText(dm.renderText, dm.x, y);
         this.ctx.fillText(dm.renderText, dm.x, y);
         keep.push(dm);
@@ -284,6 +345,41 @@ export class PlayerDanmakuEngine {
     this.ctx.globalAlpha = 1;
     this.activeBack = this.active;
     this.active = keep;
+  }
+
+  /**
+   * mode 7 高级弹幕：按运动轨道插值定位绘制。
+   * 返回 false 表示已过期（超过 delay+duration），调用方丢弃。
+   * 缓动采用 DFM 同款 quadratic easeOut（-t*(t-2)）。
+   */
+  private drawSpecial(dm: ActiveDm, now: number): boolean {
+    const track: SpecialTrack = dm.special as SpecialTrack;
+    const elapsedMs: number = (now - dm.born) * 1000;
+    if (elapsedMs < track.delayMs) {
+      return true; // 延迟中，未到出场时间
+    }
+    const t0: number = elapsedMs - track.delayMs;
+    if (t0 > track.durationMs) {
+      return false;
+    }
+    let progress: number = t0 / track.durationMs;
+    if (track.easeOut) {
+      progress = -progress * (progress - 2);
+    }
+    progress = Math.max(0, Math.min(1, progress));
+    const x: number = (track.fromX + (track.toX - track.fromX) * progress) * this.width;
+    const y: number = (track.fromY + (track.toY - track.fromY) * progress) * this.height;
+    this.ctx.save();
+    this.ctx.translate(x, y);
+    if (track.rotateZ !== 0) {
+      this.ctx.rotate(track.rotateZ * Math.PI / 180);
+    }
+    this.ctx.font = '600 ' + String(dm.fontSizePx) + 'px sans-serif';
+    this.ctx.fillStyle = dm.renderColor;
+    this.ctx.strokeText(dm.renderText, 0, 0);
+    this.ctx.fillText(dm.renderText, 0, 0);
+    this.ctx.restore();
+    return true;
   }
 
   resetAt(time: number): void {
@@ -296,7 +392,7 @@ export class PlayerDanmakuEngine {
     this.speed = value;
     for (let i: number = 0; i < this.active.length; i++) {
       const dm: ActiveDm = this.active[i];
-      if (!dm.isFixed) {
+      if (!dm.isFixed && dm.special === null) {
         const spawnInset: number = Math.max(10, this.fontSize() * 0.3);
         const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / Math.max(0.5, value);
         dm.speed = (this.width + spawnInset + dm.textWidth) / travelSeconds;
@@ -309,8 +405,14 @@ export class PlayerDanmakuEngine {
     this.textWidthCache.clear();
     for (let i: number = 0; i < this.active.length; i++) {
       const dm: ActiveDm = this.active[i];
-      dm.textWidth = this.measureText(dm.renderText);
-      if (!dm.isFixed) {
+      if (dm.special !== null) {
+        const track: SpecialTrack = dm.special;
+        dm.fontSizePx = Math.max(14, Math.min(90, track.sizePct / 100 * this.height));
+      } else {
+        dm.fontSizePx = this.sizeFor(dm.item);
+      }
+      dm.textWidth = this.measure(dm.renderText, dm.fontSizePx);
+      if (!dm.isFixed && dm.special === null) {
         const spawnInset: number = Math.max(10, this.fontSize() * 0.3);
         const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / Math.max(0.5, this.speed);
         dm.speed = (this.width + spawnInset + dm.textWidth) / travelSeconds;
@@ -335,7 +437,8 @@ export class PlayerDanmakuEngine {
       const isBottom: boolean = dm.item.mode === 4;
       const isScroll: boolean = !isTop && !isBottom;
       if ((isScroll && this.blockScrollDm) || (isTop && this.blockTopDm) ||
-        (isBottom && this.blockBottomDm) || (this.blockColorDm && dm.item.color !== 16777215)) continue;
+        (isBottom && this.blockBottomDm) || (this.blockColorDm && dm.item.color !== 16777215) ||
+        dm.item.weight < this.minWeight) continue;
       keep.push(dm);
     }
     this.active = keep;
@@ -379,9 +482,10 @@ export class PlayerDanmakuEngine {
     const minimumGap: number = Math.max(18, this.fontSize() * 0.62);
     for (let i: number = 0; i < this.active.length; i++) {
       const current: ActiveDm = this.active[i];
-      if (current.lane !== lane) continue;
-      // 固定弹幕仍占据同一条视觉轨道，滚动弹幕不能从它下面穿过。
-      if (current.isFixed) return false;
+      if (current.lane !== lane || current.special !== null) continue;
+      // 固定弹幕仍占据同一条视觉轨道，滚动弹幕不能从它下面穿过；
+      // 逆向弹幕与正向同轨会对向相撞，同样拒绝。
+      if (current.isFixed || current.reverse) return false;
       const currentTail: number = current.x + current.textWidth;
       if (currentTail + minimumGap > spawnX) return false;
       if (newSpeed > current.speed + 0.01) {
@@ -391,6 +495,38 @@ export class PlayerDanmakuEngine {
       }
     }
     return true;
+  }
+
+  /** 逆向弹幕（mode 6，从左向右）的镜像安全判断：tail 在左、head 在右。 */
+  private laneSafeForReverse(lane: number, spawnTail: number, newSpeed: number): boolean {
+    const minimumGap: number = Math.max(18, this.fontSize() * 0.62);
+    for (let i: number = 0; i < this.active.length; i++) {
+      const current: ActiveDm = this.active[i];
+      if (current.lane !== lane || current.special !== null) continue;
+      // 固定弹幕与正向弹幕都不能与逆向弹幕同轨。
+      if (current.isFixed || !current.reverse) return false;
+      const currentHead: number = current.x;
+      // 新弹幕 tail 已越过同轨前辈 head（镜像间距不足）。
+      if (spawnTail + minimumGap > currentHead) return false;
+      if (newSpeed > current.speed + 0.01) {
+        const catchSeconds: number = (currentHead - spawnTail - minimumGap) / (newSpeed - current.speed);
+        const currentExitSeconds: number = Math.max(0, (this.width - currentHead + minimumGap) / Math.max(1, current.speed));
+        if (catchSeconds < currentExitSeconds) return false;
+      }
+    }
+    return true;
+  }
+
+  private allocReverseLane(spawnTail: number, speed: number): number {
+    const laneCount: number = this.laneCount();
+    for (let offset: number = 0; offset < laneCount; offset++) {
+      const lane: number = (this.nextScrollLane + offset) % laneCount;
+      if (this.laneSafeForReverse(lane, spawnTail, speed)) {
+        this.nextScrollLane = (lane + 1) % laneCount;
+        return lane;
+      }
+    }
+    return -1;
   }
 
   private allocLane(spawnX: number, speed: number): number {
@@ -429,12 +565,17 @@ export class PlayerDanmakuEngine {
     return -1;
   }
 
-  private measureText(text: string): number {
-    const size: number = this.fontSize();
-    const key: string = String(Math.round(size * 10)) + ':' + text;
+  /** 逐条字号：B 站 18/25/36 档按 25 为基准缩放，再叠用户字号缩放。 */
+  private sizeFor(item: DanmakuItem): number {
+    const factor: number = item.fontsize > 0 ? item.fontsize / 25 : 1;
+    return this.fontSize() * Math.max(0.6, Math.min(1.8, factor));
+  }
+
+  private measure(text: string, sizePx: number): number {
+    const key: string = String(Math.round(sizePx * 10)) + ':' + text;
     const cached: number | undefined = this.textWidthCache.get(key);
     if (cached !== undefined) return cached;
-    this.ctx.font = '600 ' + size + 'px sans-serif';
+    this.ctx.font = '600 ' + sizePx + 'px sans-serif';
     const w: number = this.ctx.measureText(text).width;
     const result: number = Math.max(20, w);
     if (this.textWidthCache.size > 512) {

@@ -14,6 +14,7 @@ export struct PlayerSettingsPanel {
   @Prop dmSpeed: number = 1;
   @Prop dmFontScale: number = 1.3;
   @Prop dmDensity: number = 18;
+  @Prop dmBlockLevel: number = 0;
   @Prop blockScrollDm: boolean = false;
   @Prop blockTopDm: boolean = false;
   @Prop blockBottomDm: boolean = false;
@@ -32,6 +33,7 @@ export struct PlayerSettingsPanel {
   onDmSpeedChange: (value: number) => void = () => {};
   onDmFontScaleChange: (value: number) => void = () => {};
   onDmDensityChange: (value: number) => void = () => {};
+  onDmBlockLevelChange: (value: number) => void = () => {};
   onToggleDmBlock: (kind: string) => void = () => {};
   onQualityChange: (qn: number) => void = () => {};
   onChapterChange: (seconds: number) => void = () => {};
@@ -118,6 +120,8 @@ export struct PlayerSettingsPanel {
         this.DmSliderRow('速度', () => this.dmSpeed, 0.5, 2, (value: number) => this.onDmSpeedChange(value))
         this.DmSliderRow('字号', () => this.dmFontScale, 0.7, 1.8, (value: number) => this.onDmFontScaleChange(value))
         this.DmSliderRow('密度', () => this.dmDensity, 6, 30, (value: number) => this.onDmDensityChange(value))
+        // 智能云屏蔽等级（B 站 app 同款）：按弹幕 weight 过滤，0 为关闭
+        this.DmSliderRow('屏蔽', () => this.dmBlockLevel, 0, 10, (value: number) => this.onDmBlockLevelChange(value))
         Row({ space: 6 }) {
           this.DmBlockChip('滚动', () => this.blockScrollDm, 'scroll')
           this.DmBlockChip('顶部', () => this.blockTopDm, 'top')

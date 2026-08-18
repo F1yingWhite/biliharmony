@@ -53,18 +53,25 @@ export class DmFilterRule {
 // 弹幕数据
 export class DanmakuItem {
   time: number = 0;    // 出现时间（秒）
-  mode: number = 1;    // 1-3 滚动, 4 底部, 5 顶部
+  mode: number = 1;    // 1-3 滚动, 4 底部, 5 顶部, 6 逆向滚动, 7 高级弹幕
   color: number = 0xFFFFFF;
   text: string = '';
   /** 弹幕 id（dmid），protobuf 分段来源有值，弹幕举报用；XML 兜底无此字段为 0 */
   id: number = 0;
+  /** 发送字号档位：18 小 / 25 标准 / 36 大；渲染时按 25 为基准缩放。 */
+  fontsize: number = 25;
+  /** 智能云屏蔽权重 0-10（越大越优质）；低于用户设定屏蔽等级的弹幕不喷出。 */
+  weight: number = 10;
 
-  constructor(time: number, mode: number, color: number, text: string, id: number = 0) {
+  constructor(time: number, mode: number, color: number, text: string, id: number = 0,
+    fontsize: number = 25, weight: number = 10) {
     this.time = time;
     this.mode = mode;
     this.color = color;
     this.text = text;
     this.id = id;
+    this.fontsize = fontsize;
+    this.weight = weight;
   }
 }
 
@@ -730,7 +737,8 @@ export class BiliApi {
       const elems: Array<ProtoDanmaku> = parseDanmakuSegment(buffer);
       const result: Array<DanmakuItem> = [];
       for (let i: number = 0; i < elems.length; i++) {
-        result.push(new DanmakuItem(elems[i].time, elems[i].mode, elems[i].color, elems[i].text, elems[i].id));
+        result.push(new DanmakuItem(elems[i].time, elems[i].mode, elems[i].color, elems[i].text,
+          elems[i].id, elems[i].fontsize, elems[i].weight));
       }
       return result;
     } catch (e) {
