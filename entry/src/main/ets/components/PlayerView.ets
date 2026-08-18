@@ -135,6 +135,8 @@ export struct PlayerView {
   // 默认 1.3 对齐 B 站弹幕观感；设置面板可在 0.7~1.8 间调节。
   @State dmFontScale: number = 1.3;
   @State dmDensity: number = 18;
+  /** 智能云屏蔽等级 0-10（weight 低于等级的不喷出，0 关闭）。 */
+  @State dmBlockLevel: number = 0;
   @State blockScrollDm: boolean = false;
   @State blockTopDm: boolean = false;
   @State blockBottomDm: boolean = false;
@@ -1682,11 +1684,18 @@ if (this.runtimeSources.length === 0) {
     this.dmEngine.setDensity(value);
   }
 
+  setDmBlockLevel(value: number): void {
+    this.dmBlockLevel = Math.round(value);
+    this.dmEngine.minWeight = this.dmBlockLevel;
+    this.applyDmFilters();
+  }
+
   applyDmFilters(): void {
     this.dmEngine.blockScrollDm = this.blockScrollDm;
     this.dmEngine.blockTopDm = this.blockTopDm;
     this.dmEngine.blockBottomDm = this.blockBottomDm;
     this.dmEngine.blockColorDm = this.blockColorDm;
+    this.dmEngine.minWeight = this.dmBlockLevel;
     this.dmEngine.applyFilters();
     if (this.dmEngine.active.length === 0) this.stopDmLoop(false);
   }
@@ -2358,6 +2367,7 @@ if (this.runtimeSources.length === 0) {
       dmSpeed: this.dmSpeed,
       dmFontScale: this.dmFontScale,
       dmDensity: this.dmDensity,
+      dmBlockLevel: this.dmBlockLevel,
       blockScrollDm: this.blockScrollDm,
       blockTopDm: this.blockTopDm,
       blockBottomDm: this.blockBottomDm,
@@ -2376,6 +2386,7 @@ if (this.runtimeSources.length === 0) {
         this.setDmSpeed(1);
         this.setDmFontScale(1.3);
         this.setDmDensity(18);
+        this.setDmBlockLevel(0);
         this.blockScrollDm = false;
         this.blockTopDm = false;
         this.blockBottomDm = false;
@@ -2386,6 +2397,7 @@ if (this.runtimeSources.length === 0) {
       onDmSpeedChange: (value: number) => this.setDmSpeed(value),
       onDmFontScaleChange: (value: number) => this.setDmFontScale(value),
       onDmDensityChange: (value: number) => this.setDmDensity(value),
+      onDmBlockLevelChange: (value: number) => this.setDmBlockLevel(value),
       onToggleDmBlock: (kind: string) => {
         if (kind === 'scroll') this.blockScrollDm = !this.blockScrollDm;
         else if (kind === 'top') this.blockTopDm = !this.blockTopDm;

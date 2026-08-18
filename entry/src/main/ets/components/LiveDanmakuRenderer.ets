@@ -1,6 +1,7 @@
 /**
  * 直播弹幕 Canvas 渲染器：把 LivePlayerView 里内联的滚动弹幕引擎抽成独立类。
  * 职责与 PlayerDanmakuEngine 对齐：车道分配、双缓冲推进、定时器与绘制；组件层只保留视图/开关同步。
+ * socket 批量到达的弹幕先入待喷队列，按固定节奏逐条释放，避免一批一批同时上屏。
  */
 import { LiveChatMessage } from '../model/LiveModels';
 import { colorHex } from './PlayerDanmakuSupport';
@@ -33,6 +34,9 @@ export class LiveDanmakuRenderer {
 
   private ctx: CanvasRenderingContext2D;
   private active: Array<ActiveLiveDanmaku> = [];
+  /** 待喷出队列：socket 批量到达的弹幕先入队，按固定节奏逐条释放，避免一批一批同时上屏。 */
+  private pending: Array<LiveChatMessage> = [];
+  private lastReleaseMs: number = 0;
   private tick: number = -1;
   private lastDrawMs: number = 0;
   private nextLane: number = 0;
@@ -50,23 +54,49 @@ export class LiveDanmakuRenderer {
     this.messageBaselineReady = true;
   }
 
-  /** 新消息增量进入：只渲染基线之后新增的弹幕。 */
+  /** 新消息增量进入：基线之后新增的弹幕先入待喷队列，由渲染循环按节奏逐条释放。 */
   onMessagesChanged(messages: Array<LiveChatMessage>): void {
     if (!this.messageBaselineReady) return;
+    let added: boolean = false;
     for (let i: number = 0; i < messages.length; i++) {
       const message: LiveChatMessage = messages[i];
       if (this.seenMessageIds.has(message.id)) continue;
       this.seenMessageIds.add(message.id);
-      this.spawnMessage(message);
+      this.pending.push(message);
+      added = true;
     }
     if (this.seenMessageIds.size > 600) {
       this.seenMessageIds.clear();
-      for (let i: number = 0; i < messages.length; i++) this.seenMessageIds.add(messages[i].id);
+      for (let i = 0; i < messages.length; i++) this.seenMessageIds.add(messages[i].id);
     }
+    if (added && this.playing && this.enabled) this.startLoop();
+  }
+
+  /**
+   * 按节奏从队列释放弹幕：每 ~130ms 放一条（积压 >8 时放两条）；
+   * 积压超过 30 条丢弃最旧，保证直播弹幕的时效性（与 B 站客户端丢弃策略一致）。
+   */
+  private drainQueue(): void {
+    if (this.pending.length === 0) return;
+    const now: number = Date.now();
+    if (now - this.lastReleaseMs < 130) return;
+    if (this.pending.length > 30) {
+      this.pending.splice(0, this.pending.length - 30);
+    }
+    const burst: number = this.pending.length > 8 ? 2 : 1;
+    let released: boolean = false;
+    for (let i: number = 0; i < burst && this.pending.length > 0; i++) {
+      if (this.active.length >= 28) break;
+      const message: LiveChatMessage = this.pending.shift() as LiveChatMessage;
+      this.spawnMessage(message);
+      released = true;
+    }
+    if (released) this.lastReleaseMs = now;
   }
 
   /** 清空所有活动弹幕和消息基线（组件销毁/生命周期重入时用）。 */
   release(): void {
+    this.pending = [];
     this.stopLoop(true);
     this.seenMessageIds.clear();
     this.messageBaselineReady = false;
@@ -74,14 +104,17 @@ export class LiveDanmakuRenderer {
 
   toggle(on: boolean): void {
     this.enabled = on;
-    if (!this.enabled) this.stopLoop(true);
+    if (!this.enabled) {
+      this.pending = [];
+      this.stopLoop(true);
+    }
   }
 
   /** 同步播放/全屏状态；从暂停恢复或进入全屏时若有存量弹幕则立即续画。 */
   setPlayback(playing: boolean, fullscreen: boolean): void {
     this.playing = playing;
     this.fullscreen = fullscreen;
-    if (playing && this.enabled && this.active.length > 0) this.startLoop();
+    if (playing && this.enabled && (this.active.length > 0 || this.pending.length > 0)) this.startLoop();
   }
 
   private fontSize(): number {
@@ -158,14 +191,18 @@ export class LiveDanmakuRenderer {
     }
     this.ctx.globalAlpha = 1;
     this.active = keep;
-    if (keep.length === 0) this.stopLoop(false);
+    // 队列里还有待喷弹幕时循环保持运转，彻底清空后才停表。
+    if (keep.length === 0 && this.pending.length === 0) this.stopLoop(false);
   }
 
   private startLoop(): void {
-    if (this.tick >= 0 || !this.enabled || this.active.length === 0) return;
+    if (this.tick >= 0 || !this.enabled || (this.active.length === 0 && this.pending.length === 0)) return;
     this.lastDrawMs = Date.now();
     this.tick = setInterval(() => {
-      if (this.playing && this.enabled) this.drawFrame();
+      if (this.playing && this.enabled) {
+        this.drainQueue();
+        this.drawFrame();
+      }
     }, this.fullscreen ? 25 : 33);
   }
 
@@ -175,6 +212,7 @@ export class LiveDanmakuRenderer {
     this.lastDrawMs = 0;
     if (clear) {
       this.active = [];
+      this.pending = [];
       this.nextLane = 0;
     }
     this.ctx.clearRect(0, 0, this.width, this.height);
