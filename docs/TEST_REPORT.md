@@ -129,6 +129,6 @@
 - 环境：远程模拟器 `bili_dev`（HarmonyOS 6.1.1(24)），未签名但可安装的兼容包 `entry-default-api24-unsigned.hap` 安装成功。
 - `python3 tool/qa/smoke.py --skip-install`：PASS=4 / FAIL=1（动态页按“有内容即可”改为计数后应通过）。
 - `python3 tool/qa/suite_all.py --skip-install`：PASS=14 / FAIL=1 / SKIP=1（原失败为滚动文本阈值 60 偏高，已按 50 调整）。
-- `python3 tool/qa/suite_deep.py --skip-install`：PASS=7 / FAIL=1（仅“番剧详情缺少追番/选集”为测试用例选卡不稳定，非业务崩溃）。
+- `python3 tool/qa/suite_deep.py --skip-install`：PASS=8 / FAIL=0（已将番剧详情选卡改为点 `ListItem` 封面区域，不再点中“共 N 部”计数行）。
 - `python3 tool/qa/audit_ui.py --all`：全量 dump 审计 0 越界、0 零尺寸；1 条低概率文本重叠来自瀑布流两个相邻卡片标题的近距显示。
 - 已修复 `hdc` "No Error" 被误判失败的跨平台兼容问题。
