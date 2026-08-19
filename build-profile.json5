@@ -1,20 +1,8 @@
 {
   "app": {
-    "signingConfigs": [
-      {
-        "name": "default",
-        "type": "HarmonyOS",
-        "material": {
-          "certpath": "C:\\Users\\f1yin\\.ohos\\config\\default_biliharmony_1w9J4asWbdJapm-91Ty0_oEvgB2DuW_6CctCqXhCLb0=.cer",
-          "keyAlias": "debugKey",
-          "keyPassword": "0000001B55BF92ADA6530F1D7A5135762EDDEBC03B257373D818B1A7599FF9C09454370DCA67DD1D9D1CEB",
-          "profile": "C:\\Users\\f1yin\\.ohos\\config\\default_biliharmony_1w9J4asWbdJapm-91Ty0_oEvgB2DuW_6CctCqXhCLb0=.p7b",
-          "signAlg": "SHA256withECDSA",
-          "storeFile": "C:\\Users\\f1yin\\.ohos\\config\\default_biliharmony_1w9J4asWbdJapm-91Ty0_oEvgB2DuW_6CctCqXhCLb0=.p12",
-          "storePassword": "0000001B8F802539EAE1E4E7825FEC4660CC33BADAD0148E4DCF2542DBA92F1C161A258FC8780CECC1A78B"
-        }
-      }
-    ],
+    // 签名材料不入库：各开发机本地填写（DevEco 自动签名会回写本文件），
+    // 并执行 git update-index --skip-worktree build-profile.json5 屏蔽本地差异。
+    "signingConfigs": [],
     "products": [
       {
         "name": "default",
