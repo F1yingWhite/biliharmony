@@ -148,6 +148,6 @@
   - 结论：现有保活配置（3 根 tab 全保活 + 频道 `cachedMaxCount(1)` + 列表 `cachedCount 3~5`）合理，建议保持；不建议再降缓存档位。
 - 其他：
   - 沉浸光感底栏为 API26 特性（`apiAvailable('26.0.0')`，`AppTheme.ets:362`），API24 模拟器恒走实底 PlainTabs，非缺陷。
-  - 官方 OpenHarmony 文档以 git submodule 挂载于 `docs/openharmony-docs`（本地源仓 `ohdocs-md`，pin `8046e9d`），不入主仓库实体；`*.mp4` 已加入 .gitignore。
+  - 官方 OpenHarmony 文档曾以 git submodule 挂载于 `docs/openharmony-docs`（源仓为开发机本地路径，无法对外 clone，2026-08-19 已移除）；`*.mp4` 已加入 .gitignore。
   - 网页控制台（画面变化推送 + 鼠标/触控 + Back/Home）部署于 54 宿主机 `/data2/xyh/emuweb/`（端口 8099），hdc 截图链路帧率上限 ≈3–4fps（`snapshot_display` 单帧 230–400ms）。
 - 构建：`hvigorw assembleHap` BUILD SUCCESSFUL；API24 兼容包（`compatibleSdkVersion=6.1.1(24)`）安装模拟器、冷启动正常；冒烟 0 hilog 错误。当前"关注"feed 样本无图片动态（全部为投稿视频，账号数据所致），本轮看图页独立内存增未单独测得，但 hero 开/关/返回键路径回归无异常。
