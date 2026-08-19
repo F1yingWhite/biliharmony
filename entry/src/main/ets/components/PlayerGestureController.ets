@@ -83,13 +83,18 @@ export class PlayerGestureController {
     }
     if (this.panMode === 'brightness') {
       this.panGestureActive = false;
-      const travel: number = viewWidth * 0.8;
+      // travel 兜底：viewWidth 在播放器尚未完成布局时为 0/1（弹幕引擎初始值），
+      // 直接乘 0.8 会把任何微小 offsetY 的都按 0.8 除 → 亮度瞬间 clamp 到最亮/最暗。
+      // 下限 160vp 保证灵敏度有上限：即使视口未知，轻抖最多偏移几个百分点。
+      const travel: number = Math.max(160, viewWidth * 0.8);
       const value: number = Math.max(0.02, Math.min(1, this.panStartBrightness - offsetY / travel));
       this.gestureBrightness = value;
       // 提示气泡展示整数百分比（0~100），不能把原始小数/偏移量直接拼进文本。
       this.onAdjust('brightness', Math.round(value * 100));
       this.onBrightness(value);
       const now: number = Date.now();
+      // 节奏限制：最多每 16ms 提交一次真实窗口亮度，避免手势高频回调排队；
+      // 只记录“实际应用”的时间点，且应用后立即刷新，保证最新值总会被提交。
       if (now - this.lastGestureApplyMs >= 16) {
         this.lastGestureApplyMs = now;
         this.onBrightnessApply(value);
@@ -98,7 +103,8 @@ export class PlayerGestureController {
     }
     if (this.panMode === 'volume') {
       this.panGestureActive = false;
-      const travel: number = viewWidth * 0.8;
+      // 与亮度共用 travel 下限：viewWidth 未就绪时避免音量一步跳满/归零。
+      const travel: number = Math.max(160, viewWidth * 0.8);
       const value: number = Math.max(0, Math.min(100, this.panStartVolume - offsetY * 100 / travel));
       this.gestureVolume = value;
       this.onAdjust('volume', Math.round(value));

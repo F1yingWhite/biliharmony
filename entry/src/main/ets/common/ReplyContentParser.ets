@@ -148,7 +148,8 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
     const part: ReplyRenderPart = new ReplyRenderPart();
     part.key = String(item.rpid) + '-action-' + String(serial++);
     if (foundEmote !== null) {
-      part.image = foundEmote.url;
+      // 有动态图用 GIF（Image 自动播放），否则静态图；大小按 1/2 行高传递。
+      part.image = foundEmote.displayUrl();
       part.imageSize = foundEmote.size;
     } else if (foundMention !== null) {
       part.text = foundMention.label;

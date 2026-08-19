@@ -622,7 +622,8 @@ export struct MineView {
   }
 
   /** 清空缓存前的确认弹窗。 */
-  private confirmClearCache(): void {    promptAction.showDialog({
+  private confirmClearCache(): void {
+    promptAction.showDialog({
       title: '清空缓存',
       message: `将删除 ${this.cacheSizeText()} 的图片/弹幕等临时文件，不影响登录态。`,
       buttons: [
@@ -649,7 +650,7 @@ export struct MineView {
       hilog.info(0x0000, 'BiliCache', 'clearCache done: freed=%{public}d bytes from %{public}s', freed, dir);
       this.toast(freed > 0 ? `已清空 ${this.formatBytes(freed)}` : '缓存已是空的');
     } catch (e) {
-      this.toast('清空失败，请稍后重试');
+      // 目录清空失败忽略
     }
   }
 

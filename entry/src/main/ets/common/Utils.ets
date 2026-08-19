@@ -107,10 +107,11 @@ export function formatRelativeTime(timestamp: number): string {
   return (d.getFullYear()) + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
 }
 
-// 时间戳(秒) → 完整日期
+// 时间戳(秒) → 完整日期时间（含 小时:分钟）
 export function formatDate(timestamp: number): string {
   const d: Date = new Date(timestamp * 1000);
-  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) +
+    ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
 }
 
 // 生成随机字符串（用于 buvid 等）

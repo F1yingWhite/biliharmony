@@ -91,6 +91,8 @@ export struct PlayerView {
   onDmDraftChange: (value: string) => void = () => {};
   onDmSend: () => void = () => {};
   onProgress: (seconds: number) => void = () => {};
+  /** 在线观看人数变化上报：详情页把"X人正在看"显示在信息行（竖屏播放器不再悬浮）。 */
+  onOnlineCount: (value: string) => void = () => {};
   onEnded: () => void = () => {};
   onLike: () => void = () => {};
   onCoin: () => void = () => {};
@@ -127,7 +129,7 @@ export struct PlayerView {
   @State showControls: boolean = false;
   @State buffering: boolean = false;
   @State showMoreMenu: boolean = false;      // 竖屏：底部 Sheet 设置面板
-  @State showSideDrawer: boolean = false;    // 横屏：右侧抽屉设置面板
+  @State showSideDrawer: boolean = false;    // 横屏：右侧抽屉设置面板（bindContentCover 窗口级弹层）
   @State moreSheetPage: string = 'menu';     // Sheet/抽屉共用的子页状态
   @State subtitleOn: boolean = false;
   @State subtitleIndex: number = -1;
@@ -207,13 +209,13 @@ export struct PlayerView {
   @State sliderDragging: boolean = false;
   @State sliderDragValue: number = 0;
   private volumeRestoreTimer: number = -1;
+  /** 音画对齐：音频等待视频首个 timeUpdate（首帧上屏）后再 play 的挂起标记与兜底计时。 */
+  private audioStartPending: boolean = false;
+  private audioStartTimer: number = -1;
   // 起播静音至首帧：play 时双轨音量置 0，首个 timeUpdate>50ms（首帧已上屏）恢复用户音量，
   // 600ms 兜底定时器防静音挂死。解决开播"先闻其声、后见画面"。
   private firstFrameMuteArmed: boolean = false;
   private firstFrameMuteTimer: number = -1;
-  // 双音轨（高画质 DASH）延迟启动：音频轨缓冲快，直接 play 会抢跑出声而画面还在加载。
-  // 置位后由视频首个 timeUpdate（首帧推进）再启动音频轨。
-  private audioStartPending: boolean = false;
   private fullscreenExitTimer: number = -1;
   // AVPlayer 创建本身是异步的：代次使离页/换源前发起的 createAVPlayer 结果失效并立即释放。
   private playerCreateGeneration: number = 0;
@@ -255,11 +257,13 @@ export struct PlayerView {
           const video: media.AVPlayer | null = this.player;
           if (resume && video !== null && this.prepared) {
             try {
-              // seek 后恢复播放同样静音等首帧：新位置解码帧上屏前不放声。
               if (!this.playing) {
+                // seek 后恢复播放同样静音等首帧：新位置解码帧上屏前不放声。
                 this.armFirstFrameMute();
                 video.play();
               }
+              // 音频仍按首帧对齐节奏启动（若已播放则幂等无副作用）。
+              this.gateAudioStart();
             } catch (e) {
             }
             // 双音轨延迟启动：首个 timeUpdate 时才播放音频轨，与视频新位置的解码帧同步出声。
@@ -677,6 +681,12 @@ if (this.runtimeSources.length === 0) {
     const audio: media.AVPlayer | null = this.audioPlayer;
     this.shouldPlayAfterPrepare = false;
     this.muteImmediately();
+    // 取消首帧门控：否则 1.2s 兜底计时器会在暂停后把音频单独放出来。
+    this.audioStartPending = false;
+    if (this.audioStartTimer >= 0) {
+      clearTimeout(this.audioStartTimer);
+      this.audioStartTimer = -1;
+    }
     try {
       if (video !== null && this.prepared) video.pause();
       if (audio !== null && this.audioPrepared) audio.pause();
@@ -938,15 +948,6 @@ if (this.runtimeSources.length === 0) {
         if (this.player !== p) return;
         // 起播静音恢复点：首个 timeUpdate>50ms 说明首帧已解码上屏，此时再放声（先画后声）。
         if (this.firstFrameMuteArmed && t > 50) this.disarmFirstFrameMute();
-        // 双音轨延迟启动：视频首帧推进后才启动音频轨，避免音频抢跑后被校时拽回。
-        if (this.audioStartPending && t > 50) {
-          this.audioStartPending = false;
-          try {
-            if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.play();
-          } catch (e) {
-            // 音频轨状态异常时保持静默，不阻塞视频播放。
-          }
-        }
         // AVPlayer 上报毫秒，播放器 UI/弹幕内部统一使用秒。
         const nextTime: number = t / 1000;
         if (this.dmEngine.lastPlayerTime > 0 && (nextTime < this.dmEngine.lastPlayerTime - 0.5 || nextTime > this.dmEngine.lastPlayerTime + 2.5)) {
@@ -954,6 +955,19 @@ if (this.runtimeSources.length === 0) {
         }
         this.dmEngine.lastPlayerTime = nextTime;
         this.playheadSec = nextTime;
+        // 音画对齐：视频首帧已上屏（首个播放时刻）后启动音频。
+        if (this.audioStartPending && nextTime > 0.05) {
+          this.audioStartPending = false;
+          if (this.audioStartTimer >= 0) {
+            clearTimeout(this.audioStartTimer);
+            this.audioStartTimer = -1;
+          }
+          try {
+            const a: media.AVPlayer | null = this.audioPlayer;
+            if (a !== null && this.audioPrepared) a.play();
+          } catch (e) {
+          }
+        }
         // seek 锁定时 AVPlayer 仍会上报 seek 前的位置，忽略这些旧回写，让进度条钉在目标值。
         if (!this.seekLocked && Math.floor(nextTime) !== Math.floor(this.curTime)) this.curTime = nextTime;
         this.onProgress(nextTime);
@@ -1000,9 +1014,14 @@ if (this.runtimeSources.length === 0) {
         return;
       }
       const source: media.MediaSource = media.createMediaSourceWithUrl(sourceUrl, this.playbackHeaders());
-      if (this.runtimeAudioSources.length > 0) await this.initAudioPlayer(generation);
+      // 音轨初始化不再 await：音/视频两条握手并行，起播耗时从“串行之和”降为“较慢一路”。
+      // tryStartPreparedPlayers 会等到两条轨都 prepared 才开播，并行不会引入竞态。
+      if (this.runtimeAudioSources.length > 0) {
+        this.initAudioPlayer(generation).catch(() => {
+        });
+      }
       if (this.destroyed || generation !== this.playerCreateGeneration || this.player !== p) return;
-      await p.setMediaSource(source, this.videoPlaybackStrategy());
+      await p.setMediaSource(source, this.videoPlaybackStrategy(this.resumeAfterPrepare <= 0 && this.initialSeekSeconds <= 0));
     } catch (e) {
       if (generation === this.playerCreateGeneration) this.playerCreating = false;
       if (this.destroyed || generation !== this.playerCreateGeneration) return;
@@ -1028,8 +1047,8 @@ if (this.runtimeSources.length === 0) {
     return PlayerPlaybackConfig.sourceUrl(this.runtimeAudioSources, this.audioSourceIndex);
   }
 
-  private videoPlaybackStrategy(): media.PlaybackStrategy {
-    return PlayerPlaybackConfig.videoStrategy();
+  private videoPlaybackStrategy(showFirstFrame: boolean = true): media.PlaybackStrategy {
+    return PlayerPlaybackConfig.videoStrategy(showFirstFrame);
   }
 
   private audioPlaybackStrategy(): media.PlaybackStrategy {
@@ -1106,12 +1125,30 @@ if (this.runtimeSources.length === 0) {
       // 起播先静音，首个 timeUpdate（首帧上屏）后放声，避免先闻其声后见画面。
       this.armFirstFrameMute();
       video.play();
-      if (audio !== null) {
-        // 双音轨不直接 play：音频轨小、缓冲快，抢跑会"先出声后见画面"，
-        // 等首个 timeUpdate 由 audioStartPending 路径启动。
-        this.audioStartPending = true;
-      }
+      // 音频不随视频同时 play：等视频首帧上屏后再启动，避免先闻其声。
+      this.gateAudioStart();
     }
+  }
+
+  /** 起播时将音频延迟到视频首帧（首个 timeUpdate > 0）后再播放，防止声音先于画面；1.2s 兜底。 */
+  private gateAudioStart(): void {
+    const audio: media.AVPlayer | null = this.audioPlayer;
+    if (audio === null || !this.audioPrepared) return;
+    if (this.audioStartTimer >= 0) {
+      clearTimeout(this.audioStartTimer);
+    }
+    this.audioStartPending = true;
+    this.audioStartTimer = setTimeout(() => {
+      this.audioStartTimer = -1;
+      this.audioStartPending = false;
+      // 兜底：视频首帧迟迟不来（长时间缓冲等）也不再继续等待，1.2s 后强制让音频跟上。
+      // 但若期间用户已暂停（playing=false），绝不能把音频单独放出来。
+      if (!this.playing) return;
+      try {
+        if (this.audioPlayer === audio && this.audioPrepared) audio.play();
+      } catch (e) {
+      }
+    }, 1200);
   }
 
   async changeQuality(qn: number): Promise<void> {
@@ -1224,9 +1261,15 @@ if (this.runtimeSources.length === 0) {
     const request: number = ++this.onlineRequest;
     const cid: number = this.cid;
     BiliApi.getOnlineTotal(this.aid, this.bvid, cid).then((total: string) => {
-      if (!this.destroyed && request === this.onlineRequest && this.cid === cid) this.onlineTotal = total;
+      if (!this.destroyed && request === this.onlineRequest && this.cid === cid) {
+        this.onlineTotal = total;
+        this.onOnlineCount(total);
+      }
     }).catch(() => {
-      if (!this.destroyed && request === this.onlineRequest) this.onlineTotal = '';
+      if (!this.destroyed && request === this.onlineRequest) {
+        this.onlineTotal = '';
+        this.onOnlineCount('');
+      }
     });
   }
 
@@ -1377,6 +1420,11 @@ if (this.runtimeSources.length === 0) {
     }
     if (this.playing) {
       this.audioStartPending = false;
+      // 首帧门控的 1.2s 兜底计时器也必须取消，否则暂停后它会到点把音频重新放出来。
+      if (this.audioStartTimer >= 0) {
+        clearTimeout(this.audioStartTimer);
+        this.audioStartTimer = -1;
+      }
       try {
         p.pause();
         if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.pause();
@@ -1395,8 +1443,8 @@ if (this.runtimeSources.length === 0) {
         // 恢复播放同样先静音等首帧（pause 期间画面虽在，但 resume 后首个解码帧仍可能滞后于声音）。
         this.armFirstFrameMute();
         p.play();
-        // 双音轨统一走延迟启动（首个 timeUpdate 时 audioStartPending 路径播放）。
-        if (this.audioPlayer !== null && this.audioPrepared) this.audioStartPending = true;
+        // 音频等视频首帧上屏后再启动（同一节奏，避免先闻其声）。
+        this.gateAudioStart();
         this.playing = true;
         this.onPlayingChange(true);
         this.scheduleControlsHide();
@@ -1625,6 +1673,11 @@ if (this.runtimeSources.length === 0) {
       clearTimeout(this.volumeRestoreTimer);
       this.volumeRestoreTimer = -1;
     }
+    if (this.audioStartTimer >= 0) {
+      clearTimeout(this.audioStartTimer);
+      this.audioStartTimer = -1;
+    }
+    this.audioStartPending = false;
     if (this.fullscreenExitTimer >= 0) {
       clearTimeout(this.fullscreenExitTimer);
       this.fullscreenExitTimer = -1;
@@ -2164,18 +2217,9 @@ if (this.runtimeSources.length === 0) {
         })
       }
 
-      // 横屏设置抽屉：从右侧滑入，点左侧空白收起；竖屏设置走 bindSheet（见下方 showMoreMenu）。
-      if (this.fullscreen && this.showSideDrawer && this.errorText.length === 0) {
-        PlayerSideSettingsDrawer({
-          onClose: (): void => {
-            this.showSideDrawer = false;
-            this.openSheetPage('menu');
-          },
-          content: (): void => {
-            this.MoreMenuSheetContent()
-          },
-        })
-      }
+      // 横屏设置抽屉走 bindContentCover（窗口级弹层，盖在页面级弹幕画布之上，
+      // 弹幕保持播放不消失）；竖屏设置走 bindSheet（见下方 showMoreMenu）。
+      // 抽屉自身的右滑入动画在 Cover 打开时照常播放。
 
       // 播完结束画面：推荐视频卡片（照推荐列表第一条的排布）+ 右侧「立即播放」 + 下方重播/分享
       if (this.endScreenOpen && !this.compactMode && this.errorText.length === 0) {
@@ -2192,6 +2236,10 @@ if (this.runtimeSources.length === 0) {
       showClose: false,
       radius: { topLeft: 18, topRight: 18 },
       backgroundColor: this.isDark ? '#18191C' : '#FFFFFF',
+    })
+    .bindContentCover($$this.showSideDrawer, this.SideDrawerCoverContent(), {
+      modalTransition: ModalTransition.NONE,
+      backgroundColor: '#00000000',
     })
     .gesture(
       GestureGroup(GestureMode.Exclusive,
@@ -2498,6 +2546,20 @@ if (this.runtimeSources.length === 0) {
         this.closeSettingPanels();
       },
       onSpeedChange: (rate: number) => this.setPlaybackSpeed(rate),
+    })
+  }
+
+  /** 横屏设置抽屉的 Cover 内容：从右侧滑入（动画在 PlayerSideSettingsDrawer 上），点左侧空白收起。 */
+  @Builder
+  SideDrawerCoverContent() {
+    PlayerSideSettingsDrawer({
+      onClose: (): void => {
+        this.showSideDrawer = false;
+        this.openSheetPage('menu');
+      },
+      content: (): void => {
+        this.MoreMenuSheetContent()
+      },
     })
   }
 

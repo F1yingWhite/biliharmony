@@ -21,6 +21,12 @@ export struct LivePlayerView {
   @State controls: boolean = true;
   @State danmakuOn: boolean = true;
   @State showQuality: boolean = false;
+  @State showDmSettings: boolean = false;
+  // 弹幕设置（对齐视频播放页）：透明度/速度/字号/密度，直接作用于渲染器。
+  @State dmOpacity: number = 0.88;
+  @State dmSpeed: number = 1;
+  @State dmFontScale: number = 1;
+  @State dmDensity: number = 28;
   @State fullscreen: boolean = false;
   @State errorText: string = '';
   @StorageProp('livePlayerExitRequest') @Watch('onExitRequested') exitRequest: number = 0;
@@ -248,6 +254,32 @@ export struct LivePlayerView {
   }
 
 
+  /** 弹幕设置滑杆行：标签 + Slider + 当前值（保留一位小数/整数）。 */
+  @Builder
+  DmSettingSlider(label: string, value: number, min: number, max: number, onChange: (value: number) => void) {
+    Row({ space: 10 }) {
+      Text(label)
+        .fontSize(12).fontColor('#CCFFFFFF')
+        .width(44)
+      Slider({ value: value, min: min, max: max, step: (max - min) / 20, style: SliderStyle.OutSet })
+        .layoutWeight(1)
+        .height(22)
+        .blockColor('#FFFFFF')
+        .trackColor('#40FFFFFF')
+        .selectedColor(this.accent)
+        .onChange((v: number, mode: SliderChangeMode) => {
+          onChange(v);
+        })
+      Text(max <= 2 ? value.toFixed(1) : String(Math.round(value)))
+        .fontSize(11).fontColor('#CCFFFFFF')
+        .width(30)
+        .textAlign(TextAlign.End)
+    }
+    .width('100%')
+    .height(32)
+    .alignItems(VerticalAlign.Center)
+  }
+
   build() {
     Stack({ alignContent: Alignment.Center }) {
       XComponent({ id: 'livePlayerSurface', type: XComponentType.SURFACE, controller: this.controller })
@@ -313,7 +345,18 @@ export struct LivePlayerView {
               .fontSize(12).fontColor('#FFFFFF')
               .padding({ left: 9, right: 9, top: 6, bottom: 6 })
               .backgroundColor('#33000000').borderRadius(14)
-              .onClick(() => this.showQuality = !this.showQuality)
+              .onClick(() => {
+                this.showDmSettings = false;
+                this.showQuality = !this.showQuality;
+              })
+            Text(this.showDmSettings ? '收起设置' : '弹幕设置')
+              .fontSize(12).fontColor('#FFFFFF')
+              .padding({ left: 9, right: 9, top: 6, bottom: 6 })
+              .backgroundColor('#33000000').borderRadius(14)
+              .onClick(() => {
+                this.showQuality = false;
+                this.showDmSettings = !this.showDmSettings;
+              })
             Blank()
             Row({ space: 4 }) {
               Circle().width(7).height(7).fill(this.accent)
@@ -351,6 +394,36 @@ export struct LivePlayerView {
                 })
             }, (option: LiveQualityOption) => String(option.qn))
           }.width('100%')
+        }
+        .width(this.fullscreen ? 360 : '100%')
+        .padding({ left: 16, right: 16, top: 12, bottom: 58 })
+        .borderRadius({ topLeft: 16, topRight: 16 })
+        .backgroundColor('#E81A1A1E')
+        .backdropBlur(20)
+        .align(Alignment.Bottom)
+      }
+
+      // 弹幕设置面板：与视频播放页同一组滑杆（透明度/速度/字号/密度）。
+      if (this.controls && this.showDmSettings) {
+        Column({ space: 14 }) {
+          Text('弹幕设置')
+            .width('100%').fontSize(14).fontWeight(FontWeight.Bold).fontColor('#FFFFFF')
+          this.DmSettingSlider('透明度', this.dmOpacity, 0.2, 1, (value: number) => {
+            this.dmOpacity = value;
+            this.dmRenderer.opacity = value;
+          })
+          this.DmSettingSlider('速度', this.dmSpeed, 0.5, 2, (value: number) => {
+            this.dmSpeed = value;
+            this.dmRenderer.speedScale = value;
+          })
+          this.DmSettingSlider('字号', this.dmFontScale, 0.7, 1.8, (value: number) => {
+            this.dmFontScale = value;
+            this.dmRenderer.fontScale = value;
+          })
+          this.DmSettingSlider('密度', this.dmDensity, 6, 40, (value: number) => {
+            this.dmDensity = Math.round(value);
+            this.dmRenderer.maxActive = Math.round(value);
+          })
         }
         .width(this.fullscreen ? 360 : '100%')
         .padding({ left: 16, right: 16, top: 12, bottom: 58 })
