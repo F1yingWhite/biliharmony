@@ -6,16 +6,16 @@
 
 ## 0. 请求基础设施
 
-| 组件 | 路径 | 职责 |
-| --- | --- | --- |
-| `common/HttpClient.ets` | `@ohos.net.http` 封装 | GET/POST、Cookie 罐、CSRF 注入、统一错误码处理 |
-| `common/Constants.ets` | 域名 / UA / appKey / 请求头 | 见下表头部分 |
-| `common/WbiSign.ets` | WBI 签名 | 需要 wbi 的端点自动附加 `w_rid` / `wts` |
-| `common/AppSign.ets` | App 端签名 | app 端接口的 `appkey` / `sign` 参数 |
-| `common/Md5.ets` | 纯 ArkTS MD5 | 供 AppSign / 密码加密使用 |
-| `common/RsaUtil.ets` | RSA 公钥加密 | 密码登录二次加密 |
-| `api/internal/ApiCommon.ets` | `ActionResult` 等公共返回 | 统一成功/失败判定 |
-| `api/BiliApi.ets` | 门面类 | 向页面暴露全部接口（各领域 API 类汇总转发） |
+| 组件                         | 路径                        | 职责                                           |
+| ---------------------------- | --------------------------- | ---------------------------------------------- |
+| `common/HttpClient.ets`      | `@ohos.net.http` 封装       | GET/POST、Cookie 罐、CSRF 注入、统一错误码处理 |
+| `common/Constants.ets`       | 域名 / UA / appKey / 请求头 | 见下表头部分                                   |
+| `common/WbiSign.ets`         | WBI 签名                    | 需要 wbi 的端点自动附加 `w_rid` / `wts`        |
+| `common/AppSign.ets`         | App 端签名                  | app 端接口的 `appkey` / `sign` 参数            |
+| `common/Md5.ets`             | 纯 ArkTS MD5                | 供 AppSign / 密码加密使用                      |
+| `common/RsaUtil.ets`         | RSA 公钥加密                | 密码登录二次加密                               |
+| `api/internal/ApiCommon.ets` | `ActionResult` 等公共返回   | 统一成功/失败判定                              |
+| `api/BiliApi.ets`            | 门面类                      | 向页面暴露全部接口（各领域 API 类汇总转发）    |
 
 **返回结构约定**：`getData()` 抽 `data` 字段；`ActionResult{ok, message}` 统一表达成功/失败；
 失败时 message 直接用于 toast。
@@ -41,100 +41,100 @@ commentBaseUrl https://comment.bilibili.com  // 弹幕 xml
 
 ### 1. FeedApi —— 首页推荐 / 热门
 
-| 函数 | 端点 | 说明 |
-| --- | --- | --- |
-| `getRecommend(idx)` | `app.bilibili.com/x/v2/feed/index?fnval=976&qn=32...`（app 端签名） | 首页推荐双列流，`idx` 游标;失败降级 web rcmd |
-| `getRecommendApp(idx)` | app 端 `feed/index` | 同上游 app 参数 |
-| `getRecommendWeb(idx)` | `api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd` | web 降级路径 |
-| `getHot(pn, ps)` | `api.bilibili.com/x/web-interface/popular` | 热门视频列表 |
+| 函数                   | 端点                                                                | 说明                                         |
+| ---------------------- | ------------------------------------------------------------------- | -------------------------------------------- |
+| `getRecommend(idx)`    | `app.bilibili.com/x/v2/feed/index?fnval=976&qn=32...`（app 端签名） | 首页推荐双列流，`idx` 游标;失败降级 web rcmd |
+| `getRecommendApp(idx)` | app 端 `feed/index`                                                 | 同上游 app 参数                              |
+| `getRecommendWeb(idx)` | `api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd`          | web 降级路径                                 |
+| `getHot(pn, ps)`       | `api.bilibili.com/x/web-interface/popular`                          | 热门视频列表                                 |
 
 ### 2. SearchApi（搜索 / 排行榜 / 热搜）
 
-| 函数 | 端点 |
-| --- | --- |
-| `getHotSearch()` | `s.search.bilibili.com/main/hotword` |
-| `getSearchDefault()` | `api.bilibili.com/x/web-interface/wbi/search/default`（搜索框默认占位词，data.show_name 为字符串） |
-| `searchSuggest(term)` | `s.search.bilibili.com/main/suggest` |
-| `search(keyword, page)` | `api.bilibili.com/x/web-interface/wbi/search/all/v2` |
-| `searchAll` | 同上（综合聚合） |
-| `searchVideosByType` / `searchUsers` / `searchMedia` / `searchLiveRooms` / `searchArticles` | `wbi/search/type` 各 type |
-| `getRankVideos(rid)` | `x/web-interface/ranking/v2` |
-| `getPopularSeriesList/One/Precious` | 每周必看 / 入站必刷 |
+| 函数                                                                                        | 端点                                                                                               |
+| ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `getHotSearch()`                                                                            | `s.search.bilibili.com/main/hotword`                                                               |
+| `getSearchDefault()`                                                                        | `api.bilibili.com/x/web-interface/wbi/search/default`（搜索框默认占位词，data.show_name 为字符串） |
+| `searchSuggest(term)`                                                                       | `s.search.bilibili.com/main/suggest`                                                               |
+| `search(keyword, page)`                                                                     | `api.bilibili.com/x/web-interface/wbi/search/all/v2`                                               |
+| `searchAll`                                                                                 | 同上（综合聚合）                                                                                   |
+| `searchVideosByType` / `searchUsers` / `searchMedia` / `searchLiveRooms` / `searchArticles` | `wbi/search/type` 各 type                                                                          |
+| `getRankVideos(rid)`                                                                        | `x/web-interface/ranking/v2`                                                                       |
+| `getPopularSeriesList/One/Precious`                                                         | 每周必看 / 入站必刷                                                                                |
 
 ### 3. LiveApi（直播）
 
-| 函数 | 端点（域 lives） |
-| --- | --- |
-| `getLiveRooms` | `/xlive/web-interface/v1/webMain/getList` |
-| `getLiveRoomInfo` | `/room/v1/Room/get_info` |
-| `getLivePlayInfo` | `/xlive/web-room/v2/index/getRoomPlayInfo`（多画质） |
-| `getLiveDanmakuInfo` | `/xlive/web-room/v1/index/getDanmuInfo`（WS 弹幕鉴权） |
-| `getLiveDanmakuHistory` | `/xlive/web-room/v1/dM/gethistory` |
-| `sendLiveDanmaku` | `/msg/send` |
-| `getLiveEmoticons` | `/xlive/web-ucenter/v2/emoticon/GetEmoticons` |
-| `getLiveSuperChats` | `/av/v1/SuperChat/getMessageList` |
+| 函数                    | 端点（域 lives）                                       |
+| ----------------------- | ------------------------------------------------------ |
+| `getLiveRooms`          | `/xlive/web-interface/v1/webMain/getList`              |
+| `getLiveRoomInfo`       | `/room/v1/Room/get_info`                               |
+| `getLivePlayInfo`       | `/xlive/web-room/v2/index/getRoomPlayInfo`（多画质）   |
+| `getLiveDanmakuInfo`    | `/xlive/web-room/v1/index/getDanmuInfo`（WS 弹幕鉴权） |
+| `getLiveDanmakuHistory` | `/xlive/web-room/v1/dM/gethistory`                     |
+| `sendLiveDanmaku`       | `/msg/send`                                            |
+| `getLiveEmoticons`      | `/xlive/web-ucenter/v2/emoticon/GetEmoticons`          |
+| `getLiveSuperChats`     | `/av/v1/SuperChat/getMessageList`                      |
 
 ### 4. CommentApi（评论区）
 
-| 函数 | 端点 | 说明 |
-| --- | --- | --- |
-| `getReplies(oid, type, cursor, mode)` | `x/v2/reply?sort=1` 或 `/x/v2/replymain` | 有登录态走 legacy 分页可得总数;游客走 `/main` + `offset`;`-352` 降级 wbi |
-| `getReplyReplies(oid, type, root, page)` | `x/v2/reply/reply?pn&ps` | 楼中楼分页 |
-| `addReply(oid, type, msg, root, parent)` | `/x/v2/reply/add` | root=楼中楼根,parent=被回复者 |
-| `likeReply(oid, type, rpid, liked)` | `/x/v2/reply/action` | action=0/1 |
-| `hateReply` | `/x/v2/reply/hate` | |
-| `getUserEmotes` | `/x/emote/user/panel/web` | 登录后表情包 |
+| 函数                                     | 端点                                     | 说明                                                                     |
+| ---------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------ |
+| `getReplies(oid, type, cursor, mode)`    | `x/v2/reply?sort=1` 或 `/x/v2/replymain` | 有登录态走 legacy 分页可得总数;游客走 `/main` + `offset`;`-352` 降级 wbi |
+| `getReplyReplies(oid, type, root, page)` | `x/v2/reply/reply?pn&ps`                 | 楼中楼分页                                                               |
+| `addReply(oid, type, msg, root, parent)` | `/x/v2/reply/add`                        | root=楼中楼根,parent=被回复者                                            |
+| `likeReply(oid, type, rpid, liked)`      | `/x/v2/reply/action`                     | action=0/1                                                               |
+| `hateReply`                              | `/x/v2/reply/hate`                       |                                                                          |
+| `getUserEmotes`                          | `/x/emote/user/panel/web`                | 登录后表情包                                                             |
 
 ### 5. DynamicApi（动态）
 
-| 函数 | 端点 |
-| --- | --- |
-| `getDynamicDetail(id)` | `/x/polymer/web-dynamic/v1/detail?id=` |
-| `getDynamicFeed(offset, dynType)` | `/x/polymer/web-dynamic/v1/feed/all` |
-| `likeDynamic(dynId, like)` | `/x/dynamic/feed/dyn/thumb` |
-| `repostDynamic(dynId)` | `/x/dynamic/feed/create/dyn` |
-| `getUserDynamicFeed(mid)` | `/x/polymer/web-dynamic/v1/feed/space` |
+| 函数                              | 端点                                   |
+| --------------------------------- | -------------------------------------- |
+| `getDynamicDetail(id)`            | `/x/polymer/web-dynamic/v1/detail?id=` |
+| `getDynamicFeed(offset, dynType)` | `/x/polymer/web-dynamic/v1/feed/all`   |
+| `likeDynamic(dynId, like)`        | `/x/dynamic/feed/dyn/thumb`            |
+| `repostDynamic(dynId)`            | `/x/dynamic/feed/create/dyn`           |
+| `getUserDynamicFeed(mid)`         | `/x/polymer/web-dynamic/v1/feed/space` |
 
 ### 6. FavoriteApi（收藏 / 收藏夹管理）
 
-| 函数 | 端点 |
-| --- | --- |
-| `getFavoriteFolders` / `getAllFavoriteFolders` | `/x/v3/fav/folder/created/list(-all)` |
-| `getFavoriteVideos` | `/x/v3/fav/resourcelist` |
-| `modifyVideoFavorite` | `/x/v3/fav/resource/batch-deal` |
-| `add/edit/delFavoriteFolder` | `/x/v3/fav/folder/add\|edit\|del` |
-| `delFavoriteResources` / `moveFavoriteResources` | `/x/v3/fav/resource/delemove` |
-| `getCollectedFolders` | `/x/v3/fav/folder/collected/list` |
-| `getCollectionVideos` | `/x/space/fav/season/list` |
+| 函数                                             | 端点                                  |
+| ------------------------------------------------ | ------------------------------------- |
+| `getFavoriteFolders` / `getAllFavoriteFolders`   | `/x/v3/fav/folder/created/list(-all)` |
+| `getFavoriteVideos`                              | `/x/v3/fav/resourcelist`              |
+| `modifyVideoFavorite`                            | `/x/v3/fav/resource/batch-deal`       |
+| `add/edit/delFavoriteFolder`                     | `/x/v3/fav/folder/add\|edit\|del`     |
+| `delFavoriteResources` / `moveFavoriteResources` | `/x/v3/fav/resource/delemove`         |
+| `getCollectedFolders`                            | `/x/v3/fav/folder/collected/list`     |
+| `getCollectionVideos`                            | `/x/space/fav/season/list`            |
 
 ### 7. HistoryApi（历史 / 稍后再看）
 
-| 函数 | 端点 |
-| --- | --- |
-| `getHistory` | `/x/web-interface/history/cursor`（游标分页 + 观看进度） |
-| `getWatchLaterList` | `/x/v2/history/toview` |
-| `addWatchLater` / `delWatchLater` / `clearWatchLater` | `/x/v2/history/toview/(add|v2/dels|clear)` |
+| 函数                                                  | 端点                                                     |
+| ----------------------------------------------------- | -------------------------------------------------------- |
+| `getHistory`                                          | `/x/web-interface/history/cursor`（游标分页 + 观看进度） |
+| `getWatchLaterList`                                   | `/x/v2/history/toview`                                   |
+| `addWatchLater` / `delWatchLater` / `clearWatchLater` | `/x/v2/history/toview/(add                               | v2/dels | clear)` |
 
 ### 8. MessageApi（私信 / 消息通知）
 
-| 函数 | 端点（域 api.vc） |
-| --- | --- |
-| `getMessageSessions` | `/session_svr/v1/session_svr/get_sessions?` |
-| `getPrivateMessages` | `/svr_sync/v1/svr_sync/fetch_session_msgs?` |
-| `markPrivateMessagesReadoRead` | `/session_svr/v1/session_svr/update_ack` |
-| `sendPrivateMessage` | `/web_im/v1/web_im/send_msg` |
-| `getMsgFeedUnread/Reply/At/Like` | `/x/msgfeed/…` |
-| `getSysNotifications` | `message.bilibili.com/x/sys-msg/query_notify_list` |
+| 函数                             | 端点（域 api.vc）                                  |
+| -------------------------------- | -------------------------------------------------- |
+| `getMessageSessions`             | `/session_svr/v1/session_svr/get_sessions?`        |
+| `getPrivateMessages`             | `/svr_sync/v1/svr_sync/fetch_session_msgs?`        |
+| `markPrivateMessagesReadoRead`   | `/session_svr/v1/session_svr/update_ack`           |
+| `sendPrivateMessage`             | `/web_im/v1/web_im/send_msg`                       |
+| `getMsgFeedUnread/Reply/At/Like` | `/x/msgfeed/…`                                     |
+| `getSysNotifications`            | `message.bilibili.com/x/sys-msg/query_notify_list` |
 
 ### 9. UserApi（用户 / 空间）
 
-| 函数 | 端点 |
-| --- | --- |
-| `getNav` | `/x/web-interface/nav`（登录态概览） |
-| `getUserStat` | `/x/relation/stat` |
-| `getRelationUsers` | `/x/relation/followings\|followers` |
-| `getUserSpaceInfo` | `/x/space/wbi/acc/info`（wbi） |
-| `getUserSpaceArcs` | `/x/v2/space`（app 端投稿） |
+| 函数               | 端点                                 |
+| ------------------ | ------------------------------------ |
+| `getNav`           | `/x/web-interface/nav`（登录态概览） |
+| `getUserStat`      | `/x/relation/stat`                   |
+| `getRelationUsers` | `/x/relation/followings\|followers`  |
+| `getUserSpaceInfo` | `/x/space/wbi/acc/info`（wbi）       |
+| `getUserSpaceArcs` | `/x/v2/space`（app 端投稿）          |
 
 ### 10. BiliApi（视频详情 / 播放 / 互动 / 登录 / 弹幕 — 汇总门面）
 
@@ -181,20 +181,20 @@ commentBaseUrl https://comment.bilibili.com  // 弹幕 xml
 
 ## 五、页面 ↔ API 映射速查
 
-| 页面 | 使用的 API |
-| --- | --- |
-| 首页 Index / HomeView | FeedApi.getRecommend / getHot / LiveApi.getLiveRooms |
-| 分区频道 ZoneChannel | SearchApi.getRankVideos(rid)（rid 即分区 id） |
-| 我的追番 BangumiList | BiliApi.getBangumiFollowList |
-| 搜索 Search | SearchApi 全家族 |
-| 视频 VideoDetail | BiliApi.getVideoDetail/PlayUrl/Relation/… + CommentApi + 弹幕 API |
-| 直播 LiveRoom | LiveApi 全家族 + LiveDanmakuClient(WS) |
-| 动态 DynamicView/DynamicDetail | DynamicApi + CommentApi(评论区) |
-| 私信 Messages | MessageApi |
-| 用户 UserSpace | UserApi + SearchApi.getRankVideos |
-| 历史/收藏/稍后 LibraryPages | HistoryApi + FavoriteApi |
-| 登录 Login | BiliApi 登录三件套 |
-| 排行榜 RankPage | SearchApi rank 家族 |
+| 页面                           | 使用的 API                                                        |
+| ------------------------------ | ----------------------------------------------------------------- |
+| 首页 Index / HomeView          | FeedApi.getRecommend / getHot / LiveApi.getLiveRooms              |
+| 分区频道 ZoneChannel           | SearchApi.getRankVideos(rid)（rid 即分区 id）                     |
+| 我的追番 BangumiList           | BiliApi.getBangumiFollowList                                      |
+| 搜索 Search                    | SearchApi 全家族                                                  |
+| 视频 VideoDetail               | BiliApi.getVideoDetail/PlayUrl/Relation/… + CommentApi + 弹幕 API |
+| 直播 LiveRoom                  | LiveApi 全家族 + LiveDanmakuClient(WS)                            |
+| 动态 DynamicView/DynamicDetail | DynamicApi + CommentApi(评论区)                                   |
+| 私信 Messages                  | MessageApi                                                        |
+| 用户 UserSpace                 | UserApi + SearchApi.getRankVideos                                 |
+| 历史/收藏/稍后 LibraryPages    | HistoryApi + FavoriteApi                                          |
+| 登录 Login                     | BiliApi 登录三件套                                                |
+| 排行榜 RankPage                | SearchApi rank 家族                                               |
 
 ## 六、重构建议（基于本清单）
 
