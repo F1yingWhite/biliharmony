@@ -115,6 +115,12 @@ export struct DynCard {
    *  主页三个 tab 是 Navigation 根页面内容，根页面 push NavDestination 会被系统强制叠加
    *  从右滑入动画，geometryTransition 也不生效；该场景改走 onOpenImageInCover 全屏 Cover。 */
   @Prop sharedImageTransition: boolean = true;
+  /**
+   * 图片 id / 共享元素转场 id 前缀：动态分类 Tabs 四个页签常驻且共用同一 dynSource，
+   * 同一动态会渲染出多张同 id 缩略图；getRectangleById 命中离屏页签的图时，
+   * 看图入场便从错误的矩形（常是相邻页签方向）放大。各容器传唯一前缀区分。
+   */
+  @Prop idPrefix: string = '';
   /** 全屏 Cover 形态打开看图（仅 sharedImageTransition=false 的根页面场景使用）。 */
   onOpenImageInCover: (images: Array<string>, index: number, rect: ImageViewerSrcRect | undefined) => void =
     (images: Array<string>, index: number, rect: ImageViewerSrcRect | undefined) => {};
@@ -142,6 +148,7 @@ export struct DynCard {
     if (next !== undefined) {
       this.item = next;
     }
+    this.idPrefix = params.idPrefix === undefined ? '' : params.idPrefix as string;
     this.actionBusy = false;
     this.syncFromItem();
   }
@@ -275,6 +282,14 @@ export struct DynCard {
     return rows * cell + (rows - 1) * 4;
   }
 
+  private imgId(dynId: string, index: number): string {
+    return this.idPrefix + 'dynamic-img-' + dynId + '-' + String(index);
+  }
+
+  private imgTransitionId(dynId: string, index: number): string {
+    return this.idPrefix + 'image-viewer-dynamic-' + dynId + '-' + String(index);
+  }
+
   /** 图文动态宫格：单图 2/3 宽正方形，多图三列正方形单元（对齐官方客户端）。
    *  超过 9 张时只展示前 9 张，第 9 张压暗并叠加 +N（官方同款处理）。 */
   @Builder
@@ -285,8 +300,8 @@ export struct DynCard {
         .height(this.gridCell(inset) * 2 + 4)
         .objectFit(ImageFit.Cover)
         .borderRadius(8)
-        .id('dynamic-img-' + item.dynId + '-0')
-        .geometryTransition('image-viewer-dynamic-' + item.dynId + '-0')
+        .id(this.imgId(item.dynId, 0))
+        .geometryTransition(this.imgTransitionId(item.dynId, 0))
         .onClick(() => {
           this.openItemImage(item, 0);
         })
@@ -300,8 +315,8 @@ export struct DynCard {
                 .width('100%')
                 .aspectRatio(1)
                 .objectFit(ImageFit.Cover)
-                .id('dynamic-img-' + item.dynId + '-' + String(index))
-                .geometryTransition('image-viewer-dynamic-' + item.dynId + '-' + String(index))
+                .id(this.imgId(item.dynId, index))
+                .geometryTransition(this.imgTransitionId(item.dynId, index))
               if (index === 8 && item.images.length > 9) {
                 Column() {
                   Text('+' + String(item.images.length - 9))
@@ -392,7 +407,7 @@ export struct DynCard {
       let rect: ImageViewerSrcRect | undefined = undefined;
       try {
         const r = this.getUIContext().getComponentUtils()
-          .getRectangleById('dynamic-img-' + item.dynId + '-' + String(index));
+          .getRectangleById(this.imgId(item.dynId, index));
         if (r.size.width > 0 && r.size.height > 0) {
           rect = {
             x: this.getUIContext().px2vp(r.windowOffset.x),
@@ -407,7 +422,7 @@ export struct DynCard {
       this.onOpenImageInCover(images, index, rect);
       return;
     }
-    const transitionId: string = 'image-viewer-dynamic-' + item.dynId + '-' + String(index);
+    const transitionId: string = this.imgTransitionId(item.dynId, index);
     const viewer: ImageViewerParam = { images: images, initialIndex: index, transitionId: transitionId };
     // 一镜到底：关 Navigation 默认转场（push 第三参 false）并包 animateTo，geometryTransition 才接管动画
     this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
@@ -1073,8 +1088,13 @@ export struct DynamicView {
     .justifyContent(FlexAlign.Center)
   }
 
+  /** 动态图片 id 前缀基座：主页动态 tab 与用户空间内嵌实例可能同屏共存，按场景+hostMid 区分。 */
+  private cardIdPrefix(tabIdx: number): string {
+    return (this.embedded ? 'dyn-e' + String(this.hostMid) : 'dyn-h') + '-' + String(tabIdx) + '-';
+  }
+
   @Builder
-  DynBody() {
+  DynBody(tabIdx: number) {
     if (this.loading) {
       LoadingView({ loading: true })
         .margin({ top: 80 })
@@ -1119,6 +1139,7 @@ export struct DynamicView {
             ListItem() {
               // 主页底部 Tabs 里的动态流（Navigation 根页面）走全屏 Cover 看图。
               DynCard({ item: item, embedded: this.embedded, sharedImageTransition: this.embedded,
+                idPrefix: this.cardIdPrefix(tabIdx),
                 onOpenImageInCover: (images: Array<string>, index: number, rect: ImageViewerSrcRect | undefined) => {
                   this.imgCoverImages = images;
                   this.imgCoverIndex = index;
@@ -1260,10 +1281,10 @@ export struct DynamicView {
       // 内嵌模式（用户空间"动态"页）禁用内层横向滑动：让外层"主页/动态/投稿"Tabs 收到手势，
       // 避免两层横向 Tabs 抢手势导致从中间页滑不出去；分类切换在独立动态页内仍可用。
       Tabs({ index: $$this.dynTab, controller: this.dynTabsController }) {
-        TabContent() { this.DynBody() }.tabBar('')
-        TabContent() { this.DynBody() }.tabBar('')
-        TabContent() { this.DynBody() }.tabBar('')
-        TabContent() { this.DynBody() }.tabBar('')
+        TabContent() { this.DynBody(0) }.tabBar('')
+        TabContent() { this.DynBody(1) }.tabBar('')
+        TabContent() { this.DynBody(2) }.tabBar('')
+        TabContent() { this.DynBody(3) }.tabBar('')
       }
       .width('100%')
       .height('100%')

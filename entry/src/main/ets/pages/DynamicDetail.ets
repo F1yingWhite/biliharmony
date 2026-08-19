@@ -354,7 +354,7 @@ export struct DynamicDetailPage {
       PageHeader({ title: '动态详情' })
       Scroll(this.scroller) {
         Column({ space: 12 }) {
-          DynCard({ item: this.item, embedded: true, detailMode: true })
+          DynCard({ item: this.item, embedded: true, detailMode: true, idPrefix: 'dyndetail-' })
           if (this.loading) {
             Row({ space: 8 }) {
               LoadingProgress().width(18).height(18).color('#FB7299')
