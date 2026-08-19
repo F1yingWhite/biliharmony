@@ -129,7 +129,7 @@ export struct PlayerView {
   @State showControls: boolean = false;
   @State buffering: boolean = false;
   @State showMoreMenu: boolean = false;      // 竖屏：底部 Sheet 设置面板
-  @State showSideDrawer: boolean = false;    // 横屏：右侧抽屉设置面板
+  @State showSideDrawer: boolean = false;    // 横屏：右侧抽屉设置面板（bindContentCover 窗口级弹层）
   @State moreSheetPage: string = 'menu';     // Sheet/抽屉共用的子页状态
   @State subtitleOn: boolean = false;
   @State subtitleIndex: number = -1;
@@ -681,6 +681,12 @@ if (this.runtimeSources.length === 0) {
     const audio: media.AVPlayer | null = this.audioPlayer;
     this.shouldPlayAfterPrepare = false;
     this.muteImmediately();
+    // 取消首帧门控：否则 1.2s 兜底计时器会在暂停后把音频单独放出来。
+    this.audioStartPending = false;
+    if (this.audioStartTimer >= 0) {
+      clearTimeout(this.audioStartTimer);
+      this.audioStartTimer = -1;
+    }
     try {
       if (video !== null && this.prepared) video.pause();
       if (audio !== null && this.audioPrepared) audio.pause();
@@ -942,15 +948,6 @@ if (this.runtimeSources.length === 0) {
         if (this.player !== p) return;
         // 起播静音恢复点：首个 timeUpdate>50ms 说明首帧已解码上屏，此时再放声（先画后声）。
         if (this.firstFrameMuteArmed && t > 50) this.disarmFirstFrameMute();
-        // 双音轨延迟启动：视频首帧推进后才启动音频轨，避免音频抢跑后被校时拽回。
-        if (this.audioStartPending && t > 50) {
-          this.audioStartPending = false;
-          try {
-            if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.play();
-          } catch (e) {
-            // 音频轨状态异常时保持静默，不阻塞视频播放。
-          }
-        }
         // AVPlayer 上报毫秒，播放器 UI/弹幕内部统一使用秒。
         const nextTime: number = t / 1000;
         if (this.dmEngine.lastPlayerTime > 0 && (nextTime < this.dmEngine.lastPlayerTime - 0.5 || nextTime > this.dmEngine.lastPlayerTime + 2.5)) {
@@ -1145,6 +1142,8 @@ if (this.runtimeSources.length === 0) {
       this.audioStartTimer = -1;
       this.audioStartPending = false;
       // 兜底：视频首帧迟迟不来（长时间缓冲等）也不再继续等待，1.2s 后强制让音频跟上。
+      // 但若期间用户已暂停（playing=false），绝不能把音频单独放出来。
+      if (!this.playing) return;
       try {
         if (this.audioPlayer === audio && this.audioPrepared) audio.play();
       } catch (e) {
@@ -1421,6 +1420,11 @@ if (this.runtimeSources.length === 0) {
     }
     if (this.playing) {
       this.audioStartPending = false;
+      // 首帧门控的 1.2s 兜底计时器也必须取消，否则暂停后它会到点把音频重新放出来。
+      if (this.audioStartTimer >= 0) {
+        clearTimeout(this.audioStartTimer);
+        this.audioStartTimer = -1;
+      }
       try {
         p.pause();
         if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.pause();
@@ -2213,18 +2217,9 @@ if (this.runtimeSources.length === 0) {
         })
       }
 
-      // 横屏设置抽屉：从右侧滑入，点左侧空白收起；竖屏设置走 bindSheet（见下方 showMoreMenu）。
-      if (this.fullscreen && this.showSideDrawer && this.errorText.length === 0) {
-        PlayerSideSettingsDrawer({
-          onClose: (): void => {
-            this.showSideDrawer = false;
-            this.openSheetPage('menu');
-          },
-          content: (): void => {
-            this.MoreMenuSheetContent()
-          },
-        })
-      }
+      // 横屏设置抽屉走 bindContentCover（窗口级弹层，盖在页面级弹幕画布之上，
+      // 弹幕保持播放不消失）；竖屏设置走 bindSheet（见下方 showMoreMenu）。
+      // 抽屉自身的右滑入动画在 Cover 打开时照常播放。
 
       // 播完结束画面：推荐视频卡片（照推荐列表第一条的排布）+ 右侧「立即播放」 + 下方重播/分享
       if (this.endScreenOpen && !this.compactMode && this.errorText.length === 0) {
@@ -2241,6 +2236,10 @@ if (this.runtimeSources.length === 0) {
       showClose: false,
       radius: { topLeft: 18, topRight: 18 },
       backgroundColor: this.isDark ? '#18191C' : '#FFFFFF',
+    })
+    .bindContentCover($$this.showSideDrawer, this.SideDrawerCoverContent(), {
+      modalTransition: ModalTransition.NONE,
+      backgroundColor: '#00000000',
     })
     .gesture(
       GestureGroup(GestureMode.Exclusive,
@@ -2547,6 +2546,20 @@ if (this.runtimeSources.length === 0) {
         this.closeSettingPanels();
       },
       onSpeedChange: (rate: number) => this.setPlaybackSpeed(rate),
+    })
+  }
+
+  /** 横屏设置抽屉的 Cover 内容：从右侧滑入（动画在 PlayerSideSettingsDrawer 上），点左侧空白收起。 */
+  @Builder
+  SideDrawerCoverContent() {
+    PlayerSideSettingsDrawer({
+      onClose: (): void => {
+        this.showSideDrawer = false;
+        this.openSheetPage('menu');
+      },
+      content: (): void => {
+        this.MoreMenuSheetContent()
+      },
     })
   }
 

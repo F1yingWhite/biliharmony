@@ -168,6 +168,8 @@ export struct ReplyEmotePanel {
         .width('100%')
         .height(44)
         .scrollable(ScrollDirection.Horizontal)
+        // Scroll 内容不足一屏时默认居中，表情包条应靠左起始。
+        .align(Alignment.Start)
         .scrollBar(BarState.Off)
       }
     }

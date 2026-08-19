@@ -761,6 +761,8 @@ export struct BangumiDetailPage {
         }
         .scrollable(ScrollDirection.Horizontal)
         .scrollBar(BarState.Off)
+        // Scroll 内容不足一屏时默认居中（官方默认 Center），横向列表应靠左。
+        .align(Alignment.Start)
         .width('100%')
       }
       .width('100%')
@@ -921,6 +923,8 @@ export struct BangumiDetailPage {
         .layoutWeight(1)
         .constraintSize({ maxWidth: LayoutTokens.pageMaxWidth })
         .alignSelf(ItemAlign.Center)
+        // Scroll 内容不足一屏时默认居中，内容应从顶部开始排。
+        .align(Alignment.TopStart)
         .scrollBar(BarState.Off)
         if (this.replyOid() > 0) {
           ReplyComposer({

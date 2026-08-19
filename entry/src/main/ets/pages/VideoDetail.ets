@@ -139,6 +139,12 @@ export struct VideoDetailPage {
   @State localDanmakuText: string = '';
   @State localDanmakuToken: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
+  /** 卡片放大入场：点击首页/列表卡片时把详情页首帧压到卡片矩形上，再展开到全屏。 */
+  @State entryScaleX: number = 1;
+  @State entryScaleY: number = 1;
+  @State entryDx: number = 0;
+  @State entryDy: number = 0;
+  @State entryBgOpacity: number = 1;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
   @StorageProp('loginVersion') @Watch('onLoginVersionChanged') loginVersion: number = 0;
@@ -476,8 +482,37 @@ export struct VideoDetailPage {
     this.bvid = this.param.bvid;
     this.aid = this.param.aid;
     this.refreshScreenSize();
+    this.prepareCardEntrance();
     this.init().catch(() => {
     });
+  }
+
+  /** 有 srcRect 时：首帧把整页内容压到源卡片矩形，下一帧动画展开到全屏（页面底色同步淡入）。 */
+  private prepareCardEntrance(): void {
+    const rect = this.param.srcRect;
+    if (rect === undefined || rect.w <= 0 || rect.h <= 0) return;
+    try {
+      const vpW: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().width);
+      const vpH: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().height);
+      if (vpW <= 0 || vpH <= 0) return;
+      // scale 在前 translate 在后：位移量不被缩放（与 ImageViewer 手动入场约定一致）。
+      this.entryScaleX = rect.w / vpW;
+      this.entryScaleY = rect.h / vpH;
+      this.entryDx = (rect.x + rect.w / 2) - vpW / 2;
+      this.entryDy = (rect.y + rect.h / 2) - vpH / 2;
+      this.entryBgOpacity = 0;
+      setTimeout(() => {
+        this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
+          this.entryScaleX = 1;
+          this.entryScaleY = 1;
+          this.entryDx = 0;
+          this.entryDy = 0;
+          this.entryBgOpacity = 1;
+        });
+      }, 30);
+    } catch (e) {
+      // 取不到屏幕尺寸则保持默认直出。
+    }
   }
 
   aboutToDisappear(): void {
@@ -2639,6 +2674,13 @@ export struct VideoDetailPage {
 
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
+      // 页面底色独立成层：卡片放大入场时从透明淡入（根 Stack 自身保持透明，透出下层首页）。
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+        .opacity(this.entryBgOpacity)
+        .hitTestBehavior(HitTestMode.None)
       Column() {
         // 播放器始终保活。进入评论仅用黑色栏遮住并收起高度，避免切 Tab 时销毁 AVPlayer 导致暂停。
         Stack({ alignContent: Alignment.Center }) {
@@ -2844,8 +2886,11 @@ export struct VideoDetailPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+    .backgroundColor('#00000000')
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    // 卡片放大入场变换（无 srcRect 时为恒等变换，不影响其他入口）。
+    .scale({ x: this.entryScaleX, y: this.entryScaleY })
+    .translate({ x: this.entryDx, y: this.entryDy })
     .onAreaChange(() => {
       this.refreshScreenSize();
     })
