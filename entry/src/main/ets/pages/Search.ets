@@ -1247,7 +1247,7 @@ export struct SearchPage {
     Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
       ForEach(section.videos, (item: VideoItem) => {
         Column() {
-          VideoCard({ video: item })
+          VideoCard({ video: item, idPrefix: 'search-' })
         }
         .width('48.5%')
       }, (item: VideoItem) => item.bvid + String(item.aid))

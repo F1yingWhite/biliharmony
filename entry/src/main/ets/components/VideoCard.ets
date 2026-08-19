@@ -3,6 +3,7 @@
  * 带毛玻璃遮罩与渐变光感效果
  * @Reusable：LazyForEach 回收复用，数据通过 @Prop + aboutToReuse 刷新
  */
+import { display } from '@kit.ArkUI';
 import { VideoItem } from '../model/Models';
 import { formatDuration } from '../common/Utils';
 import { AppNavStack, NAV_VIDEO_DETAIL, VideoDetailParam } from '../common/AppRouter';
@@ -15,12 +16,23 @@ export struct VideoCard {
   @Prop video: VideoItem = new VideoItem();
   /** 用户空间等紧凑网格隐藏 UP/分区行，复用同一封面和跳转逻辑。 */
   @Prop compact: boolean = false;
+  /**
+   * 卡片 id 前缀：同一窗口内可能有多个常驻容器渲染同一视频（首页推荐/热门 Tabs、
+   * 搜索页与用户空间叠在首页之上），裸 bvid 会让 getRectangleById 命中离屏卡片，
+   * 入场动画便从错误的矩形（常是右侧相邻 Tab）放大。各调用方传唯一前缀区分。
+   */
+  @Prop idPrefix: string = '';
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
 
   aboutToReuse(params: Record<string, Object>): void {
     this.video = params.video as VideoItem;
     this.compact = params.compact === true;
+    this.idPrefix = params.idPrefix === undefined ? '' : params.idPrefix as string;
+  }
+
+  private cardId(): string {
+    return this.idPrefix + 'video-card-' + (this.video.bvid.length > 0 ? this.video.bvid : 'a' + String(this.video.aid));
   }
 
   build() {
@@ -146,7 +158,7 @@ export struct VideoCard {
         opacity: 1,
       },
     })
-    .id('video-card-' + (this.video.bvid.length > 0 ? this.video.bvid : 'a' + String(this.video.aid)))
+    .id(this.cardId())
     .onClick(() => {
       Haptic.light();
       if (this.video.bvid.length > 0 || this.video.aid > 0) {
@@ -154,11 +166,13 @@ export struct VideoCard {
         // 从卡片位置放大到全屏：记录卡片窗口矩形，详情页首帧压到矩形上再展开。
         // 根页面 push 无共享元素转场，且要关默认右滑动画（push 第三参 false）。
         try {
-          const rect = this.getUIContext().getComponentUtils().getRectangleById(
-            'video-card-' + (this.video.bvid.length > 0 ? this.video.bvid : 'a' + String(this.video.aid)));
-          if (rect.size.width > 0 && rect.size.height > 0) {
+          const rect = this.getUIContext().getComponentUtils().getRectangleById(this.cardId());
+          const x: number = this.getUIContext().px2vp(rect.windowOffset.x);
+          const vpW: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().width);
+          // 横向离屏（残留同 id 离屏卡片等异常）时回退默认转场，避免从屏幕外放大。
+          if (rect.size.width > 0 && rect.size.height > 0 && x >= 0 && x < vpW) {
             param.srcRect = {
-              x: this.getUIContext().px2vp(rect.windowOffset.x),
+              x: x,
               y: this.getUIContext().px2vp(rect.windowOffset.y),
               w: rect.size.width,
               h: rect.size.height,

@@ -727,7 +727,7 @@ export struct UserSpacePage {
         List({ space: 10 }) {
           LazyForEach(this.videosSource, (item: VideoItem) => {
             ListItem() {
-              VideoCard({ video: item, compact: true })
+              VideoCard({ video: item, compact: true, idPrefix: 'user-' })
             }
           }, (item: VideoItem) => item.bvid.length > 0 ? item.bvid : String(item.aid))
           ListItem() {

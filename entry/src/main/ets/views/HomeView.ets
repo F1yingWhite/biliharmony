@@ -475,7 +475,7 @@ export struct HomeView {
       ListItemGroup({ footer: this.VideoFeedFooter(feedTab) }) {
         LazyForEach(feedTab === 0 ? this.recSource : this.hotSource, (item: VideoItem) => {
           ListItem() {
-            VideoCard({ video: item })
+            VideoCard({ video: item, idPrefix: 'home-' + String(feedTab) + '-' })
               // 长按卡片：不感兴趣（本地屏蔽该视频，本轮会话生效；Web 无服务端反馈接口）。
               .gesture(
                 LongPressGesture({ repeat: false })
