@@ -21,19 +21,19 @@
 
 ### 1.1 页面与路由
 
-| 页面 | 文件 | 说明 |
-| --- | --- | --- |
-| Index | `pages/Index.ets` | 导航根 + 主框架：系统 `Tabs` 悬浮式 Dock（首页/动态/我的）+ 玻璃头栏 + 折叠悬浮搜索球 |
-| VideoDetail | `pages/VideoDetail.ets` | 播放器 + 简介/评论/相关，封面取色动态主题，完整互动（赞/币/藏/关注/分享） |
-| Search | `pages/Search.ets` | 热搜/历史/联想/结果四态，结果页视频/用户 Tab + 排序 + 筛选面板 |
-| Login | `pages/Login.ets` | 扫码（TV）/ 密码（RSA）/ 短信验证码 三种登录 |
-| LiveRoom | `pages/LiveRoom.ets` | 直播间：低延迟播放、WebSocket 弹幕、醒目留言、发弹幕 |
-| Messages | `pages/Messages.ets` | 私信会话列表 + 聊天详情（页内二级导航） |
-| UserSpace | `pages/UserSpace.ets` | 用户空间：主页/动态/投稿三 Tab |
-| DynamicDetail | `pages/DynamicDetail.ets` | 动态详情 + 评论 |
-| ImageViewer | `pages/ImageViewer.ets` | 全屏看图（缩放/平移/共享元素转场/保存/分享） |
-| RelationList | `pages/RelationList.ets` | 关注/粉丝列表 |
-| LibraryPages | `pages/LibraryPages.ets` | 观看历史 / 我的收藏 |
+| 页面          | 文件                      | 说明                                                                                  |
+| ------------- | ------------------------- | ------------------------------------------------------------------------------------- |
+| Index         | `pages/Index.ets`         | 导航根 + 主框架：系统 `Tabs` 悬浮式 Dock（首页/动态/我的）+ 玻璃头栏 + 折叠悬浮搜索球 |
+| VideoDetail   | `pages/VideoDetail.ets`   | 播放器 + 简介/评论/相关，封面取色动态主题，完整互动（赞/币/藏/关注/分享）             |
+| Search        | `pages/Search.ets`        | 热搜/历史/联想/结果四态，结果页视频/用户 Tab + 排序 + 筛选面板                        |
+| Login         | `pages/Login.ets`         | 扫码（TV）/ 密码（RSA）/ 短信验证码 三种登录                                          |
+| LiveRoom      | `pages/LiveRoom.ets`      | 直播间：低延迟播放、WebSocket 弹幕、醒目留言、发弹幕                                  |
+| Messages      | `pages/Messages.ets`      | 私信会话列表 + 聊天详情（页内二级导航）                                               |
+| UserSpace     | `pages/UserSpace.ets`     | 用户空间：主页/动态/投稿三 Tab                                                        |
+| DynamicDetail | `pages/DynamicDetail.ets` | 动态详情 + 评论                                                                       |
+| ImageViewer   | `pages/ImageViewer.ets`   | 全屏看图（缩放/平移/共享元素转场/保存/分享）                                          |
+| RelationList  | `pages/RelationList.ets`  | 关注/粉丝列表                                                                         |
+| LibraryPages  | `pages/LibraryPages.ets`  | 观看历史 / 我的收藏                                                                   |
 
 - 路由：`Navigation + NavDestination`，全局唯一 `NavPathStack`（`common/AppRouter.ets`），`PageMap` 按路由名分发，带参数守卫。
 - 沉浸式：窗口级 `setWindowLayoutFullScreen` + 组件级 `expandSafeArea` 结合，系统栏图标深浅随栈顶页面切换（`common/Immersive.ets`）。
@@ -47,12 +47,12 @@
 
 ### 1.3 原缺口对照
 
-| 原缺口 | 现状 |
-| --- | --- |
-| 无用户空间页 | 已实现（§4.6 结构 + 动态 Tab） |
-| 无消息页 | 已实现（私信会话 + 聊天，首页头栏入口） |
-| 动态页无分类筛选 | 仍未做 |
-| 首页无直播频道 | 已实现（推荐/热门/直播三频道） |
+| 原缺口           | 现状                                    |
+| ---------------- | --------------------------------------- |
+| 无用户空间页     | 已实现（§4.6 结构 + 动态 Tab）          |
+| 无消息页         | 已实现（私信会话 + 聊天，首页头栏入口） |
+| 动态页无分类筛选 | 仍未做                                  |
+| 首页无直播频道   | 已实现（推荐/热门/直播三频道）          |
 
 ---
 
@@ -104,13 +104,13 @@
 
 ### 3.2 材质分层规范
 
-| 层级 | 用途 | 材质 |
-| --- | --- | --- |
-| L0 背景 | 页面底色 | 纯色，深色基准色对齐主题色色相倾向 |
-| L1 氛围 | 页面顶部氛围色 | 封面取色 `ImageColor.extract` → 低透明度渐变 |
+| 层级    | 用途                      | 材质                                                                    |
+| ------- | ------------------------- | ----------------------------------------------------------------------- |
+| L0 背景 | 页面底色                  | 纯色，深色基准色对齐主题色色相倾向                                      |
+| L1 氛围 | 页面顶部氛围色            | 封面取色 `ImageColor.extract` → 低透明度渐变                            |
 | L2 浮层 | 顶栏、底部 Dock、搜索胶囊 | `backgroundBlurStyle` 系统材质（`AppTheme.floatBg/floatBlur` 全局设施） |
-| L3 弹层 | 筛选面板、菜单、对话框 | 系统材质 + 大圆角（20vp）+ 阴影 |
-| L4 模态 | 全屏播放、登录 | 实底，不模糊 |
+| L3 弹层 | 筛选面板、菜单、对话框    | 系统材质 + 大圆角（20vp）+ 阴影                                         |
+| L4 模态 | 全屏播放、登录            | 实底，不模糊                                                            |
 
 - 触控反馈：L2/L3 浮层按压时 scale + 提亮，近似"沉浸光感"光晕反馈；底部 Dock 的指尖光晕由系统 `barFloatingStyle` 直接提供。
 
@@ -182,12 +182,12 @@
 
 #### 4.5.2 搜索结果页
 
-| Tab | search_type | 排序（order） | 筛选 | 状态 |
-| --- | --- | --- | --- | --- |
-| 视频 | `video` | 综合/最多点击/最新发布/最多弹幕/最多收藏 | 时长/发布时间/分区（底部弹层面板） | 已实施 |
-| 用户 | `bili_user` | 默认/粉丝数/等级 | — | 已实施 |
-| 番剧 `media_bangumi` / 影视 `media_ft` / 直播 `live_room` / 专栏 `article` | — | — | — | 待做 |
-| 综合（`search/all/v2` 聚合页） | — | — | — | 待做 |
+| Tab                                                                        | search_type | 排序（order）                            | 筛选                               | 状态   |
+| -------------------------------------------------------------------------- | ----------- | ---------------------------------------- | ---------------------------------- | ------ |
+| 视频                                                                       | `video`     | 综合/最多点击/最新发布/最多弹幕/最多收藏 | 时长/发布时间/分区（底部弹层面板） | 已实施 |
+| 用户                                                                       | `bili_user` | 默认/粉丝数/等级                         | —                                  | 已实施 |
+| 番剧 `media_bangumi` / 影视 `media_ft` / 直播 `live_room` / 专栏 `article` | —           | —                                        | —                                  | 待做   |
+| 综合（`search/all/v2` 聚合页）                                             | —           | —                                        | —                                  | 待做   |
 
 - 用户结果项：头像 + 昵称 + 认证 + 粉丝数 + 简介 → 点击进用户空间页。
 - API：`BiliApi.search / searchByType / searchVideosByType / searchUsers / searchSuggest / getHotSearch`。
@@ -208,15 +208,15 @@
 
 ## 5. 沉浸式方案统一
 
-| 位置 | 方案 |
-| --- | --- |
-| 窗口 | `setWindowLayoutFullScreen(true)`；新页面用组件级 `expandSafeArea` 避让 |
-| 首页/动态瀑布流 | `List.expandSafeArea([SYSTEM], [BOTTOM])`，内容滚入导航条区域 |
-| 顶栏 | 顶栏容器 `expandSafeArea([SYSTEM], [TOP])`，材质延伸到状态栏 |
-| 视频详情 | 播放器黑区延伸 TOP，状态栏图标浅色 |
-| 全屏播放 | `Immersive.setFullscreen` |
-| Tabs 内 expandSafeArea 失效 | 已知坑，加 `.clip(false)` |
-| 系统栏图标深浅 | 按 NavPathStack 栈顶页面自动重算（Index 统一调度） |
+| 位置                        | 方案                                                                    |
+| --------------------------- | ----------------------------------------------------------------------- |
+| 窗口                        | `setWindowLayoutFullScreen(true)`；新页面用组件级 `expandSafeArea` 避让 |
+| 首页/动态瀑布流             | `List.expandSafeArea([SYSTEM], [BOTTOM])`，内容滚入导航条区域           |
+| 顶栏                        | 顶栏容器 `expandSafeArea([SYSTEM], [TOP])`，材质延伸到状态栏            |
+| 视频详情                    | 播放器黑区延伸 TOP，状态栏图标浅色                                      |
+| 全屏播放                    | `Immersive.setFullscreen`                                               |
+| Tabs 内 expandSafeArea 失效 | 已知坑，加 `.clip(false)`                                               |
+| 系统栏图标深浅              | 按 NavPathStack 栈顶页面自动重算（Index 统一调度）                      |
 
 ---
 

@@ -11,15 +11,15 @@
 
 ### 1.1 观察能力总表（决定"改了能不能刷新"）
 
-| 装饰器 | 同步方向 | 能观察到的变化 | 典型坑 |
-|---|---|---|---|
-| `@State` | 组件内 | 自身赋值；class/object 的**第一层属性**赋值；Array 整体赋值 + `push/pop/splice/sort/reverse/...` | **嵌套对象属性赋值观察不到**（`this.title.name.value = 'x'` 不刷新）；必须 @Observed + 逐层 @Prop 或 @ObjectLink |
-| `@Prop` | 父→子单向 | 深拷贝快照；父更新覆盖本地 | **深拷贝丢类型**（PixelMap/RegExp 等 NAPI 类型）；嵌套 >5 层建议换 @ObjectLink；本地修改不同步回父 |
-| `@Link` | 父子双向 | 同 @State | 必须由父组件初始化，不能本地初始化 |
-| `@ObjectLink` | 指向@Observed 实例的"指针" | **嵌套属性变化都能观察**（通过 @Observed 代理） | 只读，**禁止整体赋值**（`this.objLink = x` 会切断同步链）；必须由 @Observed 类实例初始化 |
-| `@Provide/@Consume` | 跨层双向（按同名/别名绑定） | 同 @State | API 20 前 @Consume 必须匹配到某 @Provide，否则 JS ERROR；API 20+ 支持本地默认值兜底 |
-| `@Watch` | 监听 | 被装饰状态变量变化时回调 | 回调里再改同一变量会递归触发；是**值变化后**触发不是前置钩子 |
-| `@StorageProp/@StorageLink` | 与 AppStorage 单向/双向 | Array/class 第一层等同上 | 键为常量字符串；**@StorageProp 本地改不会回写 AppStorage**；类型需与 AppStorage 中一致否则隐式转换 |
+| 装饰器                      | 同步方向                    | 能观察到的变化                                                                                   | 典型坑                                                                                                           |
+| --------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `@State`                    | 组件内                      | 自身赋值；class/object 的**第一层属性**赋值；Array 整体赋值 + `push/pop/splice/sort/reverse/...` | **嵌套对象属性赋值观察不到**（`this.title.name.value = 'x'` 不刷新）；必须 @Observed + 逐层 @Prop 或 @ObjectLink |
+| `@Prop`                     | 父→子单向                   | 深拷贝快照；父更新覆盖本地                                                                       | **深拷贝丢类型**（PixelMap/RegExp 等 NAPI 类型）；嵌套 >5 层建议换 @ObjectLink；本地修改不同步回父               |
+| `@Link`                     | 父子双向                    | 同 @State                                                                                        | 必须由父组件初始化，不能本地初始化                                                                               |
+| `@ObjectLink`               | 指向@Observed 实例的"指针"  | **嵌套属性变化都能观察**（通过 @Observed 代理）                                                  | 只读，**禁止整体赋值**（`this.objLink = x` 会切断同步链）；必须由 @Observed 类实例初始化                         |
+| `@Provide/@Consume`         | 跨层双向（按同名/别名绑定） | 同 @State                                                                                        | API 20 前 @Consume 必须匹配到某 @Provide，否则 JS ERROR；API 20+ 支持本地默认值兜底                              |
+| `@Watch`                    | 监听                        | 被装饰状态变量变化时回调                                                                         | 回调里再改同一变量会递归触发；是**值变化后**触发不是前置钩子                                                     |
+| `@StorageProp/@StorageLink` | 与 AppStorage 单向/双向     | Array/class 第一层等同上                                                                         | 键为常量字符串；**@StorageProp 本地改不会回写 AppStorage**；类型需与 AppStorage 中一致否则隐式转换               |
 
 ### 1.2 无状态字段 = 创建时快照（易错清单 #2 的官方根据）
 
@@ -59,19 +59,19 @@
 
 ## 3. ArkTS 语言约束（ts2arkts 迁移指南节选，重构时不要越界）
 
-| 不允许 | 替代写法 |
-|---|---|
-| `any` / `unknown` 类型 | 具体类型/联合类型；catch 子句**不能标类型** |
-| 对象字面量和属性名非合法标识符 | 用字符串索引 Record |
-| 展开运算符（spread）用于**对象** | 仅可用在数组剩余参数与数组字面量；（`HttpClient.merge` 手寫循环即此原因） |
-| 解构赋值 / 解构变量声明 | 逐字段临时变量（本工程 `wbi` 等手写即遵此） |
-| index signature（`{ [k: string]: T }`） | `Record<string, T>`（项目全用 Record，正确） |
-| `for..in` | `Object.keys().for循环` 或 `Object.entries` |
-| 函数内声明函数（嵌套 function） | 箭头函数（本工程已用） |
-| `delete obj.prop` | 重建对象/数组（`HttpClient.removeCookie` 已按此） |
-| 使用 `this` 在函数/静态方法里 | 只在类/组件方法中用 `this` |
-| 任意使用 `instanceof` | 仅 class 间类型收窄可用；接口/联合不适合 |
-| 运算符 `+ - ~` 作用于非数值 | 显式 `Number()` |
+| 不允许                                  | 替代写法                                                                  |
+| --------------------------------------- | ------------------------------------------------------------------------- |
+| `any` / `unknown` 类型                  | 具体类型/联合类型；catch 子句**不能标类型**                               |
+| 对象字面量和属性名非合法标识符          | 用字符串索引 Record                                                       |
+| 展开运算符（spread）用于**对象**        | 仅可用在数组剩余参数与数组字面量；（`HttpClient.merge` 手寫循环即此原因） |
+| 解构赋值 / 解构变量声明                 | 逐字段临时变量（本工程 `wbi` 等手写即遵此）                               |
+| index signature（`{ [k: string]: T }`） | `Record<string, T>`（项目全用 Record，正确）                              |
+| `for..in`                               | `Object.keys().for循环` 或 `Object.entries`                               |
+| 函数内声明函数（嵌套 function）         | 箭头函数（本工程已用）                                                    |
+| `delete obj.prop`                       | 重建对象/数组（`HttpClient.removeCookie` 已按此）                         |
+| 使用 `this` 在函数/静态方法里           | 只在类/组件方法中用 `this`                                                |
+| 任意使用 `instanceof`                   | 仅 class 间类型收窄可用；接口/联合不适合                                  |
+| 运算符 `+ - ~` 作用于非数值             | 显式 `Number()`                                                           |
 
 **可放心用的**：`Array.prototype.map/filter/forEach/find/findIndex/some/every/sort/concat/slice/reduce/join/split`（本项目 `HistoryApi` 已用 map 先例）、可选链 `?.`、空值合并 `??`、rest 参数、`as T` 类型断言。
 
