@@ -434,7 +434,29 @@ export class PlayUrlInfo {
     const acceptQuality: Array<Object> = asArray(j['accept_quality']);
     const acceptDescription: Array<Object> = asArray(j['accept_description']);
     const supportFormats: Array<Object> = asArray(j['support_formats']);
-    if (dashVideo.length > 0) {
+    // ≤1080P（qn 80）优先 durl 单路 MP4：单 AVPlayer 内部完成音画同步，彻底避开双轨
+    // 门控/校时的一类 bug；seek/快进只需对单文件发 Range 请求，缓冲明显更快。
+    // 高画质（1080P 高码率/4K/HDR，仅 DASH 提供）仍走双轨。
+    if (durl.length > 0 && info.quality <= 80) {
+      const first: Record<string, Object> = asObject(durl[0]);
+      const candidates: Array<string> = [];
+      const primary: string = toHttps(str(first, 'url', ''));
+      if (primary.length > 0) {
+        candidates.push(primary);
+      }
+      const backups: Array<Object> = asArray(first['backup_url']);
+      for (let i: number = 0; i < backups.length; i++) {
+        const backup: string = toHttps(asString(backups[i], ''));
+        if (backup.length > 0 && candidates.indexOf(backup) < 0) {
+          candidates.push(backup);
+        }
+      }
+      // 对齐 PiliPlus 的 CDN 选路思路：优先 upgcxcode 镜像，把 mcdn/akamaized 放到后备。
+      candidates.sort((a: string, b: string) => cdnScore(b) - cdnScore(a));
+      info.isDash = false;
+      info.urls = candidates;
+      info.url = candidates.length > 0 ? candidates[0] : '';
+    } else if (dashVideo.length > 0) {
       info.isDash = true;
       info.format = 'dash';
       const available: Array<number> = [];
@@ -500,24 +522,6 @@ export class PlayUrlInfo {
       }
       info.audioUrls = dashItemUrls(selectedAudio);
       info.audioUrl = info.audioUrls.length > 0 ? info.audioUrls[0] : '';
-    } else if (durl.length > 0) {
-      const first: Record<string, Object> = asObject(durl[0]);
-      const candidates: Array<string> = [];
-      const primary: string = toHttps(str(first, 'url', ''));
-      if (primary.length > 0) {
-        candidates.push(primary);
-      }
-      const backups: Array<Object> = asArray(first['backup_url']);
-      for (let i: number = 0; i < backups.length; i++) {
-        const backup: string = toHttps(asString(backups[i], ''));
-        if (backup.length > 0 && candidates.indexOf(backup) < 0) {
-          candidates.push(backup);
-        }
-      }
-      // 对齐 PiliPlus 的 CDN 选路思路：优先 upgcxcode 镜像，把 mcdn/akamaized 放到后备。
-      candidates.sort((a: string, b: string) => cdnScore(b) - cdnScore(a));
-      info.urls = candidates;
-      info.url = candidates.length > 0 ? candidates[0] : '';
     }
 
     if (info.qualities.length === 0) {
@@ -716,17 +720,27 @@ export class FavoriteVideoPageData {
 export class BiliEmote {
   text: string = '';
   url: string = '';
+  /** 动态表情地址（GIF/APNG，可为空）；有值时展示用它，Image 自动播放。 */
+  gifUrl: string = '';
+  /** 1 = 单行高，2 = 双行高。 */
   size: number = 1;
 
   static from(o: Object): BiliEmote {
     const j: Record<string, Object> = asObject(o);
     const item: BiliEmote = new BiliEmote();
     item.text = str(j, 'text', '');
-    // GIF 优先：动图表情取 gif_url 才能动起来；静图表情的 gif_url 为空，自然回退静态图。
-    item.url = toHttps(str(j, 'gif_url', str(j, 'url', str(j, 'webp_url', str(j, 'icon_url', '')))));
+    // url 回退链：静态图优先；gif_url 兜底 —— 接口里纯动图表情只有 gif_url，
+    // 不兜底的包会因 url 为空整包被丢弃，单行动图包因此消失。
+    item.url = toHttps(str(j, 'url', str(j, 'webp_url', str(j, 'icon_url', str(j, 'gif_url', '')))));
+    item.gifUrl = toHttps(str(j, 'gif_url', str(j, 'gif', '')));
     const meta: Record<string, Object> = asObject(j['meta']);
     item.size = Math.max(1, asNumber(meta['size'], asNumber(j['size'], 1)));
     return item;
+  }
+
+  /** 实际展示地址：有动态图用动态图，否则用静态图。 */
+  displayUrl(): string {
+    return this.gifUrl.length > 0 ? this.gifUrl : this.url;
   }
 }
 
@@ -739,8 +753,11 @@ export class BiliEmotePackage {
     const j: Record<string, Object> = asObject(o);
     const pkg: BiliEmotePackage = new BiliEmotePackage();
     pkg.title = str(j, 'text', str(j, 'name', str(j, 'title', '表情')));
-    pkg.icon = toHttps(str(j, 'url', ''));
-    const list: Array<Object> = asArray(j['emote']);
+    pkg.icon = toHttps(str(j, 'url', str(j, 'icon', str(j, 'icon_url', ''))));
+    // 接口不同版本的表情数组字段名不一（emote / emotes / list），取最长的那个。
+    let list: Array<Object> = asArray(j['emote']);
+    if (list.length === 0) list = asArray(j['emotes']);
+    if (list.length === 0) list = asArray(j['list']);
     for (let i: number = 0; i < list.length; i++) {
       const emote: BiliEmote = BiliEmote.from(list[i]);
       if (emote.text.length > 0 && emote.url.length > 0) pkg.emotes.push(emote);

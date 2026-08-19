@@ -123,7 +123,9 @@ export class BiliApi {
     const params: Record<string, string> = {
       'cid': String(cid),
       'qn': String(qn),
-      'fnval': '4048',
+      // 4049 = 4048 | 1：在 DASH 之外同时请求 durl 单路 MP4。≤1080P 优先用 MP4 单流
+      // （AVPlayer 内部音画同步、seek 只需单路 Range 请求）；高画质仍走 DASH 双轨。
+      'fnval': '4049',
       'fnver': '0',
       'fourk': '1',
       'high_quality': '1',
