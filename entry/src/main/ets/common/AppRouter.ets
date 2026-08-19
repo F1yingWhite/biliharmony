@@ -47,9 +47,6 @@ export interface ImageViewerParam {
   /** 源缩略图在窗口中的矩形（vp）。Tabs 内 geometryTransition 坐标系错乱（按 Tabs 轨道
    *  布局坐标计算，非首屏 tab 整体偏移 N 屏宽），此时改用本字段做手动"从缩略图放大"入场。 */
   srcRect?: ImageViewerSrcRect;
-  /** 以全屏 Cover 形态展示时的关闭回调（Navigation 根页面无法走 NavDestination 转场，
-   *  根页面 push 会被系统强制叠加从右滑入动画，故根页面场景改用 bindContentCover 呈现）。 */
-  onRequestClose?: () => void;
 }
 
 /** 源缩略图窗口矩形（vp 单位）。 */

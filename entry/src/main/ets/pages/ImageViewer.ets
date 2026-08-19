@@ -33,6 +33,17 @@ struct ZoomableImage {
   private panBaseY: number = 0;
 
   aboutToAppear(): void {
+    // 首帧 onAreaChange 会把视口尺寸写入 viewportWidth/Height。若初始为 0，首帧布局阶段
+    // 即发生 0→满屏 的状态变更——在 bindContentCover(ModalTransition.NONE) 的提交事务里
+    // 首帧写 @State 会造成 ModalPage 同帧回滚（看图一闪即关、封面盖不回来）。
+    // 先按屏幕尺寸预填，使首次回调成为同值无操作。
+    try {
+      const d: display.Display = display.getDefaultDisplaySync();
+      this.viewportWidth = d.width;
+      this.viewportHeight = d.height;
+    } catch (e) {
+      // 取不到屏幕尺寸时保持 0，首帧 onAreaChange 再兜底写入。
+    }
     // 评论/动态等通过 geometryTransition 进入时，额外做一次轻微放大入场；
     // 即使共享元素动画在某些容器里失效，也不会出现“瞬间变满屏”的生硬感。
     if (this.transitionId.length > 0) {
@@ -224,7 +235,10 @@ export struct ImageViewerPage {
       this.entryDy = (rect.y + rect.h / 2) - vpH / 2;
       this.bgOpacity = 0;
       setTimeout(() => {
-        this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
+        this.getUIContext().animateTo({
+          duration: 300,
+          curve: Curve.EaseInOut,
+        }, () => {
           this.entryScaleX = 1;
           this.entryScaleY = 1;
           this.entryDx = 0;
@@ -244,15 +258,28 @@ export struct ImageViewerPage {
   goBack(): void {
     if (this.closing) return;
     this.closing = true;
-    // 全屏 Cover 形态（Navigation 根页面场景）：先自身淡出，再让宿主关闭 Cover。
-    if (this.param.onRequestClose !== undefined) {
-      this.getUIContext().animateTo({ duration: 250, curve: Curve.EaseInOut }, () => {
-        this.bgOpacity = 0;
-      });
+    // srcRect 手动矩形放大形态（根页面 push）：入场动画镜面回放——内容缩回源缩略图矩形、
+    // 黑底同步淡出，随后出栈（与视频参考的"从哪开到哪收"一致）。
+    if (this.entryFromRect && this.param.srcRect !== undefined) {
+      const rect: ImageViewerSrcRect = this.param.srcRect;
+      try {
+        const vpW: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().width);
+        const vpH: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().height);
+        if (vpW > 0 && vpH > 0) {
+          this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
+            this.entryScaleX = rect.w / vpW;
+            this.entryScaleY = rect.h / vpH;
+            this.entryDx = (rect.x + rect.w / 2) - vpW / 2;
+            this.entryDy = (rect.y + rect.h / 2) - vpH / 2;
+            this.bgOpacity = 0;
+          });
+        }
+      } catch (e) {
+        // 取不到屏幕尺寸则直接出栈，走默认转场。
+      }
       setTimeout(() => {
-        const close: (() => void) | undefined = this.param.onRequestClose;
-        if (close !== undefined) close();
-      }, 260);
+        AppNavStack.pop(false);
+      }, 310);
       return;
     }
     // 保持黑底不先淡出，直接让 geometryTransition 把图片缩回缩略图；

@@ -4,8 +4,7 @@
 import { DynamicItem, DynamicPageData, BiliEmote, RelationUserItem, RelationUserPageData } from '../model/Models';
 import { AppNavStack, NAV_DYNAMIC_DETAIL, NAV_IMAGE_VIEWER, NAV_LIVE_ROOM, NAV_LOGIN, NAV_VIDEO_DETAIL,
   NAV_USER_SPACE, DynamicDetailParam, ImageViewerParam, ImageViewerSrcRect, LiveRoomParam, VideoDetailParam,
-  UserSpaceParam, NAV_BANGUMI_DETAIL, BangumiDetailParam } from '../common/AppRouter';
-import { ImageViewerPage } from '../pages/ImageViewer';
+   UserSpaceParam, NAV_BANGUMI_DETAIL, BangumiDetailParam } from '../common/AppRouter';
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
 import { LoadingView } from '../components/LoadingView';
@@ -111,9 +110,8 @@ export struct DynCard {
   @Prop @Watch('onItemChanged') item: DynamicItem = new DynamicItem();
   @Prop embedded: boolean = false;
   @Prop detailMode: boolean = false;
-  /** 是否启用图片共享元素转场。主页底部 Tabs 内的动态流必须关闭：
-   *  主页三个 tab 是 Navigation 根页面内容，根页面 push NavDestination 会被系统强制叠加
-   *  从右滑入动画，geometryTransition 也不生效；该场景改走 onOpenImageInCover 全屏 Cover。 */
+  /** 是否启用图片共享元素转场（geometryTransition）。仅内嵌场景（用户空间等已入栈页面）可用；
+   *  主页底部 Tabs 内是 Navigation 根页面，geometryTransition 不生效，该场景走 srcRect 矩形放大 push。 */
   @Prop sharedImageTransition: boolean = true;
   /**
    * 图片 id / 共享元素转场 id 前缀：动态分类 Tabs 四个页签常驻且共用同一 dynSource，
@@ -121,9 +119,6 @@ export struct DynCard {
    * 看图入场便从错误的矩形（常是相邻页签方向）放大。各容器传唯一前缀区分。
    */
   @Prop idPrefix: string = '';
-  /** 全屏 Cover 形态打开看图（仅 sharedImageTransition=false 的根页面场景使用）。 */
-  onOpenImageInCover: (images: Array<string>, index: number, rect: ImageViewerSrcRect | undefined) => void =
-    (images: Array<string>, index: number, rect: ImageViewerSrcRect | undefined) => {};
   @State liked: boolean = false;
   @State likeCount: number = 0;
   @State forwardCount: number = 0;
@@ -402,13 +397,17 @@ export struct DynCard {
   private openItemImage(item: DynamicItem, index: number): void {
     const images: Array<string> = item.images;
     if (!this.sharedImageTransition) {
-      // 根页面（主页动态 tab）：push 会被系统强制叠加从右滑入动画，改用全屏 Cover +
-      // 手动矩形入场（记录被点缩略图的窗口矩形，看图页从该矩形放大到全屏）。
+      // 根页面（主页动态 tab，Navigation 根内容）：push + srcRect 手动矩形放大
+      // （看图页 prepareRectEntrance 首帧压到被点缩略图矩形再展开，与首页卡片→详情同一套）。
+      // 历史备注：曾用 bindContentCover 全屏 Cover——API24 设备 Navigation 作用域内
+      // ModalPage 会在挂载同帧被框架移除（hilog: AceNavigation "can't find inner navigation"），
+      // 看图一闪即关；"根页面 push 被强制右滑"的旧结论在本机未复现（首页卡片→详情
+      // 同结构 push(false)+矩形放大已实测通过）。
       let rect: ImageViewerSrcRect | undefined = undefined;
       try {
         const r = this.getUIContext().getComponentUtils()
           .getRectangleById(this.imgId(item.dynId, index));
-        if (r.size.width > 0 && r.size.height > 0) {
+        if (r.size.width > 0 && r.size.height > 0 && r.windowOffset.x >= 0) {
           rect = {
             x: this.getUIContext().px2vp(r.windowOffset.x),
             y: this.getUIContext().px2vp(r.windowOffset.y),
@@ -419,7 +418,8 @@ export struct DynCard {
       } catch (e) {
         // 取不到矩形则退化为纯淡入。
       }
-      this.onOpenImageInCover(images, index, rect);
+      const viewer: ImageViewerParam = { images: images, initialIndex: index, srcRect: rect };
+      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
       return;
     }
     const transitionId: string = this.imgTransitionId(item.dynId, index);
@@ -744,12 +744,6 @@ export struct DynamicView {
   @State showComposer: boolean = false;
   @State composerText: string = '';
   @State composing: boolean = false;
-  // 全屏看图 Cover（根页面场景：Navigation 根上 push 无共享元素转场且强制右滑入，
-  // 改用 bindContentCover + 手动矩形入场实现"从点的那张放大"）。
-  @State imgCoverOpen: boolean = false;
-  @State imgCoverImages: Array<string> = [];
-  @State imgCoverIndex: number = 0;
-  @State imgCoverRect: ImageViewerSrcRect | undefined = undefined;
   // 顶部「关注 UP 主」横滑栏：登录后拉取关注列表第一页，不阻塞动态流加载。
   @State followed: Array<RelationUserItem> = [];
   /** uid -> 直播间 roomId（仅直播中的 UP；由批量开播状态接口异步补充，失败不影响横滑条）。 */
@@ -1137,15 +1131,9 @@ export struct DynamicView {
           }
           LazyForEach(this.dynSource, (item: DynamicItem) => {
             ListItem() {
-              // 主页底部 Tabs 里的动态流（Navigation 根页面）走全屏 Cover 看图。
+              // 主页底部 Tabs 里的动态流（Navigation 根页面）走 push + srcRect 矩形放大看图。
               DynCard({ item: item, embedded: this.embedded, sharedImageTransition: this.embedded,
-                idPrefix: this.cardIdPrefix(tabIdx),
-                onOpenImageInCover: (images: Array<string>, index: number, rect: ImageViewerSrcRect | undefined) => {
-                  this.imgCoverImages = images;
-                  this.imgCoverIndex = index;
-                  this.imgCoverRect = rect;
-                  this.imgCoverOpen = true;
-                } })
+                idPrefix: this.cardIdPrefix(tabIdx) })
             }
           }, (item: DynamicItem) => item.dynId)
           ListItem() {
@@ -1189,22 +1177,6 @@ export struct DynamicView {
       })
       .onRefreshing(() => this.onRefresh())
     }
-  }
-
-  /** 全屏看图 Cover：无转场直接覆盖，入场动画由 ImageViewerPage 按 srcRect 手动播放。 */
-  @Builder
-  ImageCoverViewer() {
-    ImageViewerPage({
-      param: {
-        images: this.imgCoverImages,
-        initialIndex: this.imgCoverIndex,
-        transitionId: '',
-        srcRect: this.imgCoverRect,
-        onRequestClose: () => {
-          this.imgCoverOpen = false;
-        },
-      },
-    })
   }
 
   /** 发布动态（纯文本）底部面板：输入 + 发布；发布成功后重载 feed。用系统 bindSheet 从底部滑出。 */
@@ -1347,10 +1319,6 @@ export struct DynamicView {
       showClose: false,
       radius: { topLeft: 18, topRight: 18 },
       backgroundColor: this.isDark ? '#1E2024' : '#FFFFFF',
-    })
-    .bindContentCover($$this.imgCoverOpen, this.ImageCoverViewer(), {
-      modalTransition: ModalTransition.NONE,
-      backgroundColor: '#00000000',
     })
   }
 }
