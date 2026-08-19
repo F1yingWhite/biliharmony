@@ -3,8 +3,9 @@
  */
 import { DynamicItem, DynamicPageData, BiliEmote, RelationUserItem, RelationUserPageData } from '../model/Models';
 import { AppNavStack, NAV_DYNAMIC_DETAIL, NAV_IMAGE_VIEWER, NAV_LIVE_ROOM, NAV_LOGIN, NAV_VIDEO_DETAIL,
-  NAV_USER_SPACE, DynamicDetailParam, ImageViewerParam, LiveRoomParam, VideoDetailParam,
+  NAV_USER_SPACE, DynamicDetailParam, ImageViewerParam, ImageViewerSrcRect, LiveRoomParam, VideoDetailParam,
   UserSpaceParam, NAV_BANGUMI_DETAIL, BangumiDetailParam } from '../common/AppRouter';
+import { ImageViewerPage } from '../pages/ImageViewer';
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
 import { LoadingView } from '../components/LoadingView';
@@ -22,6 +23,7 @@ import { EmoteResolver } from '../common/EmoteResolver';
 import { EmoteImageCache } from '../common/EmoteImageCache';
 import { LiveApi } from '../api/LiveApi';
 import { UserApi } from '../api/UserApi';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -109,6 +111,13 @@ export struct DynCard {
   @Prop @Watch('onItemChanged') item: DynamicItem = new DynamicItem();
   @Prop embedded: boolean = false;
   @Prop detailMode: boolean = false;
+  /** 是否启用图片共享元素转场。主页底部 Tabs 内的动态流必须关闭：
+   *  主页三个 tab 是 Navigation 根页面内容，根页面 push NavDestination 会被系统强制叠加
+   *  从右滑入动画，geometryTransition 也不生效；该场景改走 onOpenImageInCover 全屏 Cover。 */
+  @Prop sharedImageTransition: boolean = true;
+  /** 全屏 Cover 形态打开看图（仅 sharedImageTransition=false 的根页面场景使用）。 */
+  onOpenImageInCover: (images: Array<string>, index: number, rect: ImageViewerSrcRect | undefined) => void =
+    (images: Array<string>, index: number, rect: ImageViewerSrcRect | undefined) => {};
   @State liked: boolean = false;
   @State likeCount: number = 0;
   @State forwardCount: number = 0;
@@ -377,6 +386,27 @@ export struct DynCard {
 
   private openItemImage(item: DynamicItem, index: number): void {
     const images: Array<string> = item.images;
+    if (!this.sharedImageTransition) {
+      // 根页面（主页动态 tab）：push 会被系统强制叠加从右滑入动画，改用全屏 Cover +
+      // 手动矩形入场（记录被点缩略图的窗口矩形，看图页从该矩形放大到全屏）。
+      let rect: ImageViewerSrcRect | undefined = undefined;
+      try {
+        const r = this.getUIContext().getComponentUtils()
+          .getRectangleById('dynamic-img-' + item.dynId + '-' + String(index));
+        if (r.size.width > 0 && r.size.height > 0) {
+          rect = {
+            x: this.getUIContext().px2vp(r.windowOffset.x),
+            y: this.getUIContext().px2vp(r.windowOffset.y),
+            w: r.size.width,
+            h: r.size.height,
+          };
+        }
+      } catch (e) {
+        // 取不到矩形则退化为纯淡入。
+      }
+      this.onOpenImageInCover(images, index, rect);
+      return;
+    }
     const transitionId: string = 'image-viewer-dynamic-' + item.dynId + '-' + String(index);
     const viewer: ImageViewerParam = { images: images, initialIndex: index, transitionId: transitionId };
     // 一镜到底：关 Navigation 默认转场（push 第三参 false）并包 animateTo，geometryTransition 才接管动画
@@ -394,12 +424,18 @@ export struct DynCard {
           this.openItemDetail(item);
         })
       if (item.content.length > 0) {
-        Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+        // 行内底对齐：与评论区 ReplyRichText 一致，表情图底部与文字行底对齐。
+        Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.End }) {
           ForEach(contentPartsOf(item, this.emoteVer), (part: DynamicContentPart) => {
             if (part.image.length > 0) {
               Image(this.emoteSrc(part.image)).width(part.imageSize > 1 ? 46 : 23).height(part.imageSize > 1 ? 46 : 23).objectFit(ImageFit.Contain).margin({ right: 2 })
+                // 表情加载失败诊断：记录实际使用的 src（本地缓存路径或网络 URL），定位"加载失败留空白"。
+                .onError(() => {
+                  hilog.warn(0x0000, 'BiliEmote', 'dynamic emote image load failed: %{public}s', this.emoteSrc(part.image));
+                })
             } else {
               Text(part.text).fontSize(13).lineHeight(20)
+                .constraintSize({ minHeight: 20 })
                 .fontColor(this.isDark ? '#D8D8DC' : '#303236')
             }
           }, (part: DynamicContentPart) => 'forward-' + part.key)
@@ -496,12 +532,17 @@ export struct DynCard {
 
       // 内容
       if (this.item.content.length > 0) {
-        Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+        // 行内底对齐：与评论区 ReplyRichText 一致，表情图底部与文字行底对齐。
+        Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.End }) {
           ForEach(contentPartsOf(this.item, this.emoteVer), (part: DynamicContentPart) => {
             if (part.image.length > 0) {
               Image(this.emoteSrc(part.image)).width(part.imageSize > 1 ? 50 : 25).height(part.imageSize > 1 ? 50 : 25).objectFit(ImageFit.Contain).margin({ right: 2 })
+                .onError(() => {
+                  hilog.warn(0x0000, 'BiliEmote', 'dynamic emote image load failed: %{public}s', this.emoteSrc(part.image));
+                })
             } else {
               Text(part.text).fontSize(14).fontColor(this.isDark ? '#D0D0D0' : '#222222').lineHeight(21)
+                .constraintSize({ minHeight: 21 })
             }
           }, (part: DynamicContentPart) => part.key)
         }
@@ -688,6 +729,12 @@ export struct DynamicView {
   @State showComposer: boolean = false;
   @State composerText: string = '';
   @State composing: boolean = false;
+  // 全屏看图 Cover（根页面场景：Navigation 根上 push 无共享元素转场且强制右滑入，
+  // 改用 bindContentCover + 手动矩形入场实现"从点的那张放大"）。
+  @State imgCoverOpen: boolean = false;
+  @State imgCoverImages: Array<string> = [];
+  @State imgCoverIndex: number = 0;
+  @State imgCoverRect: ImageViewerSrcRect | undefined = undefined;
   // 顶部「关注 UP 主」横滑栏：登录后拉取关注列表第一页，不阻塞动态流加载。
   @State followed: Array<RelationUserItem> = [];
   /** uid -> 直播间 roomId（仅直播中的 UP；由批量开播状态接口异步补充，失败不影响横滑条）。 */
@@ -1070,7 +1117,14 @@ export struct DynamicView {
           }
           LazyForEach(this.dynSource, (item: DynamicItem) => {
             ListItem() {
-              DynCard({ item: item, embedded: this.embedded })
+              // 主页底部 Tabs 里的动态流（Navigation 根页面）走全屏 Cover 看图。
+              DynCard({ item: item, embedded: this.embedded, sharedImageTransition: this.embedded,
+                onOpenImageInCover: (images: Array<string>, index: number, rect: ImageViewerSrcRect | undefined) => {
+                  this.imgCoverImages = images;
+                  this.imgCoverIndex = index;
+                  this.imgCoverRect = rect;
+                  this.imgCoverOpen = true;
+                } })
             }
           }, (item: DynamicItem) => item.dynId)
           ListItem() {
@@ -1114,6 +1168,22 @@ export struct DynamicView {
       })
       .onRefreshing(() => this.onRefresh())
     }
+  }
+
+  /** 全屏看图 Cover：无转场直接覆盖，入场动画由 ImageViewerPage 按 srcRect 手动播放。 */
+  @Builder
+  ImageCoverViewer() {
+    ImageViewerPage({
+      param: {
+        images: this.imgCoverImages,
+        initialIndex: this.imgCoverIndex,
+        transitionId: '',
+        srcRect: this.imgCoverRect,
+        onRequestClose: () => {
+          this.imgCoverOpen = false;
+        },
+      },
+    })
   }
 
   /** 发布动态（纯文本）底部面板：输入 + 发布；发布成功后重载 feed。用系统 bindSheet 从底部滑出。 */
@@ -1256,6 +1326,10 @@ export struct DynamicView {
       showClose: false,
       radius: { topLeft: 18, topRight: 18 },
       backgroundColor: this.isDark ? '#1E2024' : '#FFFFFF',
+    })
+    .bindContentCover($$this.imgCoverOpen, this.ImageCoverViewer(), {
+      modalTransition: ModalTransition.NONE,
+      backgroundColor: '#00000000',
     })
   }
 }

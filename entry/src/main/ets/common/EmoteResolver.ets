@@ -6,6 +6,7 @@
  */
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { CommentApi } from '../api/CommentApi';
 import { BiliEmotePackage } from '../model/Models';
 
@@ -14,6 +15,8 @@ const PREF_NAME: string = 'emote_resolver';
 const PREF_TABLE_ENTRIES: string = 'emote_table_entries';
 
 const table: Map<string, string> = new Map<string, string>();
+/** 已上报过的未命中占位符（去重，避免刷屏）。 */
+const missedLogged: Set<string> = new Set<string>();
 let loading: boolean = false;
 let loaded: boolean = false;
 /** 本进程是否已对磁盘表做过头一轮接口刷新（不阻塞首次渲染）。 */
@@ -39,7 +42,15 @@ export class EmoteResolver {
   /** 查占位符（含方括号，如 [tv_流鼻血]）对应的表情图 URL；未加载或不存在返回空串。 */
   static lookup(text: string): string {
     const url: string | undefined = table.get(text);
-    return url === undefined ? '' : url;
+    if (url === undefined) {
+      // 未命中诊断：接口未下发 emoji 节点且表情表也没有时的唯一线索。
+      if (!missedLogged.has(text)) {
+        missedLogged.add(text);
+        hilog.info(0x0000, 'BiliEmote', 'resolver miss: %{public}s (tableSize=%{public}d)', text, table.size);
+      }
+      return '';
+    }
+    return url;
   }
 
   /** 磁盘缓存就绪则无需等网络：确保表可用并顺手在后台刷新一次。 */
@@ -58,7 +69,8 @@ export class EmoteResolver {
       for (let i: number = 0; i < packages.length; i++) {
         for (let j: number = 0; j < packages[i].emotes.length; j++) {
           const text: string = packages[i].emotes[j].text;
-          const url: string = packages[i].emotes[j].url;
+          // GIF 优先（动图表情存动图地址），与列表渲染的 displayUrl 口径一致。
+          const url: string = packages[i].emotes[j].displayUrl();
           if (table.get(text) !== url) {
             table.set(text, url);
             changed = true;
@@ -69,6 +81,8 @@ export class EmoteResolver {
         loaded = true;
         EmoteResolver.persist();
       }
+      hilog.info(0x0000, 'BiliEmote', 'resolver refresh done: packages=%{public}d tableSize=%{public}d',
+        packages.length, table.size);
       if (changed || loaded) {
         AppStorage.setOrCreate<number>(VERSION_KEY, EmoteResolver.version() + 1);
       }
@@ -78,6 +92,11 @@ export class EmoteResolver {
       })
       .finally(() => {
         loading = false;
+        // 空结果不算"已刷新"：登录态/网络恢复后下次 ensureLoaded 必须能重试，
+        // 否则一次失败整个会话的表情兜底表都是空的（动态 [xxx] 永远显示原文）。
+        if (!loaded) {
+          refreshStarted = false;
+        }
       });
   }
 
@@ -101,6 +120,7 @@ export class EmoteResolver {
         }
         if (table.size > 0) {
           loaded = true;
+          hilog.info(0x0000, 'BiliEmote', 'resolver restored from disk: tableSize=%{public}d', table.size);
           // 触发一次订阅方重渲染：卡片表情立刻有图，不等接口返回。
           AppStorage.setOrCreate<number>(VERSION_KEY, EmoteResolver.version() + 1);
         }

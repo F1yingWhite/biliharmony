@@ -430,6 +430,8 @@ export struct DynamicDetailPage {
       .layoutWeight(1)
       .constraintSize({ maxWidth: LayoutTokens.readingMaxWidth })
       .alignSelf(ItemAlign.Center)
+      // Scroll 内容不足一屏时默认垂直居中（官方默认 Center），详情内容应从顶部开始排。
+      .align(Alignment.TopStart)
       .scrollBar(BarState.Off)
       ReplyComposer({
         text: this.replyDraft,

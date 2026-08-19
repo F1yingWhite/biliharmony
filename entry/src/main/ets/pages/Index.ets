@@ -234,6 +234,8 @@ struct Index {
           this.InvalidParamContent()
         }
       }
+      // 透明底：卡片放大入场期间透出下层页面（页面内自带底色层，入场结束即不透明）。
+      .backgroundColor('#00000000')
       .stdDestination(() => {
         // 顶部为播放器黑底 → 状态栏透明 + 浅色图标
         Immersive.setBarIcons(true, true);

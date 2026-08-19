@@ -3,7 +3,8 @@ import { http } from '@kit.NetworkKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { systemShare } from '@kit.ShareKit';
-import { AppNavStack, ImageViewerParam } from '../common/AppRouter';
+import { display } from '@kit.ArkUI';
+import { AppNavStack, ImageViewerParam, ImageViewerSrcRect } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { BackButton } from '../components/BackButton';
 import { biliImageThumbnail } from '../common/ImageUrl';
@@ -188,6 +189,13 @@ export struct ImageViewerPage {
   private sizeCache: Map<number, string> = new Map<number, string>();
   @StorageProp('imageViewerCloseRequest') @Watch('onCloseRequested') closeRequest: number = 0;
   private closing: boolean = false;
+  /** 手动"从缩略图放大"入场（Tabs 内 geometryTransition 失效时的替代）：首帧把内容
+   *  缩放平移到源矩形，再动画回全屏。entryFromRect=false 时全部为恒等变换。 */
+  @State entryScaleX: number = 1;
+  @State entryScaleY: number = 1;
+  @State entryDx: number = 0;
+  @State entryDy: number = 0;
+  private entryFromRect: boolean = false;
   /** 低于此体积（3MB）的图片直接加载原图，不再先缩略图后手动“查看原图”。 */
   private static readonly ORIGINAL_SIZE_THRESHOLD: number = 3 * 1024 * 1024;
 
@@ -197,6 +205,36 @@ export struct ImageViewerPage {
     this.originalFlags = this.param.images.map(() => false);
     this.lowResFlags = this.param.images.map(() => false);
     this.fetchOriginalSize(this.currentIndex);
+    this.prepareRectEntrance();
+  }
+
+  /** 有 srcRect 时：首帧把整页内容压到源缩略图矩形，下一帧动画展开到全屏（黑底同步淡入）。 */
+  private prepareRectEntrance(): void {
+    const rect: ImageViewerSrcRect | undefined = this.param.srcRect;
+    if (rect === undefined || rect.w <= 0 || rect.h <= 0) return;
+    try {
+      const vpW: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().width);
+      const vpH: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().height);
+      if (vpW <= 0 || vpH <= 0) return;
+      this.entryFromRect = true;
+      // scale 在前 translate 在后：位移量不被缩放（与 ZoomableImage 的变换约定一致）。
+      this.entryScaleX = rect.w / vpW;
+      this.entryScaleY = rect.h / vpH;
+      this.entryDx = (rect.x + rect.w / 2) - vpW / 2;
+      this.entryDy = (rect.y + rect.h / 2) - vpH / 2;
+      this.bgOpacity = 0;
+      setTimeout(() => {
+        this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
+          this.entryScaleX = 1;
+          this.entryScaleY = 1;
+          this.entryDx = 0;
+          this.entryDy = 0;
+          this.bgOpacity = 1;
+        });
+      }, 30);
+    } catch (e) {
+      // 取不到屏幕尺寸则保持默认淡入。
+    }
   }
 
   onCloseRequested(): void {
@@ -206,6 +244,17 @@ export struct ImageViewerPage {
   goBack(): void {
     if (this.closing) return;
     this.closing = true;
+    // 全屏 Cover 形态（Navigation 根页面场景）：先自身淡出，再让宿主关闭 Cover。
+    if (this.param.onRequestClose !== undefined) {
+      this.getUIContext().animateTo({ duration: 250, curve: Curve.EaseInOut }, () => {
+        this.bgOpacity = 0;
+      });
+      setTimeout(() => {
+        const close: (() => void) | undefined = this.param.onRequestClose;
+        if (close !== undefined) close();
+      }, 260);
+      return;
+    }
     // 保持黑底不先淡出，直接让 geometryTransition 把图片缩回缩略图；
     // 如果先 fade 黑底，收缩动画会被白底/透明底盖掉，看起来像没有缩小动画。
     this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
@@ -235,8 +284,12 @@ export struct ImageViewerPage {
    * 生成当前 index 对应的共享元素 ID。
    * transitionId 只携带了打开时那一张的完整 ID，多图滑动后需要按同一前缀推导出当前图片的 ID，
    * 关闭时才能缩回当前图片对应的缩略图。
+   * 注意：同一时刻只能给「当前页」绑定共享元素 ID。Swiper cachedCount 会预渲染相邻页，
+   * 若每页都绑 ID，相邻页的 ID 恰好命中源页面宫格里相邻的缩略图，多对配对会让
+   * geometryTransition 解析错源节点（点开图片从错误位置放大，如右上角）。
    */
   private transitionIdFor(index: number): string {
+    if (index !== this.currentIndex) return '';
     const base: string = this.param.transitionId ?? '';
     if (base.length === 0) return '';
     if (index === this.param.initialIndex) return base;
@@ -451,6 +504,11 @@ export struct ImageViewerPage {
         .loop(false)
         .cachedCount(1)
         .disableSwipe(this.currentZoomed)
+        // 手动入场变换：从源缩略图矩形展开到全屏（entryFromRect=false 时为恒等变换）。
+        .scale({ x: this.entryScaleX, y: this.entryScaleY })
+        .translate({ x: this.entryDx, y: this.entryDy })
+        // Cover 形态下随黑底一起淡入淡出（bgOpacity 恒 1 的 geometryTransition 路径不受影响）。
+        .opacity(this.bgOpacity)
         .onChange((index: number) => {
           this.currentIndex = index;
           this.currentZoomed = false;
@@ -494,6 +552,8 @@ export struct ImageViewerPage {
       .height('100%')
       .alignItems(HorizontalAlign.Center)
       .hitTestBehavior(HitTestMode.Transparent)
+      // 手动矩形入场时随黑底一起淡入（bgOpacity 默认 1，不影响 geometryTransition 路径）。
+      .opacity(this.bgOpacity)
 
       if (this.actionMenuOpen) {
         this.ImageActionMenu()

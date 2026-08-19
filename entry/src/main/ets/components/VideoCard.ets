@@ -146,10 +146,29 @@ export struct VideoCard {
         opacity: 1,
       },
     })
+    .id('video-card-' + (this.video.bvid.length > 0 ? this.video.bvid : 'a' + String(this.video.aid)))
     .onClick(() => {
       Haptic.light();
       if (this.video.bvid.length > 0 || this.video.aid > 0) {
         const param: VideoDetailParam = { bvid: this.video.bvid, aid: this.video.aid, title: this.video.title };
+        // 从卡片位置放大到全屏：记录卡片窗口矩形，详情页首帧压到矩形上再展开。
+        // 根页面 push 无共享元素转场，且要关默认右滑动画（push 第三参 false）。
+        try {
+          const rect = this.getUIContext().getComponentUtils().getRectangleById(
+            'video-card-' + (this.video.bvid.length > 0 ? this.video.bvid : 'a' + String(this.video.aid)));
+          if (rect.size.width > 0 && rect.size.height > 0) {
+            param.srcRect = {
+              x: this.getUIContext().px2vp(rect.windowOffset.x),
+              y: this.getUIContext().px2vp(rect.windowOffset.y),
+              w: rect.size.width,
+              h: rect.size.height,
+            };
+            AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param, false);
+            return;
+          }
+        } catch (e) {
+          // 取不到矩形则走默认转场。
+        }
         AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
       }
     })
