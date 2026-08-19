@@ -40,3 +40,6 @@ screenshot
 .hvigor_work
 # Python
 **/__pycache__/
+
+# 参考录屏/示例视频，不入仓库
+*.mp4
