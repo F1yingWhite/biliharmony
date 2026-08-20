@@ -487,8 +487,8 @@ export struct HomeView {
             VideoCard({
               video: item,
               idPrefix: 'home-' + String(feedTab) + '-',
-              // 仅推荐频道：封面右上 ⋮ → 举报/不想看（不想看即长按同款的本地屏蔽）。
-              showMore: feedTab === 0,
+              // 首页卡片底栏 ⋮ → 举报/不想看（不想看即长按同款的本地屏蔽）。
+              showMore: true,
               onReport: (v: VideoItem) => this.reportCard(v),
               onHide: (v: VideoItem) => this.dislikeLocal(v, feedTab),
             })

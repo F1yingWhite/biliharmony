@@ -40,6 +40,7 @@ import { FavoriteApi } from '../api/FavoriteApi';
 import { FeedApi } from '../api/FeedApi';
 import { HistoryApi } from '../api/HistoryApi';
 import { UserApi } from '../api/UserApi';
+import { CommentLog } from '../common/CommentLog';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -215,13 +216,24 @@ export struct VideoDetailPage {
 
   closeReplyThread(): void {
     if (!this.replyThreadOpen) return;
+    CommentLog.info('ui.thread.close', 'aid=' + String(this.detail.aid) + ' root=' +
+      String(this.replyThreadRoot.rpid) + ' rows=' + String(this.threadAllReplies.length));
     this.emotePanelOpen = false;
-    this.replyThreadOpen = false;
-    this.replyThreadAnimating = false;
+    this.replyThreadAnimating = true;
+    this.getUIContext().animateTo({
+      duration: 140,
+      curve: Curve.EaseIn,
+      onFinish: () => {
+        this.replyThreadAnimating = false;
+      },
+    }, () => {
+      this.replyThreadOpen = false;
+    });
   }
 
   /** 楼中楼里删掉一条子回复：连同其子孙一起从页面回复源集合移除（面板内视图树由组件自维护）。 */
   private threadRemoveReply(target: ReplyItem): void {
+    const before: number = this.threadAllReplies.length;
     const blocked: Set<number> = new Set<number>();
     blocked.add(target.rpid);
     // 收集 target 的直接子回复（rootRpid=target.rpid）及更外层子孙，用深度优先收集。
@@ -237,6 +249,9 @@ export struct VideoDetailPage {
       }
     }
     this.threadAllReplies = all.filter((x: ReplyItem) => !blocked.has(x.rpid));
+    CommentLog.info('ui.thread.remove', 'root=' + String(this.replyThreadRoot.rpid) + ' target=' +
+      String(target.rpid) + ' removed=' + String(before - this.threadAllReplies.length) +
+      ' remaining=' + String(this.threadAllReplies.length));
   }
 
   private refreshScreenSize(): void {
@@ -1316,7 +1331,14 @@ export struct VideoDetailPage {
     if (ep.cid === this.currentCid && (ep.bvid === this.detail.bvid ||
       (ep.bvid.length === 0 && ep.aid === this.detail.aid))) return;
     const param: VideoDetailParam = { bvid: ep.bvid, aid: ep.aid, title: ep.title };
+    PlayerCommandBus.stop();
     AppNavStack.replacePathByName(NAV_VIDEO_DETAIL, param);
+  }
+
+  /** 保留视频详情导航栈时，必须在新页面创建前暂停当前播放器。 */
+  private pushVideoDetail(param: VideoDetailParam): void {
+    PlayerCommandBus.stop();
+    AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
   }
 
   private onPlayerEnded(): void {
@@ -1369,7 +1391,7 @@ export struct VideoDetailPage {
       if (related.aid > 0 || related.bvid.length > 0) {
         const param: VideoDetailParam = { bvid: related.bvid, aid: related.aid, title: related.title };
         // 用户主动点"立即播放"走入栈：返回回当前视频（播完好），而不是越过它。
-        AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+        this.pushVideoDetail(param);
       }
     }
   }
@@ -1409,7 +1431,7 @@ export struct VideoDetailPage {
   private onPlayerEndRecOpen(item: VideoItem): void {
     if (item.aid <= 0 && item.bvid.length === 0) return;
     const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
-    AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+    this.pushVideoDetail(param);
   }
 
   openCoinSheet(): void {
@@ -1493,25 +1515,44 @@ export struct VideoDetailPage {
 
   async loadReplies(reset: boolean): Promise<void> {
     if (this.replyLoading) {
+      CommentLog.warn('ui.replies.skip', 'reason=loading aid=' + String(this.detail.aid) +
+        ' reset=' + String(reset));
       return;
     }
     this.replyLoading = true;
     if (reset) this.replyPrefetchCount = 0;
     const cursor: string = reset ? '' : this.replyCursor;
+    const startedAt: number = Date.now();
+    const before: number = this.replySource.totalCount();
+    CommentLog.info('ui.replies.start', 'aid=' + String(this.detail.aid) + ' reset=' + String(reset) +
+      ' mode=' + String(this.replySortMode) + ' cursorLen=' + String(cursor.length) +
+      ' before=' + String(before));
     let loaded: boolean = false;
     try {
       const data = await CommentApi.getReplies(this.detail.aid, 1, cursor, this.replySortMode);
-      if (this.destroyed) return;
+      if (this.destroyed) {
+        CommentLog.warn('ui.replies.drop', 'reason=destroyed aid=' + String(this.detail.aid) +
+          ' rows=' + String(data.replies.length));
+        return;
+      }
       if (reset) {
-        this.replySource.reset(this.sanitizeReplies(data.replies));
+        const sanitized: Array<ReplyItem> = this.sanitizeReplies(data.replies);
+        this.replySource.reset(sanitized);
       } else {
         this.appendUniqueReplies(this.replySource, data.replies);
       }
       this.replyCursor = data.cursor;
       this.replyHasMore = data.hasMore;
       loaded = true;
+      CommentLog.info('ui.replies.done', 'aid=' + String(this.detail.aid) + ' reset=' + String(reset) +
+        ' incoming=' + String(data.replies.length) + ' before=' + String(before) + ' total=' +
+        String(this.replySource.totalCount()) + ' cursorLen=' + String(this.replyCursor.length) +
+        ' hasMore=' + String(this.replyHasMore) + ' ms=' + String(CommentLog.elapsed(startedAt)));
     } catch (e) {
       // 评论加载失败保持现有列表，replyLoading 复位后空态/重试入口正常可用。
+      CommentLog.error('ui.replies.error', 'aid=' + String(this.detail.aid) + ' reset=' + String(reset) +
+        ' cursorLen=' + String(cursor.length) + ' ms=' + String(CommentLog.elapsed(startedAt)) +
+        ' error=' + CommentLog.errorText(e as Object));
     } finally {
       if (!this.destroyed) this.replyLoading = false;
     }
@@ -1519,14 +1560,21 @@ export struct VideoDetailPage {
     // 某些视频首页只返回置顶/精选的少量评论，自动继续取页直到首屏够用。
     if (this.replyHasMore && this.replySource.totalCount() < 20 && this.replyPrefetchCount < 5) {
       this.replyPrefetchCount++;
+      CommentLog.info('ui.replies.prefetch', 'aid=' + String(this.detail.aid) + ' attempt=' +
+        String(this.replyPrefetchCount) + ' total=' + String(this.replySource.totalCount()) +
+        ' cursorLen=' + String(this.replyCursor.length));
       await this.loadReplies(false);
     }
   }
 
   changeReplySort(mode: number): void {
     if (this.replySortMode === mode || this.replyLoading) {
+      CommentLog.warn('ui.replies.sort.skip', 'current=' + String(this.replySortMode) + ' requested=' +
+        String(mode) + ' loading=' + String(this.replyLoading));
       return;
     }
+    CommentLog.info('ui.replies.sort', 'aid=' + String(this.detail.aid) + ' from=' +
+      String(this.replySortMode) + ' to=' + String(mode));
     this.replySortMode = mode;
     this.replyCursor = '';
     this.replyHasMore = true;
@@ -1561,17 +1609,32 @@ export struct VideoDetailPage {
   private sanitizeReplies(list: Array<ReplyItem>): Array<ReplyItem> {
     const seen: Set<number> = new Set<number>();
     const result: Array<ReplyItem> = [];
+    let invalid: number = 0;
+    let duplicate: number = 0;
+    let empty: number = 0;
     for (let i: number = 0; i < list.length; i++) {
       const item: ReplyItem = list[i];
-      if (item.rpid <= 0 || seen.has(item.rpid)) {
+      if (item.rpid <= 0) {
+        invalid++;
+        continue;
+      }
+      if (seen.has(item.rpid)) {
+        duplicate++;
         continue;
       }
       seen.add(item.rpid);
       if (item.content.trim().length === 0 && item.pictures.length === 0) {
+        empty++;
         continue;
       }
       result.push(item);
     }
+    const event: string = invalid > 0 || duplicate > 0 || empty > 0 ? 'ui.replies.sanitize.drop' :
+      'ui.replies.sanitize';
+    const details: string = 'incoming=' + String(list.length) + ' kept=' + String(result.length) +
+      ' invalid=' + String(invalid) + ' duplicate=' + String(duplicate) + ' empty=' + String(empty);
+    if (invalid > 0 || duplicate > 0 || empty > 0) CommentLog.warn(event, details);
+    else CommentLog.info(event, details);
     return result;
   }
 
@@ -1583,17 +1646,32 @@ export struct VideoDetailPage {
       existing.add(all[i].rpid);
     }
     const fresh: Array<ReplyItem> = [];
+    let duplicate: number = 0;
+    let invalid: number = 0;
     for (let i: number = 0; i < incoming.length; i++) {
+      if (incoming[i].rpid <= 0) {
+        invalid++;
+      }
       if (!existing.has(incoming[i].rpid)) {
         existing.add(incoming[i].rpid);
         fresh.push(incoming[i]);
+      } else {
+        duplicate++;
       }
     }
     source.append(fresh);
+    CommentLog.info('ui.replies.append', 'incoming=' + String(incoming.length) + ' added=' +
+      String(fresh.length) + ' duplicate=' + String(duplicate) + ' invalid=' + String(invalid) +
+      ' total=' + String(source.totalCount()));
   }
 
   async openReplyThread(item: ReplyItem): Promise<void> {
-    if (this.replyThreadAnimating) return;
+    if (this.replyThreadAnimating) {
+      CommentLog.warn('ui.thread.open.skip', 'reason=animating requestedRoot=' + String(item.rpid));
+      return;
+    }
+    CommentLog.info('ui.thread.open', 'aid=' + String(this.detail.aid) + ' root=' + String(item.rpid) +
+      ' declared=' + String(item.count) + ' preview=' + String(item.replies.length));
     this.replyThreadAnimating = true;
     this.replyThreadRoot = item;
     this.threadAllReplies = this.mergeUniqueReplies([], item.replies);
@@ -1602,22 +1680,36 @@ export struct VideoDetailPage {
     this.threadPrefetchCount = 0;
     this.replyTargetRpid = item.rpid;
     this.replyTargetName = item.uname;
-    // 先取回并排好首批树节点，再打开与动态页相同的系统 Sheet；入场期间内容高度不再二次跳变。
-    await this.loadThreadReplies(true, false);
-    if (this.destroyed) {
-      this.replyThreadAnimating = false;
-      return;
-    }
-    this.replyThreadOpen = true;
-    this.replyThreadAnimating = false;
+    // 面板立即升起，网络请求在面板内以 loading 状态完成，点击反馈不再等待首批接口。
+    const loading: Promise<void> = this.loadThreadReplies(true, false);
+    this.getUIContext().animateTo({
+      duration: 140,
+      curve: Curve.EaseOut,
+      onFinish: () => {
+        this.replyThreadAnimating = false;
+      },
+    }, () => {
+      this.replyThreadOpen = true;
+    });
+    CommentLog.info('ui.thread.shown', 'root=' + String(item.rpid) + ' rows=' +
+      String(this.threadAllReplies.length) + ' loading=true');
+    await loading;
+    if (this.destroyed) return;
   }
 
   async loadThreadReplies(reset: boolean, allowPrefetch: boolean = true): Promise<void> {
     if (this.threadLoading || (!reset && !this.threadHasMore)) {
+      CommentLog.warn('ui.thread.skip', 'root=' + String(this.replyThreadRoot.rpid) + ' reset=' +
+        String(reset) + ' loading=' + String(this.threadLoading) + ' hasMore=' + String(this.threadHasMore));
       return;
     }
     this.threadLoading = true;
     const cursor: string = reset ? '' : this.threadCursor;
+    const startedAt: number = Date.now();
+    const before: number = this.threadAllReplies.length;
+    CommentLog.info('ui.thread.start', 'aid=' + String(this.detail.aid) + ' root=' +
+      String(this.replyThreadRoot.rpid) + ' reset=' + String(reset) + ' cursorLen=' +
+      String(cursor.length) + ' before=' + String(before));
     let loaded: boolean = false;
     try {
       const data = await CommentApi.getReplyReplies(this.detail.aid, 1, this.replyThreadRoot.rpid, cursor);
@@ -1627,8 +1719,15 @@ export struct VideoDetailPage {
       this.threadCursor = data.cursor;
       this.threadHasMore = data.hasMore;
       loaded = true;
+      CommentLog.info('ui.thread.done', 'root=' + String(this.replyThreadRoot.rpid) + ' reset=' +
+        String(reset) + ' incoming=' + String(data.replies.length) + ' before=' + String(before) +
+        ' total=' + String(this.threadAllReplies.length) + ' cursorLen=' + String(this.threadCursor.length) +
+        ' hasMore=' + String(this.threadHasMore) + ' ms=' + String(CommentLog.elapsed(startedAt)));
     } catch (e) {
       // 回复加载失败保持现有内容，threadLoading 复位后可点击继续加载重试。
+      CommentLog.error('ui.thread.error', 'root=' + String(this.replyThreadRoot.rpid) + ' reset=' +
+        String(reset) + ' ms=' + String(CommentLog.elapsed(startedAt)) + ' error=' +
+        CommentLog.errorText(e as Object));
     } finally {
       if (!this.destroyed) this.threadLoading = false;
     }
@@ -1636,6 +1735,9 @@ export struct VideoDetailPage {
     const target: number = Math.min(20, Math.max(1, this.replyThreadRoot.count));
     if (allowPrefetch && this.threadHasMore && this.threadAllReplies.length < target && this.threadPrefetchCount < 5) {
       this.threadPrefetchCount++;
+      CommentLog.info('ui.thread.prefetch', 'root=' + String(this.replyThreadRoot.rpid) + ' attempt=' +
+        String(this.threadPrefetchCount) + ' total=' + String(this.threadAllReplies.length) +
+        ' target=' + String(target));
       await this.loadThreadReplies(false);
     }
   }
@@ -1649,7 +1751,7 @@ export struct VideoDetailPage {
     this.closeReplyThread();
     this.scheduleTimeout(() => {
       if (!this.destroyed) action();
-    }, 260);
+    }, 150);
   }
 
   @Builder
@@ -1676,6 +1778,8 @@ export struct VideoDetailPage {
       onShare: (item: ReplyItem) => this.shareReplyAsImage(item),
       focusTick: this.replyFocusTick,
       onSelectReply: (item: ReplyItem) => {
+        CommentLog.info('ui.thread.select', 'root=' + String(this.replyThreadRoot.rpid) +
+          ' target=' + String(item.rpid));
         this.replyTargetRpid = item.rpid;
         this.replyTargetName = item.uname;
         this.replyFocusTick++;
@@ -1697,18 +1801,36 @@ export struct VideoDetailPage {
 
   async sendReply(): Promise<void> {
     const content: string = this.replyDraft.trim();
-    if (content.length === 0 || this.replySending || !this.ensureLogin()) return;
+    if (content.length === 0 || this.replySending) {
+      CommentLog.warn('ui.send.skip', 'empty=' + String(content.length === 0) +
+        ' sending=' + String(this.replySending));
+      return;
+    }
+    if (!this.ensureLogin()) {
+      CommentLog.warn('ui.send.skip', 'reason=login messageLen=' + String(content.length));
+      return;
+    }
     this.replySending = true;
+    const startedAt: number = Date.now();
     try {
       const root: number = this.replyThreadOpen ? this.replyThreadRoot.rpid : 0;
       const parent: number = this.replyThreadOpen ?
         (this.replyTargetRpid > 0 ? this.replyTargetRpid : root) : 0;
+      CommentLog.info('ui.send.start', 'aid=' + String(this.detail.aid) + ' root=' + String(root) +
+        ' parent=' + String(parent) + ' messageLen=' + String(content.length));
       const result: ActionResult = await CommentApi.addReply(this.detail.aid, 1, content, root, parent);
-      if (this.destroyed) return;
+      if (this.destroyed) {
+        CommentLog.warn('ui.send.drop', 'reason=destroyed root=' + String(root) + ' parent=' + String(parent));
+        return;
+      }
       if (!result.ok) {
+        CommentLog.warn('ui.send.failed', 'root=' + String(root) + ' parent=' + String(parent) +
+          ' code=' + String(result.code) + ' ms=' + String(CommentLog.elapsed(startedAt)));
         this.toast(result.message);
         return;
       }
+      CommentLog.info('ui.send.done', 'root=' + String(root) + ' parent=' + String(parent) +
+        ' ms=' + String(CommentLog.elapsed(startedAt)));
       this.replyDraft = '';
       this.toast(this.replyThreadOpen ? '回复成功' : '评论成功');
       if (this.replyThreadOpen) {
@@ -1724,6 +1846,8 @@ export struct VideoDetailPage {
         await this.loadReplies(true);
       }
     } catch (e) {
+      CommentLog.error('ui.send.error', 'aid=' + String(this.detail.aid) + ' ms=' +
+        String(CommentLog.elapsed(startedAt)) + ' error=' + CommentLog.errorText(e as Object));
       if (!this.destroyed) this.toast('网络异常，发送失败');
     } finally {
       if (!this.destroyed) this.replySending = false;
@@ -1778,6 +1902,8 @@ export struct VideoDetailPage {
    */
   private mutateReplyItem(rpid: number, mutate: (target: ReplyItem) => void): ReplyItem | null {
     let found: ReplyItem | null = null;
+    let mainChanged: boolean = false;
+    let rootChanged: boolean = false;
     const list: Array<ReplyItem> = this.replySource.getAll();
     for (let i: number = 0; i < list.length; i++) {
       if (list[i].rpid === rpid) {
@@ -1786,6 +1912,7 @@ export struct VideoDetailPage {
         const next1: ReplyItem = list[i].clone();
         next1.rev = list[i].rev + 1;
         this.replySource.updateItem(i, next1);
+        mainChanged = true;
         break;
       }
     }
@@ -1811,8 +1938,12 @@ export struct VideoDetailPage {
       const next3: ReplyItem = this.replyThreadRoot.clone();
       next3.rev = this.replyThreadRoot.rev + 1;
       this.replyThreadRoot = next3;
+      rootChanged = true;
     }
     this.replyLikeVersion++;
+    CommentLog.info('ui.reply.mutate', 'rpid=' + String(rpid) + ' main=' + String(mainChanged) +
+      ' thread=' + String(threadChanged) + ' root=' + String(rootChanged) +
+      ' found=' + String(found !== null) + ' version=' + String(this.replyLikeVersion));
     return found;
   }
 
@@ -2306,7 +2437,7 @@ export struct VideoDetailPage {
   private openRelatedVideo(item: VideoItem): void {
     if (item.aid <= 0 && item.bvid.length === 0) return;
     const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
-    AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+    this.pushVideoDetail(param);
   }
 
   @Builder
@@ -2316,13 +2447,13 @@ export struct VideoDetailPage {
         .fontSize(this.visualTab === index ? 15 : 14)
         .fontWeight(this.visualTab === index ? FontWeight.Bold : FontWeight.Normal)
         .fontColor(this.visualTab === index ? (this.isDark ? '#F1F2F3' : '#18191C') : '#9499A0')
-        .animation({ duration: 220, curve: Curve.EaseOut })
+        .animation({ duration: 140, curve: Curve.EaseOut })
       Row()
         .width(20).height(3).borderRadius(1.5)
         .backgroundColor(this.accent)
         .opacity(this.visualTab === index ? 1 : 0)
         .scale({ x: this.visualTab === index ? 1 : 0.35, y: 1 })
-        .animation({ duration: 220, curve: Curve.EaseOut })
+        .animation({ duration: 140, curve: Curve.EaseOut })
     }
     .height(44)
     .padding({ left: 9, right: 9 })
@@ -2464,8 +2595,8 @@ export struct VideoDetailPage {
     .barMode(BarMode.Fixed)
     .cachedMaxCount(1, TabsCacheMode.CACHE_BOTH_SIDE)
     .animationMode(AnimationMode.CONTENT_FIRST)
-    .animationDuration(320)
-    .animationCurve(Curve.EaseInOut)
+    .animationDuration(180)
+    .animationCurve(Curve.EaseOut)
     .onAnimationStart((index: number, targetIndex: number, extraInfo: TabsAnimationEvent) => {
       // 只更新标签视觉状态；不能在这里改 Tabs 绑定 index，否则会中途强制跳页。
       this.visualTab = targetIndex;
@@ -2731,6 +2862,25 @@ export struct VideoDetailPage {
           .clip(true)
           .hitTestBehavior(HitTestMode.None)
       }
+
+      if (this.replyThreadOpen) {
+        Stack() {
+          this.VideoThreadSheet()
+        }
+        .width('100%')
+        .height(this.replySheetHeight())
+        // 自定义面板必须显式锚到播放器底边。只设置高度时，部分真机的 Stack
+        // 会把它贴到窗口顶端，表现为“回复栏飞到最上面”。
+        .position({ x: 0, y: Immersive.statusBarHeight() + this.visiblePlayerHeight() })
+        .borderRadius({ topLeft: 18, topRight: 18 })
+        .clip(true)
+        .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+        .shadow({ radius: 16, color: '#40000000', offsetX: 0, offsetY: -4 })
+        .zIndex(20)
+        .transition(TransitionEffect.move(TransitionEdge.BOTTOM)
+          .combine(TransitionEffect.opacity(0.98))
+          .animation({ duration: 140, curve: Curve.EaseOut }))
+      }
     }
     .width('100%')
     .height('100%')
@@ -2738,16 +2888,6 @@ export struct VideoDetailPage {
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
     .onAreaChange(() => {
       this.refreshScreenSize();
-    })
-    .bindSheet($$this.replyThreadOpen, this.VideoThreadSheet(), {
-      height: this.replySheetHeight(),
-      dragBar: false,
-      showClose: false,
-      radius: { topLeft: 18, topRight: 18 },
-      backgroundColor: this.isDark ? '#18191C' : '#FFFFFF',
-      // 允许 Sheet 外继续与页面交互：点击视频不会误关回复；系统侧滑返回仍由
-      // NavDestination onBackPressed 拦截并关闭回复 Sheet。
-      enableOutsideInteractive: true,
     })
   }
 }

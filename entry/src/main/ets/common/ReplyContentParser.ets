@@ -1,4 +1,5 @@
 import { BiliEmote, ReplyItem, ReplyJump, ReplyMention } from '../model/Models';
+import { CommentLog } from './CommentLog';
 
 // 模块级正则与结果缓存：列表重渲染会反复解析同一条评论，避免重复建正则与重复解析
 const BVID_REGEX: RegExp = /BV[0-9A-Za-z]{10}/;
@@ -58,6 +59,21 @@ function decodeHtmlEntities(value: string): string {
     match = HTML_ENTITY_REGEX.exec(value);
   }
   return decoded + value.substring(lastIndex);
+}
+
+/**
+ * 接口正文会混入连续空格、NBSP、制表符和 CRLF。浏览器/官方客户端会折叠这些空白，
+ * ArkUI Span 则原样排版，表现为句间大洞，CRLF 还可能产生双换行。
+ */
+function normalizeReplyWhitespace(value: string): string {
+  return value
+    // 除 CR/LF 外，接口历史数据里还可能混入 NEL、Unicode 行/段分隔符。
+    .replace(/\r\n?|[\u0085\u2028\u2029]/g, '\n')
+    // 零宽空格/连接符不会显示，但会干扰 trim 与行尾换行判断。
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+    .replace(/[ \t\f\v\u00A0\u3000]+/g, ' ')
+    .replace(/ *\n+ */g, '\n')
+    .trim();
 }
 
 /** 评论正文和回复预览共用的富文本片段。 */
@@ -126,7 +142,12 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
     return cached.slice();
   }
   const result: Array<ReplyRenderPart> = [];
-  let rest: string = decodeHtmlEntities(item.content);
+  const decoded: string = decodeHtmlEntities(item.content);
+  let rest: string = normalizeReplyWhitespace(decoded);
+  if (rest !== decoded) {
+    CommentLog.info('content.normalize', 'rpid=' + String(item.rpid) + ' rawLen=' +
+      String(decoded.length) + ' normalizedLen=' + String(rest.length));
+  }
   let serial: number = 0;
   while (rest.length > 0) {
     let foundAt: number = rest.length;
