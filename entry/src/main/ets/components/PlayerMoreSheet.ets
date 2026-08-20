@@ -4,6 +4,7 @@
 @Component
 export struct PlayerMoreSheet {
   @StorageProp('isDarkMode') isDark: boolean = false;
+  @Prop forceDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @Prop playbackRate: number = 1;
   @Prop playMode: number = 0;
@@ -28,32 +29,36 @@ export struct PlayerMoreSheet {
   onStub: (message: string) => void = () => {};
   @State timerExpanded: boolean = false;
 
+  private darkMode(): boolean {
+    return this.forceDark || this.isDark;
+  }
+
   private sheetBg(): string {
-    return this.isDark ? '#18191C' : '#F5F6F7';
+    return this.darkMode() ? '#18191C' : '#F5F6F7';
   }
 
   private cardBg(): string {
-    return this.isDark ? '#26272B' : '#FFFFFF';
+    return this.darkMode() ? '#26272B' : '#FFFFFF';
   }
 
   private titleColor(): string {
-    return this.isDark ? '#F1F2F4' : '#18191C';
+    return this.darkMode() ? '#F1F2F4' : '#18191C';
   }
 
   private subColor(): string {
-    return this.isDark ? '#8A8F99' : '#9499A0';
+    return this.darkMode() ? '#8A8F99' : '#9499A0';
   }
 
   private iconColor(): string {
-    return this.isDark ? '#F1F2F4' : '#18191C';
+    return this.darkMode() ? '#F1F2F4' : '#18191C';
   }
 
   private dividerColor(): string {
-    return this.isDark ? '#33343A' : '#F0F1F3';
+    return this.darkMode() ? '#33343A' : '#F0F1F3';
   }
 
   private squareBg(): string {
-    return this.isDark ? '#2C2D33' : '#F3F4F6';
+    return this.darkMode() ? '#2C2D33' : '#F3F4F6';
   }
 
   private speedRates(): number[] {
@@ -191,7 +196,7 @@ export struct PlayerMoreSheet {
         .width(34)
         .height(4)
         .borderRadius(2)
-        .backgroundColor(this.isDark ? '#3A3B41' : '#DADCE0')
+        .backgroundColor(this.darkMode() ? '#3A3B41' : '#DADCE0')
         .margin({ top: 10 })
       Scroll() {
         Column({ space: 10 }) {

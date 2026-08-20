@@ -4,30 +4,35 @@
 @Component
 export struct PlayerPlaySettingsPage {
   @StorageProp('isDarkMode') isDark: boolean = false;
+  @Prop forceDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @Prop qualityPref: number = 0;
   @Prop downloadQualityLabel: string = '';
   onQualityPrefChange: (pref: number) => void = () => {};
   onStub: (message: string) => void = () => {};
 
+  private darkMode(): boolean {
+    return this.forceDark || this.isDark;
+  }
+
   private titleColor(): string {
-    return this.isDark ? '#F1F2F4' : '#18191C';
+    return this.darkMode() ? '#F1F2F4' : '#18191C';
   }
 
   private subColor(): string {
-    return this.isDark ? '#8A8F99' : '#9499A0';
+    return this.darkMode() ? '#8A8F99' : '#9499A0';
   }
 
   private cardBg(): string {
-    return this.isDark ? '#26272B' : '#FFFFFF';
+    return this.darkMode() ? '#26272B' : '#FFFFFF';
   }
 
   private dividerColor(): string {
-    return this.isDark ? '#33343A' : '#F0F1F3';
+    return this.darkMode() ? '#33343A' : '#F0F1F3';
   }
 
   private chipBg(): string {
-    return this.isDark ? '#2C2D33' : '#F3F4F6';
+    return this.darkMode() ? '#2C2D33' : '#F3F4F6';
   }
 
   private prefLabels(): string[] {

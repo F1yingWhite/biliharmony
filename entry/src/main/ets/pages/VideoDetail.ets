@@ -33,7 +33,8 @@ import { VideoReplyTab } from '../components/VideoReplyTab';
 import { CoinSheetView } from '../components/CoinSheetView';
 import { FavPickSheetView } from '../components/FavPickSheetView';
 import { VideoActionItem } from '../components/VideoActionItem';
-import { ReplyShareCard, makeReplyQr, sharePixelMapAsImage } from '../components/ReplyShareCard';
+import { ReplyShareCard, makeReplyQr, makeReplyShareSnapshot,
+  sharePixelMapAsImage } from '../components/ReplyShareCard';
 import { safeToast } from '../common/Toast';
 import { CommentApi } from '../api/CommentApi';
 import { FavoriteApi } from '../api/FavoriteApi';
@@ -41,6 +42,7 @@ import { FeedApi } from '../api/FeedApi';
 import { HistoryApi } from '../api/HistoryApi';
 import { UserApi } from '../api/UserApi';
 import { CommentLog } from '../common/CommentLog';
+import { VideoDetailGeometry } from '../common/VideoDetailGeometry';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -296,36 +298,9 @@ export struct VideoDetailPage {
   private computePlayerHeight(): number {
     try {
       if (this.screenWidthVp <= 0 || this.screenHeightVp <= 0) this.refreshScreenSize();
-      if (this.screenWidthVp <= 0 || this.screenHeightVp <= 0) return 220;
-      const widthVp: number = this.screenWidthVp;
-      const usableHeight: number = Math.max(480,
-        this.screenHeightVp - Immersive.statusBarHeight() - Immersive.bottomInset());
-      // 常规横屏按 16:9；竖屏按真实比例增高，最高不超过可用高度，优先避免被 AVPlayer 裁掉上下区域。
-      const regularHeight: number = widthVp * 9 / 16;
-      // 竖屏视频封顶到可用高度的 60%：避免几乎占满整屏挤没评论区，想看大图可走竖屏全屏。
-      const maximumHeight: number = Math.max(regularHeight, Math.floor(usableHeight * 0.6));
-      let videoWidth: number = this.realVideoWidth > 0 ? this.realVideoWidth : this.detail.width;
-      let videoHeight: number = this.realVideoHeight > 0 ? this.realVideoHeight : this.detail.height;
-      let videoRotate: number = this.detail.rotate;
-      for (let i: number = 0; i < this.detail.pages.length; i++) {
-        if (this.detail.pages[i].cid === this.currentCid && this.detail.pages[i].width > 0 &&
-          this.detail.pages[i].height > 0) {
-          if (this.realVideoWidth <= 0 || this.realVideoHeight <= 0) {
-            videoWidth = this.detail.pages[i].width;
-            videoHeight = this.detail.pages[i].height;
-          }
-          videoRotate = this.detail.pages[i].rotate;
-          break;
-        }
-      }
-      if ((this.realVideoWidth <= 0 || this.realVideoHeight <= 0) && Math.abs(videoRotate) % 180 !== 0) {
-        const rotatedWidth: number = videoHeight;
-        videoHeight = videoWidth;
-        videoWidth = rotatedWidth;
-      }
-      if (videoWidth <= 0 || videoHeight <= 0) return regularHeight;
-      const naturalHeight: number = widthVp * videoHeight / videoWidth;
-      return Math.max(regularHeight, Math.min(maximumHeight, naturalHeight));
+      return VideoDetailGeometry.playerHeight(this.detail, this.currentCid, this.screenWidthVp,
+        this.screenHeightVp, Immersive.statusBarHeight(), Immersive.bottomInset(),
+        this.realVideoWidth, this.realVideoHeight);
     } catch (e) {
       return 220;
     }
@@ -343,37 +318,13 @@ export struct VideoDetailPage {
 
   /** 当前分 P 时长（秒）：弹幕分段数预估用；取不到时回退详情总时长。 */
   private currentPageDuration(): number {
-    for (let i: number = 0; i < this.detail.pages.length; i++) {
-      if (this.detail.pages[i].cid === this.currentCid && this.detail.pages[i].duration > 0) {
-        return this.detail.pages[i].duration;
-      }
-    }
-    return this.detail.duration;
+    return VideoDetailGeometry.pageDuration(this.detail, this.currentCid);
   }
 
   /** 播放中仅长屏/竖向画幅收缩；暂停后任何画幅都可收成继续播放横幅。 */
   private shouldCollapsePlayer(): boolean {
-    if (!this.playerPlaying) return true;
-    let width: number = this.realVideoWidth > 0 ? this.realVideoWidth : this.detail.width;
-    let height: number = this.realVideoHeight > 0 ? this.realVideoHeight : this.detail.height;
-    let rotate: number = this.detail.rotate;
-    for (let i: number = 0; i < this.detail.pages.length; i++) {
-      if (this.detail.pages[i].cid === this.currentCid && this.detail.pages[i].width > 0 &&
-        this.detail.pages[i].height > 0) {
-        if (this.realVideoWidth <= 0 || this.realVideoHeight <= 0) {
-          width = this.detail.pages[i].width;
-          height = this.detail.pages[i].height;
-        }
-        rotate = this.detail.pages[i].rotate;
-        break;
-      }
-    }
-    if ((this.realVideoWidth <= 0 || this.realVideoHeight <= 0) && Math.abs(rotate) % 180 !== 0) {
-      const oldWidth: number = width;
-      width = height;
-      height = oldWidth;
-    }
-    return width > 0 && height > width;
+    return VideoDetailGeometry.shouldCollapse(this.playerPlaying, this.detail, this.currentCid,
+      this.realVideoWidth, this.realVideoHeight);
   }
 
   private visiblePlayerHeight(): number {
@@ -1670,16 +1621,19 @@ export struct VideoDetailPage {
       CommentLog.warn('ui.thread.open.skip', 'reason=animating requestedRoot=' + String(item.rpid));
       return;
     }
-    CommentLog.info('ui.thread.open', 'aid=' + String(this.detail.aid) + ' root=' + String(item.rpid) +
-      ' declared=' + String(item.count) + ' preview=' + String(item.replies.length));
+    const latest: ReplyItem | null = this.findReplyItem(item.rpid);
+    const root: ReplyItem = latest !== null ? latest : item;
+    CommentLog.info('ui.thread.open', 'aid=' + String(this.detail.aid) + ' root=' + String(root.rpid) +
+      ' declared=' + String(root.count) + ' preview=' + String(root.replies.length) +
+      ' liked=' + String(root.liked));
     this.replyThreadAnimating = true;
-    this.replyThreadRoot = item;
-    this.threadAllReplies = this.mergeUniqueReplies([], item.replies);
+    this.replyThreadRoot = root;
+    this.threadAllReplies = this.mergeUniqueReplies([], root.replies);
     this.threadCursor = '';
     this.threadHasMore = true;
     this.threadPrefetchCount = 0;
-    this.replyTargetRpid = item.rpid;
-    this.replyTargetName = item.uname;
+    this.replyTargetRpid = root.rpid;
+    this.replyTargetName = root.uname;
     // 面板立即升起，网络请求在面板内以 loading 状态完成，点击反馈不再等待首批接口。
     const loading: Promise<void> = this.loadThreadReplies(true, false);
     this.getUIContext().animateTo({
@@ -1691,7 +1645,7 @@ export struct VideoDetailPage {
     }, () => {
       this.replyThreadOpen = true;
     });
-    CommentLog.info('ui.thread.shown', 'root=' + String(item.rpid) + ' rows=' +
+    CommentLog.info('ui.thread.shown', 'root=' + String(root.rpid) + ' rows=' +
       String(this.threadAllReplies.length) + ' loading=true');
     await loading;
     if (this.destroyed) return;
@@ -1988,12 +1942,12 @@ export struct VideoDetailPage {
     (async () => {
       this.shareCardItem = item;
       this.shareCardQr = await makeReplyQr(link);
-      // checkImageStatus=true 等头像/附图在线图片解码完成再截图。
-      const pixelMap: image.PixelMap = await uiContext.getComponentSnapshot()
-        .createFromBuilder((): void => { this.ReplyShareCardBuilder(); }, 400, true);
+      const pixelMap: image.PixelMap = await makeReplyShareSnapshot(uiContext,
+        (): void => { this.ReplyShareCardBuilder(); });
       await sharePixelMapAsImage(context, pixelMap, 'reply_share_' + String(item.rpid));
     })()
-      .catch(() => {
+      .catch((e: Object) => {
+        CommentLog.error('share.reply.error', 'rpid=' + String(item.rpid) + ' error=' + CommentLog.errorText(e));
         // 分享面板不可用/截图失败时兜底为复制链接，保证"转发"始终有结果。
         this.copyTextToClipboard(link);
         this.toast('分享面板暂不可用，已复制评论链接');
@@ -2025,6 +1979,7 @@ export struct VideoDetailPage {
       sourceCover: this.detail.cover,
       sourceTitle: this.detail.title,
       sourceUpName: this.detail.upName,
+      scanHint: '长按扫码查看视频',
     })
   }
 

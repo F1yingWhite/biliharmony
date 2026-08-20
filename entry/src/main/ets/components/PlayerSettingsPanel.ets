@@ -8,6 +8,7 @@ export struct PlayerSettingsPanel {
   @Prop which: number = 0;
   @Prop fullscreen: boolean = false;
   @Prop embedded: boolean = false;
+  @Prop forceDark: boolean = false;
   @Prop accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @Prop dmOpacity: number = 0.85;
@@ -42,36 +43,40 @@ export struct PlayerSettingsPanel {
   onChapterChange: (seconds: number) => void = () => {};
   onSpeedChange: (rate: number) => void = () => {};
 
+  private darkMode(): boolean {
+    return this.forceDark || this.isDark;
+  }
+
   private titleColor(): string {
-    return this.isDark ? '#FFFFFF' : '#18191C';
+    return this.darkMode() ? '#FFFFFF' : '#18191C';
   }
 
   private subColor(): string {
-    return this.isDark ? '#CCFFFFFF' : '#5A5F66';
+    return this.darkMode() ? '#CCFFFFFF' : '#5A5F66';
   }
 
   private hintColor(): string {
-    return this.isDark ? '#88FFFFFF' : '#9499A0';
+    return this.darkMode() ? '#88FFFFFF' : '#9499A0';
   }
 
   private trackColor(): string {
-    return this.isDark ? '#40FFFFFF' : '#33FFFFFF';
+    return this.darkMode() ? '#40FFFFFF' : '#33FFFFFF';
   }
 
   private unselectedBg(): string {
-    return this.isDark ? '#26272B' : '#F0F1F3';
+    return this.darkMode() ? '#26272B' : '#F0F1F3';
   }
 
   private cardBg(): string {
-    return this.isDark ? '#26272B' : '#FFFFFF';
+    return this.darkMode() ? '#26272B' : '#FFFFFF';
   }
 
   private dividerColor(): string {
-    return this.isDark ? '#33343A' : '#F0F1F3';
+    return this.darkMode() ? '#33343A' : '#F0F1F3';
   }
 
   private sectionTitleColor(): string {
-    return this.isDark ? '#F1F2F4' : '#18191C';
+    return this.darkMode() ? '#F1F2F4' : '#18191C';
   }
 
   private speedText(v: number): string {
@@ -424,10 +429,10 @@ export struct PlayerSettingsPanel {
       bottom: this.which === 3 ? 14 : 12,
     })
     .borderRadius(this.embedded ? 0 : { topLeft: 16, topRight: 16 })
-    .backgroundColor(this.embedded ? '#00000000' : (this.isDark ? '#18191C' : '#FFFFFF'))
+    .backgroundColor(this.embedded ? '#00000000' : (this.darkMode() ? '#18191C' : '#FFFFFF'))
     .backdropBlur(this.embedded ? 0 : 24)
     .border(this.embedded ? { width: 0 } :
-      { width: { top: this.which === 0 ? 0.5 : 0 }, color: this.isDark ? '#333333' : '#EEEEEE' })
+      { width: { top: this.which === 0 ? 0.5 : 0 }, color: this.darkMode() ? '#333333' : '#EEEEEE' })
     .align(this.embedded ? Alignment.Top : Alignment.Bottom)
     .transition(this.embedded ? TransitionEffect.IDENTITY :
       TransitionEffect.asymmetric(

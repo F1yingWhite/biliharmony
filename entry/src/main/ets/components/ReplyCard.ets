@@ -33,14 +33,14 @@ interface ReportButtonItem {
  */
 @Component
 export struct ReplyCard {
-  @Prop item: ReplyItem = new ReplyItem();
+  @Prop @Watch('onItemChanged') item: ReplyItem = new ReplyItem();
   @Prop showPreview: boolean = false;
   @Prop parentLabel: string = '';
   @Prop threadDepth: number = 0;
   @Prop threadGuides: Array<boolean> = [];
   @Prop threadHasChildren: boolean = false;
   @Prop threadCollapsed: boolean = false;
-  @Prop version: number = 0;
+  @Prop @Watch('onVersionChanged') version: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   /** 所属稿件/动态的 UP 主 mid；评论或回复作者是本人时名字旁标注"UP主"。 */
@@ -83,6 +83,14 @@ export struct ReplyCard {
     this.mirrorLiked = this.item.liked;
     this.mirrorDisliked = this.item.disliked;
     this.mirrorLike = this.item.like;
+  }
+
+  private onItemChanged(): void {
+    this.syncMirrorFromItem();
+  }
+
+  private onVersionChanged(): void {
+    this.syncMirrorFromItem();
   }
 
   aboutToDisappear(): void {
@@ -165,11 +173,10 @@ export struct ReplyCard {
       srcIds: ids,
       srcPreviews: previews,
     };
-    this.onNavigate(() => {
-      AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
-      AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
-      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer);
-    });
+    // 图片查看器是临时覆盖页，保留当前评论/回复详情上下文；关闭图片后应回到原位置。
+    AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
+    AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
+    AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer);
   }
 
   /** 评论附图也逐张保存窗口矩形，查看器横滑后可收回当前图片，而不是固定回首图。 */
@@ -205,7 +212,7 @@ export struct ReplyCard {
   }
 
   private threadIndent(): number {
-    return this.visualDepth() * 18;
+    return this.visualDepth() * 16;
   }
 
   /** 回复头像容器顶部为 5vp、高 38vp；所有树枝统一对齐头像中心。 */
@@ -426,7 +433,7 @@ export struct ReplyCard {
     }
   }
 
-  /** 回复树连接线：视觉采用原生评论区的实心小圆点，圆点热区可折叠子树。 */
+  /** 回复树连接线：细线只表达层级，小节点保留折叠热区但不抢头像焦点。 */
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
       Row({ space: this.threadDepth > 0 ? 8 : 10 }) {
