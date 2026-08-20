@@ -5,7 +5,7 @@ import { HttpClient, HttpResponse } from '../common/HttpClient';
 import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
 import { asArray, asObject } from '../common/Utils';
-import { BiliEmotePackage, ReplyData, ReplyPageData } from '../model/Models';
+import { BiliEmotePackage, ReplyData } from '../model/Models';
 import { ActionResult, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
@@ -157,17 +157,47 @@ export class CommentApi {
     return result;
   }
 
-  // ===== 单条评论的完整回复列表 =====
-  static async getReplyReplies(oid: number, type: number, root: number, page: number): Promise<ReplyPageData> {
+  // ===== 单条评论的完整回复列表（楼中楼） =====
+  // 老端点 /x/v2/reply/reply（pn 分页）近期被风控（-352/空列表），导致"显示有 N 条回复、点开却是空的"。
+  // 改走与主列表同款 /x/v2/reply/main：pagination_str 带 root + type:10（取根评论的全部子回复），
+  // 用 next_offset 游标翻页；匿名 -352 时回退 WBI 签名端点（与 getReplies 一致）。
+  static async getReplyReplies(oid: number, type: number, root: number, cursor: string): Promise<ReplyData> {
+    const paginationObj: Record<string, Object> = {
+      'root': root,
+      'offset': cursor,
+      'next': true,
+      'sort': 1,
+      'type': 10,
+    };
+    const pagination: string = JSON.stringify(paginationObj);
     const params: Record<string, string> = {
       'oid': String(oid),
       'type': String(type),
-      'root': String(root),
-      'pn': String(page),
-      'ps': '20',
+      'mode': '3',
+      'pagination_str': pagination,
     };
-    const resp: HttpResponse = await webGet(Api.replyReplyList, params);
-    const data: Record<string, Object> | null = getData(resp);
-    return data === null ? new ReplyPageData() : ReplyPageData.from(data);
+    const resp: HttpResponse = await webGet(Api.replyList + '/main', params, 'https://www.bilibili.com/');
+    let data: Record<string, Object> | null = getData(resp);
+    if (data === null) {
+      hilog.warn(0x0000, 'BiliApi',
+        'getReplyReplies /main failed oid=%{public}d root=%{public}d cursorLen=%{public}d; try wbi fallback',
+        oid, root, cursor.length);
+      const fallback: Record<string, string> = {
+        'oid': String(oid),
+        'type': String(type),
+        'mode': '3',
+        'pagination_str': pagination,
+        'web_location': '1315875',
+      };
+      await WbiSign.encWbi(fallback);
+      const fallbackResp: HttpResponse = await webGet(Api.replyList + '/wbi/main', fallback, 'https://www.bilibili.com/');
+      data = getData(fallbackResp);
+    }
+    if (data === null) {
+      hilog.warn(0x0000, 'BiliApi',
+        'getReplyReplies both /main and /wbi/main failed oid=%{public}d root=%{public}d', oid, root);
+      return new ReplyData();
+    }
+    return ReplyData.from(data);
   }
 }

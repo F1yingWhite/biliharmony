@@ -2,6 +2,7 @@ import { BiliEmote, BiliEmotePackage } from '../model/Models';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { EmoteImageCache } from '../common/EmoteImageCache';
 import { colorWithAlpha } from '../common/Utils';
+import { Immersive } from '../common/Immersive';
 
 /**
  * 评论表情键盘。每个表情包是一张可横向切换的页面，底部分类栏与页面下标双向同步。
@@ -20,9 +21,19 @@ export struct ReplyEmotePanel {
   @StorageProp('accentColor') accent: string = '#FB7299';
   onPackageChange: (index: number) => void = () => {};
   onSelect: (item: BiliEmote) => void = () => {};
+  private tabScroller: ListScroller = new ListScroller();
 
   aboutToAppear(): void {
     this.primeCurrentPackage();
+  }
+
+  /** 底部导航手势区高度（vp）：表情面板贴窗口底缘渲染，分类条不内缩会与系统导航条抢点击。 */
+  private bottomInset(): number {
+    try {
+      return Immersive.bottomInset();
+    } catch (e) {
+      return 0;
+    }
   }
 
   onPackagesChanged(): void {
@@ -32,6 +43,21 @@ export struct ReplyEmotePanel {
   onCurrentIndexChanged(): void {
     // 切到别的包时只预取那个包，避免一次把上百张图全拉垮。
     this.primeCurrentPackage();
+    // 滑页（或点 Tab）后把分类条滚动到选中项居中，选中态始终在可视范围内。
+    this.scrollToActiveTab();
+  }
+
+  private scrollToActiveTab(): void {
+    const index: number = this.currentIndex;
+    if (index < 0 || index >= this.packages.length) return;
+    // 延后一帧：目标 ListItem 可能刚随数据更新完成布局，立即滚动可能定位不到。
+    setTimeout(() => {
+      try {
+        this.tabScroller.scrollToIndex(index, true, ScrollAlign.CENTER);
+      } catch (e) {
+        // 滚动失败不影响选中态展示。
+      }
+    }, 40);
   }
 
   /** 预取当前正在看的那个表情包的图片（其余包等被切到再下载）。 */
@@ -64,7 +90,7 @@ export struct ReplyEmotePanel {
   }
 
   private contentHeight(): number {
-    return Math.max(190, this.panelHeight - 44);
+    return Math.max(150, this.panelHeight - 44 - this.bottomInset());
   }
 
   private emoteLabel(item: BiliEmote): string {
@@ -144,9 +170,11 @@ export struct ReplyEmotePanel {
         .duration(260)
         .onChange((index: number) => this.onPackageChange(index))
 
-        Scroll() {
-          Row({ space: 4 }) {
-            ForEach(this.packages, (pkg: BiliEmotePackage, index: number) => {
+        // 分类条用横向 List：可程序化 scrollToIndex，滑页后选中 Tab 自动滚到可见区居中；
+        // 原 Scroll+Row 只能滚动内容、无法定位，选中项会留在视野外。
+        List({ space: 4, scroller: this.tabScroller }) {
+          ForEach(this.packages, (pkg: BiliEmotePackage, index: number) => {
+            ListItem() {
               Row() {
                 if (pkg.icon.length > 0) {
                   Image(this.imageSrc(pkg.icon)).width(27).height(27).objectFit(ImageFit.Contain)
@@ -161,20 +189,21 @@ export struct ReplyEmotePanel {
               .borderRadius(8)
               .backgroundColor(index === this.currentIndex ? colorWithAlpha(this.accent, '18') : '#00000000')
               .onClick(() => this.onPackageChange(index))
-            }, (pkg: BiliEmotePackage, index: number) => pkg.title + String(index))
-          }
-          .padding({ left: 8, right: 8 })
+            }
+            .padding({ left: index === 0 ? 8 : 0, right: index === this.packages.length - 1 ? 8 : 0 })
+          }, (pkg: BiliEmotePackage, index: number) => pkg.title + String(index))
         }
         .width('100%')
         .height(44)
-        .scrollable(ScrollDirection.Horizontal)
-        // Scroll 内容不足一屏时默认居中，表情包条应靠左起始。
-        .align(Alignment.Start)
+        .listDirection(Axis.Horizontal)
         .scrollBar(BarState.Off)
+        .alignListItem(ListItemAlign.Start)
       }
     }
     .width('100%')
     .height(this.panelHeight)
+    // 底边内缩系统导航区：分类条离屏幕底缘留出可点空间，避免滑到最底部时误触返回/导航。
+    .padding({ bottom: this.bottomInset() })
     .backgroundColor(this.isDark ? '#232428' : '#F5F6F8')
     .border({ width: { top: 0.5 }, color: this.isDark ? '#333333' : '#E7E9EC' })
   }

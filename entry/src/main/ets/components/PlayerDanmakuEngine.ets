@@ -459,14 +459,17 @@ export class PlayerDanmakuEngine {
     this.cursor = low;
   }
 
-  /** 默认字号进一步增大；行高单独由 lineHeight 控制，不再用大间距假装字号。 */
+  /** 默认字号（竖屏 34 / 全屏 44）；行高单独由 lineHeight 控制，不再用大间距假装字号。 */
   private fontSize(): number {
-    return (this.fullscreen ? 40 : 30) * this.fontScale;
+    return (this.fullscreen ? 44 : 34) * this.fontScale;
   }
 
   private lineHeight(): number {
-    // 旧实现固定加 10，字号越大空隙越夸张；现在只保留 3vp 防描边相碰。
-    return this.fontSize() + 3;
+    // 基准字号之上只保留 2vp 防描边相碰；超出基准的字号增量只按 50% 计入行高（次线性）：
+    // 用户放大字号时轨道间距不成比例拉大、轨道数不骤减；缩小字号保持"行高跟随字号"的原行为。
+    const base: number = this.fullscreen ? 44 : 34;
+    const extra: number = this.fontSize() - base;
+    return base + 2 + (extra > 0 ? extra * 0.5 : extra);
   }
 
   private laneCount(): number {

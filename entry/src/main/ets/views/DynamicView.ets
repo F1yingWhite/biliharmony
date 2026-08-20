@@ -1,10 +1,13 @@
 /**
  * 动态视图：关注动态 feed（需登录）
  */
+import { image } from '@kit.ImageKit';
 import { DynamicItem, DynamicPageData, BiliEmote, RelationUserItem, RelationUserPageData } from '../model/Models';
-import { AppNavStack, NAV_DYNAMIC_DETAIL, NAV_IMAGE_VIEWER, NAV_LIVE_ROOM, NAV_LOGIN, NAV_VIDEO_DETAIL,
+import { AppNavStack, APP_ROOT_SNAPSHOT_ID, HERO_BG_SNAPSHOT_KEY, NAV_DYNAMIC_DETAIL, NAV_IMAGE_VIEWER,
+  NAV_LIVE_ROOM, NAV_LOGIN,
+  NAV_VIDEO_DETAIL,
   NAV_USER_SPACE, DynamicDetailParam, ImageViewerParam, ImageViewerSrcRect, LiveRoomParam, VideoDetailParam,
-   UserSpaceParam, NAV_BANGUMI_DETAIL, BangumiDetailParam } from '../common/AppRouter';
+    UserSpaceParam, NAV_BANGUMI_DETAIL, BangumiDetailParam } from '../common/AppRouter';
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
 import { LoadingView } from '../components/LoadingView';
@@ -36,6 +39,8 @@ class DynamicContentPart {
   key: string = '';
   /** 1 = 单行高，2 = 双行高（动态卡片行内表情放大 2 倍）。 */
   imageSize: number = 1;
+  /** 表情标签（如 [doge]）：图加载失败时回退文字，避免行内空白。 */
+  imageLabel: string = '';
 }
 
 // 表情拆分结果按动态 id 缓存（内容不可变），避免每次 build 重算 O(内容×表情数) 扫描。
@@ -89,6 +94,7 @@ function contentPartsOf(item: DynamicItem, emoteVersion: number): Array<DynamicC
     const emotePart: DynamicContentPart = new DynamicContentPart();
     emotePart.image = found !== null ? found.displayUrl() : fallbackUrl;
     emotePart.imageSize = found !== null ? found.size : 1;
+    emotePart.imageLabel = found !== null ? found.text : fallbackToken;
     emotePart.key = item.dynId + '-e' + String(keyIndex++);
     result.push(emotePart);
     rest = rest.substring(foundAt + (found !== null ? found.text.length : fallbackToken.length));
@@ -125,6 +131,8 @@ export struct DynCard {
   @State actionBusy: boolean = false;
   /** 表情图本地缓存映射：原网络 URL → cacheDir 内本地路径（落盘缓存，离线可显示）。 */
   @State emoteLocal: Map<string, string> = new Map<string, string>();
+  /** 确认加载失败的表情 URL：回退渲染 [表情名] 文字，避免行内空白块。 */
+  @State emoteFailed: Set<string> = new Set<string>();
   /** 图片宫格可用宽（onAreaChange 实测），用于按官方三列正方形单元计算高度。 */
   @State gridWidth: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
@@ -164,13 +172,16 @@ export struct DynCard {
     const parts: Array<DynamicContentPart> = contentPartsOf(this.item, this.emoteVer);
     for (let i: number = 0; i < parts.length; i++) {
       const image: string = parts[i].image;
-      if (image.length === 0 || this.emoteLocal.has(image)) continue;
+      if (image.length === 0 || this.emoteLocal.has(image) || this.emoteFailed.has(image)) continue;
       EmoteImageCache.ensure(image).then((local: string) => {
-        // 与 image 相同表示命中失败回退网络；只有拿到了本地路径才更新。
+        // 与 image 相同表示下载失败；只有拿到了本地路径才更新，否则记失败走 [表情名] 回退。
         if (local !== image) {
           this.emoteLocal.set(image, local);
+        } else {
+          this.emoteFailed.add(image);
         }
       }).catch(() => {
+        this.emoteFailed.add(image);
       });
     }
   }
@@ -411,15 +422,16 @@ export struct DynCard {
           rect = {
             x: this.getUIContext().px2vp(r.windowOffset.x),
             y: this.getUIContext().px2vp(r.windowOffset.y),
-            w: r.size.width,
-            h: r.size.height,
+            // size 同样是 px（SDK d.ts 标注 Unit: px），漏转会把放大起点位移约一个密度倍率
+            w: this.getUIContext().px2vp(r.size.width),
+            h: this.getUIContext().px2vp(r.size.height),
           };
         }
       } catch (e) {
         // 取不到矩形则退化为纯淡入。
       }
       const viewer: ImageViewerParam = { images: images, initialIndex: index, srcRect: rect };
-      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
+      this.pushViewer(viewer);
       return;
     }
     const transitionId: string = this.imgTransitionId(item.dynId, index);
@@ -428,6 +440,27 @@ export struct DynCard {
     this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
       AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
     });
+  }
+
+  /** 看图页 push（关默认转场）。根页面场景先截根页图垫底：push 后根页 feed 不再渲染，
+   *  没有截图会透出纯白窗口底，hero 放大/收合动画显得"背景全白"。 */
+  private pushViewer(viewer: ImageViewerParam): void {
+    const pushNow = (): void => {
+      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
+    };
+    if (AppNavStack.getAllPathName().length === 0) {
+      try {
+        this.getUIContext().getComponentSnapshot().get(APP_ROOT_SNAPSHOT_ID)
+          .then((pix: image.PixelMap) => {
+            AppStorage.setOrCreate(HERO_BG_SNAPSHOT_KEY, pix);
+            pushNow();
+          }).catch(() => pushNow());
+        return;
+      } catch (e) {
+        // 截图失败退化为直接 push。
+      }
+    }
+    pushNow();
   }
 
   @Builder
@@ -439,23 +472,22 @@ export struct DynCard {
           this.openItemDetail(item);
         })
       if (item.content.length > 0) {
-        // 行内底对齐：与评论区 ReplyRichText 一致，表情图底部与文字行底对齐。
-        Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.End }) {
+        // 行内流：与评论区一致，表情随文字同流换行（Flex 独立 item 会把表情挤到新行），底部对齐。
+        Text() {
           ForEach(contentPartsOf(item, this.emoteVer), (part: DynamicContentPart) => {
-            if (part.image.length > 0) {
-              Image(this.emoteSrc(part.image)).width(part.imageSize > 1 ? 46 : 23).height(part.imageSize > 1 ? 46 : 23).objectFit(ImageFit.Contain).margin({ right: 2 })
-                // 表情加载失败诊断：记录实际使用的 src（本地缓存路径或网络 URL），定位"加载失败留空白"。
-                .onError(() => {
-                  hilog.warn(0x0000, 'BiliEmote', 'dynamic emote image load failed: %{public}s', this.emoteSrc(part.image));
-                })
+            if (part.image.length > 0 && this.emoteFailed.has(part.image)) {
+              Span(part.imageLabel.length > 0 ? part.imageLabel : '[表情]')
+            } else if (part.image.length > 0) {
+              ImageSpan(this.emoteSrc(part.image)).width(part.imageSize > 1 ? 46 : 23).height(part.imageSize > 1 ? 46 : 23).objectFit(ImageFit.Contain).verticalAlign(ImageSpanAlignment.BOTTOM)
             } else {
-              Text(part.text).fontSize(13).lineHeight(20)
-                .constraintSize({ minHeight: 20 })
-                .fontColor(this.isDark ? '#D8D8DC' : '#303236')
+              Span(part.text)
             }
           }, (part: DynamicContentPart) => 'forward-' + part.key)
         }
+        .fontSize(13)
+        .lineHeight(20)
         .width('100%')
+        .fontColor(this.isDark ? '#D8D8DC' : '#303236')
         .onClick(() => {
           this.openItemDetail(item);
         })
@@ -547,21 +579,22 @@ export struct DynCard {
 
       // 内容
       if (this.item.content.length > 0) {
-        // 行内底对齐：与评论区 ReplyRichText 一致，表情图底部与文字行底对齐。
-        Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.End }) {
+        // 行内流：与评论区一致，表情随文字同流换行（Flex 独立 item 会把表情挤到新行），底部对齐。
+        Text() {
           ForEach(contentPartsOf(this.item, this.emoteVer), (part: DynamicContentPart) => {
-            if (part.image.length > 0) {
-              Image(this.emoteSrc(part.image)).width(part.imageSize > 1 ? 50 : 25).height(part.imageSize > 1 ? 50 : 25).objectFit(ImageFit.Contain).margin({ right: 2 })
-                .onError(() => {
-                  hilog.warn(0x0000, 'BiliEmote', 'dynamic emote image load failed: %{public}s', this.emoteSrc(part.image));
-                })
+            if (part.image.length > 0 && this.emoteFailed.has(part.image)) {
+              Span(part.imageLabel.length > 0 ? part.imageLabel : '[表情]')
+            } else if (part.image.length > 0) {
+              ImageSpan(this.emoteSrc(part.image)).width(part.imageSize > 1 ? 50 : 25).height(part.imageSize > 1 ? 50 : 25).objectFit(ImageFit.Contain).verticalAlign(ImageSpanAlignment.BOTTOM)
             } else {
-              Text(part.text).fontSize(14).fontColor(this.isDark ? '#D0D0D0' : '#222222').lineHeight(21)
-                .constraintSize({ minHeight: 21 })
+              Span(part.text)
             }
           }, (part: DynamicContentPart) => part.key)
         }
+        .fontSize(14)
+        .lineHeight(21)
         .width('100%')
+        .fontColor(this.isDark ? '#D0D0D0' : '#222222')
         .onClick(() => this.openDetail())
       }
 

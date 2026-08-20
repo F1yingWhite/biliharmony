@@ -51,9 +51,17 @@ export class EmoteImageCache {
       return url;
     }
     try {
-      const st: fs.Stat | null = fs.statSync(path);
-      if (st !== null && st.size > 0) {
+      // 命中校验用魔数而不是文件大小：极小的合法 GIF/PNG 会被 size>64 误杀，
+      // 命中路径反复删+重下，弱网下表情永远停留在"加载不出来"。
+      fs.statSync(path);
+      if (EmoteImageCache.isImageFile(path)) {
         return path;
+      }
+      // 历史版本落盘未校验，可能把 CDN 的 JSON 错误体存成假图片（表情永久空白的根因之一）：
+      // 魔数不符的文件直接删掉重新下载。
+      try {
+        fs.unlinkSync(path);
+      } catch (e) {
       }
     } catch (e) {
       // 不存在则继续下载
@@ -88,6 +96,10 @@ export class EmoteImageCache {
         readTimeout: 8000,
       });
       request.destroy();
+      // 404/502 的 JSON 错误体此前也会被写盘、之后永久命中"已缓存"，把表情钉死成空白。
+      if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        return url;
+      }
       // 真机可能返回裸 ArrayBuffer，模拟器偶返回 Uint8Array（视图），两者都是二进制；
       // 只有“真字符串”响应才放弃落盘。此前用 ArrayBuffer.isView() 判断误伤了裸 ArrayBuffer，
       // 导致真机永远不落盘。
@@ -103,6 +115,9 @@ export class EmoteImageCache {
         return url;
       }
       if (buf.byteLength === 0) {
+        return url;
+      }
+      if (!EmoteImageCache.isImageBytes(buf)) {
         return url;
       }
       const dir: string = EmoteImageCache.dirPath();
@@ -121,6 +136,47 @@ export class EmoteImageCache {
     } catch (e) {
       return url;
     }
+  }
+
+  /** 图片魔数校验：只有真正的图片二进制才允许落盘。 */
+  private static isImageBytes(buf: ArrayBuffer): boolean {
+    if (buf.byteLength < 12) {
+      return false;
+    }
+    return EmoteImageCache.matchesImageMagic(new Uint8Array(buf));
+  }
+
+  /** 已缓存文件是否真图片：只读文件头 16 字节，不整文件进内存。 */
+  static isImageFile(path: string): boolean {
+    let file: fs.File | null = null;
+    try {
+      file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      const buf: ArrayBuffer = new ArrayBuffer(16);
+      const len: number = fs.readSync(file.fd, buf, { offset: 0 });
+      if (len < 12) {
+        return false;
+      }
+      return EmoteImageCache.matchesImageMagic(new Uint8Array(buf, 0, len));
+    } catch (e) {
+      return false;
+    } finally {
+      if (file !== null) {
+        try {
+          fs.closeSync(file);
+        } catch (e) {
+        }
+      }
+    }
+  }
+
+  private static matchesImageMagic(b: Uint8Array): boolean {
+    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) return true; // PNG
+    if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return true; // GIF
+    if (b[0] === 0xFF && b[1] === 0xD8) return true; // JPEG
+    if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+      b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return true; // WebP
+    if (b[0] === 0x42 && b[1] === 0x4D) return true; // BMP
+    return false;
   }
 
   private static dirPath(): string {

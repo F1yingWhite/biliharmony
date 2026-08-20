@@ -113,7 +113,8 @@ export struct ReplyComposer {
       this.editorController.addImageSpan(emote.url, {
         imageStyle: {
           size: [22, 22],
-          verticalAlign: ImageSpanAlignment.CENTER,
+          // 与评论渲染区一致：表情底部对齐，编辑预览所见即所得。
+          verticalAlign: ImageSpanAlignment.BOTTOM,
           objectFit: ImageFit.Contain,
         },
       });

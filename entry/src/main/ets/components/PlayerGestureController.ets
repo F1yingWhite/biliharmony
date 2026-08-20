@@ -3,6 +3,7 @@
  * 从 PlayerView 抽出，只保留手势数学与本地模式，UI 状态由回调写回组件 @State。
  */
 import { Immersive } from '../common/Immersive';
+import { AppTheme } from '../common/AppTheme';
 
 export class PlayerGestureController {
   panStartTime: number = 0;
@@ -42,8 +43,10 @@ export class PlayerGestureController {
   }
 
   loadInitials(): void {
-    const brightness: number = Immersive.windowBrightness();
-    if (brightness >= 0) this.gestureBrightness = brightness;
+    let brightness: number = Immersive.windowBrightness();
+    // 窗口跟随系统（-1）时回退到上次手势设置的亮度：否则每个视频首次上下滑都会从默认 50% 起跳。
+    if (brightness < 0) brightness = AppTheme.loadLastBrightness();
+    if (brightness >= 0) this.gestureBrightness = Math.max(0.02, Math.min(1, brightness));
   }
 
   beginPan(eventX: number, viewWidth: number, playheadSec: number, duration: number): void {
