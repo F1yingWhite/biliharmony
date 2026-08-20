@@ -1,0 +1,1581 @@
+{
+  "captured_at": "2026-08-20T15:24:00+08:00",
+  "bfs_extended_at": "2026-08-20T15:42:00+08:00",
+  "deduplicated_against": "entry/src/main/ets/common/Constants.ets",
+  "default_hosts": {
+    "web": "https://api.bilibili.com",
+    "live": "https://api.live.bilibili.com",
+    "im": "https://api.vc.bilibili.com",
+    "message": "https://message.bilibili.com"
+  },
+  "endpoints": [
+    {
+      "page": "home",
+      "method": "GET",
+      "host": "web",
+      "path": "/pgc/web/season/home/top",
+      "params": [
+        "season_type=1"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "array"
+      ],
+      "function": "获取首页番剧顶部推荐列表"
+    },
+    {
+      "page": "home",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/web-interface/index/ogv/rcmd",
+      "params": [
+        "request_cnt",
+        "brush",
+        "fresh_type"
+      ],
+      "auth": "public_or_experiment",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -400,
+      "note": "Bundle-confirmed; minimal public parameters were insufficient.",
+      "function": "获取首页专业内容（OGV）推荐"
+    },
+    {
+      "page": "home",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/web-interface/history/continuation",
+      "params": [
+        "his_exp"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "source_static",
+      "function": "获取首页继续观看内容"
+    },
+    {
+      "page": "home",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/feed/nav",
+      "params": [],
+      "auth": "cookie_optional",
+      "evidence": "source_static",
+      "function": "获取首页动态导航信息"
+    },
+    {
+      "page": "home",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/live-up",
+      "params": [],
+      "auth": "cookie_optional",
+      "evidence": "source_static",
+      "function": "获取关注用户的直播状态"
+    },
+    {
+      "page": "home",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/product/user/recommendation/follow-up/recent/whitelist/status",
+      "params": [],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "查询近期关注推荐功能的白名单状态"
+    },
+    {
+      "page": "home",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/v2/history/toview/web",
+      "params": [],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取稍后再看列表"
+    },
+    {
+      "page": "home",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/v3/fav/folder/list4navigate",
+      "params": [],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取导航栏收藏夹列表"
+    },
+    {
+      "page": "home",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/v3/fav/resource/list4navigate",
+      "params": [
+        "platform=web",
+        "media_id"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取导航栏收藏夹内容"
+    },
+    {
+      "page": "search",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/web-interface/wbi/search/square",
+      "params": [
+        "limit",
+        "platform=web",
+        "wts",
+        "w_rid"
+      ],
+      "auth": "wbi",
+      "evidence": "source_static",
+      "function": "获取搜索框热词与推荐词"
+    },
+    {
+      "page": "search",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/web-interface/search/egg",
+      "params": [
+        "egg_id"
+      ],
+      "auth": "public",
+      "evidence": "source_static",
+      "function": "获取搜索彩蛋配置"
+    },
+    {
+      "page": "search",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/article/metas",
+      "params": [
+        "ids=comma-separated"
+      ],
+      "auth": "public",
+      "evidence": "source_static",
+      "function": "批量获取专栏文章元数据"
+    },
+    {
+      "page": "video",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/web-interface/view/detail/part",
+      "params": [
+        "aid",
+        "bvid",
+        "cid",
+        "platform=web"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "ai_chapter"
+      ],
+      "function": "获取视频分段与 AI 章节信息"
+    },
+    {
+      "page": "video",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/web-interface/view/conclusion/judge",
+      "params": [
+        "bvid",
+        "cid",
+        "up_mid"
+      ],
+      "auth": "content_dependent",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -403,
+      "function": "查询视频 AI 总结是否可用"
+    },
+    {
+      "page": "video",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/web-interface/archive/custom/config",
+      "params": [
+        "aid",
+        "bvid"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -404,
+      "note": "Valid endpoint; sample video had no custom configuration.",
+      "function": "获取视频自定义播放配置"
+    },
+    {
+      "page": "video",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/web-interface/archive/desc2",
+      "params": [
+        "aid",
+        "page",
+        "gaia_source=main_web"
+      ],
+      "auth": "public",
+      "evidence": "source_static",
+      "function": "分页获取视频长简介"
+    },
+    {
+      "page": "video",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/web-interface/coin/today/exp",
+      "params": [],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "查询当日投币经验值"
+    },
+    {
+      "page": "video",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/web-interface/view/uplikeimg",
+      "params": [
+        "aid",
+        "vmid"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取 UP 主点赞动画素材"
+    },
+    {
+      "page": "video",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/note/is_forbid",
+      "params": [
+        "aid"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "forbid_note_entrance"
+      ],
+      "function": "查询视频笔记入口是否禁用"
+    },
+    {
+      "page": "video",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/player/videoshot",
+      "params": [
+        "aid",
+        "index=1"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "image",
+        "img_x_len",
+        "img_x_size",
+        "img_y_len",
+        "img_y_size",
+        "index",
+        "indexs",
+        "pvdata",
+        "video_shots"
+      ],
+      "function": "获取视频预览缩略图与时间索引"
+    },
+    {
+      "page": "video",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/relation/relations",
+      "params": [
+        "fids=comma-separated"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "批量查询与用户的关注关系"
+    },
+    {
+      "page": "video",
+      "method": "POST",
+      "host": "web",
+      "path": "/x/relation/prompt",
+      "params": [
+        "fid",
+        "btype",
+        "csrf"
+      ],
+      "auth": "login_csrf",
+      "content_type": "application/x-www-form-urlencoded",
+      "evidence": "source_static",
+      "function": "上报关注提示交互"
+    },
+    {
+      "page": "video",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/v1/contract/layer_info",
+      "params": [
+        "up_mid",
+        "source"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取 UP 主契约浮层信息"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/feed/all/update",
+      "params": [
+        "type",
+        "update_baseline"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "查询综合动态流的新内容数量"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/feed/hot",
+      "params": [
+        "page",
+        "fake_mid",
+        "features?"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "has_more",
+        "items",
+        "offset",
+        "update_baseline",
+        "update_num"
+      ],
+      "function": "获取热门动态流"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/feed/topic",
+      "params": [
+        "topic_id",
+        "page_size",
+        "offset",
+        "sort_by",
+        "source=Web"
+      ],
+      "auth": "public",
+      "evidence": "source_static",
+      "function": "获取话题动态流"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/uplist",
+      "params": [
+        "offset",
+        "platform=web"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取动态页关注用户列表"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/detail/forward",
+      "params": [
+        "id",
+        "offset"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "source_static",
+      "function": "分页获取动态转发列表"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/detail/forward/item",
+      "params": [
+        "id",
+        "timezone_offset"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "source_static",
+      "function": "获取单条转发动态详情"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/detail/pic",
+      "params": [
+        "id"
+      ],
+      "auth": "public",
+      "evidence": "source_static",
+      "function": "获取动态图片详情"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/forward/preview",
+      "params": [
+        "id or type+rid"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "source_static",
+      "function": "获取动态转发预览"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/mention/search",
+      "params": [
+        "keyword?"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "搜索动态中可提及的用户"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/name-to-uid",
+      "params": [
+        "names=comma-separated"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "source_static",
+      "function": "批量将用户名解析为 UID"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/portal",
+      "params": [
+        "up_list_more=1?"
+      ],
+      "auth": "login",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -101,
+      "function": "获取动态页入口与聚合数据"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/dynamic/feed/create/infos",
+      "params": [
+        "scene-dependent"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取发布动态所需的初始化信息"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/dynamic/feed/create/init_check",
+      "params": [
+        "scene"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "检查当前账号能否发布动态"
+    },
+    {
+      "page": "dynamic",
+      "method": "POST",
+      "host": "web",
+      "path": "/x/dynamic/feed/create/submit_check",
+      "params": [
+        "content",
+        "pics",
+        "attach_card",
+        "scene",
+        "create_option",
+        "dyn_id_str?"
+      ],
+      "auth": "login_csrf",
+      "evidence": "source_static",
+      "function": "提交动态内容发布前检查"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/dynamic/feed/edit/infos",
+      "params": [
+        "scene",
+        "dyn_id"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取编辑动态所需的信息"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/dynamic/feed/dyn/banner",
+      "params": [
+        "platform=1",
+        "position=web动态"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "source_static",
+      "function": "获取动态页横幅配置"
+    },
+    {
+      "page": "dynamic",
+      "method": "POST",
+      "host": "web",
+      "path": "/x/dynamic/feed/dyn/private_pub_setting",
+      "params": [
+        "platform=web",
+        "object_id",
+        "action",
+        "csrf"
+      ],
+      "auth": "login_csrf",
+      "evidence": "source_static",
+      "function": "修改动态私密发布设置"
+    },
+    {
+      "page": "dynamic",
+      "method": "POST",
+      "host": "web",
+      "path": "/x/dynamic/feed/operate/remove",
+      "params": [
+        "platform=web",
+        "dynamic payload",
+        "csrf"
+      ],
+      "auth": "login_csrf",
+      "evidence": "source_static",
+      "function": "删除动态"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/timing/draft/list",
+      "params": [],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取定时发布草稿列表"
+    },
+    {
+      "page": "dynamic",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/topic/pub/rcmd/search",
+      "params": [
+        "keywords",
+        "upload_id"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "搜索发布动态时的推荐话题"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/space/v2/myinfo",
+      "params": [
+        "web_location=333.1387"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取当前登录用户的空间资料"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/space/wbi/acc/relation",
+      "params": [
+        "mid",
+        "web_location=333.1387",
+        "wts",
+        "w_rid"
+      ],
+      "auth": "wbi_cookie_optional",
+      "evidence": "source_static",
+      "function": "获取空间用户的关注关系"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/space/setting",
+      "params": [
+        "mid",
+        "web_location=333.1387"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "index_order",
+        "privacy",
+        "show_nft_switch"
+      ],
+      "function": "获取用户空间展示与隐私设置"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/space/navnum",
+      "params": [
+        "mid",
+        "web_location=333.1387"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "album",
+        "article",
+        "audio",
+        "bangumi",
+        "channel",
+        "cinema",
+        "favourite",
+        "opus",
+        "playlist",
+        "pugv",
+        "season_num",
+        "tag",
+        "video"
+      ],
+      "function": "获取用户空间各内容分区数量"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/space/upstat",
+      "params": [
+        "mid",
+        "web_location=333.1387"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "source_static",
+      "function": "获取 UP 主播放与阅读统计"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/space/masterpiece",
+      "params": [
+        "vmid"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "array"
+      ],
+      "function": "获取用户空间代表作"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/space/coin/video",
+      "params": [
+        "vmid"
+      ],
+      "auth": "public",
+      "evidence": "source_static",
+      "function": "获取用户最近投币的视频"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/space/like/video",
+      "params": [
+        "vmid"
+      ],
+      "auth": "public",
+      "evidence": "source_static",
+      "function": "获取用户最近点赞的视频"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/space/reservation",
+      "params": [
+        "vmid"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": null,
+      "function": "获取用户空间预约活动"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/opus/feed/space",
+      "params": [
+        "host_mid",
+        "page",
+        "offset",
+        "type"
+      ],
+      "auth": "wbi_cookie_optional",
+      "evidence": "source_static",
+      "function": "获取用户空间图文动态流"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/opus/feed/fav",
+      "params": [
+        "page",
+        "page_size",
+        "timezone_offset"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取已收藏的图文动态"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-dynamic/v1/feed/space/search",
+      "params": [
+        "page-defined search params"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "source_static",
+      "function": "搜索用户空间动态"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-space/home/seasons_series",
+      "params": [
+        "mid",
+        "page_size",
+        "page_num"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "items_lists"
+      ],
+      "function": "获取空间首页合集与系列"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-space/seasons_series_list",
+      "params": [
+        "mid",
+        "page_size",
+        "page_num"
+      ],
+      "auth": "public",
+      "evidence": "source_static",
+      "function": "分页获取空间合集与系列列表"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/web-space/seasons_archives_list",
+      "params": [
+        "mid",
+        "season_id",
+        "sort_reverse",
+        "page_size",
+        "page_num"
+      ],
+      "auth": "public",
+      "evidence": "source_static",
+      "function": "分页获取合集内视频"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/space/wbi/article",
+      "params": [
+        "mid",
+        "ps",
+        "pn",
+        "platform=web",
+        "wts",
+        "w_rid"
+      ],
+      "auth": "wbi",
+      "evidence": "source_static",
+      "function": "分页获取用户投稿的专栏文章"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/article/up/lists",
+      "params": [
+        "mid",
+        "sort"
+      ],
+      "auth": "wbi",
+      "evidence": "source_static",
+      "function": "获取 UP 主的专栏文集"
+    },
+    {
+      "page": "space",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/space/fav/nav",
+      "params": [
+        "mid"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "source_static",
+      "function": "获取用户空间收藏导航"
+    },
+    {
+      "page": "space",
+      "method": "POST",
+      "host": "web",
+      "path": "/x/v3/fav/statistics/count",
+      "params": [
+        "rid",
+        "r_type",
+        "cnt_type"
+      ],
+      "auth": "cookie_optional",
+      "content_type": "application/x-www-form-urlencoded",
+      "evidence": "source_static",
+      "function": "统计指定资源的收藏次数"
+    },
+    {
+      "page": "live",
+      "method": "GET",
+      "host": "live",
+      "path": "/room/v2/Index/getNavigate",
+      "params": [],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "area_id",
+        "area_name",
+        "color",
+        "img",
+        "is_show_sub",
+        "sub_title"
+      ],
+      "function": "获取直播分区导航"
+    },
+    {
+      "page": "live",
+      "method": "GET",
+      "host": "live",
+      "path": "/room/v2/Index/getHoverInfo",
+      "params": [
+        "area_id"
+      ],
+      "auth": "public",
+      "evidence": "source_static",
+      "function": "获取直播分区悬浮信息"
+    },
+    {
+      "page": "live",
+      "method": "GET",
+      "host": "live",
+      "path": "/room/v2/Index/getNewRankTop",
+      "params": [
+        "type=guard"
+      ],
+      "auth": "public",
+      "evidence": "source_static",
+      "function": "获取直播分区排行榜"
+    },
+    {
+      "page": "live",
+      "method": "GET",
+      "host": "live",
+      "path": "/xlive/web-interface/v1/index/getList",
+      "params": [
+        "platform=web"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "activity_card_v2",
+        "area_entrance_v2",
+        "banner",
+        "cover_source",
+        "recommend_room_list",
+        "room_list"
+      ],
+      "function": "获取直播首页推荐与分区房间列表"
+    },
+    {
+      "page": "live",
+      "method": "GET",
+      "host": "live",
+      "path": "/xlive/web-interface/v1/index/getHotRankList",
+      "params": [],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "count",
+        "list"
+      ],
+      "function": "获取直播热门排行榜"
+    },
+    {
+      "page": "live",
+      "method": "GET",
+      "host": "live",
+      "path": "/xlive/web-interface/v1/index/getPendantsByRoomIds",
+      "params": [
+        "ids=repeated"
+      ],
+      "auth": "public",
+      "evidence": "source_static",
+      "function": "批量获取直播间角标与挂件"
+    },
+    {
+      "page": "live",
+      "method": "GET",
+      "host": "live",
+      "path": "/xlive/web-interface/v1/index/getAreaMask",
+      "params": [
+        "room_id",
+        "area_id",
+        "ruid"
+      ],
+      "auth": "public",
+      "evidence": "source_static",
+      "function": "获取直播分区遮罩与限制信息"
+    },
+    {
+      "page": "live",
+      "method": "GET",
+      "host": "live",
+      "path": "/xlive/web-ucenter/user/get_user_info",
+      "params": [],
+      "auth": "login",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -101,
+      "function": "获取当前用户的直播中心资料"
+    },
+    {
+      "page": "live",
+      "method": "GET",
+      "host": "live",
+      "path": "/xlive/web-ucenter/v1/room/GetHomePageConfig",
+      "params": [
+        "room_id"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "source_static",
+      "function": "获取直播间主页配置"
+    },
+    {
+      "page": "live",
+      "method": "GET",
+      "host": "live",
+      "path": "/xlive/web-ucenter/v1/labs/InfoPlugs",
+      "params": [],
+      "auth": "cookie_optional",
+      "evidence": "source_static",
+      "function": "获取直播实验功能插件配置"
+    },
+    {
+      "page": "live",
+      "method": "GET",
+      "host": "live",
+      "path": "/xlive/open-interface/v1/fetch_client_resource",
+      "params": [
+        "business=live_web_body_style:0"
+      ],
+      "auth": "public",
+      "evidence": "source_static",
+      "function": "获取直播网页客户端资源配置"
+    },
+    {
+      "page": "popular",
+      "method": "GET",
+      "host": "web",
+      "path": "/pgc/season/rank/web/list",
+      "params": [
+        "day=3",
+        "season_type"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "list",
+        "note",
+        "season_type"
+      ],
+      "function": "获取番剧季度排行榜"
+    },
+    {
+      "page": "popular",
+      "method": "GET",
+      "host": "web",
+      "path": "/pgc/web/rank/list",
+      "params": [
+        "day=3",
+        "season_type"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "list",
+        "note"
+      ],
+      "function": "获取影视内容排行榜"
+    },
+    {
+      "page": "channel",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/web-interface/region/feed/rcmd",
+      "params": [
+        "display_id",
+        "request_cnt",
+        "from_region",
+        "device=web",
+        "plat=30"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "archives"
+      ],
+      "function": "获取频道分区推荐视频流"
+    },
+    {
+      "page": "channel",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/web-show/region/banner",
+      "params": [
+        "region_id"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "region_banner_list"
+      ],
+      "function": "获取频道分区横幅"
+    },
+    {
+      "page": "history",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/web-interface/history/search",
+      "params": [
+        "pn",
+        "keyword",
+        "business=all"
+      ],
+      "auth": "login",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -101,
+      "function": "搜索观看历史"
+    },
+    {
+      "page": "history",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/v2/history/shadow",
+      "params": [
+        "jsonp=jsonp"
+      ],
+      "auth": "login",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -101,
+      "function": "查询观看历史暂停状态"
+    },
+    {
+      "page": "history",
+      "method": "POST",
+      "host": "web",
+      "path": "/x/v2/history/shadow/set",
+      "params": [
+        "csrf",
+        "switch=true",
+        "jsonp=jsonp"
+      ],
+      "auth": "login_csrf",
+      "content_type": "application/x-www-form-urlencoded",
+      "evidence": "source_static",
+      "function": "设置是否暂停记录观看历史"
+    },
+    {
+      "page": "bangumi",
+      "method": "GET",
+      "host": "web",
+      "path": "/pgc/season/web/related/recommend",
+      "params": [
+        "season_id"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "relates",
+        "season"
+      ],
+      "function": "获取相关番剧推荐"
+    },
+    {
+      "page": "bangumi",
+      "method": "GET",
+      "host": "web",
+      "path": "/pgc/view/web/simple/season",
+      "params": [
+        "season_id"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "activity",
+        "cover",
+        "media_id",
+        "new_ep",
+        "rights",
+        "season_id",
+        "stat",
+        "title",
+        "up_info"
+      ],
+      "function": "获取番剧季度基础信息"
+    },
+    {
+      "page": "bangumi",
+      "method": "GET",
+      "host": "web",
+      "path": "/pgc/view/web/ep/page",
+      "params": [
+        "ep_id",
+        "page_index=comma-separated?"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "locator",
+        "sections",
+        "sections_meta"
+      ],
+      "function": "按剧集获取番剧定位与分区信息"
+    },
+    {
+      "page": "bangumi",
+      "method": "GET",
+      "host": "web",
+      "path": "/pgc/web/season/section",
+      "params": [
+        "season_id"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "main_section",
+        "section"
+      ],
+      "function": "获取番剧正片与附加分集结构"
+    },
+    {
+      "page": "bangumi",
+      "method": "GET",
+      "host": "web",
+      "path": "/pgc/player/web/check",
+      "params": [
+        "season_id",
+        "ep_id"
+      ],
+      "auth": "login_or_entitlement",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -401,
+      "function": "检查番剧剧集播放权限"
+    },
+    {
+      "page": "bangumi",
+      "method": "GET",
+      "host": "web",
+      "path": "/pgc/player/web/v2/playurl",
+      "params": [
+        "ep_id",
+        "cid",
+        "qn",
+        "fnval",
+        "fnver=0",
+        "fourk=1"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "exp_info",
+        "play_check",
+        "play_view_business_info",
+        "video_info",
+        "view_info"
+      ],
+      "function": "获取番剧剧集播放地址与清晰度信息"
+    },
+    {
+      "page": "player",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/web-interface/wbi/view/detail",
+      "params": [
+        "aid or bvid",
+        "need_view=1",
+        "isGaiaAvoided",
+        "wts",
+        "w_rid"
+      ],
+      "auth": "wbi_cookie_optional",
+      "evidence": "source_static",
+      "function": "获取视频详情、相关推荐与互动信息"
+    },
+    {
+      "page": "player",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/v2/dm/panel",
+      "params": [
+        "oid",
+        "pid",
+        "type=1"
+      ],
+      "auth": "login",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -101,
+      "function": "获取视频弹幕面板配置"
+    },
+    {
+      "page": "player",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/v2/dm/history/index",
+      "params": [
+        "month=YYYY-MM",
+        "type=1",
+        "oid"
+      ],
+      "auth": "login",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -101,
+      "function": "获取指定月份存在历史弹幕的日期"
+    },
+    {
+      "page": "player",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/v2/dm/thumbup/detail",
+      "params": [
+        "dmid",
+        "oid"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "runtime_public_200",
+      "data_keys": null,
+      "function": "查询单条弹幕的点赞详情"
+    },
+    {
+      "page": "player",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/v2/dm/thumbup/stats",
+      "params": [
+        "oid",
+        "ids"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "dmid-keyed objects"
+      ],
+      "function": "批量查询弹幕点赞统计"
+    },
+    {
+      "page": "message",
+      "method": "GET",
+      "host": "im",
+      "path": "/session_svr/v1/session_svr/new_sessions",
+      "params": [
+        "cursor parameters",
+        "build=0",
+        "mobi_app=web",
+        "wts",
+        "w_rid"
+      ],
+      "auth": "login_wbi",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -101,
+      "function": "分页获取最新私信会话"
+    },
+    {
+      "page": "message",
+      "method": "GET",
+      "host": "im",
+      "path": "/session_svr/v1/session_svr/single_unread",
+      "params": [
+        "unread_type=0",
+        "build=0",
+        "mobi_app=web"
+      ],
+      "auth": "login",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -101,
+      "function": "获取单聊未读消息数"
+    },
+    {
+      "page": "message",
+      "method": "GET",
+      "host": "im",
+      "path": "/session_svr/v1/session_svr/my_group_unread",
+      "params": [],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取群聊未读消息数"
+    },
+    {
+      "page": "message",
+      "method": "GET",
+      "host": "im",
+      "path": "/session_svr/v1/session_svr/session_detail",
+      "params": [
+        "talker_id",
+        "session_type"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取私信会话详情"
+    },
+    {
+      "page": "message",
+      "method": "GET",
+      "host": "im",
+      "path": "/x/im/anti_disturb/get_disturb",
+      "params": [
+        "scene"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取私信免打扰设置"
+    },
+    {
+      "page": "message",
+      "method": "GET",
+      "host": "im",
+      "path": "/x/im/auto_reply/get_reply_text",
+      "params": [
+        "type[]",
+        "build=0",
+        "mobi_app=web"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取私信自动回复文案"
+    },
+    {
+      "page": "message",
+      "method": "GET",
+      "host": "im",
+      "path": "/x/im/feed/infoweb",
+      "params": [
+        "aids?",
+        "ep_ids?",
+        "article_ids?",
+        "build=0",
+        "mobi_app=web"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "批量获取私信内分享内容的卡片信息"
+    },
+    {
+      "page": "message",
+      "method": "GET",
+      "host": "im",
+      "path": "/x/im/link_setting/get_block_words",
+      "params": [],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取私信链接屏蔽词配置"
+    },
+    {
+      "page": "message",
+      "method": "GET",
+      "host": "im",
+      "path": "/x/im/web/toast_msg",
+      "params": [
+        "build=0",
+        "mobi_app=web"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取私信网页提示消息"
+    },
+    {
+      "page": "message",
+      "method": "GET",
+      "host": "message",
+      "path": "/x/sys-msg/query_unified_notify",
+      "params": [
+        "page_size=10",
+        "build=0",
+        "mobi_app=web"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取统一系统通知"
+    },
+    {
+      "page": "message",
+      "method": "GET",
+      "host": "message",
+      "path": "/x/sys-msg/query_user_notify",
+      "params": [
+        "page_size=20",
+        "build=0",
+        "mobi_app=web"
+      ],
+      "auth": "login",
+      "evidence": "source_static",
+      "function": "获取用户类系统通知"
+    },
+    {
+      "page": "message",
+      "method": "GET",
+      "host": "web",
+      "path": "/x/polymer/pc-electron/v1/user/cards",
+      "params": [
+        "uids=comma-separated",
+        "build=0",
+        "mobi_app=web"
+      ],
+      "auth": "login",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -101,
+      "function": "批量获取消息参与者用户卡片"
+    },
+    {
+      "page": "cheese",
+      "method": "GET",
+      "host": "web",
+      "path": "/pugv/view/web/season/v2",
+      "params": [
+        "season_id or ep_id",
+        "from_spmid?"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "brief",
+        "cover",
+        "drm_switch",
+        "ep_count",
+        "sections",
+        "season_id",
+        "stat",
+        "title",
+        "up_info",
+        "user_status"
+      ],
+      "function": "获取课程季度、章节与购买状态"
+    },
+    {
+      "page": "cheese",
+      "method": "GET",
+      "host": "web",
+      "path": "/pugv/view/web/credential/detail",
+      "params": [
+        "season_id"
+      ],
+      "auth": "login_or_entitlement",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -401,
+      "function": "获取课程凭证与权益详情"
+    },
+    {
+      "page": "cheese",
+      "method": "GET",
+      "host": "web",
+      "path": "/pugv/view/html5/coach/detail",
+      "params": [
+        "seasonId"
+      ],
+      "auth": "login_or_entitlement",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -401,
+      "function": "获取课程辅导服务详情"
+    },
+    {
+      "page": "cheese",
+      "method": "GET",
+      "host": "web",
+      "path": "/pugv/view/web/live/dialog/teacher/info",
+      "params": [
+        "live_teacher_mid"
+      ],
+      "auth": "public",
+      "evidence": "runtime_public_200",
+      "data_keys": [
+        "avatar",
+        "brief",
+        "follower",
+        "is_follow",
+        "link",
+        "mid",
+        "uname"
+      ],
+      "function": "获取课程直播讲师信息"
+    },
+    {
+      "page": "cheese",
+      "method": "GET",
+      "host": "web",
+      "path": "/pugv/view/web/live/jump",
+      "params": [
+        "ep_id"
+      ],
+      "auth": "cookie_optional",
+      "evidence": "source_static",
+      "function": "获取课程直播跳转信息"
+    },
+    {
+      "page": "cheese",
+      "method": "GET",
+      "host": "web",
+      "path": "/pugv/player/web/risk/censor",
+      "params": [
+        "player risk parameters"
+      ],
+      "auth": "login_or_entitlement",
+      "evidence": "runtime_public_business_error",
+      "observed_code": -400,
+      "note": "Minimal season_id/platform probe was insufficient.",
+      "function": "执行课程播放风险校验"
+    }
+  ]
+}
