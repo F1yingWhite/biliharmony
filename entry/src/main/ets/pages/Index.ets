@@ -15,7 +15,8 @@ import { AppNavStack, APP_ROOT_SNAPSHOT_ID, NAV_SEARCH, NAV_VIDEO_DETAIL, NAV_LO
   NAV_WATCH_LATER, NAV_LIVE_ROOM, NAV_IMAGE_VIEWER, NAV_DYNAMIC_DETAIL, VideoDetailParam, UserSpaceParam, LiveRoomParam,
   ImageViewerParam, DynamicDetailParam, NAV_RELATION_LIST, RelationListParam, NAV_BANGUMI_DETAIL,
   BangumiDetailParam, NAV_RANK, NAV_ARTICLE, ArticlePageParam, NAV_BANGUMI_LIST, NAV_BANGUMI_INDEX, NAV_ZONE,
-  NAV_BLACK_LIST, NAV_LIVE_ZONE, NAV_FAV_SORT, NAV_BANGUMI_TIMELINE } from '../common/AppRouter';
+  NAV_BLACK_LIST, NAV_LIVE_ZONE, NAV_FAV_SORT, NAV_BANGUMI_TIMELINE, HERO_NAV_TRANSITION_ACTIVE_KEY,
+  HERO_NAV_TRANSITION_DURATION_KEY } from '../common/AppRouter';
 import { SearchPage } from './Search';
 import { FavSortParam } from '../common/AppRouter';
 import { MessagesPage } from './Messages';
@@ -62,6 +63,7 @@ struct Index {
   @StorageProp('isDarkMode') @Watch('onThemeChanged') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
   @StorageProp('headerFade') fade: number = 0;
+  @State heroTransitionInputLocked: boolean = false;
 
   aboutToAppear(): void {
     this.reapplyBarColors();
@@ -107,6 +109,28 @@ struct Index {
   /** 广播主 Tab 索引：「我的」页借此在切回时重算缓存大小（Tabs 保活不重走 aboutToAppear）。 */
   private onCurrentTabChanged(): void {
     AppStorage.setOrCreate('mainTabIndex', this.currentTab);
+  }
+
+  /**
+   * 官方 Navigation 自定义内容转场：hero 期间同时保留 from/to 两页，由页面内的独立图片层负责移动。
+   * 这取代“截一张首页图垫底”的办法，避免 push/pop 边界在真机上出现白帧或旧截图闪一下。
+   */
+  private heroNavTransition(_from: NavContentInfo, _to: NavContentInfo,
+    operation: NavigationOperation): NavigationAnimatedTransition | undefined {
+    if (AppStorage.get<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY) !== true) return undefined;
+    const duration: number = AppStorage.get<number>(HERO_NAV_TRANSITION_DURATION_KEY) ?? 360;
+    // push 后目标页本身会阻断输入；pop 开始时来源页立即重新获得手势，必须额外冻结。
+    this.heroTransitionInputLocked = operation === NavigationOperation.POP;
+    return {
+      timeout: duration + 120,
+      transition: (proxy: NavigationTransitionProxy): void => {
+        setTimeout(() => {
+          AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, false);
+          this.heroTransitionInputLocked = false;
+          proxy.finishTransition();
+        }, duration);
+      },
+    };
   }
 
   /** 路由参数守卫：非法参数返回 null，页面渲染为空态而不是裸强转崩溃。 */
@@ -291,10 +315,8 @@ struct Index {
         }
       }
       .stdDestination(() => Immersive.setBarIcons(true, true), () => this.syncBarColors())
-      // 看图页：容器背景透明，转场期间透出源页面；黑底由页面内 bgOpacity 渐显（见 ImageViewer.ets）
+      // 看图页自己管理 hero、黑底和控件时序，容器不再额外做整页淡入淡出。
       .backgroundColor('#00000000')
-      // 默认转场已由 push/pop(false) 关闭，这里用淡入淡出衬托共享元素飞行
-      .transition(TransitionEffect.OPACITY)
       .onBackPressed(() => {
         // 看图页拦截系统返回/侧滑，交给页面做"缩回缩略图"的收合动画。
         const request: number = AppStorage.get<number>('imageViewerCloseRequest') ?? 0;
@@ -310,6 +332,16 @@ struct Index {
         }
       }
       .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+      .backgroundColor('#00000000')
+      .onBackPressed(() => {
+        const dynamicParam: DynamicDetailParam | null = Index.asDynamicDetailParam(param);
+        if (dynamicParam !== null && dynamicParam.srcRect !== undefined) {
+          const request: number = AppStorage.get<number>('dynamicDetailCloseRequest') ?? 0;
+          AppStorage.setOrCreate<number>('dynamicDetailCloseRequest', request + 1);
+          return true;
+        }
+        return false;
+      })
     } else if (name === NAV_RELATION_LIST) {
       NavDestination() {
         if (Index.asRelationListParam(param) !== null) {
@@ -577,8 +609,9 @@ struct Index {
   }
 
   build() {
-    Navigation(AppNavStack) {
-      Stack({ alignContent: Alignment.TopStart }) {
+    Stack() {
+      Navigation(AppNavStack) {
+        Stack({ alignContent: Alignment.TopStart }) {
         // 系统 Tabs：三个视图常驻保活，切换不丢滚动位置
         if (AppTheme.isImmersiveUiSupported()) {
           this.FloatingTabs()
@@ -603,19 +636,35 @@ struct Index {
             this.SearchPlain()
           }
         }
+        }
+        .width('100%')
+        .height('100%')
+        .backgroundColor(this.isDark ? '#18191C' : '#F6F7F8')
+        .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+        // hero 转场底衬：根页被二级页 push 覆盖后不再渲染，push 前截此组件做目标页最底层
+        .id(APP_ROOT_SNAPSHOT_ID)
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(this.isDark ? '#18191C' : '#F6F7F8')
+      .hideTitleBar(true)
+      .mode(NavigationMode.Stack)
+      .navDestination(this.PageMap)
+      .customNavContentTransition((from: NavContentInfo, to: NavContentInfo, operation: NavigationOperation) =>
+        this.heroNavTransition(from, to, operation))
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-      // hero 转场底衬：根页被二级页 push 覆盖后不再渲染，push 前截此组件做目标页最底层
-      .id(APP_ROOT_SNAPSHOT_ID)
+
+      if (this.heroTransitionInputLocked) {
+        // Navigation 在 pop 开始后会立即让来源页重新成为输入目标；透明阻断层覆盖完整
+        // 转场时段，防止用户快速上下滑让列表在图片飞行途中改变目标位置。
+        Column()
+          .width('100%')
+          .height('100%')
+          .hitTestBehavior(HitTestMode.Block)
+          .zIndex(1000)
+      }
     }
     .width('100%')
     .height('100%')
-    .hideTitleBar(true)
-    .mode(NavigationMode.Stack)
-    .navDestination(this.PageMap)
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 }
