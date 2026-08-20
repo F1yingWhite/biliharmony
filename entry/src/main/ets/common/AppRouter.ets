@@ -10,6 +10,9 @@ export const APP_ROOT_SNAPSHOT_ID: string = 'bili-app-root';
 /** AppStorage 键：根首页截图 PixelMap。走 AppStorage 而非路由参数——NavPathStack 会克隆
  *  参数对象，原生 PixelMap 传不过去；push 前写入，目标页 aboutToAppear 读取、出栈时删除。 */
 export const HERO_BG_SNAPSHOT_KEY: string = 'heroBgSnapshot';
+/** 使用 Navigation 官方自定义内容转场保活来源页，供独立 hero 在两页之上完成飞行。 */
+export const HERO_NAV_TRANSITION_ACTIVE_KEY: string = 'heroNavTransitionActive';
+export const HERO_NAV_TRANSITION_DURATION_KEY: string = 'heroNavTransitionDuration';
 
 /** 视频详情页跳转参数 */
 export interface VideoDetailParam {
@@ -56,6 +59,12 @@ export interface ImageViewerParam {
   /** 源缩略图在窗口中的矩形（vp）。Tabs 内 geometryTransition 坐标系错乱（按 Tabs 轨道
    *  布局坐标计算，非首屏 tab 整体偏移 N 屏宽），此时改用本字段做手动"从缩略图放大"入场。 */
   srcRect?: ImageViewerSrcRect;
+  /** 每张图片各自的源缩略图矩形；左右滑动后按 currentIndex 收回对应格子。 */
+  srcRects?: Array<ImageViewerSrcRect>;
+  /** 每张源缩略图的组件 ID；关闭前重新测量实时位置，避免列表滚动后飞回打开时的旧坐标。 */
+  srcIds?: Array<string>;
+  /** 来源页实际渲染的缩略图 URL；hero 复用已解码资源，避免换一档缩略图重新加载造成闪帧。 */
+  srcPreviews?: Array<string>;
 }
 
 /** 源缩略图窗口矩形（vp 单位）。 */
@@ -77,6 +86,8 @@ export interface BangumiDetailParam {
 export interface DynamicDetailParam {
   item: Object;
   focusComments?: boolean;
+  /** 点击的整张动态卡窗口矩形（vp），用于卡片容器展开到详情页并原路收回。 */
+  srcRect?: ImageViewerSrcRect;
 }
 
 /** 专栏阅读页参数。 */

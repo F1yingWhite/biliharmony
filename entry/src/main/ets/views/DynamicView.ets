@@ -1,9 +1,9 @@
 /**
  * 动态视图：关注动态 feed（需登录）
  */
-import { image } from '@kit.ImageKit';
 import { DynamicItem, DynamicPageData, BiliEmote, RelationUserItem, RelationUserPageData } from '../model/Models';
-import { AppNavStack, APP_ROOT_SNAPSHOT_ID, HERO_BG_SNAPSHOT_KEY, NAV_DYNAMIC_DETAIL, NAV_IMAGE_VIEWER,
+import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY, NAV_DYNAMIC_DETAIL,
+  NAV_IMAGE_VIEWER,
   NAV_LIVE_ROOM, NAV_LOGIN,
   NAV_VIDEO_DETAIL,
   NAV_USER_SPACE, DynamicDetailParam, ImageViewerParam, ImageViewerSrcRect, LiveRoomParam, VideoDetailParam,
@@ -296,6 +296,15 @@ export struct DynCard {
     return this.idPrefix + 'image-viewer-dynamic-' + dynId + '-' + String(index);
   }
 
+  private cardId(): string {
+    return this.idPrefix + 'dynamic-card-' + this.item.dynId;
+  }
+
+  private videoCoverId(item: DynamicItem): string {
+    const videoId: string = item.bvid.length > 0 ? item.bvid : 'a' + String(item.aid);
+    return this.idPrefix + 'dynamic-video-cover-' + item.dynId + '-' + videoId;
+  }
+
   /** 图文动态宫格：单图 2/3 宽正方形，多图三列正方形单元（对齐官方客户端）。
    *  超过 9 张时只展示前 9 张，第 9 张压暗并叠加 +N（官方同款处理）。 */
   @Builder
@@ -367,7 +376,25 @@ export struct DynCard {
 
   private openDetail(focusComments: boolean = false): void {
     if (this.detailMode || this.item.dynId.length === 0) return;
-    const param: DynamicDetailParam = { item: this.item as Object, focusComments: focusComments };
+    let srcRect: ImageViewerSrcRect | undefined = undefined;
+    try {
+      const area = this.getUIContext().getComponentUtils().getRectangleById(this.cardId());
+      if (area.size.width > 0 && area.size.height > 0 && area.windowOffset.x >= 0) {
+        srcRect = {
+          x: this.getUIContext().px2vp(area.windowOffset.x),
+          y: this.getUIContext().px2vp(area.windowOffset.y),
+          w: this.getUIContext().px2vp(area.size.width),
+          h: this.getUIContext().px2vp(area.size.height),
+        };
+      }
+    } catch (e) {
+      // 取不到卡片矩形时保持普通导航。
+    }
+    const param: DynamicDetailParam = { item: this.item as Object, focusComments: focusComments, srcRect: srcRect };
+    if (srcRect !== undefined) {
+      AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
+      AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 380);
+    }
     AppNavStack.pushPathByName(NAV_DYNAMIC_DETAIL, param);
   }
 
@@ -397,70 +424,99 @@ export struct DynCard {
       // PGC（番剧/影视）卡片进番剧详情页；UGC 合集卡没有 season_id/epid，仍走视频详情。
       const param: BangumiDetailParam = { seasonId: item.seasonId, epId: item.epId, title: item.title };
       AppNavStack.pushPathByName(NAV_BANGUMI_DETAIL, param);
-    } else if (item.bvid.length > 0) {
-      const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
-      AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+    } else if (item.bvid.length > 0 || item.aid > 0) {
+      this.openVideo(item);
     } else {
       this.openItemDetail(item);
     }
   }
 
+  /** 动态里的投稿视频与首页视频共用同一套“封面 → 播放区”转场。 */
+  private openVideo(item: DynamicItem): void {
+    const param: VideoDetailParam = {
+      bvid: item.bvid,
+      aid: item.aid,
+      title: item.title,
+      cover: item.cover,
+    };
+    let srcRect: ImageViewerSrcRect | undefined = undefined;
+    try {
+      const area = this.getUIContext().getComponentUtils().getRectangleById(this.videoCoverId(item));
+      if (area.size.width > 0 && area.size.height > 0 && area.windowOffset.x >= 0 && area.windowOffset.y >= 0) {
+        srcRect = {
+          x: this.getUIContext().px2vp(area.windowOffset.x),
+          y: this.getUIContext().px2vp(area.windowOffset.y),
+          w: this.getUIContext().px2vp(area.size.width),
+          h: this.getUIContext().px2vp(area.size.height),
+        };
+      }
+    } catch (e) {
+      // 无封面或尚未完成布局时退回普通导航。
+    }
+    if (srcRect !== undefined) {
+      param.srcRect = srcRect;
+      AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
+      AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
+    }
+    AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+  }
+
   private openItemImage(item: DynamicItem, index: number): void {
     const images: Array<string> = item.images;
-    if (!this.sharedImageTransition) {
-      // 根页面（主页动态 tab，Navigation 根内容）：push + srcRect 手动矩形放大
-      // （看图页 prepareRectEntrance 首帧压到被点缩略图矩形再展开，与首页卡片→详情同一套）。
-      // 历史备注：曾用 bindContentCover 全屏 Cover——API24 设备 Navigation 作用域内
-      // ModalPage 会在挂载同帧被框架移除（hilog: AceNavigation "can't find inner navigation"），
-      // 看图一闪即关；"根页面 push 被强制右滑"的旧结论在本机未复现（首页卡片→详情
-      // 同结构 push(false)+矩形放大已实测通过）。
-      let rect: ImageViewerSrcRect | undefined = undefined;
+    const rects: Array<ImageViewerSrcRect> = this.collectImageRects(item);
+    const rect: ImageViewerSrcRect | undefined = index < rects.length && rects[index].w > 0 ? rects[index] : undefined;
+    const ids: Array<string> = [];
+    const previews: Array<string> = [];
+    for (let i: number = 0; i < images.length; i++) {
+      // 第 10 张以后都由第 9 格的“+N”入口承载，返回时也以该格为实时目标。
+      ids.push(this.imgId(item.dynId, Math.min(i, 8)));
+      previews.push(biliImageThumbnail(images[i], images.length === 1 ? 900 : 320));
+    }
+    const viewer: ImageViewerParam = {
+      images: images,
+      initialIndex: index,
+      srcRect: rect,
+      srcRects: rects,
+      srcIds: ids,
+      srcPreviews: previews,
+    };
+    this.pushViewer(viewer);
+  }
+
+  /** 记录宫格每一格的窗口矩形；超过 9 张的图片统一收回“+N”所在的第 9 格。 */
+  private collectImageRects(item: DynamicItem): Array<ImageViewerSrcRect> {
+    const rects: Array<ImageViewerSrcRect> = [];
+    let overflowRect: ImageViewerSrcRect = { x: 0, y: 0, w: 0, h: 0 };
+    for (let i: number = 0; i < item.images.length; i++) {
+      if (i >= 9) {
+        rects.push(overflowRect);
+        continue;
+      }
+      let rect: ImageViewerSrcRect = { x: 0, y: 0, w: 0, h: 0 };
       try {
-        const r = this.getUIContext().getComponentUtils()
-          .getRectangleById(this.imgId(item.dynId, index));
-        if (r.size.width > 0 && r.size.height > 0 && r.windowOffset.x >= 0) {
+        const area = this.getUIContext().getComponentUtils().getRectangleById(this.imgId(item.dynId, i));
+        if (area.size.width > 0 && area.size.height > 0 && area.windowOffset.x >= 0) {
           rect = {
-            x: this.getUIContext().px2vp(r.windowOffset.x),
-            y: this.getUIContext().px2vp(r.windowOffset.y),
-            // size 同样是 px（SDK d.ts 标注 Unit: px），漏转会把放大起点位移约一个密度倍率
-            w: this.getUIContext().px2vp(r.size.width),
-            h: this.getUIContext().px2vp(r.size.height),
+            x: this.getUIContext().px2vp(area.windowOffset.x),
+            y: this.getUIContext().px2vp(area.windowOffset.y),
+            w: this.getUIContext().px2vp(area.size.width),
+            h: this.getUIContext().px2vp(area.size.height),
           };
         }
       } catch (e) {
-        // 取不到矩形则退化为纯淡入。
+        // 未布局的格子保留零矩形，退出时退化为淡出。
       }
-      const viewer: ImageViewerParam = { images: images, initialIndex: index, srcRect: rect };
-      this.pushViewer(viewer);
-      return;
+      rects.push(rect);
+      if (i === 8) overflowRect = rect;
     }
-    const transitionId: string = this.imgTransitionId(item.dynId, index);
-    const viewer: ImageViewerParam = { images: images, initialIndex: index, transitionId: transitionId };
-    // 一镜到底：关 Navigation 默认转场（push 第三参 false）并包 animateTo，geometryTransition 才接管动画
-    this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
-      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
-    });
+    return rects;
   }
 
-  /** 看图页 push（关默认转场）。根页面场景先截根页图垫底：push 后根页 feed 不再渲染，
-   *  没有截图会透出纯白窗口底，hero 放大/收合动画显得"背景全白"。 */
+  /** 官方 Navigation 自定义内容转场会在 hero 期间保活来源页，不再截屏垫底。 */
   private pushViewer(viewer: ImageViewerParam): void {
-    const pushNow = (): void => {
-      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
-    };
-    if (AppNavStack.getAllPathName().length === 0) {
-      try {
-        this.getUIContext().getComponentSnapshot().get(APP_ROOT_SNAPSHOT_ID)
-          .then((pix: image.PixelMap) => {
-            AppStorage.setOrCreate(HERO_BG_SNAPSHOT_KEY, pix);
-            pushNow();
-          }).catch(() => pushNow());
-        return;
-      } catch (e) {
-        // 截图失败退化为直接 push。
-      }
-    }
-    pushNow();
+    AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
+    AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
+    AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer);
   }
 
   @Builder
@@ -498,7 +554,12 @@ export struct DynCard {
       if (item.title.length > 0) {
         Row({ space: 9 }) {
           if (item.cover.length > 0) {
-            Image(biliImageThumbnail(item.cover, 240)).width(112).height(68).objectFit(ImageFit.Cover).borderRadius(6)
+            Image(biliImageThumbnail(item.cover, 240))
+              .width(112)
+              .height(68)
+              .objectFit(ImageFit.Cover)
+              .borderRadius(6)
+              .id(this.videoCoverId(item))
           }
           Column({ space: 5 }) {
             Text(item.title).fontSize(13).fontColor(this.isDark ? '#E6E6E6' : '#18191C').maxLines(2)
@@ -623,6 +684,7 @@ export struct DynCard {
                   .padding({ left: 5, right: 5, top: 2, bottom: 2 }).borderRadius(4).margin(5)
               }
             }
+            .id(this.videoCoverId(this.item))
           }
           Column({ space: 6 }) {
             Text(this.item.title)
@@ -690,6 +752,9 @@ export struct DynCard {
           this.forwardDynamic().catch(() => {
           });
         })
+        // 更多菜单固定贴齐卡片右边，不再紧跟在转发按钮后面。
+        Blank()
+          .layoutWeight(1)
         Row({ space: 4 }) {
           Image($r('app.media.ic_more'))
             .width(16)
@@ -708,6 +773,7 @@ export struct DynCard {
     .padding(12)
     .borderRadius(10)
     .backgroundColor(this.isDark ? '#2A2C31' : '#FFFFFF')
+    .id(this.cardId())
     .onAreaChange((oldV: Area, newV: Area) => {
       // 实测卡片内容宽（减去自身 padding 24），供图片宫格计算正方形单元边长。
       const w: number = Number.parseFloat(String(newV.width));

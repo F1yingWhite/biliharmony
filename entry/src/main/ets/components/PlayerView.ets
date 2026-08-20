@@ -121,8 +121,10 @@ export struct PlayerView {
   @State endScreenOpen: boolean = false;
   @State playing: boolean = false;
   @State prepared: boolean = false;
-  /** 首个播放帧是否已上屏（stateChange 'playing'）：之前播放区垫封面，避免空 surface 黑屏。 */
+  /** 首个播放帧是否已可见（playing + startRenderFrame）：之前播放区垫封面，避免空 surface 黑屏。 */
   @State firstFrameShown: boolean = false;
+  /** 官方 startRenderFrame 已到达；必须再与 playing 同时成立，才撤掉起播封面。 */
+  private firstRenderReady: boolean = false;
   @State errorText: string = '';
   @State curTime: number = 0;
   @State duration: number = 0;
@@ -612,6 +614,7 @@ if (this.runtimeSources.length === 0) {
     this.audioPrepared = false;
     this.playing = false;
     this.firstFrameShown = false;
+    this.firstRenderReady = false;
     this.buffering = true;
     this.errorText = '';
     this.curTime = 0;
@@ -905,6 +908,11 @@ if (this.runtimeSources.length === 0) {
     this.initPlayer();
   }
 
+  /** AVPlayer 进入 playing 不等于 Surface 已有画面；两项都满足后才交叉淡出封面。 */
+  private revealFirstFrameIfReady(): void {
+    if (!this.firstFrameShown && this.playing && this.firstRenderReady) this.firstFrameShown = true;
+  }
+
   async initPlayer(): Promise<void> {
     if (this.destroyed || this.player !== null || this.playerCreating) {
       return;
@@ -942,8 +950,8 @@ if (this.runtimeSources.length === 0) {
           this.tryStartPreparedPlayers();
         } else if (state === 'playing') {
           this.resumeTransitionActive = false;
-          this.firstFrameShown = true;
           this.playing = true;
+          this.revealFirstFrameIfReady();
           this.onPlayingChange(true);
           this.scheduleControlsHide();
           this.startDmLoop();
@@ -974,6 +982,12 @@ if (this.runtimeSources.length === 0) {
             }
           }
         }
+      });
+      // 官方首帧事件：stateChange('playing') 只表示播放器状态，不能证明 Surface 已经出画。
+      p.on('startRenderFrame', () => {
+        if (this.player !== p) return;
+        this.firstRenderReady = true;
+        this.revealFirstFrameIfReady();
       });
       p.on('error', (err: BusinessError) => {
         this.handlePlayerError(p, err.message);
@@ -1223,6 +1237,7 @@ if (this.runtimeSources.length === 0) {
       this.playing = false;
       // 换清晰度重建播放后 surface 短暂空白：封面重新垫底，首帧上屏后再淡出。
       this.firstFrameShown = false;
+      this.firstRenderReady = false;
       this.buffering = true;
       this.closeSettingPanels();
       this.stopDmLoop(false);
@@ -1396,6 +1411,8 @@ if (this.runtimeSources.length === 0) {
     this.audioPrepared = false;
     this.prepared = false;
     this.playing = false;
+    this.firstFrameShown = false;
+    this.firstRenderReady = false;
     this.buffering = false;
     this.errorText = '当前线路不可用，正在切换备用 CDN…';
     try {
@@ -1436,6 +1453,8 @@ if (this.runtimeSources.length === 0) {
     this.prepared = false;
     this.audioPrepared = false;
     this.playing = false;
+    this.firstFrameShown = false;
+    this.firstRenderReady = false;
     this.buffering = true;
     try {
       await failedAudio.release();
@@ -1572,6 +1591,8 @@ if (this.runtimeSources.length === 0) {
     this.prepared = false;
     this.audioPrepared = false;
     this.playing = false;
+    this.firstFrameShown = false;
+    this.firstRenderReady = false;
     this.resumeAfterPrepare = Math.max(0, targetMs / 1000);
     this.shouldPlayAfterPrepare = resume;
     this.buffering = true;
@@ -1802,6 +1823,7 @@ if (this.runtimeSources.length === 0) {
     this.audioPrepared = false;
     this.prepared = false;
     this.playing = false;
+    this.firstRenderReady = false;
   }
 
   // ===== 弹幕引擎 =====

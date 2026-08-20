@@ -5,7 +5,7 @@ import { HttpClient, HttpResponse } from '../common/HttpClient';
 import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
 import { asArray, asObject } from '../common/Utils';
-import { BiliEmotePackage, ReplyData } from '../model/Models';
+import { BiliEmotePackage, ReplyData, ReplyItem } from '../model/Models';
 import { ActionResult, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
@@ -158,46 +158,44 @@ export class CommentApi {
   }
 
   // ===== 单条评论的完整回复列表（楼中楼） =====
-  // 老端点 /x/v2/reply/reply（pn 分页）近期被风控（-352/空列表），导致"显示有 N 条回复、点开却是空的"。
-  // 改走与主列表同款 /x/v2/reply/main：pagination_str 带 root + type:10（取根评论的全部子回复），
-  // 用 next_offset 游标翻页；匿名 -352 时回退 WBI 签名端点（与 getReplies 一致）。
+  // 楼中楼必须使用 /x/v2/reply/reply 的 root + pn 分页。/reply/main 是主评论流，
+  // 它不会按 pagination_str 里的 root 可靠过滤；把它用于这里会在预览的几条真实回复后
+  // 继续追加主评论，造成“回复详情重复评论区”的数据串流。
   static async getReplyReplies(oid: number, type: number, root: number, cursor: string): Promise<ReplyData> {
-    const paginationObj: Record<string, Object> = {
-      'root': root,
-      'offset': cursor,
-      'next': true,
-      'sort': 1,
-      'type': 10,
-    };
-    const pagination: string = JSON.stringify(paginationObj);
+    const parsedPage: number = Number(cursor.length > 0 ? cursor : '1');
+    const pageNumber: number = Number.isFinite(parsedPage) && parsedPage >= 1 ? Math.floor(parsedPage) : 1;
     const params: Record<string, string> = {
       'oid': String(oid),
       'type': String(type),
-      'mode': '3',
-      'pagination_str': pagination,
+      'root': String(root),
+      'pn': String(pageNumber),
+      'ps': '20',
     };
-    const resp: HttpResponse = await webGet(Api.replyList + '/main', params, 'https://www.bilibili.com/');
-    let data: Record<string, Object> | null = getData(resp);
+    const resp: HttpResponse = await webGet(Api.replyReplyList, params, 'https://www.bilibili.com/');
+    const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       hilog.warn(0x0000, 'BiliApi',
-        'getReplyReplies /main failed oid=%{public}d root=%{public}d cursorLen=%{public}d; try wbi fallback',
-        oid, root, cursor.length);
-      const fallback: Record<string, string> = {
-        'oid': String(oid),
-        'type': String(type),
-        'mode': '3',
-        'pagination_str': pagination,
-        'web_location': '1315875',
-      };
-      await WbiSign.encWbi(fallback);
-      const fallbackResp: HttpResponse = await webGet(Api.replyList + '/wbi/main', fallback, 'https://www.bilibili.com/');
-      data = getData(fallbackResp);
+        'getReplyReplies /reply failed oid=%{public}d root=%{public}d page=%{public}d', oid, root, pageNumber);
+      const empty: ReplyData = new ReplyData();
+      empty.hasMore = false;
+      return empty;
     }
-    if (data === null) {
+    const result: ReplyData = ReplyData.fromLegacy(data, pageNumber);
+    const valid: Array<ReplyItem> = [];
+    for (let i: number = 0; i < result.replies.length; i++) {
+      const reply: ReplyItem = result.replies[i];
+      // 正常 reply/reply 响应的所有子项 root 都等于当前楼层。兼容少数直接回复仅有
+      // parent 的响应；root/parent 都不匹配的一律视为主评论串流并丢弃。
+      if (reply.rpid !== root && (reply.rootRpid === root || reply.parentRpid === root)) {
+        valid.push(reply);
+      }
+    }
+    if (valid.length !== result.replies.length) {
       hilog.warn(0x0000, 'BiliApi',
-        'getReplyReplies both /main and /wbi/main failed oid=%{public}d root=%{public}d', oid, root);
-      return new ReplyData();
+        'getReplyReplies dropped unrelated rows root=%{public}d total=%{public}d valid=%{public}d',
+        root, result.replies.length, valid.length);
     }
-    return ReplyData.from(data);
+    result.replies = valid;
+    return result;
   }
 }
