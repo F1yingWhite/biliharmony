@@ -35,6 +35,7 @@ import { PlayerFullscreenHeader } from './PlayerFullscreenHeader';
 import { CONTROLS_GRADIENT_COLORS, DM_SEGMENT_SECONDS, ActiveDm } from './PlayerDanmakuSupport';
 import { PlayerDanmakuEngine } from './PlayerDanmakuEngine';
 import { PlayerBottomControls } from './PlayerBottomControls';
+import { PlayerGestureSurface } from './PlayerGestureSurface';
 
 /** showDialog 按钮的声明类型（promptAction 的 Button 命名空间类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -145,8 +146,9 @@ export struct PlayerView {
   @State showControls: boolean = false;
   @State buffering: boolean = false;
   @State showMoreMenu: boolean = false;      // 竖屏：底部 Sheet 设置面板
-  @State showSideDrawer: boolean = false;    // 横屏：右侧抽屉设置面板（bindContentCover 窗口级弹层）
+  @State showSideDrawer: boolean = false;    // 横屏：播放器栈顶右侧抽屉设置面板
   @State moreSheetPage: string = 'menu';     // Sheet/抽屉共用的子页状态
+  private settingsOpenedDirectly: boolean = false;
   /** 竖屏 ⋮ 面板高度（vp）：业务页传“默认评论区”高度，0 表示用内置兜底。 */
   @Prop moreSheetHeight: number = 0;
   @State playMode: number = 0;               // 播放模式：0 自动连播 1 列表循环 2 单集循环
@@ -1685,6 +1687,24 @@ if (this.runtimeSources.length === 0) {
     this.togglePlay();
   }
 
+  @Builder
+  PlayerGestureArea() {
+    PlayerGestureSurface({
+      onSingleTap: (event: GestureEvent) => this.handleCanvasTap(event),
+      onDoubleTap: () => this.handleDoubleTap(),
+      onPanStart: (event: GestureEvent) => this.beginPlayerPan(event),
+      onPanUpdate: (event: GestureEvent) => this.updatePlayerPan(event),
+      onPanEnd: () => this.endPlayerPan(),
+      onLongPressStart: () => this.beginHoldSpeed(),
+      onLongPressEnd: () => this.endHoldSpeed(),
+      onTouchDown: (x: number, y: number) => {
+        if (!this.dmPinnedVisible && this.dmEngine.active.length > 0) {
+          this.pendingDm = this.dmEngine.hitTestActive(x, y);
+        }
+      },
+    })
+  }
+
   qualityLabel(): string {
     for (let i: number = 0; i < this.runtimeQualityOptions.length; i++) {
       if (this.runtimeQualityOptions[i].qn === this.activeQuality) return this.runtimeQualityOptions[i].label;
@@ -2002,11 +2022,15 @@ if (this.runtimeSources.length === 0) {
   private closeSettingPanels(): void {
     this.showMoreMenu = false;
     this.showSideDrawer = false;
+    this.settingsOpenedDirectly = false;
   }
 
   /** 切换更多菜单/抽屉内页：push/pop 式过渡（子页从右滑入，menu 向左滑出）。 */
   private openSheetPage(page: string): void {
     if (page === this.moreSheetPage) return;
+    if (this.moreSheetPage === 'menu' && page !== 'menu') {
+      this.settingsOpenedDirectly = false;
+    }
     this.getUIContext().animateTo({ duration: 240, curve: Curve.EaseOut }, () => {
       this.moreSheetPage = page;
     });
@@ -2018,11 +2042,13 @@ if (this.runtimeSources.length === 0) {
       const next: boolean = !this.showSideDrawer;
       this.closeSettingPanels();
       this.showSideDrawer = next;
+      this.settingsOpenedDirectly = false;
       if (next) this.openSheetPage('menu');
     } else {
       const next: boolean = !this.showMoreMenu;
       this.closeSettingPanels();
       this.showMoreMenu = next;
+      this.settingsOpenedDirectly = false;
       if (next) this.openSheetPage('menu');
     }
   }
@@ -2030,12 +2056,23 @@ if (this.runtimeSources.length === 0) {
   /** 打开指定设置子页：竖屏走底部 Sheet，横屏走右侧抽屉。 */
   private openSettingsPage(page: string): void {
     this.closeSettingPanels();
+    this.settingsOpenedDirectly = true;
     this.moreSheetPage = page;
     if (this.fullscreen) {
       this.showSideDrawer = true;
     } else {
       this.showMoreMenu = true;
     }
+  }
+
+  private backFromSettingsPage(): void {
+    if (this.fullscreen && this.settingsOpenedDirectly) {
+      this.showSideDrawer = false;
+      this.moreSheetPage = 'menu';
+      this.settingsOpenedDirectly = false;
+      return;
+    }
+    this.openSheetPage('menu');
   }
 
   private pauseForTimer(): void {
@@ -2722,6 +2759,11 @@ if (this.runtimeSources.length === 0) {
       .hitTestBehavior(HitTestMode.None)
       .visibility(this.externalDanmakuOn ? Visibility.Visible : Visibility.Hidden)
 
+      // 控件隐藏时整屏命中；控件显示时只由中间空白区挂载，避免覆盖顶栏和底栏。
+      if (!this.showControls) {
+        this.PlayerGestureArea()
+      }
+
       // 弹幕交互气泡：点击弹幕停住后，在弹幕上方/下方显示一个黑色半透明小气泡
       // （点赞/复制/举报三个线性图标，无文字，弹幕本身保持原大小和位置）。
       if (this.dmPinnedVisible) {
@@ -2922,7 +2964,11 @@ if (this.runtimeSources.length === 0) {
               .width('100%')
               .padding({ top: 6, left: 4, right: 4 })
             }
-            Blank()
+            Stack() {
+              this.PlayerGestureArea()
+            }
+            .width('100%')
+            .layoutWeight(1)
             PlayerBottomControls({
               fullscreen: this.fullscreen,
               playing: this.playing,
@@ -2962,10 +3008,6 @@ if (this.runtimeSources.length === 0) {
         })
       }
 
-      // 横屏设置抽屉走 bindContentCover（窗口级弹层，盖在页面级弹幕画布之上，
-      // 弹幕保持播放不消失）；竖屏设置走 bindSheet（见下方 showMoreMenu）。
-      // 抽屉自身的右滑入动画在 Cover 打开时照常播放。
-
       // 播完结束画面：横屏全屏用官方多卡片版式；其余（竖屏/竖屏全屏/compact）用单卡版式
       if (this.endScreenOpen && !this.compactMode && this.errorText.length === 0) {
         if (this.fullscreen && !this.fullscreenPortrait) {
@@ -2973,6 +3015,12 @@ if (this.runtimeSources.length === 0) {
         } else {
           this.PlayerEndScreen()
         }
+      }
+
+      // 横屏旋转后窗口级 ContentCover 可能不会重新挂载；抽屉直接放在播放器栈顶，
+      // 同样覆盖弹幕和控制条，并由左侧空白区域负责关闭。
+      if (this.fullscreen && this.showSideDrawer) {
+        this.SideDrawerCoverContent()
       }
     }
     .width('100%')
@@ -2985,38 +3033,6 @@ if (this.runtimeSources.length === 0) {
       showClose: false,
       radius: { topLeft: 18, topRight: 18 },
       backgroundColor: this.isDark ? '#18191C' : '#F5F6F7',
-    })
-    .bindContentCover($$this.showSideDrawer, this.SideDrawerCoverContent(), {
-      modalTransition: ModalTransition.NONE,
-      backgroundColor: '#00000000',
-    })
-    .gesture(
-      GestureGroup(GestureMode.Exclusive,
-        TapGesture({ count: 2 })
-          .onAction(() => this.handleDoubleTap()),
-        TapGesture({ count: 1 })
-          .onAction((event: GestureEvent) => this.handleCanvasTap(event)),
-        PanGesture({ fingers: 1, direction: PanDirection.All, distance: 12 })
-          .onActionStart((event: GestureEvent) => this.beginPlayerPan(event))
-          .onActionUpdate((event: GestureEvent) => this.updatePlayerPan(event))
-          .onActionEnd(() => this.endPlayerPan())
-          .onActionCancel(() => this.endPlayerPan())
-      )
-    )
-    .priorityGesture(
-      LongPressGesture({ fingers: 1, repeat: false, duration: 350 })
-        .onAction(() => this.beginHoldSpeed())
-        .onActionEnd(() => this.endHoldSpeed())
-        .onActionCancel(() => this.endHoldSpeed())
-    )
-    .onTouch((event: TouchEvent) => {
-      // 按下瞬间就用当时坐标命中弹幕并冻结：TapGesture 判定完成时弹幕早已滑走，
-      // 抬起后若没有发生滑动手势（hand=PanGesture 未接管）再确认停住。
-      if (event.type === TouchType.Down && !this.dmPinnedVisible && this.dmEngine.active.length > 0) {
-        const x: number = event.touches.length > 0 ? event.touches[0].x : -1;
-        const y: number = event.touches[0].y;
-        this.pendingDm = this.dmEngine.hitTestActive(x, y);
-      }
     })
   }
 
@@ -3244,6 +3260,7 @@ if (this.runtimeSources.length === 0) {
       which: which,
       fullscreen: this.fullscreen,
       embedded: true,
+      forceDark: this.fullscreen,
       accent: this.accent,
       dmOpacity: this.dmOpacity,
       dmSpeed: this.dmSpeed,
@@ -3302,18 +3319,20 @@ if (this.runtimeSources.length === 0) {
     })
   }
 
-  /** 横屏设置抽屉的 Cover 内容：从右侧滑入（动画在 PlayerSideSettingsDrawer 上），点左侧空白收起。 */
+  /** 横屏设置抽屉：从右侧滑入，点左侧空白收起。 */
   @Builder
   SideDrawerCoverContent() {
     PlayerSideSettingsDrawer({
       onClose: (): void => {
         this.showSideDrawer = false;
-        this.openSheetPage('menu');
+        this.moreSheetPage = 'menu';
+        this.settingsOpenedDirectly = false;
       },
       content: (): void => {
         this.MoreMenuSheetContent()
       },
     })
+    .zIndex(200)
   }
 
   @Builder
@@ -3326,16 +3345,16 @@ if (this.runtimeSources.length === 0) {
             .width(24)
             .height(24)
             .renderMode(ImageRenderMode.Template)
-            .fillColor(this.isDark ? '#FFFFFF' : '#18191C')
+            .fillColor((this.fullscreen || this.isDark) ? '#FFFFFF' : '#18191C')
           Text('返回')
             .fontSize(15)
-            .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+            .fontColor((this.fullscreen || this.isDark) ? '#FFFFFF' : '#18191C')
           Blank()
         }
         .width('100%')
         .padding({ left: 8, right: 8, top: 4, bottom: 10 })
         .onClick(() => {
-          this.openSheetPage('menu');
+          this.backFromSettingsPage();
         })
         Column() {
           if (this.moreSheetPage === 'danmakuList' || this.moreSheetPage === 'dmFilter') {
@@ -3345,6 +3364,7 @@ if (this.runtimeSources.length === 0) {
                 source: this.dmListSource,
                 count: this.dmListCount,
                 embedded: true,
+                forceDark: this.fullscreen,
                 onSeek: (seconds: number): void => {
                   this.seekTo(seconds, true);
                 },
@@ -3364,6 +3384,7 @@ if (this.runtimeSources.length === 0) {
                 draft: this.dmFilterDraft,
                 rulesCount: this.dmFilterRulesCount,
                 embedded: true,
+                forceDark: this.fullscreen,
                 onTypeChange: (type: number): void => {
                   this.dmFilterType = type;
                 },
@@ -3389,6 +3410,7 @@ if (this.runtimeSources.length === 0) {
                   // 清晰度页 = 画质档位 + 播放设置卡（原独立「播放设置」页并入此处，对齐官方结构）。
                   this.EmbeddedSettingsPanel(1)
                   PlayerPlaySettingsPage({
+                    forceDark: this.fullscreen,
                     qualityPref: this.qualityPref,
                     downloadQualityLabel: this.qualityLabel(),
                     onQualityPrefChange: (pref: number): void => {
@@ -3420,6 +3442,7 @@ if (this.runtimeSources.length === 0) {
         .transition(TransitionEffect.move(TransitionEdge.END).combine(TransitionEffect.opacity(0.5)))
       } else {
         PlayerMoreSheet({
+          forceDark: this.fullscreen,
           playbackRate: this.playbackRate,
           playMode: this.playMode,
           qualityLabel: this.qualityLabel(),
@@ -3462,6 +3485,6 @@ if (this.runtimeSources.length === 0) {
     .padding(this.moreSheetPage === 'menu' ?
       { left: 0, right: 0, top: 0, bottom: 0 } :
       { left: 16, right: 16, top: 14, bottom: 14 })
-    .backgroundColor(this.isDark ? '#18191C' : '#F5F6F7')
+    .backgroundColor((this.fullscreen || this.isDark) ? '#18191C' : '#F5F6F7')
   }
 }

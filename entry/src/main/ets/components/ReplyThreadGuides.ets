@@ -1,5 +1,5 @@
 /**
- * 楼中楼回复树缩进连接线与折叠圆点。
+ * 楼中楼回复树缩进连接线与轻量折叠节点。
  * 从 ReplyCard.ThreadTreeLines 拆出，让评论卡不再维护树线绘制细节。
  */
 @Component
@@ -31,7 +31,7 @@ export struct ReplyThreadGuides {
   }
 
   private threadIndent(): number {
-    return this.visualDepth() * 18;
+    return this.visualDepth() * 16;
   }
 
   private treeJoinY(): number {
@@ -39,7 +39,7 @@ export struct ReplyThreadGuides {
   }
 
   private treeGuideX(index: number): number {
-    return index * 18 + 9;
+    return index * 16 + 8;
   }
 
   private guideIndexes(): Array<number> {
@@ -55,67 +55,61 @@ export struct ReplyThreadGuides {
   }
 
   private treeLineColor(): string {
-    return this.isDark ? '#4A4D54' : '#D3D7DD';
-  }
-
-  private treeNodeFillColor(): string {
-    return this.isDark ? '#26272B' : '#FFFFFF';
+    return this.isDark ? '#34373D' : '#E1E4E8';
   }
 
   build() {
     ForEach(this.guideIndexes(), (index: number) => {
       if (index < this.visualDepth() - 1 && this.guideContinues(index)) {
         Column()
-          .width(1.5)
+          .width(1)
           .height(this.measuredHeight)
-          .borderRadius(0.75)
+          .borderRadius(0.5)
           .backgroundColor(this.treeLineColor())
-          .position({ x: this.treeGuideX(index) - 0.75, y: 0 })
+          .position({ x: this.treeGuideX(index) - 0.5, y: 0 })
           .hitTestBehavior(HitTestMode.None)
       }
       if (index === this.visualDepth() - 1) {
         Row()
-          .width(Math.max(1, this.threadIndent() - this.treeGuideX(index) + 0.75))
-          .height(this.treeJoinY() + 0.75)
+          .width(Math.max(1, this.threadIndent() - this.treeGuideX(index) + 3))
+          .height(this.treeJoinY() + 0.5)
           .border({
-            width: { left: 1.5, bottom: 1.5 },
+            width: { left: 1, bottom: 1 },
             color: this.treeLineColor(),
-            radius: { bottomLeft: 7 },
+            radius: { bottomLeft: 5 },
           })
-          .position({ x: this.treeGuideX(index) - 0.75, y: 0 })
+          .position({ x: this.treeGuideX(index) - 0.5, y: 0 })
           .hitTestBehavior(HitTestMode.None)
         if (this.guideContinues(index)) {
           Column()
-            .width(1.5)
-            .height(Math.max(0, this.measuredHeight - this.treeJoinY() + 16))
-            .borderRadius(0.75)
+            .width(1)
+            .height(Math.max(0, this.measuredHeight - this.treeJoinY()))
+            .borderRadius(0.5)
             .backgroundColor(this.treeLineColor())
-            .position({ x: this.treeGuideX(index) - 0.75, y: this.treeJoinY() })
+            .position({ x: this.treeGuideX(index) - 0.5, y: this.treeJoinY() })
             .hitTestBehavior(HitTestMode.None)
         }
         if (this.threadHasChildren) {
           Stack({ alignContent: Alignment.Center }) {
             Circle()
-              .width(12)
-              .height(12)
-              .fill(this.treeNodeFillColor())
-              .stroke(this.visualCollapsed ? this.accent : this.treeLineColor())
-              .strokeWidth(1.2)
-            Row()
-              .width(6)
-              .height(1.4)
-              .backgroundColor(this.visualCollapsed ? this.accent : '#9BA0A8')
-            Column()
-              .width(1.4)
-              .height(6)
-              .backgroundColor(this.accent)
-              .opacity(this.visualCollapsed ? 1 : 0)
-              .scale({ x: 1, y: this.visualCollapsed ? 1 : 0.1 })
+              .width(this.visualCollapsed ? 7 : 5)
+              .height(this.visualCollapsed ? 7 : 5)
+              .fill(this.visualCollapsed ? this.accent : this.treeLineColor())
               .animation({ duration: 130, curve: Curve.EaseInOut })
+            Column()
+              .width(1)
+              .height(4)
+              .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+              .opacity(this.visualCollapsed ? 1 : 0)
+            Row()
+              .width(4)
+              .height(1)
+              .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+              .opacity(this.visualCollapsed ? 1 : 0)
           }
-          .width(28)
-          .height(28)
-          .position({ x: this.treeGuideX(index) - 14, y: this.treeJoinY() - 14 })
+          .width(24)
+          .height(24)
+          .position({ x: this.treeGuideX(index) - 12, y: this.treeJoinY() - 12 })
           .hitTestBehavior(HitTestMode.Block)
           .priorityGesture(TapGesture().onAction(() => this.onToggle()))
         }
