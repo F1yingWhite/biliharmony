@@ -8,9 +8,57 @@ const VIDEO_URL_REGEX: RegExp = /https?:\/\/(?:www\.)?bilibili\.com\/video\/(?:B
 const AID_REGEX: RegExp = /(?:^|[^A-Za-z])av(\d{1,18})/i;
 const ACTION_REGEX: RegExp = /(BV[0-9A-Za-z]{10}|(?:^|\s|[（(【\[])(?:\d{1,2}:)?[0-5]?\d:[0-5]\d|(?:^|[^A-Za-z])av\d{1,18})/i;
 const LEADING_BRACKET_REGEX: RegExp = /^[（(【\[]/;
+const HTML_ENTITY_REGEX: RegExp = /&(#(?:x[0-9A-Fa-f]+|\d+)|quot|apos|amp|lt|gt|nbsp);/g;
 const PARSE_CACHE_MAX: number = 300;
 const PARSE_CACHE_TRIM: number = 60;
 const parseCache: Map<string, Array<ReplyRenderPart>> = new Map<string, Array<ReplyRenderPart>>();
+
+function textFromCodePoint(codePoint: number): string {
+  if (!Number.isFinite(codePoint) || codePoint < 0 || codePoint > 0x10FFFF ||
+    (codePoint >= 0xD800 && codePoint <= 0xDFFF)) {
+    return '';
+  }
+  if (codePoint <= 0xFFFF) {
+    return String.fromCharCode(codePoint);
+  }
+  const adjusted: number = codePoint - 0x10000;
+  return String.fromCharCode(0xD800 + (adjusted >> 10), 0xDC00 + (adjusted & 0x3FF));
+}
+
+/**
+ * 评论接口偶尔会把引号等正文字符以 HTML 实体返回。ArkUI Text 不会像浏览器 DOM
+ * 一样自动解码，因此需要在富文本分段前还原；保留未知或非法实体，避免误吞正文。
+ */
+function decodeHtmlEntities(value: string): string {
+  let decoded: string = '';
+  let lastIndex: number = 0;
+  HTML_ENTITY_REGEX.lastIndex = 0;
+  let match: RegExpExecArray | null = HTML_ENTITY_REGEX.exec(value);
+  while (match !== null) {
+    decoded += value.substring(lastIndex, match.index);
+    const token: string = match[1];
+    let replacement: string = '';
+    if (token.startsWith('#x') || token.startsWith('#X')) {
+      replacement = textFromCodePoint(parseInt(token.substring(2), 16));
+    } else if (token.startsWith('#')) {
+      replacement = textFromCodePoint(parseInt(token.substring(1), 10));
+    } else {
+      switch (token) {
+        case 'quot': replacement = '"'; break;
+        case 'apos': replacement = "'"; break;
+        case 'amp': replacement = '&'; break;
+        case 'lt': replacement = '<'; break;
+        case 'gt': replacement = '>'; break;
+        case 'nbsp': replacement = ' '; break;
+        default: break;
+      }
+    }
+    decoded += replacement.length > 0 ? replacement : match[0];
+    lastIndex = match.index + match[0].length;
+    match = HTML_ENTITY_REGEX.exec(value);
+  }
+  return decoded + value.substring(lastIndex);
+}
 
 /** 评论正文和回复预览共用的富文本片段。 */
 export class ReplyRenderPart {
@@ -78,7 +126,7 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
     return cached.slice();
   }
   const result: Array<ReplyRenderPart> = [];
-  let rest: string = item.content;
+  let rest: string = decodeHtmlEntities(item.content);
   let serial: number = 0;
   while (rest.length > 0) {
     let foundAt: number = rest.length;

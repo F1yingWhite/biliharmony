@@ -1,12 +1,13 @@
 /** 动态详情：首屏复用 feed 对象，随后从 detail 接口补齐正文、表情和评论 subject。 */
-import { AppNavStack, DynamicDetailParam, NAV_LOGIN } from '../common/AppRouter';
+import { AppNavStack, DynamicDetailParam, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
+  ImageViewerSrcRect, NAV_LOGIN } from '../common/AppRouter';
 import { DynamicItem, ReplyData, ReplyItem } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { Immersive } from '../common/Immersive';
 import { PageHeader } from '../components/PageHeader';
 import { DynCard } from '../views/DynamicView';
 import { UserStore } from '../common/UserStore';
-import { UIContext } from '@kit.ArkUI';
+import { display, FrameCallback, UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { safeToast } from '../common/Toast';
 import { image } from '@kit.ImageKit';
@@ -22,6 +23,19 @@ import { EmoteResolver } from '../common/EmoteResolver';
 import {
   ReplyCloneResult, ReplyReactionHooks, mutateReplyInArray, mutatedReplyClone, runReplyDislike, runReplyLike
 } from '../common/ReplyMutation';
+
+class DynamicHeroFrameCallback extends FrameCallback {
+  private task: () => void;
+
+  constructor(task: () => void) {
+    super();
+    this.task = task;
+  }
+
+  onFrame(_frameTimeInNano: number): void {
+    this.task();
+  }
+}
 
 @Component
 export struct DynamicDetailPage {
@@ -46,6 +60,23 @@ export struct DynamicDetailPage {
   @State threadSending: boolean = false;
   @State threadTargetRpid: number = 0;
   @State threadTargetName: string = '';
+  @State contentOpacity: number = 1;
+  @State heroVisible: boolean = false;
+  @State heroPageX: number = 0;
+  @State heroPageY: number = 0;
+  @State heroPageWidth: number = 0;
+  @State heroPageHeight: number = 0;
+  @State heroPageRadius: number = 0;
+  @State heroCardX: number = 0;
+  @State heroCardY: number = 0;
+  @State heroCardWidth: number = 0;
+  @State heroCardHeight: number = 0;
+  private entryFromRect: boolean = false;
+  private entranceArmed: boolean = false;
+  private closing: boolean = false;
+  private screenWidthVp: number = 0;
+  private screenHeightVp: number = 0;
+  @StorageProp('dynamicDetailCloseRequest') @Watch('onCloseRequested') closeRequest: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
   private destroyed: boolean = false;
   private replyCursor: string = '';
@@ -62,10 +93,118 @@ export struct DynamicDetailPage {
     safeToast(this.getUIContext(), message);
   }
 
+  private targetCardRect(): ImageViewerSrcRect {
+    return {
+      x: 10,
+      y: Immersive.statusBarHeight() + 48,
+      w: Math.max(0, this.screenWidthVp - 20),
+      h: this.param.srcRect !== undefined ? this.param.srcRect.h : 0,
+    };
+  }
+
+  private prepareEntrance(): void {
+    const rect: ImageViewerSrcRect | undefined = this.param.srcRect;
+    if (rect === undefined || rect.w <= 0 || rect.h <= 0) return;
+    try {
+      const screen: display.Display = display.getDefaultDisplaySync();
+      this.screenWidthVp = this.getUIContext().px2vp(screen.width);
+      this.screenHeightVp = this.getUIContext().px2vp(screen.height);
+    } catch (e) {
+      return;
+    }
+    if (this.screenWidthVp <= 0 || this.screenHeightVp <= 0) return;
+    this.entryFromRect = true;
+    this.contentOpacity = 0;
+    this.heroVisible = true;
+    this.heroPageX = rect.x;
+    this.heroPageY = rect.y;
+    this.heroPageWidth = rect.w;
+    this.heroPageHeight = rect.h;
+    this.heroPageRadius = 10;
+    this.heroCardX = rect.x;
+    this.heroCardY = rect.y;
+    this.heroCardWidth = rect.w;
+    this.heroCardHeight = rect.h;
+    this.entranceArmed = true;
+  }
+
+  private triggerEntrance(): void {
+    if (!this.entranceArmed || this.closing) return;
+    this.entranceArmed = false;
+    const target: ImageViewerSrcRect = this.targetCardRect();
+    this.getUIContext().postFrameCallback(new DynamicHeroFrameCallback(() => {
+      if (this.closing) return;
+      this.getUIContext().animateTo({ duration: 340, curve: Curve.EaseOut, onFinish: () => {
+        this.heroVisible = false;
+      } }, () => {
+        this.heroPageX = 0;
+        this.heroPageY = 0;
+        this.heroPageWidth = this.screenWidthVp;
+        this.heroPageHeight = this.screenHeightVp;
+        this.heroPageRadius = 0;
+        this.heroCardX = target.x;
+        this.heroCardY = target.y;
+        this.heroCardWidth = target.w;
+        this.heroCardHeight = target.h;
+      });
+      this.getUIContext().animateTo({ duration: 180, delay: 130, curve: Curve.EaseOut }, () => {
+        this.contentOpacity = 1;
+      });
+    }));
+  }
+
+  onCloseRequested(): void {
+    this.goBack();
+  }
+
+  private goBack(): void {
+    if (this.closing) return;
+    this.closing = true;
+    const rect: ImageViewerSrcRect | undefined = this.param.srcRect;
+    if (this.entryFromRect && rect !== undefined) {
+      const start: ImageViewerSrcRect = this.targetCardRect();
+      this.heroPageX = 0;
+      this.heroPageY = 0;
+      this.heroPageWidth = this.screenWidthVp;
+      this.heroPageHeight = this.screenHeightVp;
+      this.heroPageRadius = 0;
+      this.heroCardX = start.x;
+      this.heroCardY = start.y;
+      this.heroCardWidth = start.w;
+      this.heroCardHeight = start.h;
+      this.heroVisible = true;
+      this.contentOpacity = 0;
+      this.getUIContext().postFrameCallback(new DynamicHeroFrameCallback(() => {
+        AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
+        AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 380);
+        AppNavStack.pop();
+        this.getUIContext().animateTo({ duration: 340, curve: Curve.EaseOut }, () => {
+          this.heroPageX = rect.x;
+          this.heroPageY = rect.y;
+          this.heroPageWidth = rect.w;
+          this.heroPageHeight = rect.h;
+          this.heroPageRadius = 10;
+          this.heroCardX = rect.x;
+          this.heroCardY = rect.y;
+          this.heroCardWidth = rect.w;
+          this.heroCardHeight = rect.h;
+        });
+      }));
+      return;
+    }
+    AppNavStack.pop();
+  }
+
   aboutToAppear(): void {
     EmoteResolver.ensureLoaded();
     this.destroyed = false;
+    this.closing = false;
+    this.entryFromRect = false;
+    this.contentOpacity = 1;
+    this.heroVisible = false;
     this.item = this.param.item as DynamicItem;
+    this.prepareEntrance();
+    this.triggerEntrance();
     if (this.item.commentId > 0 && this.item.commentType > 0) {
       this.loadReplies(true).catch(() => {
       });
@@ -350,8 +489,9 @@ export struct DynamicDetailPage {
   }
 
   build() {
-    Column() {
-      PageHeader({ title: '动态详情' })
+    Stack({ alignContent: Alignment.TopStart }) {
+      Column() {
+      PageHeader({ title: '动态详情', onBack: () => this.goBack() })
       Scroll(this.scroller) {
         Column({ space: 12 }) {
           DynCard({ item: this.item, embedded: true, detailMode: true, idPrefix: 'dyndetail-' })
@@ -445,17 +585,42 @@ export struct DynamicDetailPage {
       .padding({ bottom: Immersive.bottomInset() })
       .constraintSize({ maxWidth: LayoutTokens.readingMaxWidth })
       .alignSelf(ItemAlign.Center)
+      }
+      .width('100%')
+      .height('100%')
+      .padding({ top: Immersive.statusBarHeight() })
+      .backgroundColor(this.isDark ? '#18191C' : '#F4F6F8')
+      .opacity(this.contentOpacity)
+      .bindSheet($$this.threadOpen, this.ThreadSheet(), {
+        height: SheetSize.LARGE,
+        dragBar: false,
+        showClose: false,
+        radius: { topLeft: 18, topRight: 18 },
+        backgroundColor: this.isDark ? '#18191C' : '#FFFFFF',
+      })
+
+      if (this.heroVisible) {
+        Column()
+          .width(this.heroPageWidth)
+          .height(this.heroPageHeight)
+          .position({ x: this.heroPageX, y: this.heroPageY })
+          .borderRadius(this.heroPageRadius)
+          .backgroundColor(this.isDark ? '#18191C' : '#F4F6F8')
+          .clip(true)
+          .hitTestBehavior(HitTestMode.None)
+        Stack({ alignContent: Alignment.TopStart }) {
+          DynCard({ item: this.item, embedded: true, detailMode: true, idPrefix: 'dyndetail-hero-' })
+        }
+        .width(this.heroCardWidth)
+        .height(this.heroCardHeight)
+        .position({ x: this.heroCardX, y: this.heroCardY })
+        .clip(true)
+        .hitTestBehavior(HitTestMode.None)
+      }
     }
     .width('100%')
     .height('100%')
-    .padding({ top: Immersive.statusBarHeight() })
-    .backgroundColor(this.isDark ? '#18191C' : '#F4F6F8')
-    .bindSheet($$this.threadOpen, this.ThreadSheet(), {
-      height: SheetSize.LARGE,
-      dragBar: false,
-      showClose: false,
-      radius: { topLeft: 18, topRight: 18 },
-      backgroundColor: this.isDark ? '#18191C' : '#FFFFFF',
-    })
+    .backgroundColor('#00000000')
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 }

@@ -4,11 +4,10 @@
  * @Reusable：LazyForEach 回收复用，数据通过 @Prop + aboutToReuse 刷新
  */
 import { display } from '@kit.ArkUI';
-import { image } from '@kit.ImageKit';
 import { VideoItem } from '../model/Models';
 import { formatCount, formatDuration } from '../common/Utils';
-import { AppNavStack, APP_ROOT_SNAPSHOT_ID, HERO_BG_SNAPSHOT_KEY, NAV_VIDEO_DETAIL, VideoDetailParam,
-  ImageViewerSrcRect } from '../common/AppRouter';
+import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY, NAV_VIDEO_DETAIL,
+  VideoDetailParam, ImageViewerSrcRect } from '../common/AppRouter';
 import { Haptic } from '../common/Haptic';
 import { UserStore } from '../common/UserStore';
 import { FeedCardTitle, FeedCoverImage, FeedGradientMask } from './FeedCardParts';
@@ -54,6 +53,10 @@ export struct VideoCard {
 
   private cardId(): string {
     return this.idPrefix + 'video-card-' + (this.video.bvid.length > 0 ? this.video.bvid : 'a' + String(this.video.aid));
+  }
+
+  private coverId(): string {
+    return this.cardId() + '-cover';
   }
 
   build() {
@@ -102,6 +105,7 @@ export struct VideoCard {
         .onClick(() => this.openDetail())
       }
       .width('100%')
+      .id(this.coverId())
 
       // 标题（@Builder 不能链式修饰，用 Row 承载左右内缩）
       // 固定两行高度：卡片高度不随标题长短变化，双列网格每张卡片严格等大、间距一致。
@@ -328,11 +332,11 @@ export struct VideoCard {
     Haptic.light();
     if (this.video.bvid.length > 0 || this.video.aid > 0) {
       const param: VideoDetailParam = { bvid: this.video.bvid, aid: this.video.aid, title: this.video.title, cover: this.video.cover };
-      // 从卡片位置放大到全屏：记录卡片窗口矩形，详情页首帧压到矩形上再展开。
+      // 只记录封面窗口矩形：详情页仅让封面飞向播放区，标题、数据和整页都不参与缩放。
       // 根页面 push 无共享元素转场，且要关默认右滑动画（push 第三参 false）。
       let srcRect: ImageViewerSrcRect | undefined = undefined;
       try {
-        const rect = this.getUIContext().getComponentUtils().getRectangleById(this.cardId());
+        const rect = this.getUIContext().getComponentUtils().getRectangleById(this.coverId());
         const x: number = this.getUIContext().px2vp(rect.windowOffset.x);
         const vpW: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().width);
         // 横向离屏（残留同 id 离屏卡片等异常）时回退默认转场，避免从屏幕外放大。
@@ -352,31 +356,13 @@ export struct VideoCard {
     }
   }
 
-  /** 详情页 push：有 srcRect 关默认转场走手动矩形放大。根页面场景先截根页图附给目标页
-   *  垫底——push 后根页 feed 不再渲染，没有截图会透出纯白窗口底，hero 动画显得"背景全白"。 */
+  /** 详情页 push：官方 Navigation 自定义内容转场在 hero 期间保活来源页。 */
   private pushDetail(param: VideoDetailParam, srcRect: ImageViewerSrcRect | undefined): void {
-    const pushNow = (): void => {
-      if (srcRect !== undefined) {
-        param.srcRect = srcRect;
-        AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param, false);
-      } else {
-        AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
-      }
-    };
-    if (AppNavStack.getAllPathName().length === 0) {
-      try {
-        this.getUIContext().getComponentSnapshot().get(APP_ROOT_SNAPSHOT_ID)
-          .then((pix: image.PixelMap) => {
-        AppStorage.setOrCreate(HERO_BG_SNAPSHOT_KEY, pix);
-        pushNow();
-      }).catch(() => {
-        pushNow();
-      });
-        return;
-      } catch (e) {
-        // 截图失败退化为直接 push。
-      }
+    if (srcRect !== undefined) {
+      param.srcRect = srcRect;
+      AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
+      AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
     }
-    pushNow();
+    AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
   }
 }
