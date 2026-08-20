@@ -3,7 +3,7 @@
  * 大区块已按职责拆到组件：评论 Tab（VideoReplyTab）、相关推荐行（RelatedVideoRow）、
  * 投币弹窗（CoinSheetView）、收藏夹多选（FavPickSheetView）、楼中楼面板（ReplyThreadPanel）。
  */
-import { display, UIContext } from '@kit.ArkUI';
+import { display, FrameCallback, UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
 import { systemShare } from '@kit.ShareKit';
@@ -11,8 +11,8 @@ import { inputMethod } from '@kit.IMEKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { Immersive } from '../common/Immersive';
 import { Haptic } from '../common/Haptic';
-import { AppNavStack, HERO_BG_SNAPSHOT_KEY, NAV_LOGIN, NAV_VIDEO_DETAIL, NAV_USER_SPACE, VideoDetailParam,
-  UserSpaceParam } from '../common/AppRouter';
+import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
+  ImageViewerSrcRect, NAV_LOGIN, NAV_VIDEO_DETAIL, NAV_USER_SPACE, VideoDetailParam, UserSpaceParam } from '../common/AppRouter';
 import { VideoDetail, VideoItem, ReplyItem, PlayUrlInfo, VideoPage, VideoQualityOption, VideoRelationState,
   BiliEmote, BiliEmotePackage, FavoriteFolderItem, UserStat, SpaceArcData, SubtitleTrack, UgcSeasonEpisode } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
@@ -45,6 +45,20 @@ import { UserApi } from '../api/UserApi';
 interface ReportButtonItem {
   text: string;
   color: string;
+}
+
+/** 等下一次 VSync 已提交源矩形后再开始 hero，避免用固定延时猜首帧时机。 */
+class VideoHeroFrameCallback extends FrameCallback {
+  private task: () => void;
+
+  constructor(task: () => void) {
+    super();
+    this.task = task;
+  }
+
+  onFrame(_frameTimeInNano: number): void {
+    this.task();
+  }
 }
 
 @Component
@@ -141,19 +155,22 @@ export struct VideoDetailPage {
   @State localDanmakuText: string = '';
   @State localDanmakuToken: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
-  /** 卡片放大入场：点击首页/列表卡片时把详情页首帧压到卡片矩形上，再展开到全屏。 */
-  @State entryScaleX: number = 1;
-  @State entryScaleY: number = 1;
-  @State entryDx: number = 0;
-  @State entryDy: number = 0;
-  @State entryBgOpacity: number = 1;
+  /** 卡片 hero：只移动封面边界，详情内容不参与缩放。 */
+  @State entryContentOpacity: number = 1;
+  @State heroVisible: boolean = false;
+  @State heroSource: string = '';
+  @State heroX: number = 0;
+  @State heroY: number = 0;
+  @State heroWidth: number = 0;
+  @State heroHeight: number = 0;
+  @State heroRadius: number = 0;
+  /** 固定使用入口卡片携带的封面，详情接口返回后也不在起播途中换图。 */
+  private entryCoverSource: string = '';
   /** 入场是否走了"卡片矩形放大"（有值且取到屏幕尺寸才算），退出时决定是否镜面收合。 */
   private entryFromRect: boolean = false;
-  /** 卡片放大入场已就位待播出（等 detail 数据或 700ms 兜底定时器触发）。 */
+  /** 卡片封面已在源矩形就位，等待下一次 VSync 开始。 */
   private entranceArmed: boolean = false;
   private closing: boolean = false;
-  /** 根首页截图（root 场景 hero 转场底衬）：push 前由卡片侧写入 AppStorage，此处读出垫底。 */
-  private heroBg: image.PixelMap | undefined = undefined;
   /** 系统返回/侧滑经 Index NavDestination 拦截后置位，页面内执行收合动画。 */
   @StorageProp('videoDetailCloseRequest') @Watch('onCloseRequested') closeRequest: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
@@ -491,105 +508,121 @@ export struct VideoDetailPage {
     this.danmakuOn = AppTheme.loadDanmakuSettings().enabled;
     this.bvid = this.param.bvid;
     this.aid = this.param.aid;
+    this.entryCoverSource = this.param.cover ?? '';
     this.entryFromRect = false;
+    this.entranceArmed = false;
     this.closing = false;
-    this.heroBg = AppStorage.get<image.PixelMap>(HERO_BG_SNAPSHOT_KEY);
+    this.entryContentOpacity = 1;
+    this.heroVisible = false;
     this.refreshScreenSize();
     this.prepareCardEntrance();
-    // 点击后立即开始扩大（内置 30ms 首帧延迟），不再等 detail 数据：
-    // 旧逻辑最坏要等 ~700ms 网络才"动起来"，是"点了没反应→突然放大"生硬感的最大来源。
-    // 数据在后台继续加载，播放区封面用卡片侧带来的封面垫底（entryCoverUrl）。
+    // 首次 VSync 后立即移动封面；详情请求与 hero 并行，不再等待网络结果。
     this.triggerEntranceExpansion();
-    // 兜底：prepare 异常未 arm 时此触发为空操作；极端时序卡住也能展开。
-    this.scheduleTimeout(() => this.triggerEntranceExpansion(), 700);
     this.init().catch(() => {
     });
   }
 
-  /** 有 srcRect 时：首帧把整页等比缩到"顶部对齐源卡片"的小页，随后展开（triggerEntranceExpansion）。
-   *  等比缩放（x=y）：旧版 scaleX≠scaleY 会把整页纵向压成薄片再拉伸，是"生硬/橡皮感"的来源；
-   *  等比+顶部对齐后，页顶播放区封面恰好落在卡片位置（卡宽≈缩后页宽、16:9 等高），
-   *  视觉上即"封面从卡片放大、页面随之展开"，其余内容只等比缩小不变形。
-   *  页面底色随展开同步淡入。 */
+  /** 播放区在窗口中的 hero 矩形。入场期详情尚未返回，天然稳定为 16:9。 */
+  private playerHeroRect(): ImageViewerSrcRect | undefined {
+    if (this.screenWidthVp <= 0) return undefined;
+    return {
+      x: 0,
+      y: Immersive.statusBarHeight(),
+      w: this.screenWidthVp,
+      h: this.visiblePlayerHeight(),
+    };
+  }
+
+  /** 有 srcRect 时，首帧只把一张独立封面放在源卡片封面上。 */
   private prepareCardEntrance(): void {
     const rect = this.param.srcRect;
     if (rect === undefined || rect.w <= 0 || rect.h <= 0) return;
-    try {
-      const vpW: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().width);
-      const vpH: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().height);
-      if (vpW <= 0 || vpH <= 0) return;
-      const s: number = rect.w / vpW;
-      // scale 在前 translate 在后：位移量不被缩放（与 ImageViewer 手动入场约定一致）。
-      this.entryFromRect = true;
-      this.entryScaleX = s;
-      this.entryScaleY = s;
-      this.entryDx = (rect.x + rect.w / 2) - vpW / 2;
-      this.entryDy = (rect.y + s * vpH / 2) - vpH / 2;
-      this.entryBgOpacity = 0;
-      this.entranceArmed = true;
-    } catch (e) {
-      // 取不到屏幕尺寸则保持默认直出。
-    }
+    if (this.playerHeroRect() === undefined) return;
+    this.entryFromRect = true;
+    this.entryContentOpacity = 0;
+    this.heroSource = this.entryCoverUrl();
+    this.heroX = rect.x;
+    this.heroY = rect.y;
+    this.heroWidth = rect.w;
+    this.heroHeight = rect.h;
+    this.heroRadius = 10;
+    this.heroVisible = true;
+    this.entranceArmed = true;
   }
 
-  /** 触发卡片放大展开：30ms 延迟确保首帧已上屏再开始动画；数据就绪或超时兜底各触发一次，只生效一次。 */
+  /** VSync 驱动封面飞向播放区；正文稍后淡入，不再出现缩小的完整详情页。 */
   private triggerEntranceExpansion(): void {
     if (!this.entranceArmed || this.destroyed || this.closing) return;
     this.entranceArmed = false;
-    this.scheduleTimeout(() => {
-      this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
-        this.entryScaleX = 1;
-        this.entryScaleY = 1;
-        this.entryDx = 0;
-        this.entryDy = 0;
-        this.entryBgOpacity = 1;
+    const target: ImageViewerSrcRect | undefined = this.playerHeroRect();
+    if (target === undefined) {
+      this.heroVisible = false;
+      this.entryContentOpacity = 1;
+      return;
+    }
+    this.getUIContext().postFrameCallback(new VideoHeroFrameCallback(() => {
+      if (this.destroyed || this.closing) return;
+      this.getUIContext().animateTo({ duration: 320, curve: Curve.EaseOut, onFinish: () => {
+        this.heroVisible = false;
+      } }, () => {
+        this.heroX = target.x;
+        this.heroY = target.y;
+        this.heroWidth = target.w;
+        this.heroHeight = target.h;
+        this.heroRadius = 0;
       });
-    }, 30);
+      this.getUIContext().animateTo({ duration: 190, delay: 100, curve: Curve.EaseOut }, () => {
+        this.entryContentOpacity = 1;
+      });
+    }));
   }
 
   onCloseRequested(): void {
     this.goBack();
   }
 
-  /** 卡片放大入场的镜面退出：内容 300ms 缩回源卡片矩形、页面底色同步淡出，随后出栈。
-   *  非卡片入口（无 srcRect/未取到屏幕尺寸）保持默认出栈。 */
+  private beginHeroNavPop(): void {
+    AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
+    AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
+    AppNavStack.pop();
+  }
+
+  /** 镜面退出：当前播放区封面收回源封面，详情正文独立淡出。 */
   goBack(): void {
     if (this.closing) return;
     this.closing = true;
     const rect = this.param.srcRect;
     if (this.entryFromRect && rect !== undefined) {
-      try {
-        const vpW: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().width);
-        const vpH: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().height);
-        if (vpW > 0 && vpH > 0) {
-          // 与入场同一等比变换（顶部对齐卡片）的镜面收合。
-          const s: number = rect.w / vpW;
-          this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
-            this.entryScaleX = s;
-            this.entryScaleY = s;
-            this.entryDx = (rect.x + rect.w / 2) - vpW / 2;
-            this.entryDy = (rect.y + s * vpH / 2) - vpH / 2;
-            this.entryBgOpacity = 0;
+      const start: ImageViewerSrcRect | undefined = this.playerHeroRect();
+      if (start !== undefined) {
+        this.heroSource = this.entryCoverUrl();
+        this.heroX = start.x;
+        this.heroY = start.y;
+        this.heroWidth = start.w;
+        this.heroHeight = start.h;
+        this.heroRadius = 0;
+        this.heroVisible = true;
+        this.getUIContext().postFrameCallback(new VideoHeroFrameCallback(() => {
+          this.beginHeroNavPop();
+          this.getUIContext().animateTo({ duration: 170, curve: Curve.EaseOut }, () => {
+            this.entryContentOpacity = 0;
           });
-        }
-      } catch (e) {
-        // 取不到屏幕尺寸则直接出栈。
+          this.getUIContext().animateTo({ duration: 320, curve: Curve.EaseOut }, () => {
+            this.heroX = rect.x;
+            this.heroY = rect.y;
+            this.heroWidth = rect.w;
+            this.heroHeight = rect.h;
+            this.heroRadius = 10;
+          });
+        }));
+        return;
       }
-      this.scheduleTimeout(() => {
-        AppNavStack.pop(false);
-      }, 310);
-      return;
     }
     AppNavStack.pop();
   }
 
   aboutToDisappear(): void {
     this.destroyed = true;
-    // hero 底衬快照释放：出栈后根页恢复渲染，不再需要截图垫底。
-    if (this.heroBg !== undefined) {
-      this.heroBg = undefined;
-      AppStorage.delete(HERO_BG_SNAPSHOT_KEY);
-    }
     this.reportVideoHeartbeat(this.videoProgressSeconds, true);
     this.timers.forEach((id: number) => {
       clearTimeout(id);
@@ -2455,29 +2488,17 @@ export struct VideoDetailPage {
 
   /** 卡片侧带过来的封面：detail 数据回来前播放区/底图直接垫它，入场期不出"加载中"占位。 */
   private entryCoverUrl(): string {
-    return this.detail.cover.length > 0 ? this.detail.cover : (this.param.cover ?? '');
+    return this.entryCoverSource.length > 0 ? this.entryCoverSource : this.detail.cover;
   }
 
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
-      // 首页快照垫底层：根场景 push 后根页 feed 不再渲染（透出窗口白底）。用 push 前截的
-      // 根页图占住"下层首页"，hero 放大/收合全程背景不闪白；页面底色铺满后自然盖住快照。
-      if (this.heroBg !== undefined) {
-        Image(this.heroBg)
-          .width('100%')
-          .height('100%')
-          .objectFit(ImageFit.Cover)
-          .hitTestBehavior(HitTestMode.None)
-      }
-      // 内容整体层（底色+页面）统一做入场缩放；垫底快照必须在这层外面，
-      // 否则会被缩放变换一起带走，动画期间"下层首页"只出现在卡片矩形内。
+      // 详情内容只淡入淡出，绝不跟 hero 一起缩放。
       Stack({ alignContent: Alignment.TopStart }) {
-      // 页面底色独立成层：卡片放大入场时从透明淡入（内容层自身透明，透出外层首页快照）。
       Column()
         .width('100%')
         .height('100%')
         .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
-        .opacity(this.entryBgOpacity)
         .hitTestBehavior(HitTestMode.None)
       Column() {
         // 播放器始终保活。进入评论仅用黑色栏遮住并收起高度，避免切 Tab 时销毁 AVPlayer 导致暂停。
@@ -2497,7 +2518,8 @@ export struct VideoDetailPage {
               cid: this.currentCid,
               videoDuration: this.currentPageDuration(),
               videoTitle: this.detail.title,
-              videoCover: this.detail.cover,
+              // 卡片原封面持续垫在 Surface 上，直到 PlayerView 同时收到 playing 与官方首帧事件。
+              videoCover: this.entryCoverUrl(),
               ownerName: this.detail.upName,
               ownerFace: this.detail.upFace,
               liked: this.liked,
@@ -2587,27 +2609,16 @@ export struct VideoDetailPage {
             })
           } else {
             Stack({ alignContent: Alignment.Center }) {
-              Image(this.coverThumb(this.entryCoverUrl()))
+              Image(this.entryCoverUrl())
                 .width('100%')
                 .height('100%')
                 .objectFit(ImageFit.Cover)
-                .blur(18)
-                .brightness(0.5)
-              // 封面取色氛围光晕
+              // 加载提示只压暗封面，不再切成“模糊底图 + 中间小图”，hero 落点连续。
               Column()
                 .width('100%')
                 .height('100%')
-                .radialGradient({
-                  center: ['50%', '40%'],
-                  radius: '70%',
-                  colors: [[colorWithAlpha(this.pageTint, '66'), 0.0], [colorWithAlpha(this.pageTint, '00'), 1.0]],
-                })
-              Column({ space: 8 }) {
-                Image(this.entryCoverUrl())
-                  .width(140)
-                  .aspectRatio(16 / 9)
-                  .objectFit(ImageFit.Cover)
-                  .borderRadius(8)
+                .backgroundColor('#52000000')
+              Column() {
                 Text(this.playUrl.length === 0 && !this.loading ? '获取播放地址失败' : '加载播放地址中...')
                   .fontSize(12)
                   .fontColor('#FFFFFF')
@@ -2708,9 +2719,18 @@ export struct VideoDetailPage {
       }
       .width('100%')
       .height('100%')
-      // 卡片放大入场变换（无 srcRect 时为恒等变换，不影响其他入口）。
-      .scale({ x: this.entryScaleX, y: this.entryScaleY })
-      .translate({ x: this.entryDx, y: this.entryDy })
+      .opacity(this.entryContentOpacity)
+
+      if (this.heroVisible && this.heroSource.length > 0) {
+        Image(this.heroSource)
+          .width(this.heroWidth)
+          .height(this.heroHeight)
+          .position({ x: this.heroX, y: this.heroY })
+          .objectFit(ImageFit.Cover)
+          .borderRadius(this.heroRadius)
+          .clip(true)
+          .hitTestBehavior(HitTestMode.None)
+      }
     }
     .width('100%')
     .height('100%')

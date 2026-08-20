@@ -3,8 +3,9 @@ import { ReplyActionBar } from './ReplyActionBar';
 import { ReplyRichText } from './ReplyRichText';
 import { ReplyPreview } from './ReplyPreview';
 import { ReplyThreadGuides } from './ReplyThreadGuides';
-import { AppNavStack, ImageViewerParam, NAV_IMAGE_VIEWER, NAV_USER_SPACE, NAV_VIDEO_DETAIL,
-  UserSpaceParam, VideoDetailParam } from '../common/AppRouter';
+import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY, ImageViewerParam,
+  ImageViewerSrcRect, NAV_IMAGE_VIEWER, NAV_USER_SPACE, NAV_VIDEO_DETAIL, UserSpaceParam,
+  VideoDetailParam } from '../common/AppRouter';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
 import { parseReplyContent, ReplyRenderPart } from '../common/ReplyContentParser';
 import { formatDuration } from '../common/Utils';
@@ -148,12 +149,55 @@ export struct ReplyCard {
 
   private openPicture(index: number): void {
     const originals: Array<string> = this.item.pictures.map((url: string) => biliImageOriginal(url));
-    const transitionId: string = 'image-viewer-reply-' + String(this.item.rpid) + '-' + String(index);
-    const viewer: ImageViewerParam = { images: originals, initialIndex: index, transitionId: transitionId };
-    // 一镜到底：关默认转场 + animateTo，geometryTransition 接管
-    this.onNavigate(() => this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
-      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
-    }));
+    const rects: Array<ImageViewerSrcRect> = this.collectPictureRects();
+    const rect: ImageViewerSrcRect | undefined = index < rects.length && rects[index].w > 0 ? rects[index] : undefined;
+    const ids: Array<string> = [];
+    const previews: Array<string> = [];
+    for (let i: number = 0; i < this.item.pictures.length; i++) {
+      ids.push(this.pictureId(i));
+      previews.push(biliImageThumbnail(this.item.pictures[i], this.item.pictures.length === 1 ? 640 : 320));
+    }
+    const viewer: ImageViewerParam = {
+      images: originals,
+      initialIndex: index,
+      srcRect: rect,
+      srcRects: rects,
+      srcIds: ids,
+      srcPreviews: previews,
+    };
+    this.onNavigate(() => {
+      AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
+      AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
+      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer);
+    });
+  }
+
+  /** 评论附图也逐张保存窗口矩形，查看器横滑后可收回当前图片，而不是固定回首图。 */
+  private collectPictureRects(): Array<ImageViewerSrcRect> {
+    const rects: Array<ImageViewerSrcRect> = [];
+    for (let i: number = 0; i < this.item.pictures.length; i++) {
+      let rect: ImageViewerSrcRect = { x: 0, y: 0, w: 0, h: 0 };
+      try {
+        const area = this.getUIContext().getComponentUtils()
+          .getRectangleById(this.pictureId(i));
+        if (area.size.width > 0 && area.size.height > 0 && area.windowOffset.x >= 0) {
+          rect = {
+            x: this.getUIContext().px2vp(area.windowOffset.x),
+            y: this.getUIContext().px2vp(area.windowOffset.y),
+            w: this.getUIContext().px2vp(area.size.width),
+            h: this.getUIContext().px2vp(area.size.height),
+          };
+        }
+      } catch (e) {
+        // 未布局的图片退化为普通淡出。
+      }
+      rects.push(rect);
+    }
+    return rects;
+  }
+
+  private pictureId(index: number): string {
+    return 'reply-img-' + String(this.item.rpid) + '-' + String(index);
   }
 
   private visualDepth(): number {
@@ -471,8 +515,7 @@ export struct ReplyCard {
                 .objectFit(ImageFit.Cover)
                 .borderRadius(6)
                 .margin({ right: 5, bottom: 5 })
-                .id('reply-img-' + String(this.item.rpid) + '-' + String(index))
-                .geometryTransition('image-viewer-reply-' + String(this.item.rpid) + '-' + String(index))
+                .id(this.pictureId(index))
                 // 评论附图异步解码，长列表滚动不卡。
                 .syncLoad(false)
                 .priorityGesture(TapGesture().onAction(() => this.openPicture(index)))
