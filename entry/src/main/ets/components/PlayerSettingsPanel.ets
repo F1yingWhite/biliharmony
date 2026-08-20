@@ -27,7 +27,10 @@ export struct PlayerSettingsPanel {
   @Prop subtitles: Array<SubtitleTrack> = [];
   @Prop subtitleIndex: number = -1;
   @Prop subtitleOn: boolean = false;
+  @Prop dmFilterRulesCount: number = 0;
   onSubtitleChange: (index: number) => void = () => {};
+  onDmFilterTap: () => void = () => {};
+  onBlockAdvancedToggle: (next: boolean) => void = () => {};
   onResetDanmaku: () => void = () => {};
   onDmOpacityChange: (value: number) => void = () => {};
   onDmSpeedChange: (value: number) => void = () => {};
@@ -59,38 +62,125 @@ export struct PlayerSettingsPanel {
     return this.isDark ? '#26272B' : '#F0F1F3';
   }
 
+  private cardBg(): string {
+    return this.isDark ? '#26272B' : '#FFFFFF';
+  }
+
+  private dividerColor(): string {
+    return this.isDark ? '#33343A' : '#F0F1F3';
+  }
+
+  private sectionTitleColor(): string {
+    return this.isDark ? '#F1F2F4' : '#18191C';
+  }
+
+  private speedText(v: number): string {
+    if (v <= 0.75) return '较慢';
+    if (v <= 1.25) return '正常';
+    if (v <= 1.75) return '较快';
+    return '很快';
+  }
+
+  private stubToast(message: string): void {
+    this.getUIContext().getPromptAction().showToast({ message: message });
+  }
+
   // 注意：状态值必须用闭包在 Builder 体内读取，不能按值传参——
   // @Builder 按值传参会生成静态快照，状态变化后 UI 不刷新（滑条/按钮“没反应”的根因）。
   @Builder
   DmSliderRow(label: string, getValue: () => number, min: number, max: number, onChange: (value: number) => void) {
-    Row({ space: 8 }) {
-      Text(label).width(38).fontSize(11).fontColor(this.subColor())
-      Slider({ value: getValue(), min: min, max: max, step: (max - min) / 20, style: SliderStyle.InSet })
+    Row({ space: 10 }) {
+      Text(label).width(52).fontSize(13).fontColor(this.sectionTitleColor())
+      Slider({ value: getValue(), min: min, max: max, step: (max - min) / 50, style: SliderStyle.InSet })
         .layoutWeight(1)
         .height(22)
         .blockColor('#FFFFFF')
         .selectedColor(this.accent)
         .trackColor(this.trackColor())
         .onChange((next: number) => onChange(next))
-      Text(getValue().toFixed(getValue() >= 6 ? 0 : 1))
-        .width(28)
+      Text(Math.round(getValue() * 100) + '%')
+        .width(44)
         .textAlign(TextAlign.End)
-        .fontSize(10)
+        .fontSize(12)
         .fontColor(this.subColor())
     }
     .width('100%')
-    .height(27)
+    .padding({ left: 14, right: 14, top: 7, bottom: 7 })
   }
 
   @Builder
-  DmBlockChip(label: string, isBlocked: () => boolean, kind: string) {
+  DmSpeedRow(getValue: () => number, onChange: (value: number) => void) {
+    Row({ space: 10 }) {
+      Text('弹幕速度').width(52).fontSize(13).fontColor(this.sectionTitleColor())
+      Slider({ value: getValue(), min: 0.5, max: 2, step: 0.05, style: SliderStyle.InSet })
+        .layoutWeight(1)
+        .height(22)
+        .blockColor('#FFFFFF')
+        .selectedColor(this.accent)
+        .trackColor(this.trackColor())
+        .onChange((next: number) => onChange(next))
+      Text(this.speedText(getValue()))
+        .width(44)
+        .textAlign(TextAlign.End)
+        .fontSize(12)
+        .fontColor(this.subColor())
+    }
+    .width('100%')
+    .padding({ left: 14, right: 14, top: 7, bottom: 7 })
+  }
+
+  @Builder
+  DensityChip(label: string, value: number) {
     Text(label)
-      .fontSize(11)
-      .fontColor(isBlocked() ? '#FFFFFF' : this.subColor())
-      .padding({ left: 9, right: 9, top: 5, bottom: 5 })
-      .borderRadius(13)
-      .backgroundColor(isBlocked() ? this.accent : this.unselectedBg())
-      .onClick(() => this.onToggleDmBlock(kind))
+      .fontSize(13)
+      .fontWeight(this.dmDensity === value ? FontWeight.Medium : FontWeight.Normal)
+      .fontColor(this.dmDensity === value ? this.accent : this.sectionTitleColor())
+      .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+      .onClick(() => this.onDmDensityChange(value))
+  }
+
+  @Builder
+  DmTypeIcon(icon: Resource, label: string, active: boolean, onTap: () => void) {
+    Column() {
+      Image(icon)
+        .width(27)
+        .height(27)
+        .renderMode(ImageRenderMode.Template)
+        .fillColor(active ? this.accent : this.sectionTitleColor())
+      Text(label)
+        .fontSize(11)
+        .fontColor(active ? this.accent : this.subColor())
+        .margin({ top: 5 })
+    }
+    .layoutWeight(1)
+    .onClick(() => onTap())
+  }
+
+  @Builder
+  DmSwitchRow(label: string, sub: string, isOn: boolean, onTap: (next: boolean) => void) {
+    Row() {
+      Column({ space: 2 }) {
+        Text(label).fontSize(14).fontColor(this.sectionTitleColor())
+        if (sub.length > 0) {
+          Text(sub).fontSize(11).fontColor(this.subColor())
+        }
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      Toggle({ type: ToggleType.Switch, isOn: isOn })
+        .selectedColor(this.accent)
+        .switchPointColor('#FFFFFF')
+        .width(42)
+        .height(24)
+        .onChange((v: boolean): void => onTap(v))
+    }
+    .width('100%')
+    .padding({ top: 11, bottom: 11 })
+  }
+
+  @Builder
+  DmDivider() {
+    Divider().strokeWidth(0.6).color(this.dividerColor())
   }
 
   @Builder
@@ -110,25 +200,105 @@ export struct PlayerSettingsPanel {
   build() {
     Column({ space: this.which === 0 ? 2 : 8 }) {
       if (this.which === 0) {
+        Text('弹幕设置')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.sectionTitleColor())
+          .width('100%')
+          .margin({ bottom: 8 })
+        Column() {
+          Row() {
+            Text('弹幕密度').fontSize(13).fontColor(this.sectionTitleColor())
+            Blank()
+            this.DensityChip('正常', 22)
+            this.DensityChip('较多', 27)
+            this.DensityChip('重叠', 30)
+          }
+          .width('100%')
+          .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+          this.DmDivider()
+          this.DmSliderRow('不透明度', () => this.dmOpacity, 0.2, 1, (value: number) => this.onDmOpacityChange(value))
+          this.DmDivider()
+          this.DmSliderRow('字体大小', () => this.dmFontScale, 0.7, 1.8, (value: number) => this.onDmFontScaleChange(value))
+          this.DmDivider()
+          this.DmSpeedRow(() => this.dmSpeed, (value: number) => this.onDmSpeedChange(value))
+        }
+        .width('100%')
+        .borderRadius(14)
+        .backgroundColor(this.cardBg())
+        .margin({ bottom: 14 })
+
+        Text('画面防挡')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.sectionTitleColor())
+          .width('100%')
+          .margin({ bottom: 8 })
+        Column() {
+          Text('按弹幕类型屏蔽')
+            .fontSize(14)
+            .fontColor(this.sectionTitleColor())
+            .width('100%')
+            .padding({ left: 14, right: 14, top: 13, bottom: 10 })
+          Row() {
+            this.DmTypeIcon($r('app.media.ic_dm_fixed'), '固定', this.blockTopDm, () => this.onToggleDmBlock('top'))
+            this.DmTypeIcon($r('app.media.ic_dm_scroll'), '滚动', this.blockScrollDm, () => this.onToggleDmBlock('scroll'))
+            this.DmTypeIcon($r('app.media.ic_dm_color'), '彩色', this.blockColorDm, () => this.onToggleDmBlock('color'))
+            this.DmTypeIcon($r('app.media.ic_dm_advanced'), '高级', this.dmBlockLevel > 0, () => this.onBlockAdvancedToggle(this.dmBlockLevel <= 0))
+            this.DmTypeIcon($r('app.media.ic_dm_count'), '计数', false, () => this.stubToast('功能暂未开放'))
+          }
+          .width('100%')
+          .padding({ left: 10, right: 10, bottom: 14 })
+          this.DmDivider()
+          this.DmSwitchRow('重复弹幕隐藏', '大量内容相同的弹幕会被隐藏', false, (next: boolean): void => {
+            if (next) this.stubToast('功能暂未开放');
+          })
+          this.DmDivider()
+          this.DmSwitchRow('字幕防挡', '底部弹幕会被隐藏', this.blockBottomDm, (): void => {
+            this.onToggleDmBlock('bottom');
+          })
+          this.DmDivider()
+          this.DmSwitchRow('人像防挡', '人像不会被弹幕遮挡', false, (next: boolean): void => {
+            if (next) this.stubToast('功能暂未开放');
+          })
+        }
+        .width('100%')
+        .borderRadius(14)
+        .backgroundColor(this.cardBg())
+        .padding({ left: 14, right: 14 })
+        .margin({ bottom: 14 })
+
+        Text('更多工具')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.sectionTitleColor())
+          .width('100%')
+          .margin({ bottom: 8 })
+        Column() {
+          this.DmSwitchRow('弹幕观看屏蔽词', '仅对我不展示特定弹幕', this.dmFilterRulesCount > 0, (): void => {
+            this.onDmFilterTap();
+          })
+        }
+        .width('100%')
+        .borderRadius(14)
+        .backgroundColor(this.cardBg())
+        .padding({ left: 14, right: 14 })
+
         Row() {
-          Text('弹幕设置').fontSize(15).fontWeight(FontWeight.Bold).fontColor(this.titleColor())
-          Blank()
-          Text('恢复默认').fontSize(11).fontColor(this.subColor()).onClick(() => this.onResetDanmaku())
+          Image($r('app.media.ic_refresh'))
+            .width(14)
+            .height(14)
+            .renderMode(ImageRenderMode.Template)
+            .fillColor(this.subColor())
+          Text('重置弹幕设置')
+            .fontSize(13)
+            .fontColor(this.subColor())
+            .margin({ left: 5 })
         }
         .width('100%')
-        this.DmSliderRow('透明度', () => this.dmOpacity, 0.2, 1, (value: number) => this.onDmOpacityChange(value))
-        this.DmSliderRow('速度', () => this.dmSpeed, 0.5, 2, (value: number) => this.onDmSpeedChange(value))
-        this.DmSliderRow('字号', () => this.dmFontScale, 0.7, 1.8, (value: number) => this.onDmFontScaleChange(value))
-        this.DmSliderRow('密度', () => this.dmDensity, 6, 30, (value: number) => this.onDmDensityChange(value))
-        // 智能云屏蔽等级（B 站 app 同款）：按弹幕 weight 过滤，0 为关闭
-        this.DmSliderRow('屏蔽', () => this.dmBlockLevel, 0, 10, (value: number) => this.onDmBlockLevelChange(value))
-        Row({ space: 6 }) {
-          this.DmBlockChip('滚动', () => this.blockScrollDm, 'scroll')
-          this.DmBlockChip('顶部', () => this.blockTopDm, 'top')
-          this.DmBlockChip('底部', () => this.blockBottomDm, 'bottom')
-          this.DmBlockChip('彩色', () => this.blockColorDm, 'color')
-        }
-        .width('100%')
+        .justifyContent(FlexAlign.Center)
+        .padding({ top: 16, bottom: 4 })
+        .onClick(() => this.onResetDanmaku())
       } else if (this.which === 1) {
         Row() {
           Text('清晰度').fontSize(14).fontWeight(FontWeight.Bold).fontColor(this.titleColor())

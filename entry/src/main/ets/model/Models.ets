@@ -434,6 +434,13 @@ export class PlayUrlInfo {
     const acceptQuality: Array<Object> = asArray(j['accept_quality']);
     const acceptDescription: Array<Object> = asArray(j['accept_description']);
     const supportFormats: Array<Object> = asArray(j['support_formats']);
+    // 本次响应的真实 DASH 轨集合（供菜单标记可用/不可用；MP4 分支同样需要）。
+    const dashAvailable: Array<number> = [];
+    for (let i: number = 0; i < dashVideo.length; i++) {
+      const id: number = asNumber(asObject(dashVideo[i])['id'], 0);
+      if (id > 0 && dashAvailable.indexOf(id) < 0) dashAvailable.push(id);
+    }
+    dashAvailable.sort((a: number, b: number) => b - a);
     // ≤1080P（qn 80）优先 durl 单路 MP4：单 AVPlayer 内部完成音画同步，彻底避开双轨
     // 门控/校时的一类 bug；seek/快进只需对单文件发 Range 请求，缓冲明显更快。
     // 高画质（1080P 高码率/4K/HDR，仅 DASH 提供）仍走双轨。
@@ -456,42 +463,23 @@ export class PlayUrlInfo {
       info.isDash = false;
       info.urls = candidates;
       info.url = candidates.length > 0 ? candidates[0] : '';
+      // 菜单仍要展示 DASH 全量画质（fnval 4049 时 accept_quality 只含 MP4 协议档位，
+      // 用它会导致 1080P60/1080P+/4K 从菜单消失）；选高画质会按新 qn 重新请求走 DASH。
+      info.qualities = qualityListFrom(supportFormats, acceptQuality, acceptDescription, dashAvailable);
     } else if (dashVideo.length > 0) {
       info.isDash = true;
       info.format = 'dash';
-      const available: Array<number> = [];
-      for (let i: number = 0; i < dashVideo.length; i++) {
-        const item: Record<string, Object> = asObject(dashVideo[i]);
-        const id: number = asNumber(item['id'], 0);
-        if (id > 0 && available.indexOf(id) < 0) available.push(id);
-      }
-      available.sort((a: number, b: number) => b - a);
-      let selectedQuality: number = available.length > 0 ? available[0] : info.quality;
-      for (let i: number = 0; i < available.length; i++) {
-        if (available[i] <= requestedQuality) {
-          selectedQuality = available[i];
+      let selectedQuality: number = dashAvailable.length > 0 ? dashAvailable[0] : info.quality;
+      for (let i: number = 0; i < dashAvailable.length; i++) {
+        if (dashAvailable[i] <= requestedQuality) {
+          selectedQuality = dashAvailable[i];
           break;
         }
       }
       info.quality = selectedQuality;
 
       // 对齐 PiliPlus：support_formats 全部展示，未返回实际 DASH 轨的会员画质标灰并说明原因。
-      if (supportFormats.length > 0) {
-        for (let i: number = 0; i < supportFormats.length; i++) {
-          const formatItem: Record<string, Object> = asObject(supportFormats[i]);
-          const qn: number = asNumber(formatItem['quality'], 0);
-          if (qn <= 0) continue;
-          const description: string = str(formatItem, 'new_description', str(formatItem, 'display_desc', ''));
-          info.qualities.push(new VideoQualityOption(qn, qualityShortName(qn, description), available.indexOf(qn) >= 0));
-        }
-      } else {
-        for (let i: number = 0; i < acceptQuality.length; i++) {
-          const qn: number = asNumber(acceptQuality[i], 0);
-          if (qn <= 0) continue;
-          const description: string = i < acceptDescription.length ? asString(acceptDescription[i], '') : '';
-          info.qualities.push(new VideoQualityOption(qn, qualityShortName(qn, description), available.indexOf(qn) >= 0));
-        }
-      }
+      info.qualities = qualityListFrom(supportFormats, acceptQuality, acceptDescription, dashAvailable);
 
       // 同画质优先 AVC（兼容最好），其次 HEVC，最后 AV1；CDN 仍按可用性排序并保留后备。
       let selectedVideo: Record<string, Object> = {};
@@ -535,6 +523,29 @@ export class PlayUrlInfo {
     }
     return info;
   }
+}
+
+/** 清晰度菜单数据源：优先 support_formats（全量档位），退回 accept_quality；available= 真实 DASH 轨是否包含。 */
+function qualityListFrom(supportFormats: Array<Object>, acceptQuality: Array<Object>, acceptDescription: Array<Object>,
+  available: Array<number>): Array<VideoQualityOption> {
+  const list: Array<VideoQualityOption> = [];
+  if (supportFormats.length > 0) {
+    for (let i: number = 0; i < supportFormats.length; i++) {
+      const formatItem: Record<string, Object> = asObject(supportFormats[i]);
+      const qn: number = asNumber(formatItem['quality'], 0);
+      if (qn <= 0) continue;
+      const description: string = str(formatItem, 'new_description', str(formatItem, 'display_desc', ''));
+      list.push(new VideoQualityOption(qn, qualityShortName(qn, description), available.indexOf(qn) >= 0));
+    }
+  } else {
+    for (let i: number = 0; i < acceptQuality.length; i++) {
+      const qn: number = asNumber(acceptQuality[i], 0);
+      if (qn <= 0) continue;
+      const description: string = i < acceptDescription.length ? asString(acceptDescription[i], '') : '';
+      list.push(new VideoQualityOption(qn, qualityShortName(qn, description), available.indexOf(qn) >= 0));
+    }
+  }
+  return list;
 }
 
 function dashItemUrls(item: Record<string, Object>): Array<string> {

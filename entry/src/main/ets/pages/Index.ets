@@ -10,7 +10,8 @@ import { MineView } from '../views/MineView';
 import { Immersive } from '../common/Immersive';
 import { AppTheme } from '../common/AppTheme';
 import { GlassHeaderBar } from '../components/GlassHeaderBar';
-import { AppNavStack, NAV_SEARCH, NAV_VIDEO_DETAIL, NAV_LOGIN, NAV_USER_SPACE, NAV_MESSAGES, NAV_HISTORY, NAV_FAVORITES,
+import { AppNavStack, APP_ROOT_SNAPSHOT_ID, NAV_SEARCH, NAV_VIDEO_DETAIL, NAV_LOGIN, NAV_USER_SPACE, NAV_MESSAGES,
+  NAV_HISTORY, NAV_FAVORITES,
   NAV_WATCH_LATER, NAV_LIVE_ROOM, NAV_IMAGE_VIEWER, NAV_DYNAMIC_DETAIL, VideoDetailParam, UserSpaceParam, LiveRoomParam,
   ImageViewerParam, DynamicDetailParam, NAV_RELATION_LIST, RelationListParam, NAV_BANGUMI_DETAIL,
   BangumiDetailParam, NAV_RANK, NAV_ARTICLE, ArticlePageParam, NAV_BANGUMI_LIST, NAV_BANGUMI_INDEX, NAV_ZONE,
@@ -253,6 +254,13 @@ struct Index {
         // 横屏播放器仍处于全屏时，侧滑/返回键只退出全屏，不把整个视频页出栈。
         if (AppStorage.get<boolean>('videoPlayerFullscreen') ?? false) {
           PlayerCommandBus.exitFullscreen();
+          return true;
+        }
+        // 卡片放大入场：返回/侧滑同样走页面"缩回卡片"收合动画（与看图页同机制）。
+        const videoParam = Index.asVideoDetailParam(param);
+        if (videoParam !== null && videoParam.srcRect !== undefined) {
+          const request: number = AppStorage.get<number>('videoDetailCloseRequest') ?? 0;
+          AppStorage.setOrCreate<number>('videoDetailCloseRequest', request + 1);
           return true;
         }
         return false;
@@ -600,6 +608,8 @@ struct Index {
       .height('100%')
       .backgroundColor(this.isDark ? '#18191C' : '#F6F7F8')
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+      // hero 转场底衬：根页被二级页 push 覆盖后不再渲染，push 前截此组件做目标页最底层
+      .id(APP_ROOT_SNAPSHOT_ID)
     }
     .width('100%')
     .height('100%')

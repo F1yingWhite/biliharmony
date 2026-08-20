@@ -7,6 +7,9 @@ export struct VideoActionItem {
   @Prop icon: Resource = $r('app.media.bilix_icon_like');
   @Prop value: string = '';
   @Prop active: boolean = false;
+  /** 激活时替换用的实心图标（如点踩激活换实心下按手）；useActiveIcon 为 false 时始终用 icon。 */
+  activeIcon: Resource = $r('app.media.bilix_icon_like');
+  useActiveIcon: boolean = false;
   @Prop busy: boolean = false;
   onTap: () => void = () => {};
   /** 长按触发附加操作（如点赞按钮长按弹「三连」）；为空则不挂手势。 */
@@ -37,7 +40,7 @@ export struct VideoActionItem {
 
   build() {
     Column({ space: 4 }) {
-      Image(this.icon)
+      Image(this.useActiveIcon && this.active ? this.activeIcon : this.icon)
         .width(22)
         .height(22)
         .renderMode(ImageRenderMode.Template)

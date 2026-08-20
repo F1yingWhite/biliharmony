@@ -4,7 +4,8 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { systemShare } from '@kit.ShareKit';
 import { display } from '@kit.ArkUI';
-import { AppNavStack, ImageViewerParam, ImageViewerSrcRect } from '../common/AppRouter';
+import { image } from '@kit.ImageKit';
+import { AppNavStack, HERO_BG_SNAPSHOT_KEY, ImageViewerParam, ImageViewerSrcRect } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { BackButton } from '../components/BackButton';
 import { biliImageThumbnail } from '../common/ImageUrl';
@@ -16,14 +17,18 @@ struct ZoomableImage {
   @Prop transitionId: string = '';
   onLongPress: () => void = () => {};
   onZoomChange: (zoomed: boolean) => void = () => {};
-  /** 单击（含黑色留白区）退出查看器。 */
-  onSingleTap: () => void = () => {};
+  /** 单击：参数=是否落在图片内容上。命中内容→切换顶/底 UI 栏（捏合误识别单击不会弹掉查看器）；
+   * 落在黑色留白区→关闭查看器。 */
+  onSingleTap: (hitContent: boolean) => void = () => {};
   @State scaleValue: number = 1;
   @State offsetX: number = 0;
   @State offsetY: number = 0;
   @State entranceScale: number = 1;
   @State viewportWidth: number = 0;
   @State viewportHeight: number = 0;
+  /** 图片源原始像素尺寸（onComplete 回传，仅用宽高比，单位无关）。 */
+  private naturalW: number = 0;
+  private naturalH: number = 0;
   private pinchBase: number = 1;
   private pinchBaseX: number = 0;
   private pinchBaseY: number = 0;
@@ -68,6 +73,24 @@ struct ZoomableImage {
     return Math.max(-limit, Math.min(limit, value));
   }
 
+  /** 点击点（视口坐标）是否落在图片实际显示内容上（ObjectFit.Contain 黑边之外区域不算）。 */
+  private hitContent(x: number, y: number): boolean {
+    if (this.naturalW <= 0 || this.naturalH <= 0) return true;
+    const ar: number = this.naturalW / this.naturalH;
+    let baseW: number = this.viewportWidth;
+    let baseH: number = this.viewportWidth / ar;
+    if (baseH > this.viewportHeight) {
+      baseH = this.viewportHeight;
+      baseW = this.viewportHeight * ar;
+    }
+    const w: number = baseW * this.scaleValue;
+    const h: number = baseH * this.scaleValue;
+    const cx: number = this.viewportWidth * 0.5 + this.offsetX;
+    const cy: number = this.viewportHeight * 0.5 + this.offsetY;
+    // 边缘留 12px 容差：贴着画面边界的点击按内容处理，避免"点画面却关了"的误判。
+    return Math.abs(x - cx) <= w * 0.5 + 12 && Math.abs(y - cy) <= h * 0.5 + 12;
+  }
+
   /** 保持 focus 对应的图片内容缩放前后仍停在 focus 下方。 */
   private zoomAt(targetScale: number, focusX: number, focusY: number, animated: boolean): void {
     const nextScale: number = this.clampScale(targetScale);
@@ -104,6 +127,13 @@ struct ZoomableImage {
         .width('100%')
         .height('100%')
         .objectFit(ImageFit.Contain)
+        // 记录源图原始像素尺寸：单击时据此区分"点在画面上"与"点在黑色留白区"。
+        .onComplete((event) => {
+          if (event !== undefined) {
+            this.naturalW = Number(event.width);
+            this.naturalH = Number(event.height);
+          }
+        })
         // Navigation 栈下用 geometryTransition（一镜到底）；旧 sharedTransition 只对 legacy router 生效。
         .geometryTransition(this.transitionId.length > 0 ? this.transitionId : 'image-viewer-none')
         .scale({ x: this.scaleValue * this.entranceScale, y: this.scaleValue * this.entranceScale })
@@ -161,7 +191,12 @@ struct ZoomableImage {
                   }
                 }),
               TapGesture({ count: 1 })
-                .onAction(() => this.onSingleTap())
+                .onAction((event: GestureEvent) => {
+                  const finger: FingerInfo | undefined = event.fingerList.length > 0 ? event.fingerList[0] : undefined;
+                  const x: number = finger !== undefined ? finger.localX : this.viewportWidth * 0.5;
+                  const y: number = finger !== undefined ? finger.localY : this.viewportHeight * 0.5;
+                  this.onSingleTap(this.hitContent(x, y));
+                })
             )
           )
         )
@@ -194,6 +229,8 @@ export struct ImageViewerPage {
   @State bgOpacity: number = 1;
   /** 每张图是否已切换为原图（默认只加载缩略图，点"查看原图"才加载原图，节约内存） */
   @State originalFlags: Array<boolean> = [];
+  /** 顶/底 UI 栏（返回键、查看原图、页码）显隐：单击切换。对齐 B 站官方——单击不关闭，避免缩放手势误触直接退出。 */
+  @State uiVisible: boolean = true;
   /** 原图 HEAD 体积过小视为低清图，不展示“查看原图”入口。 */
   @State lowResFlags: Array<boolean> = [];
   @State originalSizeText: string = '';
@@ -207,11 +244,14 @@ export struct ImageViewerPage {
   @State entryDx: number = 0;
   @State entryDy: number = 0;
   private entryFromRect: boolean = false;
+  /** 根首页截图（root 场景 hero 转场底衬）：push 前由卡片侧写入 AppStorage，此处读出垫底。 */
+  private heroBg: image.PixelMap | undefined = undefined;
   /** 低于此体积（3MB）的图片直接加载原图，不再先缩略图后手动“查看原图”。 */
   private static readonly ORIGINAL_SIZE_THRESHOLD: number = 3 * 1024 * 1024;
 
   aboutToAppear(): void {
     this.currentIndex = Math.max(0, Math.min(this.param.images.length - 1, this.param.initialIndex));
+    this.heroBg = AppStorage.get<image.PixelMap>(HERO_BG_SNAPSHOT_KEY);
     Immersive.setBarIcons(true, true);
     this.originalFlags = this.param.images.map(() => false);
     this.lowResFlags = this.param.images.map(() => false);
@@ -502,8 +542,25 @@ export struct ImageViewerPage {
       TransitionEffect.opacity(0).animation({ duration: 150, curve: Curve.EaseIn })))
   }
 
+  aboutToDisappear(): void {
+    // hero 底衬快照释放：出栈后根页恢复渲染，不再需要截图垫底。
+    if (this.heroBg !== undefined) {
+      this.heroBg = undefined;
+      AppStorage.delete(HERO_BG_SNAPSHOT_KEY);
+    }
+  }
+
   build() {
     Stack({ alignContent: Alignment.Center }) {
+      // 首页快照垫底层：根场景 push 后根页 feed 不再渲染（透出窗口白底）。用 push 前截的
+      // 根页图占住"下层首页"，hero 放大/收合全程背景不闪白；黑底铺满后自然盖住快照。
+      if (this.heroBg !== undefined) {
+        Image(this.heroBg)
+          .width('100%')
+          .height('100%')
+          .objectFit(ImageFit.Cover)
+          .hitTestBehavior(HitTestMode.None)
+      }
       Column()
         .width('100%')
         .height('100%')
@@ -518,9 +575,16 @@ export struct ImageViewerPage {
               source: this.isOriginal(index) ? source : this.previewUrl(source),
               previewSource: this.thumbUrl(source),
               transitionId: this.transitionIdFor(index),
-              onLongPress: () => this.actionMenuOpen = true,
-              onZoomChange: (zoomed: boolean) => this.currentZoomed = zoomed,
-              onSingleTap: () => this.goBack(),
+               onLongPress: () => this.actionMenuOpen = true,
+               onZoomChange: (zoomed: boolean) => this.currentZoomed = zoomed,
+               onSingleTap: (hitContent: boolean) => {
+                 if (hitContent) {
+                   this.uiVisible = !this.uiVisible;
+                 } else {
+                   // 点黑色留白区＝官方客户端同款关闭手势。
+                   this.goBack();
+                 }
+               },
             })
           }, (source: string, index: number) => source + String(index))
         }
@@ -544,43 +608,46 @@ export struct ImageViewerPage {
         })
       }
 
-      // 顶部只放返回键，页码固定在底部，不再悬在图片正中央。
-      Column() {
-        Row() {
-          BackButton({ triggerWidth: 44, triggerHeight: 44, fontSize: 34, color: '#FFFFFF', nudgeY: 0,
-            onBack: () => this.goBack() })
+      // 顶部只放返回键，页码固定在底部，不再悬在图片正中央。单击切换显隐（见 uiVisible）。
+      if (this.uiVisible) {
+        Column() {
+          Row() {
+            BackButton({ triggerWidth: 44, triggerHeight: 44, fontSize: 34, color: '#FFFFFF', nudgeY: 0,
+              onBack: () => this.goBack() })
+            Blank()
+          }
+          .width('100%')
+          .padding({ left: 8, right: 12 })
+          .margin({ top: Immersive.statusBarHeight() + 4 })
           Blank()
+          if (!this.isOriginal(this.currentIndex) && !this.lowResFlags[this.currentIndex]) {
+            Text(this.originalSizeText.length > 0 ? '查看原图 (' + this.originalSizeText + ')' : '查看原图')
+              .fontSize(13)
+              .fontColor('#FFFFFF')
+              .padding({ left: 16, right: 16, top: 8, bottom: 8 })
+              .borderRadius(18)
+              .backgroundColor('#73000000')
+              .margin({ bottom: 12 })
+              .onClick(() => this.viewOriginal())
+          }
+          if (this.param.images.length > 1) {
+            Text((this.currentIndex + 1) + ' / ' + this.param.images.length)
+              .fontSize(13)
+              .fontColor('#FFFFFF')
+              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+              .borderRadius(14)
+              .backgroundColor('#73000000')
+              .margin({ bottom: Immersive.bottomInset() + 16 })
+          }
         }
         .width('100%')
-        .padding({ left: 8, right: 12 })
-        .margin({ top: Immersive.statusBarHeight() + 4 })
-        Blank()
-        if (!this.isOriginal(this.currentIndex) && !this.lowResFlags[this.currentIndex]) {
-          Text(this.originalSizeText.length > 0 ? '查看原图 (' + this.originalSizeText + ')' : '查看原图')
-            .fontSize(13)
-            .fontColor('#FFFFFF')
-            .padding({ left: 16, right: 16, top: 8, bottom: 8 })
-            .borderRadius(18)
-            .backgroundColor('#73000000')
-            .margin({ bottom: 12 })
-            .onClick(() => this.viewOriginal())
-        }
-        if (this.param.images.length > 1) {
-          Text((this.currentIndex + 1) + ' / ' + this.param.images.length)
-            .fontSize(13)
-            .fontColor('#FFFFFF')
-            .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-            .borderRadius(14)
-            .backgroundColor('#73000000')
-            .margin({ bottom: Immersive.bottomInset() + 16 })
-        }
+        .height('100%')
+        .alignItems(HorizontalAlign.Center)
+        .hitTestBehavior(HitTestMode.Transparent)
+        // 手动矩形入场时随黑底一起淡入（bgOpacity 默认 1，不影响 geometryTransition 路径）。
+        .opacity(this.bgOpacity)
+        .transition(TransitionEffect.opacity(1).animation({ duration: 140, curve: Curve.EaseOut }))
       }
-      .width('100%')
-      .height('100%')
-      .alignItems(HorizontalAlign.Center)
-      .hitTestBehavior(HitTestMode.Transparent)
-      // 手动矩形入场时随黑底一起淡入（bgOpacity 默认 1，不影响 geometryTransition 路径）。
-      .opacity(this.bgOpacity)
 
       if (this.actionMenuOpen) {
         this.ImageActionMenu()
