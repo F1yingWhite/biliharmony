@@ -1,4 +1,5 @@
 import { formatDuration } from '../common/Utils';
+import { image } from '@kit.ImageKit';
 
 /** 在线人数、长按倍速、横滑预览、音量/亮度的轻量叠层。 */
 @Component
@@ -9,6 +10,13 @@ export struct PlayerGestureOverlay {
   @Prop fullscreen: boolean = false;
   @Prop holdSpeedActive: boolean = false;
   @Prop gestureSeekPreview: number = -1;
+  @Prop sliderSeekPreview: number = -1;
+  @Prop seekPreviewFrame: image.PixelMap | null = null;
+  @Prop seekPreviewCover: string = '';
+  @Prop seekPreviewSprite: string = '';
+  @Prop seekPreviewSpriteCell: number = -1;
+  @Prop seekPreviewSpriteXLen: number = 10;
+  @Prop seekPreviewSpriteYLen: number = 10;
   @Prop gestureAdjustKind: string = '';
   @Prop gestureAdjustPercent: number = -1;
   @Prop panStartTime: number = 0;
@@ -25,7 +33,7 @@ export struct PlayerGestureOverlay {
         return;
       }
       this.holdAnimStep = (this.holdAnimStep + 1) % 3;
-    }, 220);
+    }, 160);
   }
 
   private stopHoldAnimation(): void {
@@ -47,8 +55,12 @@ export struct PlayerGestureOverlay {
           .position({ x: this.fullscreen ? 66 : 14, y: this.fullscreen ? 56 : 14 })
       }
 
-      if (this.holdSpeedActive || this.gestureSeekPreview >= 0 || this.gestureAdjustPercent >= 0) {
+      if (this.holdSpeedActive || this.gestureAdjustPercent >= 0) {
         this.HintBubble()
+      }
+
+      if (this.seekPreviewTime() >= 0) {
+        this.SeekPreviewCard()
       }
     }
     .width('100%')
@@ -56,25 +68,106 @@ export struct PlayerGestureOverlay {
     .hitTestBehavior(HitTestMode.None)
   }
 
-  /** 顶部小胶囊：长按倍速 = »»» 逐个点亮；横滑/音量/亮度保持简洁符号。 */
+  private seekPreviewTime(): number {
+    return this.sliderSeekPreview >= 0 ? this.sliderSeekPreview : this.gestureSeekPreview;
+  }
+
+  /** 拖动定位预览：图片保持 16:9，时间固定覆盖在底部，避免取帧完成时改变布局。 */
+  @Builder
+  SeekPreviewCard() {
+    Column({ space: this.fullscreen ? 14 : 12 }) {
+      Stack({ alignContent: Alignment.Center }) {
+        if (this.seekPreviewSprite.length > 0 && this.seekPreviewSpriteCell >= 0) {
+          Image(this.seekPreviewSprite)
+            .width(this.previewWidth() * this.seekPreviewSpriteXLen)
+            .height(this.previewHeight() * this.seekPreviewSpriteYLen)
+            .sourceSize({
+              width: Math.round(this.previewWidth() * this.seekPreviewSpriteXLen),
+              height: Math.round(this.previewHeight() * this.seekPreviewSpriteYLen),
+            })
+            .objectFit(ImageFit.Fill)
+            .position({
+              x: -(this.seekPreviewSpriteCell % this.seekPreviewSpriteXLen) * this.previewWidth(),
+              y: -Math.floor(this.seekPreviewSpriteCell / this.seekPreviewSpriteXLen) * this.previewHeight(),
+            })
+        } else if (this.seekPreviewFrame !== null) {
+          Image(this.seekPreviewFrame)
+            .width('100%')
+            .height('100%')
+            .objectFit(ImageFit.Cover)
+        } else if (this.seekPreviewCover.length > 0) {
+          Image(this.seekPreviewCover)
+            .width('100%')
+            .height('100%')
+            .objectFit(ImageFit.Cover)
+            .opacity(0.7)
+        } else {
+          Column()
+            .width('100%')
+            .height('100%')
+            .backgroundColor('#FF202124')
+        }
+      }
+      .width(this.previewWidth())
+      .aspectRatio(16 / 9)
+      .borderRadius(5)
+      .clip(true)
+      .border({ width: 1.5, color: '#F2FFFFFF' })
+      .shadow({ radius: 5, color: '#77000000', offsetY: 1 })
+
+      Text(this.formatSeekTime(this.seekPreviewTime()) + ' / ' + this.formatSeekTime(this.duration))
+        .fontSize(this.fullscreen ? 18 : 17)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#FFFFFFFF')
+        .shadow({ radius: 3, color: '#CC000000', offsetX: 0, offsetY: 1 })
+    }
+    .align(Alignment.Center)
+  }
+
+  private previewWidth(): number {
+    return this.fullscreen ? 148 : 116;
+  }
+
+  private previewHeight(): number {
+    return this.previewWidth() * 9 / 16;
+  }
+
+  private formatSeekTime(seconds: number): string {
+    const safe: number = Math.max(0, Math.floor(seconds));
+    const hours: number = Math.floor(safe / 3600);
+    const minutes: number = Math.floor((safe % 3600) / 60);
+    const secs: number = safe % 60;
+    const minuteText: string = minutes < 10 ? '0' + String(minutes) : String(minutes);
+    const secondText: string = secs < 10 ? '0' + String(secs) : String(secs);
+    if (hours <= 0) return minuteText + ':' + secondText;
+    const hourText: string = hours < 10 ? '0' + String(hours) : String(hours);
+    return hourText + ':' + minuteText + ':' + secondText;
+  }
+
+  /** 顶部小胶囊：长按倍速用三重快进标识；横滑/音量/亮度保持简洁符号。 */
   @Builder
   HintBubble() {
-    Row({ space: 7 }) {
+    Row({ space: 10 }) {
       if (this.holdSpeedActive) {
-        // 三个右向实心三角逐个亮起：亮 = 白，灭 = 半透明，间隔刷新实现循环（对齐官方样式）。
-        Row({ space: 2 }) {
-          Text('▶').fontSize(10)
-            .fontColor(this.holdAnimStep >= 0 ? '#FFFFFF' : '#59FFFFFF')
-            .animation({ duration: 160, curve: Curve.EaseOut })
-          Text('▶').fontSize(10)
-            .fontColor(this.holdAnimStep >= 1 ? '#FFFFFF' : '#59FFFFFF')
-            .animation({ duration: 160, curve: Curve.EaseOut })
-          Text('▶').fontSize(10)
-            .fontColor(this.holdAnimStep >= 2 ? '#FFFFFF' : '#59FFFFFF')
-            .animation({ duration: 160, curve: Curve.EaseOut })
+        Row({ space: 0 }) {
+          Image($r('app.media.ic_play'))
+            .width(13)
+            .height(16)
+            .fillColor(this.holdAnimStep === 0 ? '#FFFFFF' : '#70FFFFFF')
+            .animation({ duration: 120, curve: Curve.EaseOut })
+          Image($r('app.media.ic_play'))
+            .width(13)
+            .height(16)
+            .fillColor(this.holdAnimStep === 1 ? '#FFFFFF' : '#70FFFFFF')
+            .animation({ duration: 120, curve: Curve.EaseOut })
+          Image($r('app.media.ic_play'))
+            .width(13)
+            .height(16)
+            .fillColor(this.holdAnimStep === 2 ? '#FFFFFF' : '#70FFFFFF')
+            .animation({ duration: 120, curve: Curve.EaseOut })
         }
         Text('倍速播放中')
-          .fontSize(14)
+          .fontSize(16)
           .fontWeight(FontWeight.Medium)
           .fontColor('#FFFFFF')
       } else {
@@ -86,12 +179,12 @@ export struct PlayerGestureOverlay {
           .fontColor('#FFFFFF')
       }
     }
-    .padding({ left: 16, right: 16, top: 9, bottom: 9 })
+    .padding({ left: 18, right: 18, top: 10, bottom: 10 })
     .borderRadius(8)
-    .backgroundColor('#8C000000')
-    .backdropBlur(10)
+    .backgroundColor('#A6000000')
+    .backdropBlur(12)
     // 顶部居中：位置 x 用百分比锚左侧，translate 回移一半实现水平居中。
-    .position({ x: '50%', y: this.fullscreen ? 60 : 44 })
+    .position({ x: '50%', y: this.fullscreen ? 18 : 12 })
     .translate({ x: '-50%' })
     // 进入倍速态时启动动画；退出时停止并复位。
     .onAppear(() => {

@@ -437,7 +437,7 @@ export struct ReplyCard {
           containerSize: this.threadDepth > 0 ? 38 : 50,
         })
           .priorityGesture(TapGesture().onAction(() => this.openUser()))
-        Column({ space: this.threadDepth > 0 ? 4 : 5 }) {
+        Column({ space: this.threadDepth > 0 ? 3 : 2 }) {
         Stack({ alignContent: Alignment.TopStart }) {
           if (this.item.cardBackground.length > 0) {
             UserDecorationBanner({
@@ -500,7 +500,7 @@ export struct ReplyCard {
         ReplyRichText({
           reply: this.item,
           fontSize: this.threadDepth > 0 ? 14 : 15,
-          lineHeight: this.threadDepth > 0 ? 21 : 22,
+          lineHeight: this.threadDepth > 0 ? 19 : 20,
           emoteSize: this.threadDepth > 0 ? 22 : 24,
           onOpenPart: (part: ReplyRenderPart): void => {
             this.openPart(part);

@@ -11,6 +11,7 @@
 import { ReplyItem } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { CommentApi } from '../api/CommentApi';
+import { CommentLog } from './CommentLog';
 
 /** 在数组中按 rpid 找到真身并 mutate 后的结果：克隆（rev 已 +1）与原下标。 */
 export class ReplyCloneResult {
@@ -63,14 +64,26 @@ export interface ReplyReactionHooks {
 /** 评论点赞：乐观更新主题色与计数，接口拒绝或网络异常时精确回滚。 */
 export async function runReplyLike(item: ReplyItem, busy: Set<number>, mutateItem: ReplyItemMutator,
   hooks: ReplyReactionHooks): Promise<void> {
-  if (!hooks.ensureLogin() || busy.has(item.rpid)) return;
+  if (!hooks.ensureLogin()) {
+    CommentLog.warn('reaction.like.skip', 'reason=login rpid=' + String(item.rpid));
+    return;
+  }
+  if (busy.has(item.rpid)) {
+    CommentLog.warn('reaction.like.skip', 'reason=busy rpid=' + String(item.rpid));
+    return;
+  }
   busy.add(item.rpid);
   const current: ReplyItem | null = mutateItem(item.rpid, () => {});
   if (current === null) {
+    CommentLog.error('reaction.like.missing', 'rpid=' + String(item.rpid));
     busy.delete(item.rpid);
     return;
   }
   const next: boolean = !current.liked;
+  const startedAt: number = Date.now();
+  CommentLog.info('reaction.like.start', 'rpid=' + String(item.rpid) + ' oid=' +
+    String(hooks.resolveOid(item)) + ' from=' + String(current.liked) + ' to=' + String(next) +
+    ' count=' + String(current.like));
   mutateItem(item.rpid, (target: ReplyItem) => {
     target.liked = next;
     target.like = Math.max(0, target.like + (next ? 1 : -1));
@@ -85,14 +98,24 @@ export async function runReplyLike(item: ReplyItem, busy: Set<number>, mutateIte
   try {
     const result: ActionResult = await CommentApi.likeReply(hooks.resolveOid(item), hooks.resolveType(item),
       item.rpid, next);
-    if (hooks.isDestroyed()) return;
+    if (hooks.isDestroyed()) {
+      CommentLog.warn('reaction.like.drop', 'reason=destroyed rpid=' + String(item.rpid));
+      return;
+    }
     if (!result.ok) {
       rollback();
+      CommentLog.warn('reaction.like.rollback', 'rpid=' + String(item.rpid) + ' code=' +
+        String(result.code) + ' ms=' + String(CommentLog.elapsed(startedAt)));
       hooks.toast(result.message);
+    } else {
+      CommentLog.info('reaction.like.done', 'rpid=' + String(item.rpid) + ' action=' + String(next) +
+        ' ms=' + String(CommentLog.elapsed(startedAt)));
     }
   } catch (e) {
     if (!hooks.isDestroyed()) {
       rollback();
+      CommentLog.error('reaction.like.error', 'rpid=' + String(item.rpid) + ' ms=' +
+        String(CommentLog.elapsed(startedAt)) + ' error=' + CommentLog.errorText(e as Object));
       hooks.toast('评论点赞失败，请稍后重试');
     }
   } finally {
@@ -103,15 +126,27 @@ export async function runReplyLike(item: ReplyItem, busy: Set<number>, mutateIte
 /** 评论点踩：踩赞互斥（踩上时本地取消赞），失败整体回滚。 */
 export async function runReplyDislike(item: ReplyItem, busy: Set<number>, mutateItem: ReplyItemMutator,
   hooks: ReplyReactionHooks): Promise<void> {
-  if (!hooks.ensureLogin() || busy.has(item.rpid)) return;
+  if (!hooks.ensureLogin()) {
+    CommentLog.warn('reaction.dislike.skip', 'reason=login rpid=' + String(item.rpid));
+    return;
+  }
+  if (busy.has(item.rpid)) {
+    CommentLog.warn('reaction.dislike.skip', 'reason=busy rpid=' + String(item.rpid));
+    return;
+  }
   busy.add(item.rpid);
   const current: ReplyItem | null = mutateItem(item.rpid, () => {});
   if (current === null) {
+    CommentLog.error('reaction.dislike.missing', 'rpid=' + String(item.rpid));
     busy.delete(item.rpid);
     return;
   }
   const next: boolean = !current.disliked;
   const wasLiked: boolean = current.liked;
+  const startedAt: number = Date.now();
+  CommentLog.info('reaction.dislike.start', 'rpid=' + String(item.rpid) + ' oid=' +
+    String(hooks.resolveOid(item)) + ' from=' + String(current.disliked) + ' to=' + String(next) +
+    ' wasLiked=' + String(wasLiked));
   mutateItem(item.rpid, (target: ReplyItem) => {
     target.disliked = next;
     if (next && target.liked) {
@@ -131,14 +166,24 @@ export async function runReplyDislike(item: ReplyItem, busy: Set<number>, mutate
   try {
     const result: ActionResult = await CommentApi.hateReply(hooks.resolveOid(item), hooks.resolveType(item),
       item.rpid, next);
-    if (hooks.isDestroyed()) return;
+    if (hooks.isDestroyed()) {
+      CommentLog.warn('reaction.dislike.drop', 'reason=destroyed rpid=' + String(item.rpid));
+      return;
+    }
     if (!result.ok) {
       rollback();
+      CommentLog.warn('reaction.dislike.rollback', 'rpid=' + String(item.rpid) + ' code=' +
+        String(result.code) + ' ms=' + String(CommentLog.elapsed(startedAt)));
       hooks.toast(result.message);
+    } else {
+      CommentLog.info('reaction.dislike.done', 'rpid=' + String(item.rpid) + ' action=' + String(next) +
+        ' ms=' + String(CommentLog.elapsed(startedAt)));
     }
   } catch (e) {
     if (!hooks.isDestroyed()) {
       rollback();
+      CommentLog.error('reaction.dislike.error', 'rpid=' + String(item.rpid) + ' ms=' +
+        String(CommentLog.elapsed(startedAt)) + ' error=' + CommentLog.errorText(e as Object));
       hooks.toast('点踩失败，请稍后重试');
     }
   } finally {

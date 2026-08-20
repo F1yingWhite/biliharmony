@@ -32,6 +32,8 @@ export struct ReplyRichText {
   /** 确认加载失败的表情 URL：回退渲染 [表情名] 文字，避免行内留下空白。
    *  ImageSpan 没有 onError，失败判定来自 EmoteImageCache.ensure() 的结果。 */
   @State emoteFailed: Set<string> = new Set<string>();
+  /** 纯文本按实际约束宽度测出的高度（vp），用于规避部分真机多预留两行的 Text 固有高度。 */
+  @State plainHeight: number = 0;
   @Prop emoteSize: number = 16;
   @StorageProp('isDarkMode') isDark: boolean = false;
   onOpenPart: (part: ReplyRenderPart) => void = (part: ReplyRenderPart) => {
@@ -51,6 +53,7 @@ export struct ReplyRichText {
   }
 
   onReplyChanged(): void {
+    this.plainHeight = 0;
     this.primeEmotes();
   }
 
@@ -196,56 +199,97 @@ export struct ReplyRichText {
     return part.mentionMid > 0 || part.seekSeconds >= 0 || part.bvid.length > 0 || part.aid > 0;
   }
 
-  build() {
-    Text() {
-      ForEach(parseReplyContent(this.reply), (part: ReplyRenderPart) => {
-        if (part.image.length > 0 && this.emoteFailed.has(part.image)) {
-          // 加载失败：[表情名] 文字兜底（与旧版回退一致），避免行内空白块。
-          Span(part.imageLabel.length > 0 ? part.imageLabel : '[表情]')
-            .fontColor(this.plainColor())
-        } else if (part.image.length > 0) {
-          // 已缓存走本地路径（弱网/离线也可显示）；下载中先用网络 URL 直出，
-          // 完成后切本地路径（同一张图，无跳变）。
-          // 底部对齐：表情图底边与文字行底对齐（官方观感），而非垂直居中。
-          ImageSpan(this.emoteSrc(part.image))
-            .width(part.imageSize > 1 ? this.emoteSize * 2 : this.emoteSize)
-            .height(part.imageSize > 1 ? this.emoteSize * 2 : this.emoteSize)
-            .objectFit(ImageFit.Contain)
-            .verticalAlign(ImageSpanAlignment.BOTTOM)
-        } else {
-          Span(part.text)
-            .fontColor(this.isClickable(part) ? this.linkColor() : this.plainColor())
-        }
-      }, (part: ReplyRenderPart) => part.key)
+  private isPlainContent(): boolean {
+    const parts: Array<ReplyRenderPart> = parseReplyContent(this.reply);
+    return parts.length === 1 && parts[0].image.length === 0 && !this.isClickable(parts[0]);
+  }
+
+  private plainContent(): string {
+    const parts: Array<ReplyRenderPart> = parseReplyContent(this.reply);
+    return parts.length === 1 ? parts[0].text : '';
+  }
+
+  private measurePlainHeight(width: number): void {
+    if (width <= 0) return;
+    try {
+      const measured = this.getUIContext().getMeasureUtils().measureTextSize({
+        textContent: this.plainContent(),
+        constraintWidth: width,
+        fontSize: this.fontSize,
+        lineHeight: this.lineHeight,
+      });
+      const height: number = Math.max(this.lineHeight, this.getUIContext().px2vp(Number(measured.height)));
+      if (Number.isFinite(height) && Math.abs(height - this.plainHeight) > 0.5) {
+        this.plainHeight = height;
+      }
+    } catch (e) {
+      // 测量 API 异常时保留 Text 自适应高度，不影响正文显示。
     }
-    .fontSize(this.fontSize)
-    .lineHeight(this.lineHeight)
-    .width('100%')
-    .onAreaChange((_o: Area, n: Area): void => {
-      this.contentWidth = Number(n.width);
-      this.rebuildHits();
-    })
-    .onTouch((ev: TouchEvent): void => {
-      if (ev.type === TouchType.Down) {
-        const d: TouchObject = ev.touches[0];
-        this.tapDownX = d.x;
-        this.tapDownY = d.y;
-        this.tapDownValid = true;
-        return;
+  }
+
+  build() {
+    if (this.isPlainContent()) {
+      // 纯文本不进入 Span/ForEach 测量路径；部分真机上后者会为一行文字错误预留数行高度。
+      Text(this.plainContent())
+        .fontSize(this.fontSize)
+        .fontColor(this.plainColor())
+        .lineHeight(this.lineHeight)
+        .width('100%')
+        .height(this.plainHeight > 0 ? this.plainHeight : undefined)
+        .onAreaChange((_o: Area, n: Area): void => {
+          this.measurePlainHeight(Number(n.width));
+        })
+    } else {
+      Text() {
+        ForEach(parseReplyContent(this.reply), (part: ReplyRenderPart) => {
+          if (part.image.length > 0 && this.emoteFailed.has(part.image)) {
+            // 加载失败：[表情名] 文字兜底（与旧版回退一致），避免行内空白块。
+            Span(part.imageLabel.length > 0 ? part.imageLabel : '[表情]')
+              .fontColor(this.plainColor())
+          } else if (part.image.length > 0) {
+            // 已缓存走本地路径（弱网/离线也可显示）；下载中先用网络 URL 直出，
+            // 完成后切本地路径（同一张图，无跳变）。
+            // 底部对齐：表情图底边与文字行底对齐（官方观感），而非垂直居中。
+            ImageSpan(this.emoteSrc(part.image))
+              .width(part.imageSize > 1 ? this.emoteSize * 2 : this.emoteSize)
+              .height(part.imageSize > 1 ? this.emoteSize * 2 : this.emoteSize)
+              .objectFit(ImageFit.Contain)
+              .verticalAlign(ImageSpanAlignment.BOTTOM)
+          } else {
+            Span(part.text)
+              .fontColor(this.isClickable(part) ? this.linkColor() : this.plainColor())
+          }
+        }, (part: ReplyRenderPart) => part.key)
       }
-      if (ev.type !== TouchType.Up || !this.tapDownValid) {
-        return;
-      }
-      this.tapDownValid = false;
-      const t: TouchObject = ev.touches[0];
-      // 位移超过 10vp 视为划动/滚动，不触发跳转
-      if (Math.abs(t.x - this.tapDownX) > 10 || Math.abs(t.y - this.tapDownY) > 10) {
-        return;
-      }
-      const part: ReplyRenderPart | null = this.hitAt(t.x, t.y);
-      if (part !== null && this.isClickable(part)) {
-        this.onOpenPart(part);
-      }
-    })
+      .fontSize(this.fontSize)
+      .lineHeight(this.lineHeight)
+      .width('100%')
+      .onAreaChange((_o: Area, n: Area): void => {
+        this.contentWidth = Number(n.width);
+        this.rebuildHits();
+      })
+      .onTouch((ev: TouchEvent): void => {
+        if (ev.type === TouchType.Down) {
+          const d: TouchObject = ev.touches[0];
+          this.tapDownX = d.x;
+          this.tapDownY = d.y;
+          this.tapDownValid = true;
+          return;
+        }
+        if (ev.type !== TouchType.Up || !this.tapDownValid) {
+          return;
+        }
+        this.tapDownValid = false;
+        const t: TouchObject = ev.touches[0];
+        // 位移超过 10vp 视为划动/滚动，不触发跳转
+        if (Math.abs(t.x - this.tapDownX) > 10 || Math.abs(t.y - this.tapDownY) > 10) {
+          return;
+        }
+        const part: ReplyRenderPart | null = this.hitAt(t.x, t.y);
+        if (part !== null && this.isClickable(part)) {
+          this.onOpenPart(part);
+        }
+      })
+    }
   }
 }
