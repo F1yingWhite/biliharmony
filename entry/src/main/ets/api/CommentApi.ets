@@ -8,44 +8,112 @@ import { asArray, asObject } from '../common/Utils';
 import { BiliEmotePackage, ReplyData, ReplyItem } from '../model/Models';
 import { ActionResult, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { CommentLog } from '../common/CommentLog';
 
 export class CommentApi {
+  private static responseCode(resp: HttpResponse): number {
+    if (!resp.ok) return resp.status;
+    try {
+      return Number(resp.json()['code'] ?? -1);
+    } catch (e) {
+      return -999;
+    }
+  }
+
+  private static replyResultDetails(requestId: number, path: string, data: ReplyData, startedAt: number): string {
+    const first: number = data.replies.length > 0 ? data.replies[0].rpid : 0;
+    const last: number = data.replies.length > 0 ? data.replies[data.replies.length - 1].rpid : 0;
+    return 'req=' + String(requestId) + ' path=' + path + ' rows=' + String(data.replies.length) +
+      ' first=' + String(first) + ' last=' + String(last) + ' cursorLen=' + String(data.cursor.length) +
+      ' hasMore=' + String(data.hasMore) + ' ms=' + String(CommentLog.elapsed(startedAt));
+  }
+
+  private static async runAction(event: string, details: string,
+    task: () => Promise<ActionResult>): Promise<ActionResult> {
+    const requestId: number = CommentLog.nextRequestId();
+    const startedAt: number = Date.now();
+    CommentLog.info(event + '.start', 'req=' + String(requestId) + ' ' + details);
+    try {
+      const result: ActionResult = await task();
+      const resultDetails: string = 'req=' + String(requestId) + ' ok=' + String(result.ok) +
+        ' code=' + String(result.code) + ' ms=' + String(CommentLog.elapsed(startedAt));
+      if (result.ok) CommentLog.info(event + '.done', resultDetails);
+      else CommentLog.warn(event + '.done', resultDetails);
+      return result;
+    } catch (e) {
+      CommentLog.error(event + '.error', 'req=' + String(requestId) + ' ms=' +
+        String(CommentLog.elapsed(startedAt)) + ' error=' + CommentLog.errorText(e as Object));
+      throw new Error(CommentLog.errorText(e as Object));
+    }
+  }
+
   // ===== 评论（游客模式，WBI 签名 /wbi/main） =====
   static async getReplies(oid: number, type: number, cursor: string, mode: number = 3): Promise<ReplyData> {
-    // 登录态用传统分页端点：它能稳定返回完整主评论总量；游客态继续使用 /main 的 next_offset。
-    if (HttpClient.getCookie('SESSDATA').length > 0) {
-      const pageNumber: number = Math.max(1, Number(cursor.length > 0 ? cursor : '1'));
-      const legacyParams: Record<string, string> = {
-        'oid': String(oid), 'type': String(type), 'pn': String(pageNumber), 'ps': '20',
-        'sort': mode === 3 ? '1' : '0',
+    const requestId: number = CommentLog.nextRequestId();
+    const startedAt: number = Date.now();
+    const loggedIn: boolean = HttpClient.getCookie('SESSDATA').length > 0;
+    CommentLog.info('api.replies.start', 'req=' + String(requestId) + ' oid=' + String(oid) +
+      ' type=' + String(type) + ' mode=' + String(mode) + ' cursorLen=' + String(cursor.length) +
+      ' login=' + String(loggedIn));
+    try {
+      // 登录态用传统分页端点：它能稳定返回完整主评论总量；游客态继续使用 /main 的 next_offset。
+      if (loggedIn) {
+        const pageNumber: number = Math.max(1, Number(cursor.length > 0 ? cursor : '1'));
+        const legacyParams: Record<string, string> = {
+          'oid': String(oid), 'type': String(type), 'pn': String(pageNumber), 'ps': '20',
+          'sort': mode === 3 ? '1' : '0',
+        };
+        const legacyResp: HttpResponse = await webGet(Api.replyList, legacyParams, 'https://www.bilibili.com/');
+        const legacyData: Record<string, Object> | null = getData(legacyResp);
+        CommentLog.info('api.replies.transport', 'req=' + String(requestId) + ' path=legacy page=' +
+          String(pageNumber) + ' status=' + String(legacyResp.status) + ' code=' +
+          String(CommentApi.responseCode(legacyResp)) + ' data=' + String(legacyData !== null));
+        if (legacyData !== null) {
+          const result: ReplyData = ReplyData.fromLegacy(legacyData, pageNumber);
+          CommentLog.info('api.replies.done', CommentApi.replyResultDetails(requestId, 'legacy', result, startedAt));
+          return result;
+        }
+        CommentLog.warn('api.replies.fallback', 'req=' + String(requestId) + ' from=legacy to=main');
+      }
+      const params: Record<string, string> = {
+        'oid': String(oid),
+        'type': String(type),
+        'mode': String(mode),
+        'pagination_str': JSON.stringify({ 'offset': cursor }),
       };
-      const legacyResp: HttpResponse = await webGet(Api.replyList, legacyParams, 'https://www.bilibili.com/');
-      const legacyData: Record<string, Object> | null = getData(legacyResp);
-      if (legacyData !== null) return ReplyData.fromLegacy(legacyData, pageNumber);
+      // 对齐当前 PiliPlus：游客/通用评论流使用 /main 与 next_offset，不对该端点追加 WBI 参数。
+      const resp: HttpResponse = await webGet(Api.replyList + '/main', params, 'https://www.bilibili.com/');
+      let data: Record<string, Object> | null = getData(resp);
+      let path: string = 'main';
+      CommentLog.info('api.replies.transport', 'req=' + String(requestId) + ' path=main status=' +
+        String(resp.status) + ' code=' + String(CommentApi.responseCode(resp)) + ' data=' + String(data !== null));
+      if (data === null) {
+        // 部分网络会对匿名 /main 返回 -352；回退到签名端点，避免评论区完全不可用。
+        const fallback: Record<string, string> = {
+          'oid': String(oid), 'type': String(type), 'mode': String(mode),
+          'pagination_str': JSON.stringify({ 'offset': cursor }), 'web_location': '1315875',
+        };
+        await WbiSign.encWbi(fallback);
+        const fallbackResp: HttpResponse = await webGet(Api.replyList + '/wbi/main', fallback, 'https://www.bilibili.com/');
+        data = getData(fallbackResp);
+        path = 'wbi-main';
+        CommentLog.warn('api.replies.fallback', 'req=' + String(requestId) + ' from=main to=wbi-main status=' +
+          String(fallbackResp.status) + ' code=' + String(CommentApi.responseCode(fallbackResp)) +
+          ' data=' + String(data !== null));
+      }
+      if (data === null) {
+        CommentLog.error('api.replies.empty', 'req=' + String(requestId) + ' path=' + path +
+          ' ms=' + String(CommentLog.elapsed(startedAt)));
+        return new ReplyData();
+      }
+      const result: ReplyData = ReplyData.from(data);
+      CommentLog.info('api.replies.done', CommentApi.replyResultDetails(requestId, path, result, startedAt));
+      return result;
+    } catch (e) {
+      CommentLog.error('api.replies.error', 'req=' + String(requestId) + ' ms=' +
+        String(CommentLog.elapsed(startedAt)) + ' error=' + CommentLog.errorText(e as Object));
+      throw new Error(CommentLog.errorText(e as Object));
     }
-    const params: Record<string, string> = {
-      'oid': String(oid),
-      'type': String(type),
-      'mode': String(mode),
-      'pagination_str': JSON.stringify({ 'offset': cursor }),
-    };
-    // 对齐当前 PiliPlus：游客/通用评论流使用 /main 与 next_offset，不对该端点追加 WBI 参数。
-    const resp: HttpResponse = await webGet(Api.replyList + '/main', params, 'https://www.bilibili.com/');
-    let data: Record<string, Object> | null = getData(resp);
-    if (data === null) {
-      // 部分网络会对匿名 /main 返回 -352；回退到签名端点，避免评论区完全不可用。
-      const fallback: Record<string, string> = {
-        'oid': String(oid), 'type': String(type), 'mode': String(mode),
-        'pagination_str': JSON.stringify({ 'offset': cursor }), 'web_location': '1315875',
-      };
-      await WbiSign.encWbi(fallback);
-      const fallbackResp: HttpResponse = await webGet(Api.replyList + '/wbi/main', fallback, 'https://www.bilibili.com/');
-      data = getData(fallbackResp);
-    }
-    if (data === null) {
-      return new ReplyData();
-    }
-    return ReplyData.from(data);
   }
 
   static async addReply(oid: number, type: number, message: string, root: number = 0, parent: number = 0): Promise<ActionResult> {
@@ -57,66 +125,91 @@ export class CommentApi {
     };
     if (root > 0) params['root'] = String(root);
     if (parent > 0) params['parent'] = String(parent);
-    return postVideoAction(Api.replyAdd, params);
+    return CommentApi.runAction('api.add', 'oid=' + String(oid) + ' type=' + String(type) +
+      ' root=' + String(root) + ' parent=' + String(parent) + ' messageLen=' + String(message.length),
+      (): Promise<ActionResult> => postVideoAction(Api.replyAdd, params));
   }
 
   static async likeReply(oid: number, type: number, rpid: number, liked: boolean): Promise<ActionResult> {
-    if (oid <= 0 || type <= 0 || rpid <= 0) return new ActionResult(false, '评论参数无效');
-    return postVideoAction(Api.replyLike, {
-      'oid': String(oid),
-      'type': String(type),
-      'rpid': String(rpid),
-      'action': liked ? '1' : '0',
-    });
-  }
-
-  /** 评论点踩/取消踩：action 1 踩、0 取消。 */
-  static async hateReply(oid: number, type: number, rpid: number, hate: boolean): Promise<ActionResult> {
-    if (oid <= 0 || type <= 0 || rpid <= 0) return new ActionResult(false, '评论参数无效');
-    return postVideoAction(Api.replyHate, {
-      'oid': String(oid),
-      'type': String(type),
-      'rpid': String(rpid),
-      'action': hate ? '1' : '0',
-    });
-  }
-
-  /** 删除自己的评论/回复（type 为评论类型、oid 评论对象、rpid 评论 id，均与服务端一致）。 */
-  static async deleteReply(oid: number, type: number, rpid: number): Promise<ActionResult> {
-    if (oid <= 0 || type <= 0 || rpid <= 0) return new ActionResult(false, '评论参数无效');
-    return postVideoAction(Api.replyDel, {
-      'oid': String(oid),
-      'type': String(type),
-      'rpid': String(rpid),
-    });
-  }
-
-  /** 评论举报（需登录；reason 参考网页端：21 违法违规 22 色情低俗…统一走 21 细分，传入具体 reason）。 */
-  static async reportReply(oid: number, type: number, rpid: number, reason: string): Promise<ActionResult> {
-    if (oid <= 0 || type <= 0 || rpid <= 0) return new ActionResult(false, '评论参数无效');
-    if (HttpClient.getCookie('SESSDATA').length === 0) {
-      return new ActionResult(false, '登录状态已失效，请重新登录', -101);
+    if (oid <= 0 || type <= 0 || rpid <= 0) {
+      CommentLog.warn('api.like.invalid', 'oid=' + String(oid) + ' type=' + String(type) + ' rpid=' + String(rpid));
+      return new ActionResult(false, '评论参数无效');
     }
-    const csrf: string = HttpClient.getCookie('bili_jct');
-    if (csrf.length === 0) return new ActionResult(false, '登录状态缺少 CSRF，请重新登录', -111);
     const params: Record<string, string> = {
       'oid': String(oid),
       'type': String(type),
       'rpid': String(rpid),
-      'reason': reason,
-      'content': '',
-      'csrf': csrf,
-      'platform': 'web',
-      'web_location': '1315875',
+      'action': liked ? '1' : '0',
     };
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webPost(Api.replyReport, params);
-    if (!resp.ok) return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
-    const json: Record<string, Object> = resp.json();
-    const code: number = Number(json['code'] ?? -1);
-    const ok: boolean = code === 0;
-    return new ActionResult(ok, ok ? '已提交举报，感谢反馈' :
-      (String(json['message'] ?? '举报失败') + ' (' + String(code) + ')'), code);
+    return CommentApi.runAction('api.like', 'oid=' + String(oid) + ' type=' + String(type) +
+      ' rpid=' + String(rpid) + ' action=' + String(liked),
+      (): Promise<ActionResult> => postVideoAction(Api.replyLike, params));
+  }
+
+  /** 评论点踩/取消踩：action 1 踩、0 取消。 */
+  static async hateReply(oid: number, type: number, rpid: number, hate: boolean): Promise<ActionResult> {
+    if (oid <= 0 || type <= 0 || rpid <= 0) {
+      CommentLog.warn('api.dislike.invalid', 'oid=' + String(oid) + ' type=' + String(type) + ' rpid=' + String(rpid));
+      return new ActionResult(false, '评论参数无效');
+    }
+    const params: Record<string, string> = {
+      'oid': String(oid),
+      'type': String(type),
+      'rpid': String(rpid),
+      'action': hate ? '1' : '0',
+    };
+    return CommentApi.runAction('api.dislike', 'oid=' + String(oid) + ' type=' + String(type) +
+      ' rpid=' + String(rpid) + ' action=' + String(hate),
+      (): Promise<ActionResult> => postVideoAction(Api.replyHate, params));
+  }
+
+  /** 删除自己的评论/回复（type 为评论类型、oid 评论对象、rpid 评论 id，均与服务端一致）。 */
+  static async deleteReply(oid: number, type: number, rpid: number): Promise<ActionResult> {
+    if (oid <= 0 || type <= 0 || rpid <= 0) {
+      CommentLog.warn('api.delete.invalid', 'oid=' + String(oid) + ' type=' + String(type) + ' rpid=' + String(rpid));
+      return new ActionResult(false, '评论参数无效');
+    }
+    const params: Record<string, string> = {
+      'oid': String(oid),
+      'type': String(type),
+      'rpid': String(rpid),
+    };
+    return CommentApi.runAction('api.delete', 'oid=' + String(oid) + ' type=' + String(type) +
+      ' rpid=' + String(rpid), (): Promise<ActionResult> => postVideoAction(Api.replyDel, params));
+  }
+
+  /** 评论举报（需登录；reason 参考网页端：21 违法违规 22 色情低俗…统一走 21 细分，传入具体 reason）。 */
+  static async reportReply(oid: number, type: number, rpid: number, reason: string): Promise<ActionResult> {
+    if (oid <= 0 || type <= 0 || rpid <= 0) {
+      CommentLog.warn('api.report.invalid', 'oid=' + String(oid) + ' type=' + String(type) + ' rpid=' + String(rpid));
+      return new ActionResult(false, '评论参数无效');
+    }
+    return CommentApi.runAction('api.report', 'oid=' + String(oid) + ' type=' + String(type) +
+      ' rpid=' + String(rpid) + ' reason=' + reason, async (): Promise<ActionResult> => {
+        if (HttpClient.getCookie('SESSDATA').length === 0) {
+          return new ActionResult(false, '登录状态已失效，请重新登录', -101);
+        }
+        const csrf: string = HttpClient.getCookie('bili_jct');
+        if (csrf.length === 0) return new ActionResult(false, '登录状态缺少 CSRF，请重新登录', -111);
+        const params: Record<string, string> = {
+          'oid': String(oid),
+          'type': String(type),
+          'rpid': String(rpid),
+          'reason': reason,
+          'content': '',
+          'csrf': csrf,
+          'platform': 'web',
+          'web_location': '1315875',
+        };
+        await WbiSign.encWbi(params);
+        const resp: HttpResponse = await webPost(Api.replyReport, params);
+        if (!resp.ok) return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
+        const json: Record<string, Object> = resp.json();
+        const code: number = Number(json['code'] ?? -1);
+        const ok: boolean = code === 0;
+        return new ActionResult(ok, ok ? '已提交举报，感谢反馈' :
+          (String(json['message'] ?? '举报失败') + ' (' + String(code) + ')'), code);
+      });
   }
 
   // ===== 当前账号可用的 B 站表情包（评论/动态共用官方素材 URL） =====
@@ -162,8 +255,13 @@ export class CommentApi {
   // 它不会按 pagination_str 里的 root 可靠过滤；把它用于这里会在预览的几条真实回复后
   // 继续追加主评论，造成“回复详情重复评论区”的数据串流。
   static async getReplyReplies(oid: number, type: number, root: number, cursor: string): Promise<ReplyData> {
+    const requestId: number = CommentLog.nextRequestId();
+    const startedAt: number = Date.now();
     const parsedPage: number = Number(cursor.length > 0 ? cursor : '1');
     const pageNumber: number = Number.isFinite(parsedPage) && parsedPage >= 1 ? Math.floor(parsedPage) : 1;
+    CommentLog.info('api.thread.start', 'req=' + String(requestId) + ' oid=' + String(oid) +
+      ' type=' + String(type) + ' root=' + String(root) + ' page=' + String(pageNumber) +
+      ' cursorLen=' + String(cursor.length));
     const params: Record<string, string> = {
       'oid': String(oid),
       'type': String(type),
@@ -174,8 +272,9 @@ export class CommentApi {
     const resp: HttpResponse = await webGet(Api.replyReplyList, params, 'https://www.bilibili.com/');
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
-      hilog.warn(0x0000, 'BiliApi',
-        'getReplyReplies /reply failed oid=%{public}d root=%{public}d page=%{public}d', oid, root, pageNumber);
+      CommentLog.error('api.thread.empty', 'req=' + String(requestId) + ' oid=' + String(oid) +
+        ' root=' + String(root) + ' page=' + String(pageNumber) + ' status=' + String(resp.status) +
+        ' code=' + String(CommentApi.responseCode(resp)) + ' ms=' + String(CommentLog.elapsed(startedAt)));
       const empty: ReplyData = new ReplyData();
       empty.hasMore = false;
       return empty;
@@ -191,11 +290,12 @@ export class CommentApi {
       }
     }
     if (valid.length !== result.replies.length) {
-      hilog.warn(0x0000, 'BiliApi',
-        'getReplyReplies dropped unrelated rows root=%{public}d total=%{public}d valid=%{public}d',
-        root, result.replies.length, valid.length);
+      CommentLog.warn('api.thread.drop', 'req=' + String(requestId) + ' root=' + String(root) +
+        ' total=' + String(result.replies.length) + ' valid=' + String(valid.length));
     }
     result.replies = valid;
+    CommentLog.info('api.thread.done', CommentApi.replyResultDetails(requestId, 'reply/reply', result, startedAt) +
+      ' root=' + String(root) + ' page=' + String(pageNumber));
     return result;
   }
 }

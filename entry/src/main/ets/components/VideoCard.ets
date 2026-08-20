@@ -1,6 +1,6 @@
 /**
- * 视频卡片（B 站风格）：封面（时长）+ 标题 + UP + 底部数据行（评论/播放）
- * 首页推荐流可开卡片右下 ⋮（举报/不想看浮层）
+ * 视频卡片（B 站风格）：封面数据叠层 + 标题 + UP 主信息行
+ * 首页信息流可开卡片右下 ⋮（举报/不想看浮层）
  * @Reusable：LazyForEach 回收复用，数据通过 @Prop + aboutToReuse 刷新
  */
 import { display } from '@kit.ArkUI';
@@ -30,7 +30,7 @@ export struct VideoCard {
    * 入场动画便从错误的矩形（常是右侧相邻 Tab）放大。各调用方传唯一前缀区分。
    */
   @Prop idPrefix: string = '';
-  /** 右下数据行显示 ⋮（举报/不想看）：仅首页推荐信息流开启（@Prop 保证跨容器复用不串台）。 */
+  /** UP 主信息行显示 ⋮（举报/不想看）：首页信息流开启（@Prop 保证跨容器复用不串台）。 */
   @Prop showMore: boolean = false;
   onReport: ((item: VideoItem) => void) | null = null;
   onHide: ((item: VideoItem) => void) | null = null;
@@ -60,12 +60,12 @@ export struct VideoCard {
   }
 
   build() {
-    Column({ space: 6 }) {
+    Column() {
       // 封面：点击区是封面本身（标题/信息区各自挂点击，互不误触）。
       Stack() {
         Stack() {
           FeedCoverImage({ cover: this.video.cover, isDark: this.isDark })
-          // 覆盖层：上 = 多P标识，下 = 时长（播放/评论数移到卡底部数据行，官方排布）
+          // 覆盖层：上 = 多P标识，下 = 播放/弹幕/时长，复刻首页卡片的信息层级。
           Column() {
             Row() {
               Text('多P · ' + this.video.videos)
@@ -81,15 +81,55 @@ export struct VideoCard {
 
             Blank()
 
-            Stack({ alignContent: Alignment.BottomEnd }) {
-              FeedGradientMask({ height: 36, bottomColor: '#73000000' })
-              Text(formatDuration(this.video.duration))
-                .fontSize(11)
-                .fontColor('#FFFFFF')
-                .backgroundColor('#99000000')
-                .padding({ left: 5, right: 5, top: 2, bottom: 2 })
-                .borderRadius(4)
-                .visibility(this.video.duration > 0 ? Visibility.Visible : Visibility.None)
+            Stack({ alignContent: Alignment.Bottom }) {
+              FeedGradientMask({ height: 40, bottomColor: '#A6000000' })
+              Row({ space: 10 }) {
+                if (this.video.playText.length > 0 || this.video.play > 0) {
+                  Row({ space: 4 }) {
+                    Stack() {
+                      Image($r('app.media.ic_play'))
+                        .width(6)
+                        .height(6)
+                        .renderMode(ImageRenderMode.Template)
+                        .fillColor('#FFFFFF')
+                    }
+                    .width(17)
+                    .height(12)
+                    .alignContent(Alignment.Center)
+                    .border({ width: 1, color: '#FFFFFF', radius: 3 })
+                    Text(this.video.playText.length > 0 ? this.video.playText : formatCount(this.video.play))
+                      .fontSize(11)
+                      .fontColor('#FFFFFF')
+                      .maxLines(1)
+                  }
+                  .alignItems(VerticalAlign.Center)
+                }
+                if (this.video.danmakuText.length > 0 || this.video.danmaku > 0) {
+                  Row({ space: 4 }) {
+                    Image($r('app.media.ic_danmaku_on'))
+                      .width(14)
+                      .height(14)
+                      .renderMode(ImageRenderMode.Template)
+                      .fillColor('#FFFFFF')
+                    Text(this.video.danmakuText.length > 0 ? this.video.danmakuText : formatCount(this.video.danmaku))
+                      .fontSize(11)
+                      .fontColor('#FFFFFF')
+                      .maxLines(1)
+                  }
+                  .alignItems(VerticalAlign.Center)
+                }
+                Blank()
+                if (this.video.duration > 0) {
+                  Text(formatDuration(this.video.duration))
+                    .fontSize(11)
+                    .fontColor('#FFFFFF')
+                    .maxLines(1)
+                }
+              }
+              .width('100%')
+              .height(32)
+              .padding({ left: 8, right: 8 })
+              .alignItems(VerticalAlign.Center)
             }
             .width('100%')
           }
@@ -115,89 +155,46 @@ export struct VideoCard {
       .width('100%')
       .height(38)
       .alignItems(VerticalAlign.Top)
-      .padding({ left: 10, right: 10 })
+      .padding({ left: 10, right: 10, top: 8 })
       .onClick(() => this.openDetail())
 
-      // UP 主 + 推荐理由 / 分区；数据行（评论/播放）沉底，⋮ 落卡片右下角（官方排布）。
-      // 文本行各自挂点击开稿，⋮ 独立子树，避开父子 onClick 同触。
+      // 底栏只保留 UP 标识、作者与竖向菜单；播放数据已回到封面叠层。
       if (!this.compact) {
-        Column({ space: 5 }) {
-          Row({ space: 6 }) {
+        Row({ space: 6 }) {
+          Row({ space: 5 }) {
+            Text('UP')
+              .fontSize(8)
+              .fontColor(this.isDark ? '#8A8A8F' : '#9499A0')
+              .padding({ left: 2, right: 2 })
+              .border({ width: 0.8, color: this.isDark ? '#666970' : '#AEB2B8', radius: 2 })
             Text(this.video.upName)
               .fontSize(11)
               .fontColor(this.isDark ? '#8a8a8a' : '#9499A0')
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
               .layoutWeight(1)
-            Text(this.video.rcmdReason.length > 0 ? this.video.rcmdReason : this.video.tname)
-              .fontSize(10)
-              .fontColor(this.accent)
-              .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-              .border({ width: 0.5, color: this.accent, radius: 3 })
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .constraintSize({ maxWidth: '48%' })
-              .visibility(this.video.rcmdReason.length > 0 || this.video.tname.length > 0 ? Visibility.Visible : Visibility.None)
           }
-          .width('100%')
-          .height(18)
           .alignItems(VerticalAlign.Center)
+          .layoutWeight(1)
           .onClick(() => this.openDetail())
-
-          Row() {
-            Row({ space: 8 }) {
-              if (this.video.reply > 0) {
-                Row({ space: 3 }) {
-                  Image($r('app.media.ic_comment'))
-                    .width(11)
-                    .height(11)
-                    .renderMode(ImageRenderMode.Template)
-                    .fillColor('#9499A0')
-                  Text(formatCount(this.video.reply))
-                    .fontSize(10)
-                    .fontColor('#9499A0')
-                    .maxLines(1)
-                }
-                .alignItems(VerticalAlign.Center)
-              }
-              if (this.video.playText.length > 0) {
-                Row({ space: 3 }) {
-                  Image($r('app.media.ic_play'))
-                    .width(11)
-                    .height(11)
-                    .renderMode(ImageRenderMode.Template)
-                    .fillColor('#9499A0')
-                  Text(this.video.playText)
-                    .fontSize(10)
-                    .fontColor('#9499A0')
-                    .maxLines(1)
-                }
-                .alignItems(VerticalAlign.Center)
-              }
-            }
-            .alignItems(VerticalAlign.Center)
-            .layoutWeight(1)
-            .onClick(() => this.openDetail())
-            if (this.showMore) {
-              this.MoreDot()
-            }
+          if (this.showMore) {
+            this.MoreDot()
           }
-          .width('100%')
-          .alignItems(VerticalAlign.Center)
         }
         .width('100%')
-        .alignItems(HorizontalAlign.Start)
-        .padding({ left: 10, right: 10 })
+        .height(30)
+        .padding({ left: 10, right: 5 })
+        .alignItems(VerticalAlign.Center)
       }
     }
     .width('100%')
-    .padding({ bottom: 10 })
+    .padding({ bottom: 6 })
     .alignItems(HorizontalAlign.Start)
     // 白色卡片承载边界：封面通顶、文字区内缩，浅色白底/深色深灰底。
     .backgroundColor(this.isDark ? '#2B2D34' : '#FFFFFF')
-    .borderRadius(12)
+    .borderRadius(6)
     .clip(true)
-    .shadow({ radius: 10, color: this.isDark ? '#59000000' : '#14000000', offsetX: 0, offsetY: 3 })
+    .shadow({ radius: 4, color: this.isDark ? '#52000000' : '#18000000', offsetX: 0, offsetY: 1 })
     .stateStyles({
       pressed: {
         opacity: 0.85,

@@ -13,6 +13,7 @@ const TAG: string = 'BiliHarmony';
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    AppStorage.setOrCreate<boolean>('appInBackground', false);
     UserStore.initPersistence(this.context);
     SearchHistoryStore.init(this.context);
     // 表情占位符映射表磁盘缓存：冷启动即恢复，不依赖网络。
@@ -76,11 +77,13 @@ export default class EntryAbility extends UIAbility {
   }
 
   onForeground(): void {
+    AppStorage.setOrCreate<boolean>('appInBackground', false);
     if (AppTheme.getMode() === AppTheme.MODE_SYSTEM) this.syncSystemTheme();
     hilog.info(DOMAIN, TAG, 'Ability onForeground');
   }
 
   onBackground(): void {
+    AppStorage.setOrCreate<boolean>('appInBackground', true);
     hilog.info(DOMAIN, TAG, 'Ability onBackground');
   }
 }

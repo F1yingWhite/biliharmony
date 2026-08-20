@@ -21,6 +21,9 @@
         "label": "$string:EntryAbility_label",
         "startWindowIcon": "$media:app_start_icon_20260814",
         "startWindowBackground": "$color:start_window_background",
+        "backgroundModes": [
+          "audioPlayback"
+        ],
         "exported": true,
         "skills": [
           {
@@ -43,6 +46,9 @@
       },
       {
         "name": "ohos.permission.VIBRATE"
+      },
+      {
+        "name": "ohos.permission.KEEP_BACKGROUND_RUNNING"
       }
     ]
   }

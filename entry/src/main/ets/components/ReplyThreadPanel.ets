@@ -4,6 +4,7 @@ import { LayoutTokens } from '../common/LayoutTokens';
 import { ReplyCard } from './ReplyCard';
 import { ReplyComposer } from './ReplyComposer';
 import { buildReplyTree, ReplyTreeMeta, ReplyTreeSnapshot } from '../common/ReplyTree';
+import { CommentLog } from '../common/CommentLog';
 
 /** 动态、视频等业务可复用的回复详情容器；业务页只负责接口与状态。 */
 @Component
@@ -66,6 +67,10 @@ export struct ReplyThreadPanel {
     this.nameMap = snapshot.names;
     this.visibleReplies = snapshot.visible;
     this.treeVersion++;
+    CommentLog.info('tree.rebuild', 'root=' + String(this.root.rpid) + ' input=' +
+      String(this.replies.length) + ' visible=' + String(snapshot.visible.length) + ' meta=' +
+      String(snapshot.meta.size) + ' collapsed=' + String(this.collapsed.size) +
+      ' version=' + String(this.treeVersion));
   }
 
   private meta(item: ReplyItem): ReplyTreeMeta {
@@ -81,9 +86,14 @@ export struct ReplyThreadPanel {
 
   private toggleBranch(item: ReplyItem): void {
     const meta: ReplyTreeMeta = this.meta(item);
-    if (!meta.hasChildren) return;
+    if (!meta.hasChildren) {
+      CommentLog.warn('tree.toggle.skip', 'rpid=' + String(item.rpid) + ' reason=no-children');
+      return;
+    }
     if (this.collapsed.has(item.rpid)) this.collapsed.delete(item.rpid);
     else this.collapsed.add(item.rpid);
+    CommentLog.info('tree.toggle', 'root=' + String(this.root.rpid) + ' rpid=' + String(item.rpid) +
+      ' collapsed=' + String(this.collapsed.has(item.rpid)));
     this.getUIContext().animateTo({ duration: 150, curve: Curve.EaseInOut }, () => this.rebuildTree());
   }
 
