@@ -69,9 +69,11 @@ function normalizeReplyWhitespace(value: string): string {
   return value
     // 除 CR/LF 外，接口历史数据里还可能混入 NEL、Unicode 行/段分隔符。
     .replace(/\r\n?|[\u0085\u2028\u2029]/g, '\n')
-    // 零宽空格/连接符不会显示，但会干扰 trim 与行尾换行判断。
-    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
-    .replace(/[ \t\f\v\u00A0\u3000]+/g, ' ')
+    // 双向控制符、软连字符等不可见字符不应参与排版或首尾判断。
+    .replace(/[\u00AD\u034F\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
+    // Hangul/Khmer filler、Braille blank 等字符视觉为空但会占一个全角宽度，统一折叠为空格。
+    .replace(/[\u115F\u1160\u17B4\u17B5\u2800\u3164\uFFA0]/g, ' ')
+    .replace(/[ \t\f\v\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+/g, ' ')
     .replace(/ *\n+ */g, '\n')
     .trim();
 }

@@ -113,6 +113,13 @@ export struct UserDecorationBanner {
     return this.bannerHeight * aspect;
   }
 
+  /** 评论装扮的编号区只有一个 bannerHeight 宽，按位数收缩以完整显示序号。 */
+  private compactNumberFontSize(): number {
+    const length: number = Math.max(1, this.normalizedNumber().length);
+    const available: number = Math.max(16, this.bannerHeight - 6);
+    return Math.max(5, Math.min(10, Math.floor(available * 1.65 / length)));
+  }
+
   build() {
     Stack({ alignContent: this.fitWidth ? Alignment.Start : (this.numberOnLeft ? Alignment.TopStart : Alignment.TopEnd) }) {
       if (this.imageUrl.length > 0) {
@@ -162,12 +169,12 @@ export struct UserDecorationBanner {
               .fontWeight(FontWeight.Bold)
               .fontColor(this.numberColor)
             Text(this.normalizedNumber())
-              .fontSize(10)
+              .fontSize(this.compactNumberFontSize())
               .lineHeight(13)
               .fontWeight(FontWeight.Bold)
               .fontColor(this.numberColor)
               .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .letterSpacing(0)
           }
             // 972:162 装扮图的最右侧 1:1 区域专门留给粉丝编号；
             // 与背景图同高并右对齐，保持在装扮内容上层，不另加深色胶囊。

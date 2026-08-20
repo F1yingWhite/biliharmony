@@ -3,7 +3,6 @@
  */
 @Component
 export struct PlayerSideSettingsDrawer {
-  @StorageProp('isDarkMode') isDark: boolean = false;
   onClose: () => void = () => {};
   @BuilderParam content: () => void = this.emptyContent;
 
@@ -22,7 +21,7 @@ export struct PlayerSideSettingsDrawer {
       }
       .width(320)
       .height('100%')
-      .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+      .backgroundColor('#18191C')
       .shadow({ radius: 24, color: '#40000000', offsetX: -6, offsetY: 0 })
     }
     .width('100%')

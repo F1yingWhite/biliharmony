@@ -73,26 +73,37 @@ export async function runReplyLike(item: ReplyItem, busy: Set<number>, mutateIte
     return;
   }
   busy.add(item.rpid);
-  const current: ReplyItem | null = mutateItem(item.rpid, () => {});
-  if (current === null) {
+  let initialized: boolean = false;
+  let previousLiked: boolean = false;
+  let previousDisliked: boolean = false;
+  let previousLike: number = 0;
+  let next: boolean = false;
+  const current: ReplyItem | null = mutateItem(item.rpid, (target: ReplyItem) => {
+    if (!initialized) {
+      previousLiked = target.liked;
+      previousDisliked = target.disliked;
+      previousLike = target.like;
+      next = !target.liked;
+      initialized = true;
+    }
+    target.liked = next;
+    target.like = Math.max(0, previousLike + (next ? 1 : -1));
+    if (hooks.clearDislikeOnLike && next) target.disliked = false;
+  });
+  if (current === null || !initialized) {
     CommentLog.error('reaction.like.missing', 'rpid=' + String(item.rpid));
     busy.delete(item.rpid);
     return;
   }
-  const next: boolean = !current.liked;
   const startedAt: number = Date.now();
   CommentLog.info('reaction.like.start', 'rpid=' + String(item.rpid) + ' oid=' +
-    String(hooks.resolveOid(item)) + ' from=' + String(current.liked) + ' to=' + String(next) +
-    ' count=' + String(current.like));
-  mutateItem(item.rpid, (target: ReplyItem) => {
-    target.liked = next;
-    target.like = Math.max(0, target.like + (next ? 1 : -1));
-    if (hooks.clearDislikeOnLike && next && target.disliked) target.disliked = false;
-  });
+    String(hooks.resolveOid(item)) + ' from=' + String(previousLiked) + ' to=' + String(next) +
+    ' count=' + String(previousLike));
   const rollback = (): void => {
     mutateItem(item.rpid, (target: ReplyItem) => {
-      target.liked = !next;
-      target.like = Math.max(0, target.like + (next ? -1 : 1));
+      target.liked = previousLiked;
+      target.like = previousLike;
+      if (hooks.clearDislikeOnLike) target.disliked = previousDisliked;
     });
   };
   try {
@@ -135,32 +146,37 @@ export async function runReplyDislike(item: ReplyItem, busy: Set<number>, mutate
     return;
   }
   busy.add(item.rpid);
-  const current: ReplyItem | null = mutateItem(item.rpid, () => {});
-  if (current === null) {
+  let initialized: boolean = false;
+  let previousDisliked: boolean = false;
+  let previousLiked: boolean = false;
+  let previousLike: number = 0;
+  let next: boolean = false;
+  const current: ReplyItem | null = mutateItem(item.rpid, (target: ReplyItem) => {
+    if (!initialized) {
+      previousDisliked = target.disliked;
+      previousLiked = target.liked;
+      previousLike = target.like;
+      next = !target.disliked;
+      initialized = true;
+    }
+    target.disliked = next;
+    target.liked = next && previousLiked ? false : previousLiked;
+    target.like = Math.max(0, previousLike - (next && previousLiked ? 1 : 0));
+  });
+  if (current === null || !initialized) {
     CommentLog.error('reaction.dislike.missing', 'rpid=' + String(item.rpid));
     busy.delete(item.rpid);
     return;
   }
-  const next: boolean = !current.disliked;
-  const wasLiked: boolean = current.liked;
   const startedAt: number = Date.now();
   CommentLog.info('reaction.dislike.start', 'rpid=' + String(item.rpid) + ' oid=' +
-    String(hooks.resolveOid(item)) + ' from=' + String(current.disliked) + ' to=' + String(next) +
-    ' wasLiked=' + String(wasLiked));
-  mutateItem(item.rpid, (target: ReplyItem) => {
-    target.disliked = next;
-    if (next && target.liked) {
-      target.liked = false;
-      target.like = Math.max(0, target.like - 1);
-    }
-  });
+    String(hooks.resolveOid(item)) + ' from=' + String(previousDisliked) + ' to=' + String(next) +
+    ' wasLiked=' + String(previousLiked));
   const rollback = (): void => {
     mutateItem(item.rpid, (target: ReplyItem) => {
-      target.disliked = !next;
-      if (next && wasLiked) {
-        target.liked = true;
-        target.like++;
-      }
+      target.disliked = previousDisliked;
+      target.liked = previousLiked;
+      target.like = previousLike;
     });
   };
   try {

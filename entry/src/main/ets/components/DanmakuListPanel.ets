@@ -10,6 +10,7 @@ import { DanmakuItem } from '../api/BiliApi';
 @Component
 export struct DanmakuListPanel {
   @Prop embedded: boolean = false;
+  @Prop forceDark: boolean = false;
   @Prop count: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
@@ -21,16 +22,20 @@ export struct DanmakuListPanel {
   onClose: () => void = () => {
   };
 
+  private darkMode(): boolean {
+    return this.forceDark || this.isDark;
+  }
+
   private titleColor(): string {
-    return playerPanelTitle(this.isDark);
+    return playerPanelTitle(this.darkMode());
   }
 
   private subColor(): string {
-    return playerPanelSub(this.isDark);
+    return playerPanelSub(this.darkMode());
   }
 
   private rowBg(): string {
-    return playerPanelRowBg(this.isDark);
+    return playerPanelRowBg(this.darkMode());
   }
 
   build() {
@@ -93,9 +98,9 @@ export struct DanmakuListPanel {
     .height(this.embedded ? '100%' : 'auto')
     .padding({ left: 16, right: 16, top: 12, bottom: 14 })
     .borderRadius(this.embedded ? 0 : { topLeft: 16, topRight: 16 })
-    .backgroundColor(this.embedded ? '#00000000' : (this.isDark ? '#18191C' : '#FFFFFF'))
+    .backgroundColor(this.embedded ? '#00000000' : (this.darkMode() ? '#18191C' : '#FFFFFF'))
     .backdropBlur(this.embedded ? 0 : 24)
-    .border(this.embedded ? { width: 0 } : { width: { top: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
+    .border(this.embedded ? { width: 0 } : { width: { top: 0.5 }, color: this.darkMode() ? '#333333' : '#EEEEEE' })
     .align(this.embedded ? Alignment.Top : Alignment.Bottom)
     .transition(this.embedded ? TransitionEffect.IDENTITY :
       TransitionEffect.asymmetric(

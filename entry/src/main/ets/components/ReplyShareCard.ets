@@ -7,9 +7,12 @@ import { image } from '@kit.ImageKit';
 import { fileIo as fs, fileUri } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import { systemShare } from '@kit.ShareKit';
+import { uniformTypeDescriptor as utd } from '@kit.ArkData';
+import { UIContext } from '@kit.ArkUI';
 import { generateBarcode, scanCore } from '@kit.ScanKit';
 import { parseReplyContent, ReplyRenderPart } from '../common/ReplyContentParser';
 import { ReplyItem } from '../model/Models';
+import { CommentLog } from '../common/CommentLog';
 
 /** 生成评论分享二维码；失败时返回 null，卡片退化为一行链接文字。 */
 export async function makeReplyQr(content: string): Promise<image.PixelMap | null> {
@@ -23,6 +26,19 @@ export async function makeReplyQr(content: string): Promise<image.PixelMap | nul
     });
   } catch (e) {
     return null;
+  }
+}
+
+/**
+ * 优先等待在线图片全部解码后截图；头像/封面超时或失败时退化为当前渲染结果，
+ * 不让单张网络图片阻断整条评论的分享流程。
+ */
+export async function makeReplyShareSnapshot(uiContext: UIContext, builder: CustomBuilder): Promise<image.PixelMap> {
+  try {
+    return await uiContext.getComponentSnapshot().createFromBuilder(builder, 500, true);
+  } catch (e) {
+    CommentLog.warn('share.snapshot.retry', 'checkImageStatus=false error=' + CommentLog.errorText(e as Object));
+    return await uiContext.getComponentSnapshot().createFromBuilder(builder, 100, false);
   }
 }
 
@@ -57,15 +73,26 @@ export async function sharePixelMapAsImage(context: common.UIAbilityContext, pix
   } catch (e) {
     thumbnailUri = '';
   }
+  const imageUri: string = fileUri.getUriFromPath(path);
+  const imageType: string = utd.getUniformDataTypeByFilenameExtension('.png', utd.UniformDataType.IMAGE);
   const data: systemShare.SharedData = new systemShare.SharedData({
-    utd: 'general.png',
+    utd: imageType,
     title: '分享评论',
-    content: fileUri.getUriFromPath(path),
+    uri: imageUri,
     thumbnailUri,
     description: '来自哔哩哔哩的评论',
   });
   const controller: systemShare.ShareController = new systemShare.ShareController(data);
-  await controller.show(context, { previewMode: systemShare.SharePreviewMode.DETAIL });
+  try {
+    await controller.show(context, {
+      selectionMode: systemShare.SelectionMode.SINGLE,
+      previewMode: systemShare.SharePreviewMode.DETAIL,
+    });
+  } catch (e) {
+    const error: Error = e as Error;
+    CommentLog.error('share.panel.error', 'uri=' + imageUri + ' error=' + CommentLog.errorText(error));
+    throw error;
+  }
 }
 
 @Component
@@ -79,6 +106,18 @@ export struct ReplyShareCard {
   @Prop sourceCover: string = '';
   @Prop sourceTitle: string = '';
   @Prop sourceUpName: string = '';
+  @Prop scanHint: string = '长按扫码查看内容';
+
+  private pictureSize(): number {
+    const count: number = Math.min(this.item.pictures.length, 3);
+    if (count === 1) {
+      return 218;
+    }
+    if (count === 2) {
+      return 150;
+    }
+    return 98;
+  }
 
   private shareDate(): string {
     const d: Date = new Date();
@@ -91,16 +130,17 @@ export struct ReplyShareCard {
   build() {
     Column() {
       // 头部：头像 + 昵称 + "发表了评论"（对齐官方分享图）
-      Row({ space: 10 }) {
+      Row({ space: 12 }) {
         Image(this.item.avatar.length > 0 ? this.item.avatar : $r('app.media.bilix_empty_2233'))
-          .width(44)
-          .height(44)
-          .borderRadius(22)
+          .width(50)
+          .height(50)
+          .borderRadius(25)
           .objectFit(ImageFit.Cover)
+          .border({ width: 1, color: '#E5F4FA' })
         Column({ space: 4 }) {
           Row({ space: 5 }) {
             Text(this.item.uname)
-              .fontSize(16)
+              .fontSize(18)
               .fontWeight(FontWeight.Medium)
               .fontColor('#18191C')
             if (this.upMid > 0 && this.item.mid === this.upMid) {
@@ -113,7 +153,7 @@ export struct ReplyShareCard {
             }
           }
           Text('发表了评论')
-            .fontSize(12)
+            .fontSize(14)
             .fontColor('#9499A0')
         }
         .alignItems(HorizontalAlign.Start)
@@ -123,7 +163,7 @@ export struct ReplyShareCard {
       .alignItems(VerticalAlign.Center)
 
       // 正文（固定白底卡片，文字恒为深色）。用 Text + Span 渲染富文本，
-      // maxLines=5 截断长评论，防止分享图被拉成超长条。
+      // maxLines=6 截断长评论，防止分享图被拉成超长条。
       Text() {
         ForEach(parseReplyContent(this.item), (part: ReplyRenderPart) => {
           if (part.image.length > 0) {
@@ -133,56 +173,56 @@ export struct ReplyShareCard {
               .verticalAlign(ImageSpanAlignment.CENTER)
           } else {
             Span(part.text)
-              .fontSize(16)
+              .fontSize(19)
               .fontColor(part.mentionMid > 0 || part.seekSeconds >= 0 || part.bvid.length > 0 || part.aid > 0 ?
                 '#008AC5' : '#18191C')
           }
         }, (part: ReplyRenderPart) => part.key)
       }
-      .fontSize(16)
-      .lineHeight(24)
+      .fontSize(19)
+      .lineHeight(29)
       .width('100%')
-      .maxLines(5)
+      .maxLines(6)
       .textOverflow({ overflow: TextOverflow.Ellipsis })
-      .margin({ top: 12 })
+      .margin({ top: 20 })
 
       // 评论附图：最多 3 张。
       if (this.item.pictures.length > 0) {
         Row({ space: 6 }) {
           ForEach(this.item.pictures.slice(0, 3), (pic: string) => {
             Image(pic)
-              .width(96)
-              .height(96)
+              .width(this.pictureSize())
+              .height(this.pictureSize())
               .objectFit(ImageFit.Cover)
-              .borderRadius(6)
+              .borderRadius(7)
           }, (pic: string) => pic)
         }
         .width('100%')
-        .margin({ top: 10 })
+        .margin({ top: 16 })
       }
 
       // UP 主赞过标记（官方样式：一行灰字）
       if (this.item.upLiked) {
         Text('UP主觉得很赞')
-          .fontSize(12)
+          .fontSize(14)
           .fontColor('#9499A0')
           .width('100%')
-          .margin({ top: 10 })
+          .margin({ top: 12 })
       }
 
       // 来源内容卡：封面 + 标题 + UP 主（对齐官方分享图的视频卡）
       if (this.sourceTitle.length > 0) {
-        Row({ space: 10 }) {
+        Row({ space: 12 }) {
           if (this.sourceCover.length > 0) {
             Image(this.sourceCover)
-              .width(96)
-              .height(60)
+              .width(104)
+              .height(66)
               .objectFit(ImageFit.Cover)
               .borderRadius(6)
           }
           Column({ space: 6 }) {
             Text(this.sourceTitle)
-              .fontSize(13)
+              .fontSize(15)
               .fontColor('#18191C')
               .maxLines(2)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -190,11 +230,11 @@ export struct ReplyShareCard {
               Row({ space: 4 }) {
                 Text('UP')
                   .fontSize(9)
-                  .fontColor('#FB7299')
+                  .fontColor('#9499A0')
                   .padding({ left: 3, right: 3 })
-                  .border({ width: 0.5, color: '#FB7299', radius: 3 })
+                  .border({ width: 0.5, color: '#9499A0', radius: 3 })
                 Text(this.sourceUpName)
-                  .fontSize(11)
+                  .fontSize(12)
                   .fontColor('#9499A0')
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -206,45 +246,46 @@ export struct ReplyShareCard {
           .layoutWeight(1)
         }
         .width('100%')
-        .padding(8)
-        .backgroundColor('#F7F8FA')
-        .borderRadius(10)
-        .margin({ top: 12 })
+        .padding(10)
+        .backgroundColor('#F5F7F9')
+        .borderRadius(8)
+        .margin({ top: 18 })
       }
 
       // 底部：App 标识 + 提示文案 + 二维码
       Row() {
         Image($r('app.media.bilix_logo'))
-          .height(26)
+          .width(104)
+          .height(42)
           .objectFit(ImageFit.Contain)
         Blank()
         Column({ space: 2 }) {
           Text('保存图片至相册')
-            .fontSize(12)
+            .fontSize(14)
             .fontColor('#61666D')
-          Text(this.qr !== null ? '长按扫码查看内容' : this.linkLabel)
-            .fontSize(12)
+          Text(this.qr !== null ? this.scanHint : this.linkLabel)
+            .fontSize(14)
             .fontColor('#61666D')
           Text('分享于' + this.shareDate())
-            .fontSize(10)
+            .fontSize(11)
             .fontColor('#9499A0')
         }
         .alignItems(HorizontalAlign.End)
         .margin({ right: 8 })
         if (this.qr !== null) {
           Image(this.qr)
-            .width(64)
-            .height(64)
+            .width(78)
+            .height(78)
             .objectFit(ImageFit.Contain)
         }
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
-      .margin({ top: 16 })
+      .margin({ top: 26 })
     }
-    .width(340)
-    .padding({ left: 16, right: 16, top: 16, bottom: 16 })
-    .borderRadius(14)
+    .width(380)
+    .padding({ left: 24, right: 24, top: 26, bottom: 22 })
+    .borderRadius(26)
     .backgroundColor('#FFFFFF')
   }
 }
