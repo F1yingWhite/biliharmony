@@ -92,6 +92,14 @@ export class VideoChapter {
   image: string = '';
 }
 
+/** 视频拖动预览：每张 image 是 xLen * yLen 的雪碧图，index 为每格对应的秒数。 */
+export class VideoShotData {
+  images: Array<string> = [];
+  index: Array<number> = [];
+  xLen: number = 10;
+  yLen: number = 10;
+}
+
 export class BiliApi {
   /** 当前分 P 同时在看人数；接口失败返回空串，UI 不伪造 0。 */
   static async getOnlineTotal(aid: number, bvid: string, cid: number): Promise<string> {
@@ -102,6 +110,30 @@ export class BiliApi {
     const resp: HttpResponse = await webGet(Api.onlineTotal, params);
     const data: Record<string, Object> | null = getData(resp);
     return data === null ? '' : str(data, 'total', '');
+  }
+
+  static async getVideoShots(aid: number, bvid: string, cid: number): Promise<VideoShotData | null> {
+    if (cid <= 0 || (aid <= 0 && bvid.length === 0)) return null;
+    const params: Record<string, string> = { 'cid': String(cid), 'index': '1' };
+    if (aid > 0) params['aid'] = String(aid);
+    if (bvid.length > 0) params['bvid'] = bvid;
+    const resp: HttpResponse = await webGet(Api.videoShot, params);
+    const data: Record<string, Object> | null = getData(resp);
+    if (data === null) return null;
+    const rawImages: Array<Object> = asArray(data['image']);
+    const rawIndex: Array<Object> = asArray(data['index']);
+    if (rawImages.length === 0 || rawIndex.length === 0) return null;
+    const result: VideoShotData = new VideoShotData();
+    result.xLen = Math.max(1, Math.floor(asNumber(data['img_x_len'], 10)));
+    result.yLen = Math.max(1, Math.floor(asNumber(data['img_y_len'], 10)));
+    for (let i: number = 0; i < rawImages.length; i++) {
+      const url: string = toHttps(asString(rawImages[i], ''));
+      if (url.length > 0) result.images.push(url);
+    }
+    for (let i: number = 0; i < rawIndex.length; i++) {
+      result.index.push(Math.max(0, asNumber(rawIndex[i], 0)));
+    }
+    return result.images.length > 0 && result.index.length > 0 ? result : null;
   }
 
   // ===== 推荐/热门（委托 FeedApi） =====

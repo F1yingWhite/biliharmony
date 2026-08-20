@@ -5,34 +5,67 @@
 
 @Component
 export struct DecoratedAvatar {
-  @Prop face: string = '';
+  @StorageProp('isDark') isDark: boolean = false;
+  @Prop @Watch('onFaceChanged') face: string = '';
   @Prop pendant: string = '';
   @Prop avatarSize: number = 40;
   @Prop containerSize: number = 54;
   @Prop pendantScale: number = 1.38;
   @Prop avatarBorderWidth: number = 0;
   @Prop avatarBorderColor: string = '#00FFFFFF';
+  @State avatarLoaded: boolean = false;
+
+  private onFaceChanged(): void {
+    this.avatarLoaded = false;
+  }
 
   @Builder
   AvatarImage() {
-    if (this.avatarBorderWidth > 0) {
-      Image(this.face.length > 0 ? this.face : $r('app.media.placeholder_avatar_noface'))
+    Stack({ alignContent: Alignment.Center }) {
+      Circle()
         .width(this.avatarSize)
         .height(this.avatarSize)
-        .borderRadius(this.avatarSize / 2)
-        .objectFit(ImageFit.Cover)
-        .border({ width: this.avatarBorderWidth, color: this.avatarBorderColor })
-        .clip(true)
-    } else {
-      // ArkUI 即使收到 0 宽边框也可能在圆形裁切边缘留下半透明描边；
-      // 普通头像与带挂件头像完全不挂 border 修饰器。
-      Image(this.face.length > 0 ? this.face : $r('app.media.placeholder_avatar_noface'))
-        .width(this.avatarSize)
-        .height(this.avatarSize)
-        .borderRadius(this.avatarSize / 2)
-        .objectFit(ImageFit.Cover)
-        .clip(true)
+        .fill(this.isDark ? '#303238' : '#E7E9EC')
+        .opacity(this.avatarLoaded ? 0 : 1)
+      if (this.avatarBorderWidth > 0) {
+        Image(this.face.length > 0 ? this.face : $r('app.media.placeholder_avatar_noface'))
+          .alt($r('app.media.placeholder_avatar_noface'))
+          .width(this.avatarSize)
+          .height(this.avatarSize)
+          .borderRadius(this.avatarSize / 2)
+          .objectFit(ImageFit.Cover)
+          .border({ width: this.avatarBorderWidth, color: this.avatarBorderColor })
+          .clip(true)
+          .opacity(this.avatarLoaded ? 1 : 0)
+          .animation({ duration: 120, curve: Curve.EaseOut })
+          .onComplete(() => {
+            this.avatarLoaded = true;
+          })
+          .onError(() => {
+            this.avatarLoaded = true;
+          })
+      } else {
+        // ArkUI 即使收到 0 宽边框也可能在圆形裁切边缘留下半透明描边；
+        // 普通头像与带挂件头像完全不挂 border 修饰器。
+        Image(this.face.length > 0 ? this.face : $r('app.media.placeholder_avatar_noface'))
+          .alt($r('app.media.placeholder_avatar_noface'))
+          .width(this.avatarSize)
+          .height(this.avatarSize)
+          .borderRadius(this.avatarSize / 2)
+          .objectFit(ImageFit.Cover)
+          .clip(true)
+          .opacity(this.avatarLoaded ? 1 : 0)
+          .animation({ duration: 120, curve: Curve.EaseOut })
+          .onComplete(() => {
+            this.avatarLoaded = true;
+          })
+          .onError(() => {
+            this.avatarLoaded = true;
+          })
+      }
     }
+    .width(this.avatarSize)
+    .height(this.avatarSize)
   }
 
   build() {

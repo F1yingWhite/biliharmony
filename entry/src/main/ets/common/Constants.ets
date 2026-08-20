@@ -101,6 +101,7 @@ export class Api {
   static readonly ugcWbiUrl: string = HttpString.apiBaseUrl + '/x/player/wbi/playurl';
   static readonly relatedList: string = HttpString.apiBaseUrl + '/x/web-interface/archive/related';
   static readonly onlineTotal: string = HttpString.apiBaseUrl + '/x/player/online/total';
+  static readonly videoShot: string = HttpString.apiBaseUrl + '/x/player/videoshot';
   static readonly playerInfo: string = HttpString.apiBaseUrl + '/x/player/wbi/v2';
   static readonly heartBeat: string = HttpString.apiBaseUrl + '/x/click-interface/web/heartbeat';
   static readonly videoRelation: string = HttpString.apiBaseUrl + '/x/web-interface/archive/relation';
