@@ -9,6 +9,20 @@ import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { deviceInfo } from '@kit.BasicServicesKit';
 
+/** 弹幕设置全量快照：规范默认值即播放器初始态，首开/恢复默认/持久化读取兜底都以此为准。 */
+export class DanmakuSettings {
+  enabled: boolean = true;
+  opacity: number = 0.85;
+  speed: number = 1.0;
+  fontScale: number = 1.0;
+  density: number = 22;
+  blockLevel: number = 0;
+  blockScroll: boolean = false;
+  blockTop: boolean = false;
+  blockBottom: boolean = false;
+  blockColor: boolean = false;
+}
+
 export class AppTheme {
   /** 预设主题色（用户自选） */
   static readonly PRESET_COLORS: Array<string> = [
@@ -28,6 +42,18 @@ export class AppTheme {
   static readonly KEY_AUTO_DARK: string = 'autoDarkEnabled';
   static readonly KEY_AUTO_DARK_START: string = 'autoDarkStart';
   static readonly KEY_AUTO_DARK_END: string = 'autoDarkEnd';
+  private static readonly KEY_DM_ENABLED: string = 'danmakuEnabled';
+  private static readonly KEY_DM_OPACITY: string = 'danmakuOpacity';
+  private static readonly KEY_DM_SPEED: string = 'danmakuSpeed';
+  private static readonly KEY_DM_FONT_SCALE: string = 'danmakuFontScale';
+  private static readonly KEY_DM_DENSITY: string = 'danmakuDensity';
+  private static readonly KEY_DM_BLOCK_LEVEL: string = 'danmakuBlockLevel';
+  private static readonly KEY_DM_BLOCK_SCROLL: string = 'danmakuBlockScroll';
+  private static readonly KEY_DM_BLOCK_TOP: string = 'danmakuBlockTop';
+  private static readonly KEY_DM_BLOCK_BOTTOM: string = 'danmakuBlockBottom';
+  private static readonly KEY_DM_BLOCK_COLOR: string = 'danmakuBlockColor';
+  /** 弹幕设置 flush 尾部防抖定时器（滑条拖动期间高频变更不能每次都落盘）。 */
+  private static danmakuFlushTimer: number = -1;
   private static nativeModeApplier: ((mode: string) => void) | null = null;
   /** 显式落盘的主题偏好（PersistentStorage 只负责 AppStorage 响应式联动）。 */
   private static themePreferences: preferences.Preferences | null = null;
@@ -123,6 +149,104 @@ export class AppTheme {
   /** 广告空降开关写 Preferences。 */
   static persistSponsorSkip(on: boolean): void {
     AppTheme.syncBooleanPref('sponsorSkipEnabled', on);
+  }
+
+  private static readonly KEY_LAST_BRIGHTNESS: string = 'lastWindowBrightness';
+  private static brightnessFlushTimer: number = -1;
+
+  /** 上次手势设置的窗口亮度；窗口跟随系统（-1）时作为亮度滑动手势的起点，避免新视频首次上滑固定从 50% 起跳。 */
+  static loadLastBrightness(): number {
+    const store: preferences.Preferences | null = AppTheme.themePreferences;
+    if (store === null) return -1;
+    return AppTheme.readNumberPref(store, AppTheme.KEY_LAST_BRIGHTNESS, -1);
+  }
+
+  /** 手势亮度变化即记录（putSync 仅内存，flush 尾部防抖，拖动期间不落盘风暴）。 */
+  static saveLastBrightness(value: number): void {
+    if (value < 0 || value > 1) return;
+    const store: preferences.Preferences | null = AppTheme.themePreferences;
+    if (store === null) return;
+    try {
+      store.putSync(AppTheme.KEY_LAST_BRIGHTNESS, String(value));
+    } catch (e) {
+      return;
+    }
+    if (AppTheme.brightnessFlushTimer >= 0) {
+      clearTimeout(AppTheme.brightnessFlushTimer);
+    }
+    AppTheme.brightnessFlushTimer = setTimeout(() => {
+      AppTheme.brightnessFlushTimer = -1;
+      const target: preferences.Preferences | null = AppTheme.themePreferences;
+      if (target === null) return;
+      try {
+        target.flush();
+      } catch (e) {
+        // 写盘失败只丢最后一次偏好。
+      }
+    }, 400);
+  }
+
+  /** 读取弹幕设置：无落盘项或启动早期（Preferences 未就绪）返回规范默认值。 */
+  static loadDanmakuSettings(): DanmakuSettings {
+    const out: DanmakuSettings = new DanmakuSettings();
+    const store: preferences.Preferences | null = AppTheme.themePreferences;
+    if (store === null) return out;
+    try {
+      const on: string = store.getSync(AppTheme.KEY_DM_ENABLED, '') as string;
+      if (on.length > 0) out.enabled = on === 'true';
+      out.opacity = AppTheme.readNumberPref(store, AppTheme.KEY_DM_OPACITY, out.opacity);
+      out.speed = AppTheme.readNumberPref(store, AppTheme.KEY_DM_SPEED, out.speed);
+      out.fontScale = AppTheme.readNumberPref(store, AppTheme.KEY_DM_FONT_SCALE, out.fontScale);
+      out.density = Math.round(AppTheme.readNumberPref(store, AppTheme.KEY_DM_DENSITY, out.density));
+      out.blockLevel = Math.round(AppTheme.readNumberPref(store, AppTheme.KEY_DM_BLOCK_LEVEL, out.blockLevel));
+      out.blockScroll = (store.getSync(AppTheme.KEY_DM_BLOCK_SCROLL, '') as string) === 'true';
+      out.blockTop = (store.getSync(AppTheme.KEY_DM_BLOCK_TOP, '') as string) === 'true';
+      out.blockBottom = (store.getSync(AppTheme.KEY_DM_BLOCK_BOTTOM, '') as string) === 'true';
+      out.blockColor = (store.getSync(AppTheme.KEY_DM_BLOCK_COLOR, '') as string) === 'true';
+    } catch (e) {
+      // 恢复失败保留默认态。
+    }
+    return out;
+  }
+
+  /** 弹幕设置全量落盘：putSync 即时写入（内存），flush 尾部防抖——滑条拖动期间每秒触发多次，不能每次都写盘。 */
+  static persistDanmakuSettings(s: DanmakuSettings): void {
+    const store: preferences.Preferences | null = AppTheme.themePreferences;
+    if (store === null) return;
+    try {
+      store.putSync(AppTheme.KEY_DM_ENABLED, s.enabled ? 'true' : 'false');
+      store.putSync(AppTheme.KEY_DM_OPACITY, String(s.opacity));
+      store.putSync(AppTheme.KEY_DM_SPEED, String(s.speed));
+      store.putSync(AppTheme.KEY_DM_FONT_SCALE, String(s.fontScale));
+      store.putSync(AppTheme.KEY_DM_DENSITY, String(s.density));
+      store.putSync(AppTheme.KEY_DM_BLOCK_LEVEL, String(s.blockLevel));
+      store.putSync(AppTheme.KEY_DM_BLOCK_SCROLL, s.blockScroll ? 'true' : 'false');
+      store.putSync(AppTheme.KEY_DM_BLOCK_TOP, s.blockTop ? 'true' : 'false');
+      store.putSync(AppTheme.KEY_DM_BLOCK_BOTTOM, s.blockBottom ? 'true' : 'false');
+      store.putSync(AppTheme.KEY_DM_BLOCK_COLOR, s.blockColor ? 'true' : 'false');
+    } catch (e) {
+      return;
+    }
+    if (AppTheme.danmakuFlushTimer >= 0) {
+      clearTimeout(AppTheme.danmakuFlushTimer);
+    }
+    AppTheme.danmakuFlushTimer = setTimeout(() => {
+      AppTheme.danmakuFlushTimer = -1;
+      const target: preferences.Preferences | null = AppTheme.themePreferences;
+      if (target === null) return;
+      try {
+        target.flush();
+      } catch (e) {
+        // 写盘失败只丢最后一次偏好。
+      }
+    }, 400);
+  }
+
+  private static readNumberPref(store: preferences.Preferences, key: string, fallback: number): number {
+    const raw: string = store.getSync(key, '') as string;
+    if (raw.length === 0) return fallback;
+    const value: number = Number(raw);
+    return Number.isNaN(value) ? fallback : value;
   }
 
   /** 把当前主题模式写 Preferences（切换即同步落盘，重启还原）。 */

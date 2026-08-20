@@ -16,6 +16,8 @@ const parseCache: Map<string, Array<ReplyRenderPart>> = new Map<string, Array<Re
 export class ReplyRenderPart {
   text: string = '';
   image: string = '';
+  /** 表情原标签（如 [doge]）：图片加载失败时回退成文字，避免留下固定尺寸的空白块。 */
+  imageLabel: string = '';
   imageSize: number = 1;
   seekSeconds: number = -1;
   bvid: string = '';
@@ -64,7 +66,13 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
   for (let i: number = 0; i < item.mentions.length; i++) {
     mentionSignature += '|' + item.mentions[i].label + ':' + String(item.mentions[i].mid);
   }
-  const cacheKey: string = String(item.rpid) + '\n' + item.content + mentionSignature;
+  // 表情签名必须进缓存 key：精简上下文（无 content.emote）解析过的同 rpid+正文
+  // 结果若被全量数据复用，表情图会缺失。
+  let emoteSignature: string = '';
+  for (let i: number = 0; i < item.emotes.length; i++) {
+    emoteSignature += '|' + item.emotes[i].text;
+  }
+  const cacheKey: string = String(item.rpid) + '\n' + item.content + mentionSignature + emoteSignature;
   const cached: Array<ReplyRenderPart> | undefined = parseCache.get(cacheKey);
   if (cached !== undefined) {
     return cached.slice();
@@ -150,6 +158,7 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
     if (foundEmote !== null) {
       // 有动态图用 GIF（Image 自动播放），否则静态图；大小按 1/2 行高传递。
       part.image = foundEmote.displayUrl();
+      part.imageLabel = foundEmote.text;
       part.imageSize = foundEmote.size;
     } else if (foundMention !== null) {
       part.text = foundMention.label;

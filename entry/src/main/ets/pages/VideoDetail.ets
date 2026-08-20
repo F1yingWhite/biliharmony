@@ -1,5 +1,7 @@
 /**
- * 视频详情页：沉浸式播放器 + 封面取色动态主题 + 简介/评论/相关
+ * 视频详情页：沉浸式播放器 + 封面取色动态主题 + 简介/评论/相关。
+ * 大区块已按职责拆到组件：评论 Tab（VideoReplyTab）、相关推荐行（RelatedVideoRow）、
+ * 投币弹窗（CoinSheetView）、收藏夹多选（FavPickSheetView）、楼中楼面板（ReplyThreadPanel）。
  */
 import { display, UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
@@ -9,30 +11,29 @@ import { inputMethod } from '@kit.IMEKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { Immersive } from '../common/Immersive';
 import { Haptic } from '../common/Haptic';
-import { AppNavStack, NAV_LOGIN, NAV_VIDEO_DETAIL, NAV_USER_SPACE, VideoDetailParam,
+import { AppNavStack, HERO_BG_SNAPSHOT_KEY, NAV_LOGIN, NAV_VIDEO_DETAIL, NAV_USER_SPACE, VideoDetailParam,
   UserSpaceParam } from '../common/AppRouter';
 import { VideoDetail, VideoItem, ReplyItem, PlayUrlInfo, VideoPage, VideoQualityOption, VideoRelationState,
   BiliEmote, BiliEmotePackage, FavoriteFolderItem, UserStat, SpaceArcData, SubtitleTrack, UgcSeasonEpisode } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { PlayerView } from '../components/PlayerView';
+import { AppTheme } from '../common/AppTheme';
 import { PlayerDanmakuEngine } from '../components/PlayerDanmakuEngine';
 import { LoadingView } from '../components/LoadingView';
 import { ImageColor, ImagePalette } from '../common/ImageColor';
 import { UserStore } from '../common/UserStore';
-import { colorWithAlpha, formatCount, formatRelativeTime, formatDate, formatDuration } from '../common/Utils';
-import { DecoratedAvatar, UserDecorationBanner } from '../components/UserDecorations';
-import { parseReplyContent, ReplyRenderPart } from '../common/ReplyContentParser';
+import { colorWithAlpha, formatCount, formatDate } from '../common/Utils';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
-import { ReplyCard } from '../components/ReplyCard';
-import { ReplyComposer } from '../components/ReplyComposer';
 import { ReplyEmotePanel } from '../components/ReplyEmotePanel';
 import { ReplyThreadPanel } from '../components/ReplyThreadPanel';
+import { RelatedVideoRow } from '../components/VideoRelatedRow';
+import { VideoReplyTab } from '../components/VideoReplyTab';
+import { CoinSheetView } from '../components/CoinSheetView';
+import { FavPickSheetView } from '../components/FavPickSheetView';
 import { VideoActionItem } from '../components/VideoActionItem';
-import { buildReplyTree, ReplyTreeMeta, ReplyTreeSnapshot } from '../common/ReplyTree';
 import { ReplyShareCard, makeReplyQr, sharePixelMapAsImage } from '../components/ReplyShareCard';
-import { ReplySortChips } from '../components/ReplySortChips';
 import { safeToast } from '../common/Toast';
 import { CommentApi } from '../api/CommentApi';
 import { FavoriteApi } from '../api/FavoriteApi';
@@ -40,13 +41,10 @@ import { FeedApi } from '../api/FeedApi';
 import { HistoryApi } from '../api/HistoryApi';
 import { UserApi } from '../api/UserApi';
 
-/** 「加载更多」底部块参数：对象字面量按引用传入，状态变化才能驱动 @Builder 刷新。 */
-interface LoadMoreFooterOptions {
-  loading: boolean;
-  hasMore: boolean;
-  moreText: string;
-  endText: string;
-  onTap: () => void;
+/** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
+interface ReportButtonItem {
+  text: string;
+  color: string;
 }
 
 @Component
@@ -70,6 +68,8 @@ export struct VideoDetailPage {
   @State related: Array<VideoItem> = [];
   @State relatedLoading: boolean = false;
   @State relatedLoadError: string = '';
+  // 相关推荐卡 ⋮ 菜单（举报/不想看）改用文末 RelatedMoreDot 组件：
+  // 每行独立弹窗状态（页面级共享 @State 会让所有行的 bindPopup 同时弹出）。
   // 播完结束画面的推荐卡（推荐列表第一条 / 合集下一集）
   @State endRecTitle: string = '';
   @State endRecCover: string = '';
@@ -77,6 +77,8 @@ export struct VideoDetailPage {
   @State endRecPlayText: string = '';
   @State endRecDuration: number = 0;
   @State endRecToken: number = 0;
+  /** 横屏结束画面推荐列表（首条与竖屏"立即播放"同目标）。 */
+  @State endRecList: Array<VideoItem> = [];
   /** 播完态：播放区高度收敛为统一的推荐画面高度；重播/换视频/恢复播放时复位。 */
   @State playerEnded: boolean = false;
   @State upFollowerCount: number = -1;
@@ -90,7 +92,7 @@ export struct VideoDetailPage {
   @StorageLink('videoReplyThreadOpen') replyThreadOpen: boolean = false;
   @StorageLink('videoReplyThreadCloseRequest') @Watch('onReplyThreadCloseRequested') replyThreadCloseRequest: number = 0;
   @State replyThreadRoot: ReplyItem = new ReplyItem();
-  @State threadPage: number = 0;
+  @State threadCursor: string = '';
   @State threadHasMore: boolean = true;
   @State threadLoading: boolean = false;
   @State threadPrefetchCount: number = 0;
@@ -145,6 +147,15 @@ export struct VideoDetailPage {
   @State entryDx: number = 0;
   @State entryDy: number = 0;
   @State entryBgOpacity: number = 1;
+  /** 入场是否走了"卡片矩形放大"（有值且取到屏幕尺寸才算），退出时决定是否镜面收合。 */
+  private entryFromRect: boolean = false;
+  /** 卡片放大入场已就位待播出（等 detail 数据或 700ms 兜底定时器触发）。 */
+  private entranceArmed: boolean = false;
+  private closing: boolean = false;
+  /** 根首页截图（root 场景 hero 转场底衬）：push 前由卡片侧写入 AppStorage，此处读出垫底。 */
+  private heroBg: image.PixelMap | undefined = undefined;
+  /** 系统返回/侧滑经 Index NavDestination 拦截后置位，页面内执行收合动画。 */
+  @StorageProp('videoDetailCloseRequest') @Watch('onCloseRequested') closeRequest: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
   @StorageProp('loginVersion') @Watch('onLoginVersionChanged') loginVersion: number = 0;
@@ -154,7 +165,6 @@ export struct VideoDetailPage {
   private tabsController: TabsController = new TabsController();
   private introScroller: Scroller = new Scroller();
   private replyScroller: Scroller = new Scroller();
-  private threadScroller: Scroller = new Scroller();
   private videoProgressSeconds: number = 0;
   private lastHeartbeatSeconds: number = -1;
   private pageSwitchRequest: number = 0;
@@ -171,20 +181,12 @@ export struct VideoDetailPage {
   private screenHeightVp: number = 0;
   private playerHeightKey: string = '';
   private playerHeightValue: number = 0;
-  /** 页面级弹幕独立层的画布上下文：下移给 PlayerView 换绑其弹幕引擎，画布移出被收起动画
-   *  逐帧 resize 的播放器容器，消除动画期 Canvas 清缓冲导致的弹幕闪烁。 */
-  private danmakuCtx: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
   private dmEngineRef: PlayerDanmakuEngine | null = null;
   // playerCollapse 的未量化原值；@State 只按阈值量化写入，降低滚动期整页重排频率。
   private playerCollapseRaw: number = 0;
   private replySource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();
-  private threadSource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();
   private ugcSource: BasicDataSource<UgcSeasonEpisode> = new BasicDataSource<UgcSeasonEpisode>();
   @State threadAllReplies: Array<ReplyItem> = [];
-  private threadCollapsed: Set<number> = new Set<number>();
-  // 回复详情里「回复 @xx」的昵称表，随楼层数据加载重建一次，替代逐条线性查找。
-  private threadNameMap: Map<number, string> = new Map<number, string>();
-  private threadMetaMap: Map<number, ReplyTreeMeta> = new Map<number, ReplyTreeMeta>();
   // 评论分享卡离屏渲染用的待截内容；只在生成分享图期间短暂赋值。
   private shareCardItem: ReplyItem = new ReplyItem();
   private shareCardQr: image.PixelMap | null = null;
@@ -201,13 +203,13 @@ export struct VideoDetailPage {
     this.replyThreadAnimating = false;
   }
 
-  /** 楼中楼里删掉一条子回复：连同其子孙一起从 threadSource 移除。 */
+  /** 楼中楼里删掉一条子回复：连同其子孙一起从页面回复源集合移除（面板内视图树由组件自维护）。 */
   private threadRemoveReply(target: ReplyItem): void {
     const blocked: Set<number> = new Set<number>();
     blocked.add(target.rpid);
     // 收集 target 的直接子回复（rootRpid=target.rpid）及更外层子孙，用深度优先收集。
     let changed: boolean = true;
-    const all: Array<ReplyItem> = this.threadSource.getAll();
+    const all: Array<ReplyItem> = this.threadAllReplies;
     while (changed) {
       changed = false;
       for (let i: number = 0; i < all.length; i++) {
@@ -217,7 +219,7 @@ export struct VideoDetailPage {
         }
       }
     }
-    this.threadSource.reset(all.filter((x: ReplyItem) => !blocked.has(x.rpid)));
+    this.threadAllReplies = all.filter((x: ReplyItem) => !blocked.has(x.rpid));
   }
 
   private refreshScreenSize(): void {
@@ -300,11 +302,11 @@ export struct VideoDetailPage {
   private minPlayerHeight(): number {
     // 播放中下限抬高到屏幕高的 1/4：竖屏/长屏视频在播放时不会被收成一条细横幅，
     // 画幅未知的加载期也能保持稳定高度，避免“有时很小有时很大”的跳变感。
-    // 暂停后才允许收成 112vp 的继续播放横幅（能完整容纳暂停黑幕和居中继续播放提示）。
+    // 暂停后才允许收成 96vp 的继续播放横幅（能完整容纳暂停黑幕和居中继续播放提示）。
     if (this.playerPlaying && this.screenHeightVp > 0) {
       return Math.max(160, Math.floor(this.screenHeightVp / 4));
     }
-    return 112;
+    return 96;
   }
 
   /** 当前分 P 时长（秒）：弹幕分段数预估用；取不到时回退详情总时长。 */
@@ -343,14 +345,20 @@ export struct VideoDetailPage {
   }
 
   private visiblePlayerHeight(): number {
-    // 播完推荐画面与原画幅解耦：统一收敛到一个固定合适高度（接近常规 16:9 播放区），
-    // 竖屏长视频播完时不再拖着一整条高黑屏。
+    // 播完推荐画面与原画幅解耦：收敛到结束画面内容高度（标题+推荐行+重播行+内边距≈154vp），
+    // 既不像长视频那样拖一整条高黑屏，也不留中部空隙。
     if (this.playerEnded) {
-      const widthVp: number = this.screenWidthVp > 0 ? this.screenWidthVp : 360;
-      return Math.max(220, widthVp * 9 / 16);
+      return 156;
     }
     const base: number = this.playerHeight();
     return Math.max(this.minPlayerHeight(), base - this.playerCollapse);
+  }
+
+  /** ⋮ 面板高度 = “默认评论区”（播放区以下信息区）高度，顶边与播放区底边齐平。 */
+  private moreSheetHeightValue(): number {
+    if (this.playerFullscreen || this.screenHeightVp <= 0) return 0;
+    const h: number = this.screenHeightVp - Immersive.statusBarHeight() - this.visiblePlayerHeight();
+    return h > 260 ? h : 0;
   }
 
   /** 弹幕独立层画布高度：收起动画期间保持恒定（展开态高度），只有外层裁剪窗口收缩。 */
@@ -479,15 +487,30 @@ export struct VideoDetailPage {
     this.danmakuSending = false;
     this.pageSwitchingCid = 0;
     this.replyThreadOpen = false;
+    // 弹幕总开关从持久化设置恢复（其余弹幕项由 PlayerView 自行恢复后经此页透传/回传）。
+    this.danmakuOn = AppTheme.loadDanmakuSettings().enabled;
     this.bvid = this.param.bvid;
     this.aid = this.param.aid;
+    this.entryFromRect = false;
+    this.closing = false;
+    this.heroBg = AppStorage.get<image.PixelMap>(HERO_BG_SNAPSHOT_KEY);
     this.refreshScreenSize();
     this.prepareCardEntrance();
+    // 点击后立即开始扩大（内置 30ms 首帧延迟），不再等 detail 数据：
+    // 旧逻辑最坏要等 ~700ms 网络才"动起来"，是"点了没反应→突然放大"生硬感的最大来源。
+    // 数据在后台继续加载，播放区封面用卡片侧带来的封面垫底（entryCoverUrl）。
+    this.triggerEntranceExpansion();
+    // 兜底：prepare 异常未 arm 时此触发为空操作；极端时序卡住也能展开。
+    this.scheduleTimeout(() => this.triggerEntranceExpansion(), 700);
     this.init().catch(() => {
     });
   }
 
-  /** 有 srcRect 时：首帧把整页内容压到源卡片矩形，下一帧动画展开到全屏（页面底色同步淡入）。 */
+  /** 有 srcRect 时：首帧把整页等比缩到"顶部对齐源卡片"的小页，随后展开（triggerEntranceExpansion）。
+   *  等比缩放（x=y）：旧版 scaleX≠scaleY 会把整页纵向压成薄片再拉伸，是"生硬/橡皮感"的来源；
+   *  等比+顶部对齐后，页顶播放区封面恰好落在卡片位置（卡宽≈缩后页宽、16:9 等高），
+   *  视觉上即"封面从卡片放大、页面随之展开"，其余内容只等比缩小不变形。
+   *  页面底色随展开同步淡入。 */
   private prepareCardEntrance(): void {
     const rect = this.param.srcRect;
     if (rect === undefined || rect.w <= 0 || rect.h <= 0) return;
@@ -495,28 +518,78 @@ export struct VideoDetailPage {
       const vpW: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().width);
       const vpH: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().height);
       if (vpW <= 0 || vpH <= 0) return;
+      const s: number = rect.w / vpW;
       // scale 在前 translate 在后：位移量不被缩放（与 ImageViewer 手动入场约定一致）。
-      this.entryScaleX = rect.w / vpW;
-      this.entryScaleY = rect.h / vpH;
+      this.entryFromRect = true;
+      this.entryScaleX = s;
+      this.entryScaleY = s;
       this.entryDx = (rect.x + rect.w / 2) - vpW / 2;
-      this.entryDy = (rect.y + rect.h / 2) - vpH / 2;
+      this.entryDy = (rect.y + s * vpH / 2) - vpH / 2;
       this.entryBgOpacity = 0;
-      setTimeout(() => {
-        this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
-          this.entryScaleX = 1;
-          this.entryScaleY = 1;
-          this.entryDx = 0;
-          this.entryDy = 0;
-          this.entryBgOpacity = 1;
-        });
-      }, 30);
+      this.entranceArmed = true;
     } catch (e) {
       // 取不到屏幕尺寸则保持默认直出。
     }
   }
 
+  /** 触发卡片放大展开：30ms 延迟确保首帧已上屏再开始动画；数据就绪或超时兜底各触发一次，只生效一次。 */
+  private triggerEntranceExpansion(): void {
+    if (!this.entranceArmed || this.destroyed || this.closing) return;
+    this.entranceArmed = false;
+    this.scheduleTimeout(() => {
+      this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
+        this.entryScaleX = 1;
+        this.entryScaleY = 1;
+        this.entryDx = 0;
+        this.entryDy = 0;
+        this.entryBgOpacity = 1;
+      });
+    }, 30);
+  }
+
+  onCloseRequested(): void {
+    this.goBack();
+  }
+
+  /** 卡片放大入场的镜面退出：内容 300ms 缩回源卡片矩形、页面底色同步淡出，随后出栈。
+   *  非卡片入口（无 srcRect/未取到屏幕尺寸）保持默认出栈。 */
+  goBack(): void {
+    if (this.closing) return;
+    this.closing = true;
+    const rect = this.param.srcRect;
+    if (this.entryFromRect && rect !== undefined) {
+      try {
+        const vpW: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().width);
+        const vpH: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().height);
+        if (vpW > 0 && vpH > 0) {
+          // 与入场同一等比变换（顶部对齐卡片）的镜面收合。
+          const s: number = rect.w / vpW;
+          this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
+            this.entryScaleX = s;
+            this.entryScaleY = s;
+            this.entryDx = (rect.x + rect.w / 2) - vpW / 2;
+            this.entryDy = (rect.y + s * vpH / 2) - vpH / 2;
+            this.entryBgOpacity = 0;
+          });
+        }
+      } catch (e) {
+        // 取不到屏幕尺寸则直接出栈。
+      }
+      this.scheduleTimeout(() => {
+        AppNavStack.pop(false);
+      }, 310);
+      return;
+    }
+    AppNavStack.pop();
+  }
+
   aboutToDisappear(): void {
     this.destroyed = true;
+    // hero 底衬快照释放：出栈后根页恢复渲染，不再需要截图垫底。
+    if (this.heroBg !== undefined) {
+      this.heroBg = undefined;
+      AppStorage.delete(HERO_BG_SNAPSHOT_KEY);
+    }
     this.reportVideoHeartbeat(this.videoProgressSeconds, true);
     this.timers.forEach((id: number) => {
       clearTimeout(id);
@@ -610,7 +683,7 @@ export struct VideoDetailPage {
   private upStatsText(): string {
     const followers: string = this.upFollowerCount >= 0 ? formatCount(this.upFollowerCount) : '--';
     const videos: string = this.upVideoCount >= 0 ? formatCount(this.upVideoCount) : '--';
-    return followers + ' 粉丝 · ' + videos + ' 视频';
+    return followers + ' 粉丝  ' + videos + ' 视频';
   }
 
   /** 首次播放地址：先用默认 cid 请求，若服务端返回 last_play_cid 指向其他分 P，则改拉该分 P 并续播。 */
@@ -650,6 +723,20 @@ export struct VideoDetailPage {
     this.qualityOptions = info.qualities;
     this.subtitleTracks = info.subtitles;
     this.currentQuality = info.quality;
+    // 画质偏好「智能省流」：片源有高清晰可选时改起 720P，省流由用户偏好驱动（高码率/高清高码暂与自动一致）。
+    const qualityPref: number = AppStorage.get<number>('videoQualityPref') ?? 0;
+    if (qualityPref === 3 && info.quality > 64 &&
+      info.qualities.some((q: VideoQualityOption): boolean => q.qn === 64 && q.available)) {
+      const savedInfo: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, targetCid, 64);
+      if (savedInfo !== null && savedInfo.urls.length > 0 && !this.destroyed) {
+        this.playUrl = savedInfo.url;
+        this.playUrls = savedInfo.urls;
+        this.playAudioUrls = savedInfo.audioUrls;
+        this.qualityOptions = savedInfo.qualities;
+        this.subtitleTracks = savedInfo.subtitles;
+        this.currentQuality = savedInfo.quality;
+      }
+    }
     // last_play_time 为毫秒；续播位置 = 上次进度。
     this.initialSeekSeconds = Math.max(0, Math.floor(info.lastPlayTime / 1000));
     this.lastHeartbeatSeconds = -1;
@@ -906,6 +993,32 @@ export struct VideoDetailPage {
     }
   }
 
+  /** 点踩（App 端协议，需 App 授权）：与赞本地互斥。 */
+  async actionDislike(): Promise<void> {
+    if (!this.ensureLogin() || this.actionBusy) return;
+    this.actionBusy = true;
+    const next: boolean = !this.disliked;
+    this.disliked = next;
+    if (next && this.liked) this.liked = false;
+    try {
+      const result: ActionResult = await BiliApi.dislikeVideo(this.detail.aid, this.detail.bvid, next);
+      if (this.destroyed) return;
+      if (!result.ok) {
+        this.disliked = !next;
+        this.toast(result.message);
+        return;
+      }
+      this.toast(next ? '已点踩' : '已取消点踩');
+    } catch (e) {
+      if (!this.destroyed) {
+        this.disliked = !next;
+        this.toast('网络异常，请稍后重试');
+      }
+    } finally {
+      if (!this.destroyed) this.actionBusy = false;
+    }
+  }
+
   /** 点赞按钮长按：一键三连（点赞+投一币+收藏），弹确认后执行。 */
   private actionTriple(): void {
     if (!this.ensureLogin() || this.actionBusy) return;
@@ -1075,69 +1188,6 @@ export struct VideoDetailPage {
     }
   }
 
-  /** 收藏夹多选弹层：底部抽屉。 */
-  @Builder
-  FavPickSheet() {
-    Column() {
-      Blank()
-      Column({ space: 10 }) {
-        Text('选择收藏夹')
-          .fontSize(16).fontWeight(FontWeight.Bold)
-          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-        if (this.favPickLoading) {
-          Text('加载中…').fontSize(13).fontColor('#9499A0').padding(14)
-        } else if (this.favPickFolders.length === 0) {
-          Text('还没有收藏夹').fontSize(12).fontColor('#9499A0').padding(14)
-        } else {
-          List() {
-            ForEach(this.favPickFolders, (f: FavoriteFolderItem) => {
-              ListItem() {
-                Row({ space: 10 }) {
-                  Text(f.title).fontSize(14)
-                    .fontColor(this.isDark ? '#FFFFFF' : '#18191C').layoutWeight(1).maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  Stack({ alignContent: Alignment.Center }) {
-                    Circle().width(18).height(18)
-                      .fill(this.favPickChecked.indexOf(f.id) >= 0 ? this.accent : '#00000000')
-                      .border({ width: 1.5, color: this.favPickChecked.indexOf(f.id) >= 0 ? this.accent : '#B4B6BA' })
-                    if (this.favPickChecked.indexOf(f.id) >= 0) {
-                      Text('✓').fontSize(11).fontColor('#FFFFFF')
-                    }
-                  }
-                  .width(24).height(24)
-                }
-                .width('100%').padding({ top: 8, bottom: 8 })
-                .onClick(() => this.toggleFavPick(f.id))
-              }
-            }, (f: FavoriteFolderItem) => String(f.id))
-          }
-          .width('100%')
-          .constraintSize({ maxHeight: 300 })
-          .scrollBar(BarState.Off)
-        }
-        Row({ space: 10 }) {
-          Text('取消').fontSize(14).fontColor('#9499A0')
-            .layoutWeight(1).height(38).textAlign(TextAlign.Center)
-            .backgroundColor(this.isDark ? '#2A2C31' : '#F5F7F9').borderRadius(19)
-            .onClick(() => this.favPickOpen = false)
-          Text('保存').fontSize(14).fontColor('#FFFFFF').backgroundColor(this.accent)
-            .layoutWeight(1).height(38).textAlign(TextAlign.Center).borderRadius(19)
-            .onClick(() => {
-              this.saveFavPick().catch(() => {
-              });
-            })
-        }
-        .width('100%')
-      }
-      .width('100%')
-      .padding({ left: 16, right: 16, top: 16, bottom: Immersive.bottomInset() + 14 })
-      .backgroundColor(this.isDark ? '#1E2024' : '#FFFFFF')
-      .borderRadius({ topLeft: 14, topRight: 14 })
-    }
-    .width('100%').height('100%').justifyContent(FlexAlign.End)
-    .backgroundColor('#66000000')
-  }
-
   /** 加入稍后再看：无本地状态需要乐观更新，直接请求后按结果 toast。 */
   async actionWatchLater(): Promise<void> {
     if (!this.ensureLogin() || this.actionBusy) return;
@@ -1240,6 +1290,8 @@ export struct VideoDetailPage {
     // 播完：播放区收敛到统一高度（visiblePlayerHeight 读取 playerEnded）。
     this.playerEnded = true;
     this.syncDanmakuViewport();
+    // 横屏结束画面的多卡片列表（与下方单卡推荐同一目标源）。
+    this.endRecList = this.buildEndRecList();
     // 播完：自动填入"推荐列表第一条"作为结束画面的推荐卡。
     // 优先合集下一集（合集里连续观看），否则用相关推荐第一条。
     const next: UgcSeasonEpisode | null = this.nextUgcEpisode();
@@ -1283,9 +1335,48 @@ export struct VideoDetailPage {
       const related: VideoItem = this.related[0];
       if (related.aid > 0 || related.bvid.length > 0) {
         const param: VideoDetailParam = { bvid: related.bvid, aid: related.aid, title: related.title };
-        AppNavStack.replacePathByName(NAV_VIDEO_DETAIL, param);
+        // 用户主动点"立即播放"走入栈：返回回当前视频（播完好），而不是越过它。
+        AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
       }
     }
+  }
+
+  /** 横屏结束画面推荐列表：优先合集下一集（与竖屏"立即播放"同一目标），再补相关推荐，去重后最多 8 条。 */
+  private buildEndRecList(): Array<VideoItem> {
+    const list: Array<VideoItem> = [];
+    const next: UgcSeasonEpisode | null = this.nextUgcEpisode();
+    if (next !== null) {
+      const item: VideoItem = new VideoItem();
+      item.aid = next.aid;
+      item.bvid = next.bvid;
+      item.cid = next.cid;
+      item.title = next.title;
+      item.cover = next.cover;
+      item.upName = this.detail.upName;
+      list.push(item);
+    }
+    for (let i: number = 0; i < this.related.length && list.length < 8; i++) {
+      const related: VideoItem = this.related[i];
+      if (related.aid <= 0 && related.bvid.length === 0) continue;
+      let dup: boolean = false;
+      for (let j: number = 0; j < list.length; j++) {
+        if ((related.aid > 0 && list[j].aid === related.aid) ||
+          (related.bvid.length > 0 && related.bvid === list[j].bvid)) {
+          dup = true;
+          break;
+        }
+      }
+      if (dup) continue;
+      list.push(related);
+    }
+    return list;
+  }
+
+  /** 横屏结束画面点击推荐卡：push 入栈（返回回上一个视频，而非越过它）。 */
+  private onPlayerEndRecOpen(item: VideoItem): void {
+    if (item.aid <= 0 && item.bvid.length === 0) return;
+    const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
+    AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
   }
 
   openCoinSheet(): void {
@@ -1379,7 +1470,7 @@ export struct VideoDetailPage {
       const data = await CommentApi.getReplies(this.detail.aid, 1, cursor, this.replySortMode);
       if (this.destroyed) return;
       if (reset) {
-        this.replySource.reset(data.replies);
+        this.replySource.reset(this.sanitizeReplies(data.replies));
       } else {
         this.appendUniqueReplies(this.replySource, data.replies);
       }
@@ -1432,6 +1523,25 @@ export struct VideoDetailPage {
     return result;
   }
 
+  /** 首屏重置路径同样要清洗：置顶与普通评论重叠、rpid 缺失的脏项会造成 LazyForEach
+   *  重复 key（随机空行/错行/残留空白格）；无正文且无图的条目直接剔除（空评论卡）。 */
+  private sanitizeReplies(list: Array<ReplyItem>): Array<ReplyItem> {
+    const seen: Set<number> = new Set<number>();
+    const result: Array<ReplyItem> = [];
+    for (let i: number = 0; i < list.length; i++) {
+      const item: ReplyItem = list[i];
+      if (item.rpid <= 0 || seen.has(item.rpid)) {
+        continue;
+      }
+      seen.add(item.rpid);
+      if (item.content.trim().length === 0 && item.pictures.length === 0) {
+        continue;
+      }
+      result.push(item);
+    }
+    return result;
+  }
+
   /** 分页追加时按 rpid 去重，只把新楼层推进数据源。 */
   private appendUniqueReplies(source: BasicDataSource<ReplyItem>, incoming: Array<ReplyItem>): void {
     const existing: Set<number> = new Set<number>();
@@ -1449,37 +1559,12 @@ export struct VideoDetailPage {
     source.append(fresh);
   }
 
-  private rebuildThreadTree(): void {
-    const snapshot: ReplyTreeSnapshot = buildReplyTree(this.replyThreadRoot.rpid,
-      this.threadAllReplies, this.threadCollapsed);
-    this.threadNameMap = snapshot.names;
-    this.threadMetaMap = snapshot.meta;
-    this.threadSource.reset(snapshot.visible);
-  }
-
-  private threadMeta(item: ReplyItem): ReplyTreeMeta {
-    const meta: ReplyTreeMeta | undefined = this.threadMetaMap.get(item.rpid);
-    return meta !== undefined ? meta : new ReplyTreeMeta();
-  }
-
-  private toggleThreadBranch(item: ReplyItem): void {
-    const meta: ReplyTreeMeta = this.threadMeta(item);
-    if (!meta.hasChildren) return;
-    if (this.threadCollapsed.has(item.rpid)) this.threadCollapsed.delete(item.rpid);
-    else this.threadCollapsed.add(item.rpid);
-    this.getUIContext().animateTo({ duration: 150, curve: Curve.EaseOut }, () => {
-      this.rebuildThreadTree();
-    });
-  }
-
   async openReplyThread(item: ReplyItem): Promise<void> {
     if (this.replyThreadAnimating) return;
     this.replyThreadAnimating = true;
     this.replyThreadRoot = item;
     this.threadAllReplies = this.mergeUniqueReplies([], item.replies);
-    this.threadCollapsed.clear();
-    this.rebuildThreadTree();
-    this.threadPage = 0;
+    this.threadCursor = '';
     this.threadHasMore = true;
     this.threadPrefetchCount = 0;
     this.replyTargetRpid = item.rpid;
@@ -1499,15 +1584,14 @@ export struct VideoDetailPage {
       return;
     }
     this.threadLoading = true;
-    const page: number = reset ? 1 : this.threadPage + 1;
+    const cursor: string = reset ? '' : this.threadCursor;
     let loaded: boolean = false;
     try {
-      const data = await CommentApi.getReplyReplies(this.detail.aid, 1, this.replyThreadRoot.rpid, page);
+      const data = await CommentApi.getReplyReplies(this.detail.aid, 1, this.replyThreadRoot.rpid, cursor);
       if (this.destroyed) return;
       // 保留 item.replies 里的预览回复：接口偶尔返回空列表时，楼中楼不会变成“有数字但没内容”。
       this.threadAllReplies = this.mergeUniqueReplies(this.threadAllReplies, data.replies);
-      this.rebuildThreadTree();
-      this.threadPage = page;
+      this.threadCursor = data.cursor;
       this.threadHasMore = data.hasMore;
       loaded = true;
     } catch (e) {
@@ -1598,9 +1682,7 @@ export struct VideoDetailPage {
         this.replyTargetRpid = this.replyThreadRoot.rpid;
         this.replyTargetName = this.replyThreadRoot.uname;
         this.threadAllReplies = [];
-        this.threadCollapsed.clear();
-        this.rebuildThreadTree();
-        this.threadPage = 0;
+        this.threadCursor = '';
         this.threadHasMore = true;
         await this.loadThreadReplies(true);
       } else {
@@ -1689,10 +1771,6 @@ export struct VideoDetailPage {
         threadChanged = true;
         break;
       }
-    }
-    if (threadChanged) {
-      // 同步旧的内嵌 ReplyThreadView / threadSource 路径，保持两套实现状态一致。
-      this.rebuildThreadTree();
     }
     if (this.replyThreadRoot.rpid === rpid) {
       if (found === null) found = this.replyThreadRoot;
@@ -1809,9 +1887,9 @@ export struct VideoDetailPage {
             .height(42)
             Column({ space: 3 }) {
               Text(this.detail.upName)
-                .fontSize(14)
+                .fontSize(15)
                 .fontWeight(FontWeight.Medium)
-                .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+                .fontColor(this.accent)
               Text(this.upStatsText())
                 .fontSize(11)
                 .fontColor('#9499A0')
@@ -1850,34 +1928,58 @@ export struct VideoDetailPage {
           .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
           .width('100%')
           .lineHeight(24)
-        // 数据行：播放 / 弹幕 / 发布日期 · 分区
+        // 数据行（对齐官方）：▶播放 / 💬弹幕 / 🕓日期 / 👥在线，图标+数值成组、组间距拉开
         Row() {
           Image($r('app.media.ic_play'))
-            .width(14)
-            .height(14)
+            .width(13)
+            .height(13)
+            .renderMode(ImageRenderMode.Template)
             .fillColor('#9499A0')
           Text(formatCount(this.detail.view))
             .fontSize(12)
             .fontColor('#9499A0')
             .margin({ left: 4 })
-          Image($r('app.media.ic_danmaku_on'))
-            .width(14)
-            .height(14)
+          Image($r('app.media.ic_comment'))
+            .width(13)
+            .height(13)
+            .renderMode(ImageRenderMode.Template)
             .fillColor('#9499A0')
-            .margin({ left: 10 })
+            .margin({ left: 12 })
           Text(formatCount(this.detail.danmaku))
             .fontSize(12)
             .fontColor('#9499A0')
             .margin({ left: 4 })
-          Text((formatDate(this.detail.pubdate)) +
-            (this.playerOnlineTotal.length > 0 ? ' · ' + this.playerOnlineTotal + '人正在看' : '') +
-            (this.detail.tname.length > 0 ? ' · ' + this.detail.tname : ''))
+          Image($r('app.media.ic_history'))
+            .width(13)
+            .height(13)
+            .renderMode(ImageRenderMode.Template)
+            .fillColor('#9499A0')
+            .margin({ left: 12 })
+          Text(formatDate(this.detail.pubdate))
             .fontSize(12)
             .fontColor('#9499A0')
-            .margin({ left: 10, right: 10 })
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .layoutWeight(1)
+            .margin({ left: 4 })
+          if (this.playerOnlineTotal.length > 0) {
+            Image($r('app.media.ic_group'))
+              .width(14)
+              .height(14)
+              .renderMode(ImageRenderMode.Template)
+              .fillColor('#9499A0')
+              .margin({ left: 12 })
+            Text(this.playerOnlineTotal + '人正在看')
+              .fontSize(12)
+              .fontColor('#9499A0')
+              .margin({ left: 4 })
+          }
+          if (this.detail.tname.length > 0) {
+            Text(this.detail.tname)
+              .fontSize(12)
+              .fontColor('#9499A0')
+              .margin({ left: 12, right: 10 })
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .layoutWeight(1)
+          }
         }
         .width('100%')
         .alignItems(VerticalAlign.Center)
@@ -1888,7 +1990,10 @@ export struct VideoDetailPage {
           VideoActionItem({ icon: $r('app.media.bilix_icon_like'), value: formatCount(this.likeCount),
             active: this.liked, busy: this.actionBusy, onTap: () => this.actionLike(),
             onLongPress: () => this.actionTriple() })
-          // 视频点踩已移除：B 站点踩仅 App 端协议（需 access_key），cookie 登录无法调用。
+          // 点踩走 App 端协议（dislikeVideo 需 access_key）；未 App 授权时点按会提示重新登录。
+          // 官方风格：始终实心下按手（bilix，与点赞/投币/收藏一致），踩后主题色高亮。
+          VideoActionItem({ icon: $r('app.media.bilix_icon_dislike'), value: '不喜欢',
+            active: this.disliked, busy: this.actionBusy, onTap: () => this.actionDislike() })
           VideoActionItem({ icon: $r('app.media.bilix_icon_coin'), value: formatCount(this.coinCount),
             active: this.coinCountByMe > 0, busy: this.actionBusy, onTap: () => this.openCoinSheet() })
           VideoActionItem({ icon: $r('app.media.bilix_icon_fav'), value: formatCount(this.favoriteCount),
@@ -1896,8 +2001,6 @@ export struct VideoDetailPage {
             onLongPress: () => this.actionFavoritePick() })
           VideoActionItem({ icon: $r('app.media.bilix_icon_share'), value: formatCount(this.detail.share),
             active: false, busy: this.actionBusy, onTap: () => this.actionShare() })
-          VideoActionItem({ icon: $r('app.media.ic_watch_later'), value: '稍后',
-            active: false, busy: this.actionBusy, onTap: () => this.actionWatchLater() })
         }
         .width('100%')
         .border({ width: { top: 0.5, bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
@@ -2050,7 +2153,18 @@ export struct VideoDetailPage {
               })
           } else {
             ForEach(this.related, (item: VideoItem) => {
-              this.RelatedRow(item)
+              RelatedVideoRow({
+                item: item,
+                onOpen: (i: VideoItem) => {
+                  this.openRelatedVideo(i);
+                },
+                onReport: (i: VideoItem) => {
+                  this.reportRelated(i);
+                },
+                onHide: (i: VideoItem) => {
+                  this.hideRelated(i);
+                },
+              })
             }, (item: VideoItem) => item.bvid + String(item.aid))
             if (this.relatedLoading) {
               Text('正在刷新更多推荐…')
@@ -2090,53 +2204,45 @@ export struct VideoDetailPage {
     })
   }
 
-  threadParentName(item: ReplyItem): string {
-    if (item.parentRpid === this.replyThreadRoot.rpid) return this.replyThreadRoot.uname;
-    const name: string | undefined = this.threadNameMap.get(item.parentRpid);
-    return name !== undefined ? name : '上一条回复';
-  }
-
-  @Builder
-  ReplySortBar() {
-    Row({ space: 8 }) {
-      Text('评论 ' + formatCount(this.detail.reply))
-        .fontSize(14)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-      Blank()
-      // 排序切换与动态/番剧详情共用 chips 样式（最热 mode=3 / 最新 mode=2）。
-      ReplySortChips({
-        mode: this.replySortMode,
-        onChange: (mode: number) => {
-          this.changeReplySort(mode);
-        },
-      })
+  /** ⋮ 菜单-举报：选原因后给反馈（Web 端无视频举报接口，本地提示）。 */
+  private reportRelated(item: VideoItem): void {
+    if (!UserStore.isLogin) {
+      this.toast('请先登录后再举报');
+      return;
     }
-    .width('100%')
-    .height(42)
-    .padding({ left: 14, right: 14 })
-    .border({ width: { bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
+    const reasons: Array<string> = ['违法违规', '色情低俗', '垃圾广告', '人身攻击', '引战', '其他'];
+    const buttons: Array<ReportButtonItem> = [];
+    for (let i: number = 0; i < reasons.length; i++) {
+      buttons.push({ text: reasons[i], color: this.isDark ? '#CCFFFFFF' : '#18191C' });
+    }
+    buttons.push({ text: '取消', color: '#9499A0' });
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '举报视频',
+        message: item.title.substring(0, Math.min(24, item.title.length)),
+        buttons: buttons,
+      }).then((dialogResult) => {
+        const pick: number = Number(dialogResult.index);
+        if (pick < 0 || pick >= reasons.length) return;
+        if (!this.destroyed) this.toast('已提交举报，感谢反馈');
+      });
+    } catch (e) {
+      // 组件销毁或窗口异常时忽略。
+    }
   }
 
-  @Builder
-  ReplyInputBar() {
-    ReplyComposer({
-      text: this.replyDraft,
-      emotePackages: this.emotePackages,
-      placeholder: this.replyThreadOpen ? '回复 ' +
-        (this.replyTargetName.length > 0 ? this.replyTargetName : this.replyThreadRoot.uname) : '发一条友善的评论',
-      sending: this.replySending,
-      emoteOpen: this.emotePanelOpen,
-      focusTick: this.replyFocusTick,
-      onChange: (value: string) => {
-        this.replyDraft = value;
-      },
-      onSend: () => this.sendReply(),
-      onToggleEmote: () => this.openEmotePanel(),
-      onRequestKeyboard: () => this.requestReplyKeyboard(),
-    })
+  /** ⋮ 菜单-不想看：移除该条相关推荐并提示。 */
+  private hideRelated(item: VideoItem): void {
+    const next: Array<VideoItem> = this.related.filter((v: VideoItem) =>
+      !((item.aid > 0 && v.aid === item.aid) ||
+        (item.bvid.length > 0 && v.bvid.length > 0 && v.bvid === item.bvid)));
+    if (next.length !== this.related.length) this.related = next;
+    this.toast('已减少相似推荐');
   }
 
+
+  // 评论 Tab 的排序栏/输入栏已随 VideoReplyTab 组件拆出；此处保留表情键盘高度计算
+  // （楼中楼 Sheet 的表情面板也走本方法取值）。
   private emoteKeyboardHeight(): number {
     if (this.screenHeightVp <= 0) return 310;
     const base: number = Math.min(360, Math.max(280, this.screenHeightVp * 0.36));
@@ -2162,290 +2268,12 @@ export struct VideoDetailPage {
     })
   }
 
-  // 「加载更多」底部块：loading / 继续加载 / 到底啦 三分支，评论与回复详情共用。
-  @Builder
-  LoadMoreFooter(options: LoadMoreFooterOptions) {
-    Row() {
-      if (options.loading) {
-        LoadingProgress()
-          .width(22)
-          .height(22)
-          .color(this.accent)
-      } else if (options.hasMore) {
-        Text(options.moreText)
-          .fontSize(12)
-          .fontColor(this.accent)
-      } else {
-        Text(options.endText)
-          .fontSize(12)
-          .fontColor('#9499A0')
-      }
-    }
-    .width('100%')
-    .justifyContent(FlexAlign.Center)
-    .padding({ top: 12, bottom: 16 })
-    .onClick(() => {
-      options.onTap();
-    })
-  }
-
-  @Builder
-  ReplyThreadView() {
-    Column() {
-      Row({ space: 8 }) {
-        Text('‹')
-          .fontSize(25)
-          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-        Text('回复 ' + this.replyThreadRoot.count)
-          .fontSize(15)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-      }
-      .width('100%')
-      .height(42)
-      .padding({ left: 12, right: 12 })
-      .onClick(() => {
-        this.closeReplyThread();
-      })
-      List({ scroller: this.threadScroller }) {
-        ListItem() {
-          ReplyCard({
-            item: this.replyThreadRoot,
-            showPreview: false,
-            version: this.replyLikeVersion,
-            upMid: this.detail.upMid,
-            onLike: (item: ReplyItem) => this.actionReplyLike(item),
-            onDislike: (item: ReplyItem) => this.actionReplyDislike(item),
-            onShare: (item: ReplyItem) => this.shareReplyAsImage(item),
-            onSelectReply: (item: ReplyItem) => {
-              this.replyTargetRpid = item.rpid;
-              this.replyTargetName = item.uname;
-              this.replyFocusTick++;
-            },
-            onDeleted: (item: ReplyItem) => {
-              // 楼中楼面板的根评论被删除：关闭面板并移除主列表中对应行。
-              this.closeReplyThread();
-              this.replySource.reset(this.replySource.getAll().filter((x: ReplyItem) => x.rpid !== item.rpid));
-              this.detail.reply = Math.max(0, this.detail.reply - 1);
-            },
-          })
-        }
-        ListItem() {
-          Column() {
-            Divider()
-              .strokeWidth(0.5)
-              .color(this.isDark ? '#3A3B40' : '#E3E5E7')
-            Row({ space: 5 }) {
-              Text('相关回复')
-                .fontSize(14)
-                .fontWeight(FontWeight.Bold)
-                .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-              Text('共 ' + formatCount(this.replyThreadRoot.count) + ' 条')
-                .fontSize(11)
-                .fontColor('#9499A0')
-            }
-            .width('100%')
-            .height(42)
-          }
-          .width('100%')
-        }
-        LazyForEach(this.threadSource, (item: ReplyItem) => {
-          ListItem() {
-            ReplyCard({
-              item: item,
-              showPreview: false,
-              threadDepth: this.threadMeta(item).depth,
-              threadGuides: this.threadMeta(item).guides,
-              threadHasChildren: this.threadMeta(item).hasChildren,
-              threadCollapsed: this.threadMeta(item).collapsed,
-              parentLabel: item.parentRpid > 0 && item.parentRpid !== this.replyThreadRoot.rpid ?
-                this.threadParentName(item) : '',
-              version: this.replyLikeVersion,
-              upMid: this.detail.upMid,
-              onLike: (reply: ReplyItem) => this.actionReplyLike(reply),
-              onDislike: (reply: ReplyItem) => this.actionReplyDislike(reply),
-              onShare: (reply: ReplyItem) => this.shareReplyAsImage(reply),
-              onSelectReply: (reply: ReplyItem) => {
-                this.replyTargetRpid = reply.rpid;
-                this.replyTargetName = reply.uname;
-                this.replyFocusTick++;
-              },
-              onToggleThread: (reply: ReplyItem) => this.toggleThreadBranch(reply),
-              onDeleted: (reply: ReplyItem) => {
-                this.threadRemoveReply(reply);
-              },
-            })
-          }
-          // 稳定 key + updateItem(onDataChange)定向刷新：key 变化会销毁重建组件导致"闪"，
-          // 因此 key 只取 rpid；点赞/点在 mutate 后经 BasicDataSource.updateItem 通知该项重渲染。
-        }, (item: ReplyItem) => String(item.rpid))
-        ListItem() {
-          this.LoadMoreFooter({
-            loading: this.threadLoading,
-            hasMore: this.threadHasMore,
-            moreText: '继续加载更多回复',
-            endText: '—— 回复到底啦 ——',
-            onTap: () => {
-              if (this.threadHasMore && !this.threadLoading) this.loadThreadReplies(false);
-            },
-          })
-        }
-      }
-      .layoutWeight(1)
-      .width('100%')
-      .padding({ left: 12, right: 12 })
-      .scrollBar(BarState.Off)
-      .cachedCount(3)
-      .onReachEnd(() => {
-        this.loadThreadReplies(false);
-      })
-      .onScrollFrameBegin((offset: number, state: ScrollState) => {
-        return { offsetRemain: this.onContentScrollFrame(offset, this.threadScroller, state) };
-      })
-      this.ReplyInputBar()
-      if (this.emotePanelOpen) this.EmotePanel()
-    }
-    .width('100%')
-    .height('100%')
-    .translate({ y: this.replyViewOffsetY })
-    .opacity(this.replyViewOpacity)
-  }
-
-  @Builder
-  ReplyTab() {
-      Column() {
-        this.ReplySortBar()
-        if (this.replySource.isEmpty()) {
-          Column() {
-            LoadingView({
-              loading: this.replyLoading,
-              empty: !this.replyLoading,
-              emptyText: '还没有评论，快来抢沙发～',
-              onRetry: () => {
-                this.loadReplies(true);
-              },
-            })
-          }
-          .width('100%')
-          .layoutWeight(1)
-        } else {
-          List({ scroller: this.replyScroller }) {
-            LazyForEach(this.replySource, (item: ReplyItem) => {
-              ListItem() {
-                ReplyCard({
-                  item: item,
-                  showPreview: true,
-                  version: this.replyLikeVersion,
-                  upMid: this.detail.upMid,
-                  onLike: (reply: ReplyItem) => this.actionReplyLike(reply),
-              onDislike: (reply: ReplyItem) => this.actionReplyDislike(reply),
-                  onShare: (reply: ReplyItem) => this.shareReplyAsImage(reply),
-                  // 主评论列表："回复"按钮 = 打开该评论的楼中楼面板（与 B 站一致），
-                  // 面板内的"相关回复"列表再负责逐一选中/回复。
-                  onSelectReply: (reply: ReplyItem) => this.openReplyThread(reply),
-                  onOpenThread: (reply: ReplyItem) => this.openReplyThread(reply),
-                  onDeleted: (reply: ReplyItem) => {
-                    this.replySource.reset(this.replySource.getAll().filter((x: ReplyItem) => x.rpid !== reply.rpid));
-                    this.detail.reply = Math.max(0, this.detail.reply - 1);
-                  },
-                })
-              }
-              // 稳定 key + updateItem 定向刷新（不重建组件）。rev 进 key 会引发重建闪烁。
-            }, (item: ReplyItem) => String(item.rpid))
-            ListItem() {
-              this.LoadMoreFooter({
-                loading: this.replyLoading,
-                hasMore: this.replyHasMore,
-                moreText: '继续加载更多评论',
-                endText: '—— 评论到底啦 ——',
-                onTap: () => {
-                  if (this.replyHasMore && !this.replyLoading) this.loadReplies(false);
-                },
-              })
-            }
-          }
-          .layoutWeight(1)
-          .width('100%')
-          .padding({ left: 12, right: 12 })
-          .scrollBar(BarState.Off)
-          .cachedCount(3)
-          .onScrollFrameBegin((offset: number, state: ScrollState) => {
-            return { offsetRemain: this.onContentScrollFrame(offset, this.replyScroller, state) };
-          })
-          .onReachEnd(() => {
-            if (this.replyHasMore) {
-              this.loadReplies(false);
-            }
-          })
-        }
-        this.ReplyInputBar()
-        if (this.emotePanelOpen) this.EmotePanel()
-      }
-      .width('100%')
-      .height('100%')
-      .translate({ y: this.replyViewOffsetY })
-      .opacity(this.replyViewOpacity)
-  }
-
-  @Builder
-  RelatedRow(item: VideoItem) {
-    Row({ space: 10 }) {
-      Stack({ alignContent: Alignment.BottomEnd }) {
-        Image(item.cover)
-          .width(120)
-          .height(68)
-          .objectFit(ImageFit.Cover)
-          .borderRadius(6)
-        Text(formatDuration(item.duration))
-          .fontSize(10)
-          .fontColor('#FFFFFF')
-          .backgroundColor('#88000000')
-          .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-          .borderRadius(3)
-          .margin({ right: 4, bottom: 4 })
-      }
-      .width(120)
-      .clip(true)
-      Column({ space: 5 }) {
-        Text(item.title)
-          .fontSize(13)
-          .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .lineHeight(17)
-        Row({ space: 8 }) {
-          Text(item.upName)
-            .fontSize(11)
-            .fontColor('#9499A0')
-            .maxLines(1)
-            .layoutWeight(1)
-          Row({ space: 3 }) {
-            Image($r('app.media.ic_play'))
-              .width(12).height(12).fillColor('#9499A0')
-            Text(item.playText)
-              .fontSize(10).fontColor('#9499A0')
-          }
-          Row({ space: 3 }) {
-            Image($r('app.media.ic_comment'))
-              .width(12).height(12).fillColor('#9499A0')
-            Text(formatCount(item.reply))
-              .fontSize(10).fontColor('#9499A0')
-          }
-        }
-        .width('100%')
-        .alignItems(VerticalAlign.Center)
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-    }
-    .width('100%')
-    // 标题/UP 与封面上端对齐（Row 默认垂直居中会让文字偏下）
-    .alignItems(VerticalAlign.Top)
-    .padding({ top: 8, bottom: 8 })
-    .onClick(() => {
-      const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
-      AppNavStack.replacePathByName(NAV_VIDEO_DETAIL, param);
-    })
+  /** 相关推荐卡点击开稿（覆盖区点击与 ⋮ 菜单分开绑定，避免整卡 onClick 把 ⋮ 也带飞）。
+   *  用 push 入栈而非 replace：从推荐视频返回应回到上一个视频（栈式导航，与官方一致）。 */
+  private openRelatedVideo(item: VideoItem): void {
+    if (item.aid <= 0 && item.bvid.length === 0) return;
+    const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
+    AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
   }
 
   @Builder
@@ -2542,7 +2370,58 @@ export struct VideoDetailPage {
       }
       .tabBar('')
       TabContent() {
-        this.ReplyTab()
+        // 评论 Tab 整体拆到 VideoReplyTab 组件（排序/列表/输入/表情/加载更多）。
+        VideoReplyTab({
+          replyCount: this.detail.reply,
+          upMid: this.detail.upMid,
+          sortMode: this.replySortMode,
+          loading: this.replyLoading,
+          hasMore: this.replyHasMore,
+          version: this.replyLikeVersion,
+          draft: this.replyDraft,
+          sending: this.replySending,
+          placeholder: this.replyThreadOpen ? '回复 ' +
+            (this.replyTargetName.length > 0 ? this.replyTargetName : this.replyThreadRoot.uname) : '发一条友善的评论',
+          emoteOpen: this.emotePanelOpen,
+          focusTick: this.replyFocusTick,
+          emotePackages: this.emotePackages,
+          emotePackageIndex: this.emotePackageIndex,
+          emoteLoading: this.emoteLoading,
+          emotePanelHeight: this.emoteKeyboardHeight(),
+          screenWidth: this.screenWidthVp,
+          source: this.replySource,
+          scroller: this.replyScroller,
+          onSortChange: (mode: number) => {
+            this.changeReplySort(mode);
+          },
+          onLoadMore: (reset: boolean) => {
+            this.loadReplies(reset);
+          },
+          onLike: (item: ReplyItem) => this.actionReplyLike(item),
+          onDislike: (item: ReplyItem) => this.actionReplyDislike(item),
+          onShare: (item: ReplyItem) => this.shareReplyAsImage(item),
+          onSelectReply: (item: ReplyItem) => this.openReplyThread(item),
+          onOpenThread: (item: ReplyItem) => this.openReplyThread(item),
+          onDeleted: (item: ReplyItem) => {
+            this.replySource.reset(this.replySource.getAll().filter((x: ReplyItem) => x.rpid !== item.rpid));
+            this.detail.reply = Math.max(0, this.detail.reply - 1);
+          },
+          onDraftChange: (value: string) => {
+            this.replyDraft = value;
+          },
+          onSend: () => this.sendReply(),
+          onToggleEmote: () => this.openEmotePanel(),
+          onRequestKeyboard: () => this.requestReplyKeyboard(),
+          onEmoteSelect: (item: BiliEmote) => this.insertEmote(item),
+          onEmotePackageChange: (index: number) => {
+            this.emotePackageIndex = index;
+          },
+          onScrollFrame: (offset: number, scroller: Scroller, state: ScrollState): number => {
+            return this.onContentScrollFrame(offset, scroller, state);
+          },
+        })
+        .translate({ y: this.replyViewOffsetY })
+        .opacity(this.replyViewOpacity)
       }
       .tabBar('')
     }
@@ -2569,112 +2448,31 @@ export struct VideoDetailPage {
     .clip(true)
   }
 
-  // 投币动图仅作视觉素材，选项文案保持为清晰的“1 枚 / 2 枚”。
-  @Builder
-  CoinOption(characterImage: Resource, choice: number, enabled: boolean) {
-    Column({ space: 2 }) {
-      Image(characterImage)
-        .width(84)
-        .height(112)
-        .objectFit(ImageFit.Contain)
-      Text(String(choice) + ' 枚')
-        .fontSize(12)
-        .fontWeight(this.coinChoice === choice ? FontWeight.Medium : FontWeight.Normal)
-        .fontColor(this.coinChoice === choice ? this.accent : (this.isDark ? '#D8D8DC' : '#5A5F66'))
-    }
-    .layoutWeight(1)
-    .height(150)
-    .padding({ left: 6, right: 6, top: 7, bottom: 8 })
-    .borderRadius(14)
-    .border({ width: this.coinChoice === choice ? 2 : 0.5, color: this.coinChoice === choice ? this.accent : '#33808080' })
-    .backgroundColor(this.coinChoice === choice ? colorWithAlpha(this.accent, '14') : '#0A808080')
-    .opacity(enabled ? 1 : 0.38)
-    .justifyContent(FlexAlign.Center)
-    .alignItems(HorizontalAlign.Center)
-    .onClick(() => {
-      if (enabled) this.coinChoice = choice;
-    })
-  }
-
-  @Builder
-  CoinSheet() {
-    Stack({ alignContent: Alignment.Center }) {
-      Column()
-        .width('100%')
-        .height('100%')
-        .backgroundColor('#99000000')
-        .onClick(() => {
-          if (!this.actionBusy) this.coinSheetOpen = false;
-        })
-      Column({ space: 12 }) {
-        Row() {
-          Text('给 UP 主投硬币')
-            .fontSize(18)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-          Blank()
-          Image($r('app.media.ic_close'))
-            .width(20)
-            .height(20)
-            .fillColor('#9499A0')
-            .onClick(() => {
-              if (!this.actionBusy) this.coinSheetOpen = false;
-            })
-        }
-        .width('100%')
-        Text('单个视频最多可投 2 枚，已投 ' + String(this.coinCountByMe) + ' 枚')
-          .fontSize(12)
-          .fontColor('#9499A0')
-          .width('100%')
-        Row({ space: 12 }) {
-          this.CoinOption($r('app.media.bili_coin_22'), 1, true)
-          this.CoinOption($r('app.media.bili_coin_33'), 2, this.coinCountByMe === 0)
-        }
-        .width('100%')
-        Row({ space: 8 }) {
-          Checkbox({ name: 'coinLike', group: 'coin' })
-            .width(20)
-            .height(20)
-            .select(this.coinWithLike)
-            .selectedColor(this.accent)
-            .onChange((checked: boolean) => {
-              this.coinWithLike = checked;
-            })
-          Text('同时点赞视频')
-            .fontSize(13)
-            .fontColor(this.isDark ? '#D8D8DC' : '#5A5F66')
-        }
-        .width('100%')
-        Button(this.actionBusy ? '投币中…' : '确认投币')
-          .width('100%')
-          .height(42)
-          .fontSize(15)
-          .fontColor('#FFFFFF')
-          .backgroundColor(this.accent)
-          .borderRadius(21)
-          .enabled(!this.actionBusy)
-          .onClick(() => {
-            this.submitCoin();
-          })
-      }
-      .width(Math.min(322, Math.max(280, this.screenWidthVp - 24)))
-      .padding({ left: 18, right: 18, top: 18, bottom: 18 })
-      .borderRadius(20)
-      .backgroundColor(this.isDark ? '#25262A' : '#FFFFFF')
-      .shadow({ radius: 28, color: '#66000000', offsetY: 8 })
-    }
-    .width('100%')
-    .height('100%')
-  }
-
   /** 模糊底图用小尺寸封面，借助 B 站图片缩略参数降低下载与解码开销。 */
   private coverThumb(url: string): string {
     return url.startsWith('http') ? url + '@480w_270h_1c.webp' : url;
   }
 
+  /** 卡片侧带过来的封面：detail 数据回来前播放区/底图直接垫它，入场期不出"加载中"占位。 */
+  private entryCoverUrl(): string {
+    return this.detail.cover.length > 0 ? this.detail.cover : (this.param.cover ?? '');
+  }
+
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
-      // 页面底色独立成层：卡片放大入场时从透明淡入（根 Stack 自身保持透明，透出下层首页）。
+      // 首页快照垫底层：根场景 push 后根页 feed 不再渲染（透出窗口白底）。用 push 前截的
+      // 根页图占住"下层首页"，hero 放大/收合全程背景不闪白；页面底色铺满后自然盖住快照。
+      if (this.heroBg !== undefined) {
+        Image(this.heroBg)
+          .width('100%')
+          .height('100%')
+          .objectFit(ImageFit.Cover)
+          .hitTestBehavior(HitTestMode.None)
+      }
+      // 内容整体层（底色+页面）统一做入场缩放；垫底快照必须在这层外面，
+      // 否则会被缩放变换一起带走，动画期间"下层首页"只出现在卡片矩形内。
+      Stack({ alignContent: Alignment.TopStart }) {
+      // 页面底色独立成层：卡片放大入场时从透明淡入（内容层自身透明，透出外层首页快照）。
       Column()
         .width('100%')
         .height('100%')
@@ -2706,17 +2504,17 @@ export struct VideoDetailPage {
               coined: this.coinCountByMe > 0,
               favorited: this.favorited,
               externalDanmakuOn: this.danmakuOn,
-              externalDanmakuCtx: this.danmakuCtx,
+              danmakuFixedHeight: this.danmakuCanvasHeight(),
               onDanmakuEngineReady: (engine: PlayerDanmakuEngine) => {
                 this.dmEngineRef = engine;
                 this.syncDanmakuViewport();
               },
               localDanmakuText: this.localDanmakuText,
               localDanmakuToken: this.localDanmakuToken,
-              compactMode: !this.playerFullscreen && this.visiblePlayerHeight() < 176,
-              onBack: () => {
-                AppNavStack.pop();
-              },
+              compactMode: !this.playerFullscreen && !this.playerEnded && this.visiblePlayerHeight() < 176,
+               onBack: () => {
+                 this.goBack();
+               },
               onFullscreenChange: (fullscreen: boolean) => {
                 this.playerFullscreen = fullscreen;
                 // 全屏时评论回复 Sheet 应随评论区一起隐藏，不能叠在视频画面上。
@@ -2761,6 +2559,18 @@ export struct VideoDetailPage {
               endRecPlayText: this.endRecPlayText,
               endRecDuration: this.endRecDuration,
               endRecToken: this.endRecToken,
+              endRecList: this.endRecList,
+              upFollowing: this.following,
+              disliked: this.disliked,
+              onFollow: () => {
+                this.actionFollow();
+              },
+              onDislike: () => {
+                this.actionDislike();
+              },
+              onEndRecOpen: (item: VideoItem) => {
+                this.onPlayerEndRecOpen(item);
+              },
               onLike: () => {
                 this.actionLike();
               },
@@ -2773,10 +2583,11 @@ export struct VideoDetailPage {
               onShare: () => {
                 this.actionShare();
               },
+              moreSheetHeight: this.moreSheetHeightValue(),
             })
           } else {
             Stack({ alignContent: Alignment.Center }) {
-              Image(this.coverThumb(this.detail.cover))
+              Image(this.coverThumb(this.entryCoverUrl()))
                 .width('100%')
                 .height('100%')
                 .objectFit(ImageFit.Cover)
@@ -2792,7 +2603,7 @@ export struct VideoDetailPage {
                   colors: [[colorWithAlpha(this.pageTint, '66'), 0.0], [colorWithAlpha(this.pageTint, '00'), 1.0]],
                 })
               Column({ space: 8 }) {
-                Image(this.detail.cover)
+                Image(this.entryCoverUrl())
                   .width(140)
                   .aspectRatio(16 / 9)
                   .objectFit(ImageFit.Cover)
@@ -2856,41 +2667,55 @@ export struct VideoDetailPage {
 
       }
 
-      // 弹幕独立层：移出被收起动画逐帧 resize 的播放器容器。画布节点尺寸恒定
-      // （展开态/全屏高度），收起/展开只收缩外层裁剪窗口，避免 Canvas 后备缓冲
-      // 被反复清空造成的弹幕闪烁。整层不拦截触摸（弹幕点按由 PlayerView 根手势处理，
-      // 两者坐标系一致：均以播放区左上角为原点）。
-      if (this.playUrl.length > 0) {
-        // alignContent TopStart：画布与视频一律顶边对齐（引擎坐标原点 = 播放区左上角），
-        // 收起时画布超高部分从底部裁掉，而不是居中导致弹幕整体下偏。
-        Stack({ alignContent: Alignment.TopStart }) {
-          Canvas(this.danmakuCtx)
-            .width('100%')
-            .height(this.danmakuCanvasHeight())
-            .hitTestBehavior(HitTestMode.None)
-        }
-        .width('100%')
-        .height(this.playerFullscreen ? '100%' : this.visiblePlayerHeight())
-        .margin({ top: this.playerFullscreen ? 0 : Immersive.statusBarHeight() })
-        .clip(true)
-        .hitTestBehavior(HitTestMode.None)
-        .visibility(this.danmakuOn ? Visibility.Visible : Visibility.Hidden)
-      }
-
       if (this.coinSheetOpen) {
-        this.CoinSheet()
+        CoinSheetView({
+          coinCountByMe: this.coinCountByMe,
+          choice: this.coinChoice,
+          withLike: this.coinWithLike,
+          busy: this.actionBusy,
+          contentWidth: Math.min(322, Math.max(280, this.screenWidthVp - 24)),
+          onChoiceChange: (n: number) => {
+            this.coinChoice = n;
+          },
+          onWithLikeChange: (c: boolean) => {
+            this.coinWithLike = c;
+          },
+          onConfirm: () => {
+            this.submitCoin();
+          },
+          onClose: () => {
+            if (!this.actionBusy) this.coinSheetOpen = false;
+          },
+        })
       }
       if (this.favPickOpen) {
-        this.FavPickSheet()
+        FavPickSheetView({
+          loading: this.favPickLoading,
+          folders: this.favPickFolders,
+          checked: this.favPickChecked,
+          onToggle: (id: number) => {
+            this.toggleFavPick(id);
+          },
+          onConfirm: () => {
+            this.saveFavPick().catch(() => {
+            });
+          },
+          onClose: () => {
+            this.favPickOpen = false;
+          },
+        })
       }
+      }
+      .width('100%')
+      .height('100%')
+      // 卡片放大入场变换（无 srcRect 时为恒等变换，不影响其他入口）。
+      .scale({ x: this.entryScaleX, y: this.entryScaleY })
+      .translate({ x: this.entryDx, y: this.entryDy })
     }
     .width('100%')
     .height('100%')
     .backgroundColor('#00000000')
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
-    // 卡片放大入场变换（无 srcRect 时为恒等变换，不影响其他入口）。
-    .scale({ x: this.entryScaleX, y: this.entryScaleY })
-    .translate({ x: this.entryDx, y: this.entryDy })
     .onAreaChange(() => {
       this.refreshScreenSize();
     })

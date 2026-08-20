@@ -27,7 +27,8 @@ export function FeedCoverImage($$: FeedCoverParam) {
   // 相比原图（可能 1920px+ 的 jpg/png）显著省内存与 IO；@Reusable 复用时换 URL 依旧异步加载。
   Image($$.cover.length > 0 ? biliImageThumbnail($$.cover, 900) : $$.cover)
     .width('100%')
-    .aspectRatio(16 / 9)
+    // 对齐原生 B 站首页双列卡片的封面比例（16:9 太扁）。
+    .aspectRatio(4 / 3)
     .objectFit(ImageFit.Cover)
     // 圆角由外层卡片容器 clip 承载，封面自身不再重复圆角（避免白底下露出圆角缝隙）。
     .backgroundColor($$.isDark ? '#2A2C31' : '#E5E7EB')

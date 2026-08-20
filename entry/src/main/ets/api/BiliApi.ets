@@ -9,7 +9,7 @@ import { RsaUtil } from '../common/RsaUtil';
 import { md5Hex } from '../common/Md5';
 import { Api, Constants, RecommendParams } from '../common/Constants';
 import { asObject, asArray, asString, asNumber, asBool, str, randomString, toHttps } from '../common/Utils';
-import { VideoItem, VideoDetail, PlayUrlInfo, ReplyData, ReplyItem, ReplyPageData, UserInfo, UserStat, DynamicItem, DynamicPageData, HotSearchItem, UserSearchItem, SearchTypes,
+import { VideoItem, VideoDetail, PlayUrlInfo, ReplyData, ReplyItem, UserInfo, UserStat, DynamicItem, DynamicPageData, HotSearchItem, UserSearchItem, SearchTypes,
   UserSpaceInfo, SpaceArcData, VideoSearchResult, UserSearchResult, VideoRelationState, HistoryVideoItem, HistoryPageData,
   FavoriteFolderItem, FavoriteFolderPageData, FavoriteVideoPageData, MessageSessionItem, MessageSessionPageData,
   PrivateMessageItem, PrivateMessagePageData, BiliEmotePackage, RelationUserItem, RelationUserPageData,
@@ -123,9 +123,10 @@ export class BiliApi {
     const params: Record<string, string> = {
       'cid': String(cid),
       'qn': String(qn),
-      // 4049 = 4048 | 1：在 DASH 之外同时请求 durl 单路 MP4。≤1080P 优先用 MP4 单流
-      // （AVPlayer 内部音画同步、seek 只需单路 Range 请求）；高画质仍走 DASH 双轨。
-      'fnval': '4049',
+      // 必须纯 DASH（4048）：带 durl 位（4049）时服务端只回 mp4 协议并整体隐藏 DASH，
+      // accept_quality/support_formats 只剩 ≤720P，清晰度菜单里的 1080P/1080P60/4K 会消失。
+      // MP4 单流改在拿到 DASH 结果后按画质二次请求补换（见本方法尾部）。
+      'fnval': '4048',
       'fnver': '0',
       'fourk': '1',
       'high_quality': '1',
@@ -168,7 +169,42 @@ export class BiliApi {
     if (data === null) {
       return null;
     }
-    return PlayUrlInfo.fromPlayUrl(data, qn);
+    const info: PlayUrlInfo = PlayUrlInfo.fromPlayUrl(data, qn);
+    // ≤1080P 补发 MP4 单流请求（fnval=1）换用单轨地址：单 AVPlayer 内部音画同步、
+    // seek 只需单文件 Range 请求。菜单/字幕/续播位仍取自上面的 DASH 响应（其画质列表是全量的）；
+    // 高画质（>80，仅 DASH 提供）不换，保持双轨。
+    if (info.isDash && info.quality <= 80 && info.url.length > 0) {
+      const mp4Params: Record<string, string> = {
+        'cid': String(cid),
+        'qn': String(info.quality),
+        'fnval': '1',
+        'fnver': '0',
+        'https_url_req': '1',
+      };
+      if (bvid.length > 0) {
+        mp4Params['bvid'] = bvid;
+      } else {
+        mp4Params['avid'] = String(aid);
+      }
+      try {
+        const mp4Resp: HttpResponse = await HttpClient.get(Api.ugcUrl + '?' + HttpClient.buildQuery(mp4Params), headers);
+        const mp4Data: Record<string, Object> | null = getData(mp4Resp);
+        if (mp4Data !== null) {
+          const mp4: PlayUrlInfo = PlayUrlInfo.fromPlayUrl(mp4Data, info.quality);
+          if (mp4.url.length > 0) {
+            info.isDash = false;
+            info.format = mp4.format;
+            info.urls = mp4.urls;
+            info.url = mp4.url;
+            info.audioUrl = '';
+            info.audioUrls = [];
+          }
+        }
+      } catch (e) {
+        // MP4 换源失败保持 DASH 双轨播放，不影响可用。
+      }
+    }
+    return info;
   }
 
   /** CC 字幕内容：subtitle_url 返回 { body: [{ from, to, content }] }。失败返回空数组，UI 静默降级。 */
