@@ -14,7 +14,8 @@ import { image } from '@kit.ImageKit';
 import { ReplyCard } from '../components/ReplyCard';
 import { ReplyComposer } from '../components/ReplyComposer';
 import { ReplyThreadPanel } from '../components/ReplyThreadPanel';
-import { ReplyShareCard, makeReplyQr, sharePixelMapAsImage } from '../components/ReplyShareCard';
+import { ReplyShareCard, makeReplyQr, makeReplyShareSnapshot,
+  sharePixelMapAsImage } from '../components/ReplyShareCard';
 import { ReplySortChips } from '../components/ReplySortChips';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { CommentApi } from '../api/CommentApi';
@@ -330,12 +331,19 @@ export struct DynamicDetailPage {
   }
 
   private openReplyThread(root: ReplyItem): void {
-    this.threadRoot = root;
-    this.threadReplies = root.replies.slice();
+    let latest: ReplyItem = root;
+    for (let i: number = 0; i < this.replies.length; i++) {
+      if (this.replies[i].rpid === root.rpid) {
+        latest = this.replies[i];
+        break;
+      }
+    }
+    this.threadRoot = latest;
+    this.threadReplies = latest.replies.slice();
     this.threadCursor = '';
     this.threadHasMore = true;
-    this.threadTargetRpid = root.rpid;
-    this.threadTargetName = root.uname;
+    this.threadTargetRpid = latest.rpid;
+    this.threadTargetName = latest.uname;
     this.threadDraft = '';
     this.threadOpen = true;
     this.loadThreadReplies(true).catch(() => {
@@ -401,9 +409,8 @@ export struct DynamicDetailPage {
     (async () => {
       this.shareCardItem = item;
       this.shareCardQr = await makeReplyQr(link);
-      // checkImageStatus=true 等头像/附图在线图片解码完成再截图。
-      const pixelMap: image.PixelMap = await uiContext.getComponentSnapshot()
-        .createFromBuilder((): void => { this.ReplyShareCardBuilder(); }, 400, true);
+      const pixelMap: image.PixelMap = await makeReplyShareSnapshot(uiContext,
+        (): void => { this.ReplyShareCardBuilder(); });
       await sharePixelMapAsImage(context, pixelMap, 'reply_share_' + String(item.rpid));
     })().catch(() => {
       this.toast('分享图片生成失败，请稍后重试');
@@ -423,6 +430,7 @@ export struct DynamicDetailPage {
       sourceCover: this.item.cover,
       sourceTitle: this.item.title.length > 0 ? this.item.title : this.item.content,
       sourceUpName: this.item.uname,
+      scanHint: '长按扫码查看动态',
     })
   }
 
