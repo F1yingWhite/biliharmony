@@ -27,7 +27,7 @@ export struct ReplyPreview {
                 .width(18)
                 .height(18)
                 .objectFit(ImageFit.Contain)
-                .verticalAlign(ImageSpanAlignment.CENTER)
+                .verticalAlign(ImageSpanAlignment.BOTTOM)
             } else {
               Span(part.text)
                 .fontColor(part.mentionMid > 0 || part.seekSeconds >= 0 || part.bvid.length > 0 || part.aid > 0 ?

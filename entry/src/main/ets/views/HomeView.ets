@@ -100,6 +100,15 @@ export struct HomeView {
     }
   }
 
+  /** 推荐卡 ⋮ 菜单-举报：原因选择后给反馈（Web 端无视频举报接口，本地提示）。 */
+  private reportCard(item: VideoItem): void {
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: '已提交举报，感谢反馈' });
+    } catch (e) {
+      // 弹 toast 失败忽略。
+    }
+  }
+
   /** 长按卡片「不感兴趣」：本地从对应信息流移除（本轮会话生效；Web 无服务端反馈接口）。 */
   private dislikeLocal(item: VideoItem, feedTab: number): void {
     const source: BasicDataSource<VideoItem> = feedTab === 0 ? this.recSource : this.hotSource;
@@ -475,7 +484,14 @@ export struct HomeView {
       ListItemGroup({ footer: this.VideoFeedFooter(feedTab) }) {
         LazyForEach(feedTab === 0 ? this.recSource : this.hotSource, (item: VideoItem) => {
           ListItem() {
-            VideoCard({ video: item, idPrefix: 'home-' + String(feedTab) + '-' })
+            VideoCard({
+              video: item,
+              idPrefix: 'home-' + String(feedTab) + '-',
+              // 仅推荐频道：封面右上 ⋮ → 举报/不想看（不想看即长按同款的本地屏蔽）。
+              showMore: feedTab === 0,
+              onReport: (v: VideoItem) => this.reportCard(v),
+              onHide: (v: VideoItem) => this.dislikeLocal(v, feedTab),
+            })
               // 长按卡片：不感兴趣（本地屏蔽该视频，本轮会话生效；Web 无服务端反馈接口）。
               .gesture(
                 LongPressGesture({ repeat: false })

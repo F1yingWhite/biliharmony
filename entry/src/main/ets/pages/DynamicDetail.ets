@@ -1,6 +1,6 @@
 /** 动态详情：首屏复用 feed 对象，随后从 detail 接口补齐正文、表情和评论 subject。 */
 import { AppNavStack, DynamicDetailParam, NAV_LOGIN } from '../common/AppRouter';
-import { DynamicItem, ReplyData, ReplyItem, ReplyPageData } from '../model/Models';
+import { DynamicItem, ReplyData, ReplyItem } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { Immersive } from '../common/Immersive';
 import { PageHeader } from '../components/PageHeader';
@@ -52,7 +52,7 @@ export struct DynamicDetailPage {
   private replyLikeBusy: Set<number> = new Set<number>();
   private scroller: Scroller = new Scroller();
   private focusPerformed: boolean = false;
-  private threadPage: number = 0;
+  private threadCursor: string = '';
   // 评论分享卡离屏渲染用的待截内容；只在生成分享图期间短暂赋值。
   private shareCardItem: ReplyItem = new ReplyItem();
   private shareCardQr: image.PixelMap | null = null;
@@ -193,7 +193,7 @@ export struct DynamicDetailPage {
   private openReplyThread(root: ReplyItem): void {
     this.threadRoot = root;
     this.threadReplies = root.replies.slice();
-    this.threadPage = 0;
+    this.threadCursor = '';
     this.threadHasMore = true;
     this.threadTargetRpid = root.rpid;
     this.threadTargetName = root.uname;
@@ -206,16 +206,16 @@ export struct DynamicDetailPage {
   private async loadThreadReplies(reset: boolean): Promise<void> {
     if (this.threadLoading || this.threadRoot.rpid <= 0 || (!reset && !this.threadHasMore)) return;
     this.threadLoading = true;
-    const page: number = reset ? 1 : this.threadPage + 1;
+    const cursor: string = reset ? '' : this.threadCursor;
     try {
-      const result: ReplyPageData = await CommentApi.getReplyReplies(this.item.commentId, this.item.commentType,
-        this.threadRoot.rpid, page);
+      const result: ReplyData = await CommentApi.getReplyReplies(this.item.commentId, this.item.commentType,
+        this.threadRoot.rpid, cursor);
       if (this.destroyed || !this.threadOpen) return;
       const next: Array<ReplyItem> = reset ?
         (result.replies.length > 0 ? result.replies : this.threadReplies) :
         this.threadReplies.concat(result.replies);
       this.threadReplies = next;
-      this.threadPage = page;
+      this.threadCursor = result.cursor;
       this.threadHasMore = result.hasMore;
     } catch (e) {
       if (!this.destroyed) this.toast('回复加载失败，请稍后重试');

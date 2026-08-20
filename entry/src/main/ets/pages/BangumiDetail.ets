@@ -6,7 +6,7 @@ import { LengthMetrics, UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
 import { AppNavStack, BangumiDetailParam, NAV_BANGUMI_DETAIL, NAV_LOGIN, NAV_VIDEO_DETAIL, VideoDetailParam } from '../common/AppRouter';
-import { BangumiEpisode, BangumiSeason, ReplyData, ReplyItem, ReplyPageData } from '../model/Models';
+import { BangumiEpisode, BangumiSeason, ReplyData, ReplyItem } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { Immersive } from '../common/Immersive';
 import { LoadingView } from '../components/LoadingView';
@@ -58,7 +58,7 @@ export struct BangumiDetailPage {
   private replyCursor: string = '';
   private replyLikeBusy: Set<number> = new Set<number>();
   private scroller: Scroller = new Scroller();
-  private threadPage: number = 0;
+  private threadCursor: string = '';
   // 评论分享卡离屏渲染用的待截内容；只在生成分享图期间短暂赋值。
   private shareCardItem: ReplyItem = new ReplyItem();
   private shareCardQr: image.PixelMap | null = null;
@@ -286,7 +286,7 @@ export struct BangumiDetailPage {
   private openReplyThread(root: ReplyItem): void {
     this.threadRoot = root;
     this.threadReplies = root.replies.slice();
-    this.threadPage = 0;
+    this.threadCursor = '';
     this.threadHasMore = true;
     this.threadTargetRpid = root.rpid;
     this.threadTargetName = root.uname;
@@ -300,15 +300,15 @@ export struct BangumiDetailPage {
     const oid: number = this.replyOid();
     if (this.threadLoading || this.threadRoot.rpid <= 0 || oid <= 0 || (!reset && !this.threadHasMore)) return;
     this.threadLoading = true;
-    const page: number = reset ? 1 : this.threadPage + 1;
+    const cursor: string = reset ? '' : this.threadCursor;
     try {
-      const result: ReplyPageData = await CommentApi.getReplyReplies(oid, 1, this.threadRoot.rpid, page);
+      const result: ReplyData = await CommentApi.getReplyReplies(oid, 1, this.threadRoot.rpid, cursor);
       if (this.destroyed || !this.threadOpen) return;
       const next: Array<ReplyItem> = reset ?
         (result.replies.length > 0 ? result.replies : this.threadReplies) :
         this.threadReplies.concat(result.replies);
       this.threadReplies = next;
-      this.threadPage = page;
+      this.threadCursor = result.cursor;
       this.threadHasMore = result.hasMore;
     } catch (e) {
       if (!this.destroyed) this.toast('回复加载失败，请稍后重试');
