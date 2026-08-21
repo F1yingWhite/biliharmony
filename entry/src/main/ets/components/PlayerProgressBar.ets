@@ -11,6 +11,8 @@ export struct PlayerProgressBar {
   @Prop compact: boolean = false;
   @Prop chapters: Array<VideoChapter> = [];
   onChange: (value: number, mode: SliderChangeMode) => void = () => {};
+  /** Slider 节点在拖动中被替换时可能收不到 End，直接监听手指抬起/取消做保底。 */
+  onInteractionEnd: () => void = () => {};
 
   @Builder
   ChapterTicks() {
@@ -41,6 +43,7 @@ export struct PlayerProgressBar {
         // 收起态仍使用细轨道；InSet 会在播放器越矮时反而显得更粗。
         style: SliderStyle.OutSet,
       })
+        .id('qa_player_progress_slider')
         .width('100%')
         .height(this.compact ? 20 : 36)
         .blockSize(this.compact ? { width: 8, height: 8 } : undefined)
@@ -49,6 +52,11 @@ export struct PlayerProgressBar {
         .trackColor(this.compact ? '#55FFFFFF' : '#33FFFFFF')
         .onChange((next: number, mode: SliderChangeMode) => {
           this.onChange(next, mode);
+        })
+        .onTouch((event: TouchEvent) => {
+          if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+            this.onInteractionEnd();
+          }
         })
     }
     .layoutWeight(1)

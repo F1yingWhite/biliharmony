@@ -18,6 +18,7 @@ export struct ReplyThreadPanel {
   @Prop sending: boolean = false;
   @Prop replyTargetName: string = '';
   @Prop focusTick: number = 0;
+  @Prop focusId: string = 'thread_reply_composer_editor';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   /** 楼主（动态/稿件作者）mid，用于标注"UP主"。 */
@@ -36,6 +37,7 @@ export struct ReplyThreadPanel {
   onSend: () => void = () => {};
   onToggleEmote: () => void = () => {};
   onRequestKeyboard: () => void = () => {};
+  onFocusChange: (focused: boolean) => void = () => {};
   onNavigate: (action: () => void) => void = (action: () => void) => action();
   @BuilderParam emotePanel: () => void = this.EmptyPanel;
   @State visibleReplies: Array<ReplyItem> = [];
@@ -202,11 +204,13 @@ export struct ReplyThreadPanel {
         sending: this.sending,
         emoteOpen: this.emoteOpen,
         focusTick: this.focusTick,
+        focusId: this.focusId,
         showEmoteButton: this.showEmoteButton,
         onChange: (value: string) => this.onDraftChange(value),
         onSend: () => this.onSend(),
         onToggleEmote: () => this.onToggleEmote(),
         onRequestKeyboard: () => this.onRequestKeyboard(),
+        onFocusChange: (focused: boolean) => this.onFocusChange(focused),
       })
       if (this.emoteOpen) this.emotePanel()
     }

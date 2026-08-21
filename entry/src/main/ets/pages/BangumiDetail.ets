@@ -19,7 +19,7 @@ import { ReplyShareCard, makeReplyQr, makeReplyShareSnapshot,
 import { ReplySortChips } from '../components/ReplySortChips';
 import { UserStore } from '../common/UserStore';
 import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
-import { colorWithAlpha, formatCount, formatDuration } from '../common/Utils';
+import { asNumber, asObject, colorWithAlpha, formatCount, formatDuration } from '../common/Utils';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { CommentApi } from '../api/CommentApi';
 
@@ -53,6 +53,7 @@ export struct BangumiDetailPage {
   @State threadSending: boolean = false;
   @State threadTargetRpid: number = 0;
   @State threadTargetName: string = '';
+  @State threadFocusTick: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   private destroyed: boolean = false;
@@ -325,6 +326,28 @@ export struct BangumiDetailPage {
     }
   }
 
+  private sentThreadReply(result: ActionResult, message: string, parent: number): ReplyItem | null {
+    const returned: ReplyItem = ReplyItem.from(asObject(result.data['reply']));
+    const rpid: number = returned.rpid > 0 ? returned.rpid :
+      asNumber(result.data['rpid'], asNumber(result.data['rpid_str'], 0));
+    if (rpid <= 0) return null;
+    const reply: ReplyItem = returned.rpid > 0 ? returned : new ReplyItem();
+    const user = UserStore.current;
+    reply.rpid = rpid;
+    reply.oid = this.replyOid();
+    reply.type = 1;
+    reply.rootRpid = this.threadRoot.rpid;
+    reply.parentRpid = parent;
+    reply.dialogRpid = asNumber(result.data['dialog'], reply.dialogRpid);
+    if (reply.mid <= 0 && user !== null) reply.mid = user.mid;
+    if (reply.uname.length === 0) reply.uname = user !== null && user.uname.length > 0 ? user.uname : '我';
+    if (reply.avatar.length === 0 && user !== null) reply.avatar = user.face;
+    if (reply.level <= 0 && user !== null) reply.level = user.level;
+    if (reply.content.length === 0) reply.content = message;
+    if (reply.ctime <= 0) reply.ctime = Math.floor(Date.now() / 1000);
+    return reply;
+  }
+
   private async sendThreadReply(): Promise<void> {
     const message: string = this.threadDraft.trim();
     if (message.length === 0 || this.threadSending || !UserStore.isLogin) return;
@@ -339,7 +362,23 @@ export struct BangumiDetailPage {
         return;
       }
       this.threadDraft = '';
-      await this.loadThreadReplies(true);
+      const sent: ReplyItem | null = this.sentThreadReply(result, message, parent);
+      if (sent !== null) {
+        this.threadReplies = [sent].concat(this.threadReplies.filter((item: ReplyItem) => item.rpid !== sent.rpid));
+        const root: ReplyItem = this.threadRoot.clone();
+        root.count++;
+        root.replies = [sent].concat(root.replies.filter((item: ReplyItem) => item.rpid !== sent.rpid));
+        this.threadRoot = root;
+        for (let i: number = 0; i < this.replies.length; i++) {
+          if (this.replies[i].rpid === root.rpid) this.replies[i] = root;
+        }
+        this.replies = this.replies.slice();
+        this.threadTargetRpid = root.rpid;
+        this.threadTargetName = root.uname;
+        this.toast('回复成功');
+      } else {
+        await this.loadThreadReplies(true);
+      }
     } finally {
       if (!this.destroyed) this.threadSending = false;
     }
@@ -406,6 +445,8 @@ export struct BangumiDetailPage {
       draft: this.threadDraft,
       sending: this.threadSending,
       replyTargetName: this.threadTargetName,
+      focusTick: this.threadFocusTick,
+      focusId: 'bangumi_thread_reply_composer_editor',
       upMid: 0,
       onClose: () => this.threadOpen = false,
       onLike: (item: ReplyItem) => this.likeReply(item).catch(() => {
@@ -416,6 +457,7 @@ export struct BangumiDetailPage {
       onSelectReply: (item: ReplyItem) => {
         this.threadTargetRpid = item.rpid;
         this.threadTargetName = item.uname;
+        this.threadFocusTick++;
       },
       onDeleted: (item: ReplyItem) => {
         this.threadReplies = this.threadReplies.filter((x: ReplyItem) => x.rpid !== item.rpid);
@@ -960,6 +1002,7 @@ export struct BangumiDetailPage {
     })
     .bindSheet($$this.threadOpen, this.ThreadSheet(), {
       height: SheetSize.LARGE,
+      keyboardAvoidMode: SheetKeyboardAvoidMode.RESIZE_ONLY,
       dragBar: false,
       showClose: false,
       radius: { topLeft: 18, topRight: 18 },

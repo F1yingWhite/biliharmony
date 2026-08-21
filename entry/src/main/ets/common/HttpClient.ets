@@ -47,7 +47,8 @@ export class HttpClient {
   private static appAccessToken: string = '';
   private static initialized: boolean = false;
   private static buvidReady: boolean = false;
-  private static buvidFetching: boolean = false;
+  /** 并发请求共用同一次 SPI 拉取；调用方必须等待 Promise 完成。 */
+  private static buvidPromise: Promise<void> | null = null;
 
   static get buvid(): string {
     return HttpClient.cookieJar['buvid3'] ?? '';
@@ -81,12 +82,11 @@ export class HttpClient {
     }
   }
 
-  /** 从官方 spi 接口拉取真实 buvid3/buvid4（acc/info 等接口无真实 buvid 会被 -352 风控拒绝），只拉一次 */
-  private static async ensureBuvid(): Promise<void> {
-    if (HttpClient.buvidReady || HttpClient.buvidFetching) {
-      return;
-    }
-    HttpClient.buvidFetching = true;
+  private static isFallbackBuvid(value: string): boolean {
+    return value.length === 34 && value.startsWith('in') && /^[A-Za-z0-9]+$/.test(value.substring(2));
+  }
+
+  private static async fetchBuvid(): Promise<void> {
     const request: http.HttpRequest = http.createHttp();
     try {
       const resp: http.HttpResponse = await request.request('https://api.bilibili.com/x/frontend/finger/spi', {
@@ -112,7 +112,22 @@ export class HttpClient {
       // 失败保持兜底 buvid，下次请求重试
     } finally {
       request.destroy();
-      HttpClient.buvidFetching = false;
+    }
+  }
+
+  /** 从官方 spi 接口拉取真实 buvid3/buvid4（acc/info 等接口无真实 buvid 会被 -352 风控拒绝）。 */
+  private static async ensureBuvid(): Promise<void> {
+    if (HttpClient.buvidReady) return;
+    if (HttpClient.buvidPromise !== null) {
+      await HttpClient.buvidPromise;
+      return;
+    }
+    const task: Promise<void> = HttpClient.fetchBuvid();
+    HttpClient.buvidPromise = task;
+    try {
+      await task;
+    } finally {
+      if (HttpClient.buvidPromise === task) HttpClient.buvidPromise = null;
     }
   }
 
@@ -120,6 +135,9 @@ export class HttpClient {
   static setCookie(name: string, value: string): void {
     HttpClient.ensureInit();
     HttpClient.cookieJar[name] = value;
+    if (name === 'buvid3' && value.length > 0 && !HttpClient.isFallbackBuvid(value)) {
+      HttpClient.buvidReady = true;
+    }
   }
 
   /** 从 cookie 罐中真正删除（登出用）。ArkTS 对 Record 不用 delete，重建剔除。 */
@@ -151,7 +169,8 @@ export class HttpClient {
         const value: string = asString(saved[keys[i]], '');
         if (value.length > 0) HttpClient.cookieJar[keys[i]] = value;
       }
-      if ((HttpClient.cookieJar['buvid3'] ?? '').length > 0) HttpClient.buvidReady = true;
+      const savedBuvid3: string = asString(saved['buvid3'], '');
+      HttpClient.buvidReady = savedBuvid3.length > 0 && !HttpClient.isFallbackBuvid(savedBuvid3);
     } catch (e) {
       // 损坏的旧缓存直接忽略，后续登录会覆盖。
     }

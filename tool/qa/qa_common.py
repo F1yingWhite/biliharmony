@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 APP_ID = os.environ.get('QA_APPID', 'com.piliplus.harmony')
 ROOT = Path(__file__).resolve().parents[2]
@@ -149,9 +149,9 @@ class QaReport:
     def note(self, msg: str) -> None:
         self.lines.append(f"NOTE  {msg}")
 
-    def export(self) -> Path:
+    def export(self, filename: str = 'qa_report.md') -> Path:
         ensure_qa_dir()
-        md = QA_DIR / 'qa_report.md'
+        md = QA_DIR / filename
         content = [f"# {self.title}", '',
                    f"- 时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
                    f"- 通过: {self.passed} / 失败: {self.failed} / 跳过: {self.skipped}", '',
@@ -253,6 +253,13 @@ def node_bounds(n: Any) -> str:
     return str(a.get('bounds', '')) if isinstance(a, dict) else ''
 
 
+def node_id(n: Any) -> str:
+    a = n.get('attributes') if isinstance(n, dict) else {}
+    if not isinstance(a, dict):
+        return ''
+    return str(a.get('id', a.get('key', '')))
+
+
 def walk(root: Any) -> List[Any]:
     out: List[Any] = []
     stack = [root]
@@ -308,6 +315,27 @@ def tap_bounds(bounds: str, wait_ms: int = 500) -> None:
     x = (b['x1'] + b['x2']) // 2
     y = (b['y1'] + b['y2']) // 2
     device().run(['shell', 'uitest', 'uiInput', 'click', str(x), str(y)], check=False)
+    time.sleep(wait_ms / 1000)
+
+
+def tap(x: int, y: int, wait_ms: int = 500) -> None:
+    device().run(['shell', 'uitest', 'uiInput', 'click', str(x), str(y)], check=False)
+    time.sleep(wait_ms / 1000)
+
+
+def swipe(x1: int, y1: int, x2: int, y2: int, duration_ms: int = 400,
+          wait_ms: int = 500) -> None:
+    # uiInput 的最后一个参数实际为 velocity；旧测试一直将其当作 duration 使用。
+    # 保持兼容，并限制在工具允许的 200..40000 范围。
+    velocity = max(200, min(40000, duration_ms))
+    device().run(['shell', 'uitest', 'uiInput', 'swipe', str(x1), str(y1),
+                  str(x2), str(y2), str(velocity)], check=False)
+    time.sleep(wait_ms / 1000)
+
+
+def input_text(x: int, y: int, value: str, wait_ms: int = 500) -> None:
+    device().run(['shell', 'uitest', 'uiInput', 'inputText', str(x), str(y), value],
+                 check=False)
     time.sleep(wait_ms / 1000)
 
 
@@ -370,6 +398,74 @@ def dump_until_rich(min_texts: int = 20, timeout: int = 15, name: str = 'rich') 
             return last
         time.sleep(0.6)
     return last
+
+
+def wait_for_ui(predicate: Callable[[Any], bool], timeout: float = 15,
+                name: str = 'wait_ui', interval: float = 0.45) -> Tuple[Path, Any]:
+    """轮询 UI dump，返回第一个满足 predicate 的 (路径, UI 树)。"""
+    deadline = time.time() + timeout
+    last_path: Optional[Path] = None
+    last_tree: Any = None
+    while time.time() < deadline:
+        last_path = dump_ui(name)
+        try:
+            last_tree = load_ui_tree(last_path)
+            if predicate(last_tree):
+                return last_path, last_tree
+        except Exception:
+            pass
+        time.sleep(interval)
+    raise RuntimeError(f'wait ui 超时: {name} (last={last_path})')
+
+
+def root_size(root: Any) -> Tuple[int, int]:
+    """从最外层可见节点推断当前物理屏幕尺寸，兼容横竖屏。"""
+    best_w = 0
+    best_h = 0
+    best_area = -1
+    for n in walk(root):
+        b = parse_bounds(node_bounds(n))
+        if not b:
+            continue
+        w = max(0, b['x2'] - b['x1'])
+        h = max(0, b['y2'] - b['y1'])
+        if w * h > best_area:
+            best_area = w * h
+            best_w, best_h = w, h
+    return best_w, best_h
+
+
+def capture_transition(name: str, trigger: Sequence[str],
+                       offsets_ms: Sequence[int] = (40, 80, 120, 180, 260, 380)) -> List[Path]:
+    """在设备端触发点击/手势并按指定时刻抓帧，避免主机 hdc 往返丢掉动画中间态。
+
+    trigger 是 `uitest uiInput` 后的参数，例如 `('click', '2780', '1200')`。
+    返回值包含触发前一帧以及各 offset 的帧。
+    """
+    if not offsets_ms or any(v <= 0 for v in offsets_ms):
+        raise ValueError('offsets_ms 必须为递增正整数')
+    ordered = list(offsets_ms)
+    if ordered != sorted(set(ordered)):
+        raise ValueError('offsets_ms 必须严格递增且不能重复')
+    paths = [snapshot_shot(f'{name}_000_before')]
+    remote_names: List[str] = []
+    # uiInput 本身会在注入事件后立即返回；与抓帧放在同一个设备 shell 内即可避开 hdc 往返。
+    parts = ['uitest uiInput ' + ' '.join(str(x) for x in trigger) + ' >/dev/null 2>&1']
+    previous = 0
+    for offset in ordered:
+        delay = (offset - previous) / 1000
+        remote = f'/data/local/tmp/{name}_{offset:03d}.jpeg'
+        parts.append(f'sleep {delay:.3f}')
+        parts.append(f'snapshot_display -f {remote} >/dev/null 2>&1')
+        remote_names.append(remote)
+        previous = offset
+    # 参数完全由测试代码中的数字/固定名称组成，不接受用户 shell 文本。
+    device().run(['shell', '; '.join(parts)], retries=1, timeout=max(8, ordered[-1] // 1000 + 8))
+    for remote in remote_names:
+        local = ensure_qa_dir() / Path(remote).name
+        device().run(['file', 'recv', remote, str(local)], check=False)
+        paths.append(local)
+    return paths
 
 
 def back_home(max_back: int = 6) -> bool:

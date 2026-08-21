@@ -114,10 +114,18 @@ export class Immersive {
     }
     let height: number = 0;
     try {
-      const area: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
-      const h: number = Immersive.pxToVp(area.bottomRect.height);
-      if (h > 0 && h <= 60) {
-        height = h;
+      // TYPE_SYSTEM 只保证覆盖三键导航；手势导航的小白条使用
+      // TYPE_NAVIGATION_INDICATOR。两者取最大值，兼容两种系统导航模式。
+      const systemArea: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
+      const systemHeight: number = Immersive.pxToVp(systemArea.bottomRect.height);
+      if (systemHeight > 0 && systemHeight <= 80) height = systemHeight;
+      try {
+        const indicatorArea: window.AvoidArea =
+          win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
+        const indicatorHeight: number = Immersive.pxToVp(indicatorArea.bottomRect.height);
+        if (indicatorHeight > 0 && indicatorHeight <= 80) height = Math.max(height, indicatorHeight);
+      } catch (e) {
+        // 旧系统不支持 TYPE_NAVIGATION_INDICATOR 时沿用 TYPE_SYSTEM。
       }
     } catch (e) {
       height = 0;
@@ -176,6 +184,75 @@ export class Immersive {
     Immersive.brightnessApplying = false;
     // 手指移动速度快于系统窗口 API 时只提交最新值，避免旧 Promise 排队造成明显延迟。
     if (Immersive.brightnessPending >= -1) Immersive.flushWindowBrightness();
+  }
+
+  /**
+   * 把应用侧过渡与系统竖屏旋转对齐：WILL_ROTATE 开始收起，DID_ROTATE 只做收尾。
+   * 返回取消函数，组件销毁时可立即移除监听与兜底定时器。
+   */
+  static duringPortraitRotation(onStart: () => void, onFinish: () => void,
+    fallbackMs: number = 900): () => void {
+    const win: window.Window | null = Immersive.mainWindow;
+    let active: boolean = true;
+    let started: boolean = false;
+    let fallbackTimer: number = -1;
+    let rotationCallback: ((info: window.RotationChangeInfo) => void) | null = null;
+    const cleanup = (): void => {
+      if (!active) return;
+      active = false;
+      if (fallbackTimer >= 0) {
+        clearTimeout(fallbackTimer);
+        fallbackTimer = -1;
+      }
+      if (win !== null && rotationCallback !== null) {
+        try {
+          win.off('rotationChange', rotationCallback);
+        } catch (e) {
+          // 不支持 rotationChange 的旧设备会走超时兜底。
+        }
+      }
+    };
+    const start = (): void => {
+      if (!active || started) return;
+      started = true;
+      onStart();
+    };
+    const finish = (): void => {
+      if (!active) return;
+      start();
+      cleanup();
+      onFinish();
+    };
+    if (win === null) {
+      fallbackTimer = setTimeout(() => finish(), 0);
+      return cleanup;
+    }
+    try {
+      const rect: window.Rect = win.getWindowProperties().windowRect;
+      if (rect.height >= rect.width) {
+        // 竖屏视频本来就不旋转：下一帧开始收起，但仍给外层裁剪窗口完整的过渡时间。
+        fallbackTimer = setTimeout(() => {
+          start();
+          fallbackTimer = setTimeout(() => finish(), 300);
+        }, 16);
+        return cleanup;
+      }
+      rotationCallback = (info: window.RotationChangeInfo): void => {
+        const portrait: boolean = info.orientation === 0 || info.orientation === 2 ||
+          info.displayRect.height >= info.displayRect.width;
+        if (!portrait) return;
+        if (info.type === window.RotationChangeType.WINDOW_WILL_ROTATE) {
+          start();
+        } else if (info.type === window.RotationChangeType.WINDOW_DID_ROTATE) {
+          finish();
+        }
+      };
+      win.on('rotationChange', rotationCallback);
+    } catch (e) {
+      // 注册失败仍由超时兜底恢复详情布局。
+    }
+    fallbackTimer = setTimeout(() => finish(), Math.max(300, fallbackMs));
+    return cleanup;
   }
 
   /** 视频播放页全屏：隐藏系统栏；退出恢复。keepPortrait 为竖屏视频保持竖屏全屏（不转横屏）。 */

@@ -18,7 +18,8 @@ import { MessageApi } from '../api/MessageApi';
 export struct MessagesPage {
   @State current: MessageSessionItem = new MessageSessionItem();
   @State messages: Array<PrivateMessageItem> = [];
-  @State loading: boolean = false;
+  @State sessionLoading: boolean = false;
+  @State messageLoading: boolean = false;
   @State sessionError: string = '';
   @State messageError: string = '';
   @State hasMore: boolean = true;
@@ -36,6 +37,8 @@ export struct MessagesPage {
   private tabs: Array<string> = ['私信', '回复', '@我', '赞', '系统'];
   /** 通知列表惰性挂载：首次切到对应 Tab 才创建，避免一进页面就并发五个请求。 */
   private tabMounted: Array<boolean> = [true, false, false, false, false];
+  /** 会话请求代际：切换会话后丢弃旧会话返回的数据。 */
+  private messageGeneration: number = 0;
 
   aboutToAppear(): void {
     AppStorage.setOrCreate<boolean>('messageThreadOpen', false);
@@ -48,8 +51,8 @@ export struct MessagesPage {
   }
 
   async loadSessions(reset: boolean): Promise<void> {
-    if (this.loading || (!reset && !this.sessionHasMore)) return;
-    this.loading = true;
+    if (this.sessionLoading || (!reset && !this.sessionHasMore)) return;
+    this.sessionLoading = true;
     try {
       const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
       const beginTs: number = reset || all.length === 0 ? 0 : all[all.length - 1].sessionTs;
@@ -70,7 +73,7 @@ export struct MessagesPage {
       this.sessionCount = this.sessionsSource.totalCount();
       this.sessionHasMore = data.hasMore;
     } finally {
-      this.loading = false;
+      this.sessionLoading = false;
     }
   }
 
@@ -92,6 +95,7 @@ export struct MessagesPage {
   }
 
   async openSession(item: MessageSessionItem): Promise<void> {
+    this.messageGeneration++;
     this.current = item;
     AppStorage.setOrCreate<boolean>('messageThreadOpen', true);
     this.messages = [];
@@ -102,12 +106,13 @@ export struct MessagesPage {
   }
 
   async loadMessages(reset: boolean): Promise<void> {
-    if (this.loading || this.current.talkerId === 0 || (!reset && !this.hasMore)) return;
-    this.loading = true;
+    if (this.current.talkerId === 0 || (!reset && (this.messageLoading || !this.hasMore))) return;
+    const generation: number = this.messageGeneration;
+    this.messageLoading = true;
     const talkerId: number = this.current.talkerId;
     try {
       const data: PrivateMessagePageData = await MessageApi.getPrivateMessages(talkerId, reset ? 0 : this.minSeqno);
-      if (this.current.talkerId !== talkerId) return;
+      if (generation !== this.messageGeneration || this.current.talkerId !== talkerId) return;
       if (data.error.length > 0) {
         this.messageError = data.error;
         return;
@@ -136,7 +141,7 @@ export struct MessagesPage {
     } catch (e) {
       // 保留当前会话内容，触顶或重试时可再次请求。
     } finally {
-      this.loading = false;
+      if (generation === this.messageGeneration) this.messageLoading = false;
     }
   }
 
@@ -161,24 +166,29 @@ export struct MessagesPage {
   async send(): Promise<void> {
     const content: string = this.draft.trim();
     const user = UserStore.current;
-    if (content.length === 0 || user === null || this.sending) return;
+    const talkerId: number = this.current.talkerId;
+    const generation: number = this.messageGeneration;
+    if (content.length === 0 || user === null || talkerId === 0 || this.sending) return;
     this.sending = true;
     try {
-      const result: ActionResult = await MessageApi.sendPrivateMessage(user.mid, this.current.talkerId, content);
+      const result: ActionResult = await MessageApi.sendPrivateMessage(user.mid, talkerId, content);
+      if (generation !== this.messageGeneration || this.current.talkerId !== talkerId) return;
       if (!result.ok) {
         this.getUIContext().getPromptAction().showToast({ message: result.message });
         return;
       }
       const local: PrivateMessageItem = new PrivateMessageItem();
       local.senderId = user.mid;
-      local.receiverId = this.current.talkerId;
+      local.receiverId = talkerId;
       local.text = content;
       local.timestamp = Math.floor(Date.now() / 1000);
       local.seqno = Date.now();
       this.messages = this.messages.concat([local]);
-      this.draft = '';
+      if (this.draft.trim() === content) this.draft = '';
     } catch (e) {
-      this.getUIContext().getPromptAction().showToast({ message: '发送失败，请检查网络' });
+      if (generation === this.messageGeneration && this.current.talkerId === talkerId) {
+        this.getUIContext().getPromptAction().showToast({ message: '发送失败，请检查网络' });
+      }
     } finally {
       this.sending = false;
     }
@@ -186,6 +196,8 @@ export struct MessagesPage {
 
   goBack(): void {
     if (this.threadOpen) {
+      this.messageGeneration++;
+      this.messageLoading = false;
       AppStorage.setOrCreate<boolean>('messageThreadOpen', false);
     } else {
       AppNavStack.pop();
@@ -417,7 +429,7 @@ export struct MessagesPage {
   @Builder
   SessionListContent() {
     if (this.sessionCount === 0) {
-      LoadingView({ loading: this.loading, empty: !this.loading && this.sessionError.length === 0,
+      LoadingView({ loading: this.sessionLoading, empty: !this.sessionLoading && this.sessionError.length === 0,
         emptyText: '暂无私信会话', errorText: this.sessionError,
         onRetry: () => this.loadSessions(true).catch(() => {
         }) })
@@ -428,11 +440,11 @@ export struct MessagesPage {
         }, (item: MessageSessionItem) => String(item.talkerId))
         ListItem() {
           LoadMoreFooter({
-            loading: this.loading,
+            loading: this.sessionLoading,
             hasMore: this.sessionHasMore,
             moreText: '',
             endText: '',
-            fixedHeight: this.loading ? 48 : 1,
+            fixedHeight: this.sessionLoading ? 48 : 1,
           })
         }
       }
@@ -570,12 +582,12 @@ export struct MessagesPage {
       })
       List() {
         ListItem() {
-          Text(this.loading ? '加载中…' : (this.messageError.length > 0 ? this.messageError + ' · 点此重试' :
+          Text(this.messageLoading ? '加载中…' : (this.messageError.length > 0 ? this.messageError + ' · 点此重试' :
             (this.hasMore ? '加载更早消息' : '没有更早消息了')))
             .fontSize(11).fontColor(this.messageError.length > 0 || this.hasMore ? this.accent : '#9499A0')
             .width('100%').textAlign(TextAlign.Center).padding(12)
             .onClick(() => {
-              if (!this.loading && (this.messageError.length > 0 || this.hasMore)) {
+              if (!this.messageLoading && (this.messageError.length > 0 || this.hasMore)) {
                 this.loadMessages(this.messages.length === 0).catch(() => {
                 });
               }

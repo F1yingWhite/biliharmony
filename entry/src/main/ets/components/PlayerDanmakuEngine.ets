@@ -57,6 +57,8 @@ export class PlayerDanmakuEngine {
   private activeBack: Array<ActiveDm> = [];
   private textWidthCache: Map<string, number> = new Map<string, number>();
   private colorCache: Map<number, string> = new Map<number, string>();
+  /** 每次 spawn 只构建一次弹道桶，避免每个候选轨道都扫描完整 active 数组。 */
+  private laneBuckets: Array<Array<ActiveDm>> = [];
 
   constructor(ctx: CanvasRenderingContext2D) {
     this.ctx = ctx;
@@ -70,8 +72,29 @@ export class PlayerDanmakuEngine {
   /** 把分段弹幕合并进全局有序列表，并把游标推到播放头之后，避免重放已喷出的弹幕。 */
   appendSorted(items: Array<DanmakuItem>): void {
     if (items.length === 0) return;
-    this.list = this.list.concat(items);
-    this.list.sort((a: DanmakuItem, b: DanmakuItem) => a.time - b.time);
+    // protobuf 分段通常已经有序；仅在脏响应无序时排序新段，再与旧列表线性归并。
+    let incoming: Array<DanmakuItem> = items;
+    for (let i: number = 1; i < items.length; i++) {
+      if (items[i - 1].time > items[i].time) {
+        incoming = items.slice();
+        incoming.sort((a: DanmakuItem, b: DanmakuItem) => a.time - b.time);
+        break;
+      }
+    }
+    const merged: Array<DanmakuItem> = new Array<DanmakuItem>(this.list.length + incoming.length);
+    let oldIndex: number = 0;
+    let newIndex: number = 0;
+    let mergedIndex: number = 0;
+    while (oldIndex < this.list.length && newIndex < incoming.length) {
+      if (this.list[oldIndex].time <= incoming[newIndex].time) {
+        merged[mergedIndex++] = this.list[oldIndex++];
+      } else {
+        merged[mergedIndex++] = incoming[newIndex++];
+      }
+    }
+    while (oldIndex < this.list.length) merged[mergedIndex++] = this.list[oldIndex++];
+    while (newIndex < incoming.length) merged[mergedIndex++] = incoming[newIndex++];
+    this.list = merged;
     const guard: number = this.lastPlayerTime + 0.1;
     let low: number = 0;
     let high: number = this.list.length;
@@ -126,6 +149,7 @@ export class PlayerDanmakuEngine {
     this.nextScrollLane = 0;
     this.nextTopLane = 0;
     this.nextBottomLane = 0;
+    this.laneBuckets.length = 0;
     this.ctx.clearRect(0, 0, this.width, this.height);
   }
 
@@ -221,6 +245,7 @@ export class PlayerDanmakuEngine {
     // 数量同时受用户密度、实际轨道数和 Canvas 性能上限约束。
     const maxActive: number = this.maxActive();
     const spawnBudget: number = this.fullscreen ? 24 : 16;
+    this.rebuildLaneBuckets();
     let spawned: number = 0;
     while (this.cursor < this.list.length && this.list[this.cursor].time <= now + 0.1 && spawned < spawnBudget) {
       // 当前屏已满时等待空位；下次调度会先丢弃届时已过期的项，不让它们积压到后续时间点。
@@ -268,6 +293,7 @@ export class PlayerDanmakuEngine {
         const dm: ActiveDm = new ActiveDm(item, -1, fixedLane, 0, now + 4, true, now, textW, renderText, renderColor);
         dm.fontSizePx = sizePx;
         this.active.push(dm);
+        this.addToLaneBucket(dm);
       } else if (item.mode === 6) {
         // 逆向滚动弹幕（mode 6）：从左向右过屏，与正向分轨（避免对向相撞）。
         const textWm: number = textW;
@@ -280,6 +306,7 @@ export class PlayerDanmakuEngine {
         dm.reverse = true;
         dm.fontSizePx = sizePx;
         this.active.push(dm);
+        this.addToLaneBucket(dm);
       } else {
         // 所有弹幕保持近似相同的过屏时间；长文本虽然速度更快，但分轨时会预判追尾。
         const spawnX: number = this.width + Math.max(10, sizePx * 0.3);
@@ -290,11 +317,12 @@ export class PlayerDanmakuEngine {
         const dm: ActiveDm = new ActiveDm(item, spawnX, lane, speed, 0, false, now, textW, renderText, renderColor);
         dm.fontSizePx = sizePx;
         this.active.push(dm);
+        this.addToLaneBucket(dm);
       }
     }
   }
 
-  drawFrame(advance: boolean = true): void {
+  drawFrame(advance: boolean = true, frameTimeMs: number = Date.now()): void {
     this.ctx.clearRect(0, 0, this.width, this.height);
     const now: number = this.lastPlayerTime;
     const fontSize: number = this.fontSize();
@@ -302,14 +330,17 @@ export class PlayerDanmakuEngine {
     // 双缓冲原地复用，避免每帧分配 keep 数组带来的 GC 压力。
     const keep: Array<ActiveDm> = this.activeBack;
     keep.length = 0;
-    const drawMs: number = Date.now();
-    const deltaSec: number = advance ?
-      (this.lastDrawMs > 0 ? Math.min(0.12, Math.max(0.012, (drawMs - this.lastDrawMs) / 1000)) : 0.033) : 0;
-    if (advance) this.lastDrawMs = drawMs;
+    // DisplaySync 给出的帧时间同源、无 setInterval 抖动。卡住后按真实间隔追上播放画面，
+    // 不再把 >120ms 的时间永久丢掉；2.5s 以上的播放头跳变会由上层 resetDanmakuAt 处理。
+    const deltaSec: number = advance && this.lastDrawMs > 0 ?
+      Math.min(2.5, Math.max(0, (frameTimeMs - this.lastDrawMs) / 1000)) : 0;
+    if (advance) this.lastDrawMs = frameTimeMs;
     this.ctx.globalAlpha = this.opacity;
     this.ctx.font = '600 ' + fontSize + 'px sans-serif';
     this.ctx.strokeStyle = '#B3000000';
     this.ctx.lineWidth = this.fullscreen ? 2.5 : 2;
+    let appliedFont: number = fontSize;
+    let appliedColor: string = '';
     for (let i: number = 0; i < this.active.length; i++) {
       const dm: ActiveDm = this.active[i];
       const frozen: boolean = dm === this.pinned;
@@ -321,16 +352,23 @@ export class PlayerDanmakuEngine {
         continue;
       }
       const itemFont: number = dm.fontSizePx > 0 ? dm.fontSizePx : fontSize;
-      this.ctx.font = '600 ' + itemFont + 'px sans-serif';
+      // 同字号弹幕占绝大多数，避免每条都重复触发 Canvas 字体解析。
+      if (Math.abs(itemFont - appliedFont) > 0.01) {
+        this.ctx.font = '600 ' + itemFont + 'px sans-serif';
+        appliedFont = itemFont;
+      }
       if (dm.isFixed) {
         // 固定弹幕：被点击冻结时不过期（保持停住），否则按 fixedUntil 过期。
         if (!frozen && now > dm.fixedUntil) {
           continue;
         }
-        this.ctx.fillStyle = dm.renderColor;
         // 整数坐标：位置锁死后浮点亚像素每帧取齐会原地抖动，取整避免文字闪烁。
         const x: number = Math.round((this.width - dm.textWidth) / 2);
         const y: number = Math.round(dm.lane * laneH + itemFont);
+        if (appliedColor !== dm.renderColor) {
+          this.ctx.fillStyle = dm.renderColor;
+          appliedColor = dm.renderColor;
+        }
         this.ctx.strokeText(dm.renderText, x, y);
         this.ctx.fillText(dm.renderText, x, y);
         keep.push(dm);
@@ -340,9 +378,12 @@ export class PlayerDanmakuEngine {
         if (!frozen && dm.x - dm.textWidth > this.width + 10) {
           continue;
         }
-        this.ctx.fillStyle = dm.renderColor;
         const x: number = Math.round(dm.x);
         const y: number = Math.round(dm.lane * laneH + itemFont);
+        if (appliedColor !== dm.renderColor) {
+          this.ctx.fillStyle = dm.renderColor;
+          appliedColor = dm.renderColor;
+        }
         this.ctx.strokeText(dm.renderText, x, y);
         this.ctx.fillText(dm.renderText, x, y);
         keep.push(dm);
@@ -352,9 +393,12 @@ export class PlayerDanmakuEngine {
         if (!frozen && dm.x + dm.textWidth < -10) {
           continue;
         }
-        this.ctx.fillStyle = dm.renderColor;
         const x: number = Math.round(dm.x);
         const y: number = Math.round(dm.lane * laneH + itemFont);
+        if (appliedColor !== dm.renderColor) {
+          this.ctx.fillStyle = dm.renderColor;
+          appliedColor = dm.renderColor;
+        }
         this.ctx.strokeText(dm.renderText, x, y);
         this.ctx.fillText(dm.renderText, x, y);
         keep.push(dm);
@@ -442,7 +486,10 @@ export class PlayerDanmakuEngine {
   }
 
   setDensity(value: number): void {
+    const oldLaneCount: number = this.laneCount();
     this.density = Math.round(value);
+    const newLaneCount: number = this.laneCount();
+    if (newLaneCount !== oldLaneCount) this.clampDanmakuLanes(newLaneCount);
     const maxActive: number = this.maxActive();
     if (this.active.length > maxActive) this.active = this.active.slice(0, maxActive);
   }
@@ -474,17 +521,22 @@ export class PlayerDanmakuEngine {
     this.cursor = low;
   }
 
-  /** 默认字号（竖屏 34 / 全屏 44）；行高单独由 lineHeight 控制，不再用大间距假装字号。 */
+  /** 默认字号（竖屏 38 / 全屏 48）；行高单独由 lineHeight 控制，不再用大间距假装字号。 */
   private fontSize(): number {
-    return (this.fullscreen ? 44 : 34) * this.fontScale;
+    return (this.fullscreen ? 48 : 38) * this.fontScale;
   }
 
   private lineHeight(): number {
-    // 基准字号之上只保留 2vp 防描边相碰；超出基准的字号增量只按 50% 计入行高（次线性）：
-    // 用户放大字号时轨道间距不成比例拉大、轨道数不骤减；缩小字号保持"行高跟随字号"的原行为。
+    // 以旧默认字号作为行高基准；超出部分只按 50% 计入行高（次线性），
+    // 让新默认字号更大而轨道仍紧凑，用户继续放大时轨道数也不会骤减。
     const base: number = this.fullscreen ? 44 : 34;
     const extra: number = this.fontSize() - base;
-    return base + 2 + (extra > 0 ? extra * 0.5 : extra);
+    const normalHeight: number = base + 2 + (extra > 0 ? extra * 0.5 : extra);
+    // 高密度优先增加纵向轨道，而不是把大量弹幕重复塞进少数基线。
+    // 普通档也收紧约 10%，配合更大的默认字号消除“字小但轨道很空”的观感；
+    // 高密度档继续保持原有轨道数量，不因字号增大重新变回少轨道。
+    const densityFactor: number = this.density >= 30 ? 0.68 : (this.density >= 27 ? 0.82 : 0.90);
+    return Math.max(this.fontSize() * 0.68, normalHeight * densityFactor);
   }
 
   private laneCount(): number {
@@ -501,9 +553,9 @@ export class PlayerDanmakuEngine {
 
   private laneSafeForScroll(lane: number, spawnX: number, newSpeed: number): boolean {
     const minimumGap: number = Math.max(18, this.fontSize() * 0.62);
-    for (let i: number = 0; i < this.active.length; i++) {
-      const current: ActiveDm = this.active[i];
-      if (current.lane !== lane || current.special !== null) continue;
+    const bucket: Array<ActiveDm> = this.laneBucket(lane);
+    for (let i: number = 0; i < bucket.length; i++) {
+      const current: ActiveDm = bucket[i];
       // 固定弹幕仍占据同一条视觉轨道，滚动弹幕不能从它下面穿过；
       // 逆向弹幕与正向同轨会对向相撞，同样拒绝。
       if (current.isFixed || current.reverse) return false;
@@ -521,9 +573,9 @@ export class PlayerDanmakuEngine {
   /** 逆向弹幕（mode 6，从左向右）的镜像安全判断：tail 在左、head 在右。 */
   private laneSafeForReverse(lane: number, spawnTail: number, newSpeed: number): boolean {
     const minimumGap: number = Math.max(18, this.fontSize() * 0.62);
-    for (let i: number = 0; i < this.active.length; i++) {
-      const current: ActiveDm = this.active[i];
-      if (current.lane !== lane || current.special !== null) continue;
+    const bucket: Array<ActiveDm> = this.laneBucket(lane);
+    for (let i: number = 0; i < bucket.length; i++) {
+      const current: ActiveDm = bucket[i];
       // 固定弹幕与正向弹幕都不能与逆向弹幕同轨。
       if (current.isFixed || !current.reverse) return false;
       const currentHead: number = current.x;
@@ -547,6 +599,12 @@ export class PlayerDanmakuEngine {
         return lane;
       }
     }
+    // “重叠”档的语义是宁可复用弹道也不丢掉当前弹幕；正常/较多档仍坚持防碰撞。
+    if (this.density >= 30) {
+      const lane: number = this.nextScrollLane % laneCount;
+      this.nextScrollLane = (lane + 1) % laneCount;
+      return lane;
+    }
     return -1;
   }
 
@@ -559,6 +617,11 @@ export class PlayerDanmakuEngine {
         return lane;
       }
     }
+    if (this.density >= 30) {
+      const lane: number = this.nextScrollLane % laneCount;
+      this.nextScrollLane = (lane + 1) % laneCount;
+      return lane;
+    }
     return -1;
   }
 
@@ -569,19 +632,20 @@ export class PlayerDanmakuEngine {
     for (let offset: number = 0; offset < candidateCount; offset++) {
       const relative: number = (start + offset) % candidateCount;
       const lane: number = mode === 5 ? relative : laneCount - 1 - relative;
-      let available: boolean = true;
-      for (let i: number = 0; i < this.active.length; i++) {
-        // 顶部、底部和滚动弹幕共用视觉轨道，彻底避免模式间互相覆盖。
-        if (this.active[i].lane === lane) {
-          available = false;
-          break;
-        }
-      }
+      // 顶部、底部和滚动弹幕共用视觉轨道，彻底避免模式间互相覆盖。
+      const available: boolean = this.laneBucket(lane).length === 0;
       if (available) {
         if (mode === 5) this.nextTopLane = (relative + 1) % candidateCount;
         else this.nextBottomLane = (relative + 1) % candidateCount;
         return lane;
       }
+    }
+    if (this.density >= 30) {
+      const relative: number = start % candidateCount;
+      const lane: number = mode === 5 ? relative : laneCount - 1 - relative;
+      if (mode === 5) this.nextTopLane = (relative + 1) % candidateCount;
+      else this.nextBottomLane = (relative + 1) % candidateCount;
+      return lane;
     }
     return -1;
   }
@@ -618,6 +682,23 @@ export class PlayerDanmakuEngine {
     const result: string = colorHex(color);
     this.colorCache.set(color, result);
     return result;
+  }
+
+  private rebuildLaneBuckets(): void {
+    const count: number = this.laneCount();
+    while (this.laneBuckets.length < count) this.laneBuckets.push([]);
+    for (let i: number = 0; i < this.laneBuckets.length; i++) this.laneBuckets[i].length = 0;
+    for (let i: number = 0; i < this.active.length; i++) this.addToLaneBucket(this.active[i]);
+  }
+
+  private laneBucket(lane: number): Array<ActiveDm> {
+    while (this.laneBuckets.length <= lane) this.laneBuckets.push([]);
+    return this.laneBuckets[lane];
+  }
+
+  private addToLaneBucket(dm: ActiveDm): void {
+    if (dm.special !== null || dm.lane < 0) return;
+    this.laneBucket(dm.lane).push(dm);
   }
 
   /** 字号/轨道数变化后，保留已上屏弹幕并就近夹到新轨道，避免“行数变少弹幕直接消失”。 */

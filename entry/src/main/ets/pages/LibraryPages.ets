@@ -431,6 +431,7 @@ export struct FavoritesPage {
   @State videoPage: number = 0;
   @State hasMore: boolean = true;
   @State loading: boolean = false;
+  @State videoLoading: boolean = false;
   @State collectionHasMore: boolean = true;
   @State collectionLoading: boolean = false;
   // ===== 收藏夹管理状态 =====
@@ -448,6 +449,8 @@ export struct FavoritesPage {
   private foldersSource: BasicDataSource<FavoriteFolderItem> = new BasicDataSource<FavoriteFolderItem>();
   private collectionsSource: BasicDataSource<FavoriteFolderItem> = new BasicDataSource<FavoriteFolderItem>();
   private videosSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
+  /** 收藏夹视频请求代际：切换/返回后，旧文件夹响应不得写入当前列表。 */
+  private videoRequestGeneration: number = 0;
   /** 重命名目标收藏夹（保留 intro/公开状态，避免重命名时被重置） */
   private dialogFolder: FavoriteFolderItem = new FavoriteFolderItem();
 
@@ -508,6 +511,7 @@ export struct FavoritesPage {
 
   async openFolder(folder: FavoriteFolderItem): Promise<void> {
     if (this.category === 1 && folder.type === 0) folder.type = 21;
+    this.videoRequestGeneration++;
     this.selected = folder;
     this.videosSource.clear();
     this.videoPage = 0;
@@ -516,12 +520,16 @@ export struct FavoritesPage {
   }
 
   async loadVideos(reset: boolean): Promise<void> {
-    if (this.loading || this.selected.id === 0 || (!reset && !this.hasMore)) return;
-    this.loading = true;
+    if (this.selected.id === 0 || (!reset && (this.videoLoading || !this.hasMore))) return;
+    const generation: number = this.videoRequestGeneration;
+    const folderId: number = this.selected.id;
+    const folderType: number = this.selected.type;
+    this.videoLoading = true;
     try {
       const page: number = reset ? 1 : this.videoPage + 1;
-      const data: FavoriteVideoPageData = this.selected.type === 21 ?
-        await FavoriteApi.getCollectionVideos(this.selected.id, page) : await FavoriteApi.getFavoriteVideos(this.selected.id, page);
+      const data: FavoriteVideoPageData = folderType === 21 ?
+        await FavoriteApi.getCollectionVideos(folderId, page) : await FavoriteApi.getFavoriteVideos(folderId, page);
+      if (generation !== this.videoRequestGeneration || this.selected.id !== folderId) return;
       if (reset) {
         this.videosSource.reset(data.videos);
       } else {
@@ -531,7 +539,7 @@ export struct FavoritesPage {
       this.hasMore = data.hasMore;
     } catch (e) {
     } finally {
-      this.loading = false;
+      if (generation === this.videoRequestGeneration) this.videoLoading = false;
     }
   }
 
@@ -542,6 +550,8 @@ export struct FavoritesPage {
       return;
     }
     if (this.selected.id > 0) {
+      this.videoRequestGeneration++;
+      this.videoLoading = false;
       this.selected = new FavoriteFolderItem();
       this.videosSource.clear();
       this.hasMore = this.folderPage > 0;
@@ -811,7 +821,8 @@ export struct FavoritesPage {
 
   /** 收藏集 Tab 有自己的加载/到底状态，footer 需要按当前列表切换。 */
   private footerLoading(): boolean {
-    return this.selected.id === 0 && this.category === 1 ? this.collectionLoading : this.loading;
+    if (this.selected.id > 0) return this.videoLoading;
+    return this.category === 1 ? this.collectionLoading : this.loading;
   }
 
   private footerHasMore(): boolean {
@@ -1063,7 +1074,8 @@ export struct FavoritesPage {
           .width('100%')
           .border({ width: { bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
         }
-        if (this.loading && this.foldersSource.isEmpty() && this.videosSource.isEmpty()) {
+        if ((this.selected.id > 0 ? this.videoLoading : this.loading) &&
+          this.foldersSource.isEmpty() && this.videosSource.isEmpty()) {
           LoadingView({ loading: true })
         } else {
           List() {
