@@ -55,6 +55,9 @@ export default class EntryAbility extends UIAbility {
   onWindowStageCreate(windowStage: window.WindowStage): void {
     // 注入主窗口并开启边到边沉浸（透明系统栏；图标深浅由头栏按主题同步）
     Immersive.attach(windowStage);
+    // 进程可能在横屏全屏中被系统/调试器直接终止，此时不会经过 PlayerView 的退出清理。
+    // 新窗口必须显式恢复竖屏和系统栏，避免首页继承上个进程的横屏 preferredOrientation。
+    Immersive.setFullscreen(false);
     Immersive.enableImmersive(false, false);
     windowStage.loadContent('pages/Index', (err) => {
       if (err.code) {

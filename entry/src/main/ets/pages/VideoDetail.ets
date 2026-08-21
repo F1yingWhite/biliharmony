@@ -22,7 +22,7 @@ import { PlayerDanmakuEngine } from '../components/PlayerDanmakuEngine';
 import { LoadingView } from '../components/LoadingView';
 import { ImageColor, ImagePalette } from '../common/ImageColor';
 import { UserStore } from '../common/UserStore';
-import { colorWithAlpha, formatCount, formatDate } from '../common/Utils';
+import { asNumber, asObject, colorWithAlpha, formatCount, formatDate } from '../common/Utils';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
@@ -108,14 +108,20 @@ export struct VideoDetailPage {
   // 的系统返回/侧滑回调优先关闭，避免直接把整个视频页弹出。
   @StorageLink('videoReplyThreadOpen') replyThreadOpen: boolean = false;
   @StorageLink('videoReplyThreadCloseRequest') @Watch('onReplyThreadCloseRequested') replyThreadCloseRequest: number = 0;
+  @StorageLink('videoReplyComposerCloseRequest') @Watch('onReplyComposerCloseRequested')
+  replyComposerCloseRequest: number = 0;
   @State replyThreadRoot: ReplyItem = new ReplyItem();
   @State threadCursor: string = '';
   @State threadHasMore: boolean = true;
   @State threadLoading: boolean = false;
   @State threadPrefetchCount: number = 0;
+  /** 当前输入栏回复所属的根评论；为 0 时发布一级评论。与详情面板是否打开相互独立。 */
+  @State replyTargetRootRpid: number = 0;
   @State replyTargetRpid: number = 0;
   @State replyTargetName: string = '';
+  /** 主评论输入栏与详情输入栏分别计数，避免两个已挂载编辑器同时抢焦点。 */
   @State replyFocusTick: number = 0;
+  @State threadReplyFocusTick: number = 0;
   @State replyDraft: string = '';
   @State replySending: boolean = false;
   @State replyLikeVersion: number = 0;
@@ -145,6 +151,10 @@ export struct VideoDetailPage {
   @State following: boolean = false;
   @State followLoading: boolean = false;
   @State @Watch('onPlayerGeomChanged') playerFullscreen: boolean = false;
+  /** 退出全屏的视觉层：逻辑全屏保持到 DID_ROTATE，只让外层裁剪窗口边旋转边缩小。 */
+  @State playerFullscreenExitVisual: boolean = false;
+  @State playerFullscreenExitHeight: number = 0;
+  @State playerFullscreenExitTop: number = 0;
   @State playerPlaying: boolean = false;
   /** 播放器上报的在线观看人数（"X人正在看"），展示在播放量信息行的时间后面。 */
   @State playerOnlineTotal: string = '';
@@ -201,21 +211,82 @@ export struct VideoDetailPage {
   // 屏幕尺寸只在出现/布局变化时同步一次，避免滚动帧回调里反复 getDefaultDisplaySync。
   private screenWidthVp: number = 0;
   private screenHeightVp: number = 0;
+  /** RESIZE 避让后的页面实际高度；键盘弹出时小于物理屏幕高度。 */
+  @State pageHeightVp: number = 0;
   private playerHeightKey: string = '';
   private playerHeightValue: number = 0;
+  /** 进入全屏前的竖屏播放区高度，旋转退出时的稳定落点。 */
+  private playerFullscreenRestoreHeight: number = 0;
   private dmEngineRef: PlayerDanmakuEngine | null = null;
   // playerCollapse 的未量化原值；@State 只按阈值量化写入，降低滚动期整页重排频率。
   private playerCollapseRaw: number = 0;
   private replySource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();
+  /** 已发布但评论列表接口尚未索引到的本地楼层；刷新/切排序时仍保留。 */
+  private localSentReplies: Array<ReplyItem> = [];
   private ugcSource: BasicDataSource<UgcSeasonEpisode> = new BasicDataSource<UgcSeasonEpisode>();
   @State threadAllReplies: Array<ReplyItem> = [];
   // 评论分享卡离屏渲染用的待截内容；只在生成分享图期间短暂赋值。
   private shareCardItem: ReplyItem = new ReplyItem();
   private shareCardQr: image.PixelMap | null = null;
   private shareCardBusy: boolean = false;
+  private mainReplyComposerFocused: boolean = false;
+  private threadReplyComposerFocused: boolean = false;
 
   onReplyThreadCloseRequested(): void {
     this.closeReplyThread();
+  }
+
+  onReplyComposerCloseRequested(): void {
+    this.dismissReplyComposer();
+  }
+
+  private syncReplyComposerActive(emoteOpen: boolean = this.emotePanelOpen): void {
+    AppStorage.setOrCreate<boolean>('videoReplyComposerActive', emoteOpen ||
+      this.mainReplyComposerFocused || this.threadReplyComposerFocused);
+  }
+
+  private onReplyComposerFocusChanged(focused: boolean, thread: boolean): void {
+    if (thread) this.threadReplyComposerFocused = focused;
+    else this.mainReplyComposerFocused = focused;
+    // 系统键盘自行消费返回键时会触发 blur；空草稿同时退出定向回复态。
+    if (!focused && !this.emotePanelOpen && this.replyDraft.trim().length === 0) {
+      if (this.replyThreadOpen) {
+        this.replyTargetRootRpid = this.replyThreadRoot.rpid;
+        this.replyTargetRpid = this.replyThreadRoot.rpid;
+        this.replyTargetName = this.replyThreadRoot.uname;
+      } else {
+        this.replyTargetRootRpid = 0;
+        this.replyTargetRpid = 0;
+        this.replyTargetName = '';
+      }
+    }
+    this.syncReplyComposerActive();
+  }
+
+  private dismissReplyComposer(): void {
+    this.emotePanelOpen = false;
+    try {
+      inputMethod.getController().hideTextInput().catch(() => {});
+    } catch (e) {
+    }
+    try {
+      this.getUIContext().getFocusController().clearFocus();
+    } catch (e) {
+    }
+    this.mainReplyComposerFocused = false;
+    this.threadReplyComposerFocused = false;
+    if (this.replyDraft.trim().length === 0) {
+      if (this.replyThreadOpen) {
+        this.replyTargetRootRpid = this.replyThreadRoot.rpid;
+        this.replyTargetRpid = this.replyThreadRoot.rpid;
+        this.replyTargetName = this.replyThreadRoot.uname;
+      } else {
+        this.replyTargetRootRpid = 0;
+        this.replyTargetRpid = 0;
+        this.replyTargetName = '';
+      }
+    }
+    this.syncReplyComposerActive(false);
   }
 
   closeReplyThread(): void {
@@ -223,6 +294,12 @@ export struct VideoDetailPage {
     CommentLog.info('ui.thread.close', 'aid=' + String(this.detail.aid) + ' root=' +
       String(this.replyThreadRoot.rpid) + ' rows=' + String(this.threadAllReplies.length));
     this.emotePanelOpen = false;
+    this.mainReplyComposerFocused = false;
+    this.threadReplyComposerFocused = false;
+    this.syncReplyComposerActive(false);
+    this.replyTargetRootRpid = 0;
+    this.replyTargetRpid = 0;
+    this.replyTargetName = '';
     this.replyThreadAnimating = true;
     this.getUIContext().animateTo({
       duration: 140,
@@ -339,6 +416,30 @@ export struct VideoDetailPage {
     return Math.max(this.minPlayerHeight(), base - this.playerCollapse);
   }
 
+  private beginPlayerFullscreenExit(): void {
+    if (!this.playerFullscreen || this.playerFullscreenExitVisual) return;
+    if (this.screenHeightVp <= 0) this.refreshScreenSize();
+    const startHeight: number = this.screenHeightVp > 0 ? this.screenHeightVp : 640;
+    const targetHeight: number = this.playerFullscreenRestoreHeight > 0 ?
+      this.playerFullscreenRestoreHeight : this.playerHeight();
+    this.playerFullscreenExitHeight = startHeight;
+    this.playerFullscreenExitTop = 0;
+    this.playerFullscreenExitVisual = true;
+    this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
+      this.playerFullscreenExitHeight = targetHeight;
+      this.playerFullscreenExitTop = Immersive.statusBarHeight();
+    });
+  }
+
+  private finishPlayerFullscreenExit(): void {
+    // 先读最终竖屏尺寸，再撤掉全屏标记；Watch 因此只会向弹幕引擎提交正确的竖屏视口。
+    this.refreshScreenSize();
+    this.playerFullscreen = false;
+    this.playerFullscreenExitVisual = false;
+    this.playerFullscreenExitHeight = 0;
+    this.playerFullscreenExitTop = 0;
+  }
+
   /** ⋮ 面板高度 = “默认评论区”（播放区以下信息区）高度，顶边与播放区底边齐平。 */
   private moreSheetHeightValue(): number {
     if (this.playerFullscreen || this.screenHeightVp <= 0) return 0;
@@ -377,9 +478,19 @@ export struct VideoDetailPage {
   }
 
   /** 回复详情只占用播放器下方的评论区，不再覆盖视频。 */
-  private replySheetHeight(): number {
+  private replyViewportHeight(): number {
     if (this.screenHeightVp <= 0) this.refreshScreenSize();
-    const available: number = this.screenHeightVp - Immersive.statusBarHeight() - this.visiblePlayerHeight();
+    return this.pageHeightVp > 0 ? Math.min(this.screenHeightVp, this.pageHeightVp) : this.screenHeightVp;
+  }
+
+  private replySheetTop(): number {
+    const normalTop: number = Immersive.statusBarHeight() + this.visiblePlayerHeight();
+    // 键盘压缩后若播放器下方不足以容纳标题与展开态输入栏，面板只在此时向上覆盖一小段播放器。
+    return Math.min(normalTop, Math.max(0, this.replyViewportHeight() - 180));
+  }
+
+  private replySheetHeight(): number {
+    const available: number = this.replyViewportHeight() - this.replySheetTop();
     return Math.max(1, available);
   }
 
@@ -884,6 +995,8 @@ export struct VideoDetailPage {
     if (!this.ensureLogin()) return;
     const opening: boolean = !this.emotePanelOpen;
     this.emotePanelOpen = opening;
+    // @State 在当前事件完成后才刷新，直接使用 opening，避免这里读到切换前的旧值。
+    this.syncReplyComposerActive(opening);
     if (opening) {
       this.loadEmotes();
       try {
@@ -903,6 +1016,7 @@ export struct VideoDetailPage {
   private requestReplyKeyboard(): void {
     if (!this.emotePanelOpen) return;
     this.emotePanelOpen = false;
+    this.syncReplyComposerActive(false);
     this.scheduleTimeout(() => {
       try {
         inputMethod.getController().showTextInput().catch(() => {});
@@ -1503,7 +1617,12 @@ export struct VideoDetailPage {
       }
       if (reset) {
         const sanitized: Array<ReplyItem> = this.sanitizeReplies(data.replies);
-        this.replySource.reset(sanitized);
+        const serverIds: Set<number> = new Set<number>();
+        for (let i: number = 0; i < sanitized.length; i++) serverIds.add(sanitized[i].rpid);
+        // 一旦服务端返回该楼层就移除本地快照，改用字段更完整的服务端对象；尚未索引到的
+        // 继续置顶保留，避免发送后切排序或在途刷新把它“吞掉”。
+        this.localSentReplies = this.localSentReplies.filter((item: ReplyItem) => !serverIds.has(item.rpid));
+        this.replySource.reset(this.mergeUniqueReplies(this.localSentReplies, sanitized));
       } else {
         this.appendUniqueReplies(this.replySource, data.replies);
       }
@@ -1647,6 +1766,7 @@ export struct VideoDetailPage {
     this.threadCursor = '';
     this.threadHasMore = true;
     this.threadPrefetchCount = 0;
+    this.replyTargetRootRpid = root.rpid;
     this.replyTargetRpid = root.rpid;
     this.replyTargetName = root.uname;
     // 面板立即升起，网络请求在面板内以 loading 状态完成，点击反馈不再等待首批接口。
@@ -1664,6 +1784,19 @@ export struct VideoDetailPage {
       String(this.threadAllReplies.length) + ' loading=true');
     await loading;
     if (this.destroyed) return;
+  }
+
+  /** 主评论操作栏的“回复”只选中目标并聚焦底部输入栏，不打开楼中楼详情。 */
+  private selectReplyForComposer(item: ReplyItem): void {
+    const latest: ReplyItem | null = this.findReplyItem(item.rpid);
+    const root: ReplyItem = latest !== null ? latest : item;
+    this.replyThreadRoot = root;
+    this.replyTargetRootRpid = root.rpid;
+    this.replyTargetRpid = root.rpid;
+    this.replyTargetName = root.uname;
+    this.emotePanelOpen = false;
+    this.replyFocusTick++;
+    CommentLog.info('ui.reply.select', 'root=' + String(root.rpid) + ' target=' + String(root.rpid));
   }
 
   async loadThreadReplies(reset: boolean, allowPrefetch: boolean = true): Promise<void> {
@@ -1745,13 +1878,14 @@ export struct VideoDetailPage {
       onLike: (item: ReplyItem) => this.actionReplyLike(item),
       onDislike: (item: ReplyItem) => this.actionReplyDislike(item),
       onShare: (item: ReplyItem) => this.shareReplyAsImage(item),
-      focusTick: this.replyFocusTick,
+      focusTick: this.threadReplyFocusTick,
+      focusId: 'video_thread_reply_composer_editor',
       onSelectReply: (item: ReplyItem) => {
         CommentLog.info('ui.thread.select', 'root=' + String(this.replyThreadRoot.rpid) +
           ' target=' + String(item.rpid));
         this.replyTargetRpid = item.rpid;
         this.replyTargetName = item.uname;
-        this.replyFocusTick++;
+        this.threadReplyFocusTick++;
       },
       onDeleted: (item: ReplyItem) => {
         this.threadRemoveReply(item);
@@ -1764,8 +1898,72 @@ export struct VideoDetailPage {
       onSend: () => this.sendReply(),
       onToggleEmote: () => this.openEmotePanel(),
       onRequestKeyboard: () => this.requestReplyKeyboard(),
+      onFocusChange: (focused: boolean) => this.onReplyComposerFocusChanged(focused, true),
       onNavigate: (action: () => void) => this.navigateFromReplyThread(action),
     })
+  }
+
+  /** 用发布接口返回的 rpid 构造当前账号的新楼层，绕过评论索引的可见性延迟。 */
+  private sentReplyItem(result: ActionResult, content: string, root: number, parent: number): ReplyItem | null {
+    const returned: ReplyItem = ReplyItem.from(asObject(result.data['reply']));
+    const rpid: number = returned.rpid > 0 ? returned.rpid :
+      asNumber(result.data['rpid'], asNumber(result.data['rpid_str'], 0));
+    if (rpid <= 0) {
+      CommentLog.warn('ui.send.local.skip', 'reason=no-rpid root=' + String(root) +
+        ' parent=' + String(parent));
+      return null;
+    }
+    const item: ReplyItem = returned.rpid > 0 ? returned : new ReplyItem();
+    const user = UserStore.current;
+    item.rpid = rpid;
+    item.oid = this.detail.aid;
+    item.type = 1;
+    item.rootRpid = root;
+    item.parentRpid = parent;
+    item.dialogRpid = asNumber(result.data['dialog'], item.dialogRpid);
+    if (item.mid <= 0 && user !== null) item.mid = user.mid;
+    if (item.uname.length === 0) item.uname = user !== null && user.uname.length > 0 ? user.uname : '我';
+    if (item.avatar.length === 0 && user !== null) item.avatar = user.face;
+    if (item.level <= 0 && user !== null) item.level = user.level;
+    if (item.content.length === 0) item.content = content;
+    if (item.ctime <= 0) item.ctime = Math.floor(Date.now() / 1000);
+    // 发布响应通常只返回楼层 id，不返回 content.emote；从已加载的表情包补齐渲染信息。
+    for (let i: number = 0; i < this.emotePackages.length; i++) {
+      const emotes: Array<BiliEmote> = this.emotePackages[i].emotes;
+      for (let j: number = 0; j < emotes.length; j++) {
+        if (emotes[j].text.length > 0 && item.content.indexOf(emotes[j].text) >= 0) item.emotes.push(emotes[j]);
+      }
+    }
+    return item;
+  }
+
+  /** 楼中楼新增子回复后，同步主列表中的回复数与预览，避免关掉面板又看到旧状态。 */
+  private insertSentThreadReply(item: ReplyItem): void {
+    this.threadAllReplies = [item].concat(this.threadAllReplies.filter((reply: ReplyItem) => reply.rpid !== item.rpid));
+    const nextRoot: ReplyItem = this.replyThreadRoot.clone();
+    nextRoot.count++;
+    nextRoot.replies = [item].concat(nextRoot.replies.filter((reply: ReplyItem) => reply.rpid !== item.rpid));
+    this.replyThreadRoot = nextRoot;
+    const all: Array<ReplyItem> = this.replySource.getAll();
+    for (let i: number = 0; i < all.length; i++) {
+      if (all[i].rpid !== nextRoot.rpid) continue;
+      this.replySource.updateItem(i, nextRoot);
+      break;
+    }
+  }
+
+  /** 不进入详情也能即时把新回复写回主评论的计数与预览。 */
+  private insertSentInlineReply(item: ReplyItem, rootRpid: number): void {
+    const all: Array<ReplyItem> = this.replySource.getAll();
+    for (let i: number = 0; i < all.length; i++) {
+      if (all[i].rpid !== rootRpid) continue;
+      const root: ReplyItem = all[i].clone();
+      root.count++;
+      root.replies = [item].concat(root.replies.filter((reply: ReplyItem) => reply.rpid !== item.rpid));
+      this.replySource.updateItem(i, root);
+      this.replyThreadRoot = root;
+      return;
+    }
   }
 
   async sendReply(): Promise<void> {
@@ -1782,8 +1980,8 @@ export struct VideoDetailPage {
     this.replySending = true;
     const startedAt: number = Date.now();
     try {
-      const root: number = this.replyThreadOpen ? this.replyThreadRoot.rpid : 0;
-      const parent: number = this.replyThreadOpen ?
+      const root: number = this.replyTargetRootRpid > 0 ? this.replyTargetRootRpid : 0;
+      const parent: number = root > 0 ?
         (this.replyTargetRpid > 0 ? this.replyTargetRpid : root) : 0;
       CommentLog.info('ui.send.start', 'aid=' + String(this.detail.aid) + ' root=' + String(root) +
         ' parent=' + String(parent) + ' messageLen=' + String(content.length));
@@ -1800,19 +1998,56 @@ export struct VideoDetailPage {
       }
       CommentLog.info('ui.send.done', 'root=' + String(root) + ' parent=' + String(parent) +
         ' ms=' + String(CommentLog.elapsed(startedAt)));
+      const sent: ReplyItem | null = this.sentReplyItem(result, content, root, parent);
       this.replyDraft = '';
-      this.toast(this.replyThreadOpen ? '回复成功' : '评论成功');
-      if (this.replyThreadOpen) {
+      this.toast(root > 0 ? '回复成功' : '评论成功');
+      if (root > 0 && this.replyThreadOpen) {
         this.replyTargetRpid = this.replyThreadRoot.rpid;
         this.replyTargetName = this.replyThreadRoot.uname;
-        this.threadAllReplies = [];
-        this.threadCursor = '';
-        this.threadHasMore = true;
-        await this.loadThreadReplies(true);
+        if (sent !== null) {
+          this.insertSentThreadReply(sent);
+          this.detail.reply++;
+          CommentLog.info('ui.send.local.thread', 'rpid=' + String(sent.rpid) + ' root=' + String(root) +
+            ' total=' + String(this.threadAllReplies.length));
+        } else {
+          // 极少数兼容接口不返回 rpid，才退回服务端刷新路径。
+          this.threadAllReplies = [];
+          this.threadCursor = '';
+          this.threadHasMore = true;
+          await this.loadThreadReplies(true);
+        }
+      } else if (root > 0) {
+        if (sent !== null) {
+          this.insertSentInlineReply(sent, root);
+          this.detail.reply++;
+          CommentLog.info('ui.send.local.inline', 'rpid=' + String(sent.rpid) + ' root=' + String(root));
+        } else {
+          this.replyCursor = '';
+          this.replyHasMore = true;
+          await this.loadReplies(true);
+        }
+        this.replyTargetRootRpid = 0;
+        this.replyTargetRpid = 0;
+        this.replyTargetName = '';
       } else {
-        this.replyCursor = '';
-        this.replyHasMore = true;
-        await this.loadReplies(true);
+        if (sent !== null) {
+          this.localSentReplies = [sent].concat(this.localSentReplies.filter((item: ReplyItem) =>
+            item.rpid !== sent.rpid));
+          this.replySource.prepend([sent]);
+          this.detail.reply++;
+          this.scheduleTimeout(() => {
+            try {
+              this.replyScroller.scrollToIndex(0, true, ScrollAlign.START);
+            } catch (e) {
+            }
+          }, 16);
+          CommentLog.info('ui.send.local.root', 'rpid=' + String(sent.rpid) + ' total=' +
+            String(this.replySource.totalCount()));
+        } else {
+          this.replyCursor = '';
+          this.replyHasMore = true;
+          await this.loadReplies(true);
+        }
       }
     } catch (e) {
       CommentLog.error('ui.send.error', 'aid=' + String(this.detail.aid) + ' ms=' +
@@ -2514,7 +2749,7 @@ export struct VideoDetailPage {
           version: this.replyLikeVersion,
           draft: this.replyDraft,
           sending: this.replySending,
-          placeholder: this.replyThreadOpen ? '回复 ' +
+          placeholder: this.replyTargetRootRpid > 0 ? '回复 @' +
             (this.replyTargetName.length > 0 ? this.replyTargetName : this.replyThreadRoot.uname) : '发一条友善的评论',
           emoteOpen: this.emotePanelOpen,
           focusTick: this.replyFocusTick,
@@ -2534,9 +2769,10 @@ export struct VideoDetailPage {
           onLike: (item: ReplyItem) => this.actionReplyLike(item),
           onDislike: (item: ReplyItem) => this.actionReplyDislike(item),
           onShare: (item: ReplyItem) => this.shareReplyAsImage(item),
-          onSelectReply: (item: ReplyItem) => this.openReplyThread(item),
+          onSelectReply: (item: ReplyItem) => this.selectReplyForComposer(item),
           onOpenThread: (item: ReplyItem) => this.openReplyThread(item),
           onDeleted: (item: ReplyItem) => {
+            this.localSentReplies = this.localSentReplies.filter((x: ReplyItem) => x.rpid !== item.rpid);
             this.replySource.reset(this.replySource.getAll().filter((x: ReplyItem) => x.rpid !== item.rpid));
             this.detail.reply = Math.max(0, this.detail.reply - 1);
           },
@@ -2546,6 +2782,7 @@ export struct VideoDetailPage {
           onSend: () => this.sendReply(),
           onToggleEmote: () => this.openEmotePanel(),
           onRequestKeyboard: () => this.requestReplyKeyboard(),
+          onFocusChange: (focused: boolean) => this.onReplyComposerFocusChanged(focused, false),
           onEmoteSelect: (item: BiliEmote) => this.insertEmote(item),
           onEmotePackageChange: (index: number) => {
             this.emotePackageIndex = index;
@@ -2639,9 +2876,20 @@ export struct VideoDetailPage {
                  this.goBack();
                },
               onFullscreenChange: (fullscreen: boolean) => {
-                this.playerFullscreen = fullscreen;
+                if (fullscreen) {
+                  this.playerFullscreenRestoreHeight = this.visiblePlayerHeight();
+                  this.playerFullscreenExitVisual = false;
+                  this.playerFullscreenExitHeight = 0;
+                  this.playerFullscreenExitTop = 0;
+                  this.playerFullscreen = true;
+                } else {
+                  this.finishPlayerFullscreenExit();
+                }
                 // 全屏时评论回复 Sheet 应随评论区一起隐藏，不能叠在视频画面上。
                 if (fullscreen) this.closeReplyThread();
+              },
+              onFullscreenExitStart: () => {
+                this.beginPlayerFullscreenExit();
               },
               onPlayingChange: (playing: boolean) => {
                 this.onPlayerPlayingChange(playing);
@@ -2728,12 +2976,14 @@ export struct VideoDetailPage {
           }
         }
         .width('100%')
-        .height(this.playerFullscreen ? '100%' : this.visiblePlayerHeight())
+        .height(this.playerFullscreen ?
+          (this.playerFullscreenExitVisual ? this.playerFullscreenExitHeight : '100%') :
+          this.visiblePlayerHeight())
         .clip(true)
         .backgroundColor('#000000')
 
         // 信息区
-        if (!this.playerFullscreen) {
+        if (!this.playerFullscreen || this.playerFullscreenExitVisual) {
           // 黑色衬底条：垫在信息区圆角背后，圆角缝隙露出的是黑底而不是视频画面（竖屏视频播放区很高，缝里会透出画面）。
           Row()
             .width('100%')
@@ -2767,10 +3017,12 @@ export struct VideoDetailPage {
       }
       .width('100%')
       .height('100%')
-      .padding({ top: this.playerFullscreen ? 0 : Immersive.statusBarHeight() })
+      .padding({ top: this.playerFullscreen ?
+        (this.playerFullscreenExitVisual ? this.playerFullscreenExitTop : 0) :
+        Immersive.statusBarHeight() })
 
       // 视频上方状态栏固定纯黑，避免封面倒影干扰。
-      if (!this.playerFullscreen) {
+      if (!this.playerFullscreen || this.playerFullscreenExitVisual) {
         Column()
         .width('100%')
         .height(Immersive.statusBarHeight())
@@ -2842,7 +3094,7 @@ export struct VideoDetailPage {
         .height(this.replySheetHeight())
         // 自定义面板必须显式锚到播放器底边。只设置高度时，部分真机的 Stack
         // 会把它贴到窗口顶端，表现为“回复栏飞到最上面”。
-        .position({ x: 0, y: Immersive.statusBarHeight() + this.visiblePlayerHeight() })
+        .position({ x: 0, y: this.replySheetTop() })
         .borderRadius({ topLeft: 18, topRight: 18 })
         .clip(true)
         .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
@@ -2857,7 +3109,11 @@ export struct VideoDetailPage {
     .height('100%')
     .backgroundColor('#00000000')
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
-    .onAreaChange(() => {
+    .onAreaChange((oldValue: Area, newValue: Area) => {
+      const height: number = Number.parseFloat(String(newValue.height));
+      if (Number.isFinite(height) && height > 0 && Math.abs(height - this.pageHeightVp) > 0.5) {
+        this.pageHeightVp = height;
+      }
       this.refreshScreenSize();
     })
   }
