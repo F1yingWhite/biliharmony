@@ -983,6 +983,7 @@ export struct DynamicView {
   @State followingLoaded: boolean = false;
   private followLoading: boolean = false;
   private liveFetching: boolean = false;
+  private accountGeneration: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
@@ -992,9 +993,18 @@ export struct DynamicView {
   private dynTabsController: TabsController = new TabsController();
   private dynTypes: Array<string> = ['all', 'video', 'pgc', 'article'];
   private initializing: boolean = false;
+  /** 初始化期间收到登录广播时补跑一次，避免 Tabs 保活页面永久停在旧登录态。 */
+  private initPending: boolean = false;
 
   onLoginChanged(): void {
     // 登录/登出广播：重载动态流（Tabs 保活，aboutToAppear 不会再触发）
+    // 关注列表与直播角标属于账号数据，切换账号时必须清空并重新拉取。
+    this.accountGeneration++;
+    this.followed = [];
+    this.liveRooms = new Map<number, number>();
+    this.followingLoaded = false;
+    this.followLoading = false;
+    this.liveFetching = false;
     this.init().catch(() => {
     });
   }
@@ -1010,9 +1020,11 @@ export struct DynamicView {
   async init(): Promise<void> {
     // aboutToAppear 与登录广播可能同时触发，防重入
     if (this.initializing) {
+      this.initPending = true;
       return;
     }
     this.initializing = true;
+    this.initPending = false;
     try {
       this.loading = true;
       this.errorText = '';
@@ -1032,6 +1044,11 @@ export struct DynamicView {
     } finally {
       this.loading = false;
       this.initializing = false;
+      if (this.initPending) {
+        this.initPending = false;
+        this.init().catch(() => {
+        });
+      }
     }
   }
 
@@ -1060,28 +1077,33 @@ export struct DynamicView {
   /** 并行拉取关注 UP 主第一页，仅作横滑栏展示，失败静默（不影响动态主流程）。 */
   private async loadFollowStrip(): Promise<void> {
     if (this.followingLoaded || this.followLoading) return;
+    const generation: number = this.accountGeneration;
     this.followLoading = true;
     try {
       await UserStore.ensureLoaded();
       const mid: number = UserStore.current !== null ? UserStore.current.mid : 0;
       if (mid <= 0) return;
       const page: RelationUserPageData = await UserApi.getRelationUsers(mid, 'following', 1);
+      if (generation !== this.accountGeneration || UserStore.current === null || UserStore.current.mid !== mid) return;
       if (page.users.length > 0) {
         this.followed = page.users;
       }
     } catch (e) {
       // 关注列表失败时静默隐藏横滑条。
     } finally {
-      this.followingLoaded = true;
-      this.followLoading = false;
-      // 列表到位后异步补开播状态（直播角标）；失败静默。
-      this.refreshLiveBadges();
+      if (generation === this.accountGeneration) {
+        this.followingLoaded = true;
+        this.followLoading = false;
+        // 列表到位后异步补开播状态（直播角标）；失败静默。
+        this.refreshLiveBadges();
+      }
     }
   }
 
   /** 批量查询关注 UP 的开播状态，驱动横滑栏「直播中」角标。 */
   private async refreshLiveBadges(): Promise<void> {
     if (this.followed.length === 0 || this.liveFetching) return;
+    const generation: number = this.accountGeneration;
     this.liveFetching = true;
     try {
       const uids: Array<number> = [];
@@ -1089,6 +1111,7 @@ export struct DynamicView {
         uids.push(this.followed[i].mid);
       }
       const items = await LiveApi.getLiveStatusByUids(uids);
+      if (generation !== this.accountGeneration) return;
       const next: Map<number, number> = new Map<number, number>();
       for (let i: number = 0; i < items.length; i++) {
         if (items[i].liveStatus === 1 && items[i].roomId > 0) {
@@ -1099,7 +1122,7 @@ export struct DynamicView {
     } catch (e) {
       // 开播状态失败时只少一个角标，不打扰。
     } finally {
-      this.liveFetching = false;
+      if (generation === this.accountGeneration) this.liveFetching = false;
     }
   }
 

@@ -16,6 +16,8 @@ export class UserStore {
   private static loaded: boolean = false;
   private static authPreferences: preferences.Preferences | null = null;
   private static persistenceReady: Promise<void> | null = null;
+  /** 登录操作代际：登录/登出会使更早发出的 nav 请求失效，避免旧响应覆盖新状态。 */
+  private static authGeneration: number = 0;
 
   static get current(): UserInfo | null {
     return UserStore.user;
@@ -103,7 +105,11 @@ export class UserStore {
 
   /** 刷新登录态（nav 接口） */
   static async refresh(): Promise<UserInfo> {
+    const generation: number = UserStore.authGeneration;
     const u: UserInfo = await UserApi.getNav();
+    if (generation !== UserStore.authGeneration) {
+      return UserStore.user ?? new UserInfo();
+    }
     UserStore.user = u;
     UserStore.loaded = true;
     AppStorage.setOrCreate<string>('userAvatar', u.isLogin ? u.face : '');
@@ -123,29 +129,40 @@ export class UserStore {
 
   /** 写入登录 cookie 并刷新状态；广播 loginVersion 让各页面重载（Tabs 保活的视图不会再次 aboutToAppear） */
   static async applyLoginCookies(cookies: Array<CookiePair>, accessToken: string = ''): Promise<void> {
+    UserStore.authGeneration++;
+    const generation: number = UserStore.authGeneration;
     for (let i: number = 0; i < cookies.length; i++) {
       HttpClient.setCookie(cookies[i].name, cookies[i].value);
     }
     HttpClient.setAppAccessToken(accessToken);
     await UserStore.persistCookies(HttpClient.exportCookieJson());
+    if (generation !== UserStore.authGeneration) return;
     await UserStore.persistAccessToken(accessToken);
+    if (generation !== UserStore.authGeneration) return;
     await UserStore.refresh();
+    if (generation !== UserStore.authGeneration) return;
     AppStorage.setOrCreate<number>('loginVersion', Date.now());
   }
 
   static async logout(): Promise<void> {
+    // 先使在途 nav 请求失效；必须早于任何持久化 await。
+    UserStore.authGeneration++;
+    const generation: number = UserStore.authGeneration;
     // 从 cookie 罐中真正删除关键 cookie（置空串会让 SESSDATA=; bili_jct=; 空值对继续随请求发出）
     HttpClient.removeCookie('SESSDATA');
     HttpClient.removeCookie('bili_jct');
     HttpClient.removeCookie('DedeUserID');
     HttpClient.removeCookie('DedeUserID__ckMd5');
     HttpClient.setAppAccessToken('');
-    await UserStore.persistCookies('');
-    await UserStore.persistAccessToken('');
+    // 内存与响应式状态立即退出，磁盘 flush 不应延长“仍显示已登录”的窗口。
     UserStore.user = null;
     UserStore.loaded = false;
     AppStorage.setOrCreate<string>('userAvatar', '');
     AppStorage.setOrCreate<string>('userPendant', '');
+    await UserStore.persistCookies('');
+    if (generation !== UserStore.authGeneration) return;
+    await UserStore.persistAccessToken('');
+    if (generation !== UserStore.authGeneration) return;
     AppStorage.setOrCreate<number>('loginVersion', Date.now());
   }
 }

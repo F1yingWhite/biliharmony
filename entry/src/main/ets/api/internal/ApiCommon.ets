@@ -10,11 +10,14 @@ export class ActionResult {
   ok: boolean = false;
   message: string = '';
   code: number = 0;
+  /** 接口成功时返回的 data；评论发布需要其中的 rpid 立即构造本地楼层。 */
+  data: Record<string, Object> = {};
 
-  constructor(ok: boolean, message: string, code: number = 0) {
+  constructor(ok: boolean, message: string, code: number = 0, data: Record<string, Object> = {}) {
     this.ok = ok;
     this.message = message;
     this.code = code;
+    this.data = data;
   }
 }
 
@@ -65,7 +68,7 @@ export async function actionWithCsrf(csrfError: string, okMessage: string, failM
   const serverMessage: string = str(json, 'message', '');
   const message: string = ok ? okMessage :
     ((serverMessage.length > 0 && serverMessage !== '0' ? serverMessage : failMessage) + ' (' + String(code) + ')');
-  return new ActionResult(ok, message, code);
+  return new ActionResult(ok, message, code, ok ? asObject(json['data']) : {});
 }
 
 export async function postVideoAction(url: string, params: Record<string, string>): Promise<ActionResult> {

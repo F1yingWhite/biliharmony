@@ -269,6 +269,12 @@ struct Index {
         this.syncBarColors();
       })
       .onBackPressed(() => {
+        // 输入框或表情面板正在使用时，返回只收起输入态，不退出回复详情或视频页。
+        if (AppStorage.get<boolean>('videoReplyComposerActive') ?? false) {
+          const request: number = AppStorage.get<number>('videoReplyComposerCloseRequest') ?? 0;
+          AppStorage.setOrCreate<number>('videoReplyComposerCloseRequest', request + 1);
+          return true;
+        }
         // 评论回复详情是视频页内二级状态：系统返回键和侧滑都先退出回复详情。
         if (AppStorage.get<boolean>('videoReplyThreadOpen') ?? false) {
           const request: number = AppStorage.get<number>('videoReplyThreadCloseRequest') ?? 0;
