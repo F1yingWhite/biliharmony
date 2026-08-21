@@ -288,7 +288,8 @@ struct Index {
         }
         // 卡片放大入场：返回/侧滑同样走页面"缩回卡片"收合动画（与看图页同机制）。
         const videoParam = Index.asVideoDetailParam(param);
-        if (videoParam !== null && videoParam.srcRect !== undefined) {
+        if (videoParam !== null &&
+          (videoParam.srcRect !== undefined || videoParam.cardRect !== undefined)) {
           const request: number = AppStorage.get<number>('videoDetailCloseRequest') ?? 0;
           AppStorage.setOrCreate<number>('videoDetailCloseRequest', request + 1);
           return true;

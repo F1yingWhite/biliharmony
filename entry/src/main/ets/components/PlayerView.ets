@@ -87,6 +87,8 @@ export struct PlayerView {
   /** 系统开始转回竖屏：父页只启动外层裁剪窗口的缩放，此时不改逻辑全屏和弹幕视口。 */
   onFullscreenExitStart: () => void = () => {};
   onPlayingChange: (playing: boolean) => void = () => {};
+  /** playing 与 startRenderFrame 均到达后通知父页，父页据此撤掉跨 XComponent 创建期的稳定封面。 */
+  onFirstFrameShown: () => void = () => {};
   onResumeRequest: () => void = () => {};
   onDanmakuChange: (enabled: boolean) => void = () => {};
   /** AVPlayer 解码后的真实视频尺寸，详情页据此重算高度，避免竖屏长视频被裁切。 */
@@ -300,6 +302,10 @@ export struct PlayerView {
         (): boolean => this.prepared,
         (): boolean => this.audioPrepared,
         (): void => {
+          // 新一轮双轨 seek 接管音频定位；旧的首帧门控回调不能再单独启动音轨，
+          // 否则连续快进/后退时会吞掉本轮 seekDone，最终让音频停在 pause 状态。
+          this.audioStartPending = false;
+          this.audioGateSeekPending = false;
           this.stopDmLoop(false);
         },
         (on: boolean): void => {
@@ -1025,7 +1031,10 @@ if (this.runtimeSources.length === 0) {
 
   /** AVPlayer 进入 playing 不等于 Surface 已有画面；两项都满足后才交叉淡出封面。 */
   private revealFirstFrameIfReady(): void {
-    if (!this.firstFrameShown && this.playing && this.firstRenderReady) this.firstFrameShown = true;
+    if (!this.firstFrameShown && this.playing && this.firstRenderReady) {
+      this.firstFrameShown = true;
+      this.onFirstFrameShown();
+    }
   }
 
   async initPlayer(): Promise<void> {
@@ -1274,6 +1283,12 @@ if (this.runtimeSources.length === 0) {
       this.handleAudioPlayerError(audio, err.message);
     });
     audio.on('seekDone', (position: number) => {
+      // 用户 seek 与首帧音频对齐共用 AVPlayer 的 seekDone。连续定位时，旧门控的
+      // 回调可能晚于新一轮双轨 seek；在途 seek 必须优先消费回调，避免音轨永久暂停。
+      if (this.seekCtl?.seekInFlight ?? false) {
+        this.onAudioSeekDone(audio, position);
+        return;
+      }
       if (this.audioPlayer === audio && this.audioGateSeekPending) {
         this.audioGateSeekPending = false;
         if (this.audioStartPending && this.playing) {

@@ -11,7 +11,7 @@ import { inputMethod } from '@kit.IMEKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { Immersive } from '../common/Immersive';
 import { Haptic } from '../common/Haptic';
-import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
+import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   ImageViewerSrcRect, NAV_LOGIN, NAV_VIDEO_DETAIL, NAV_USER_SPACE, VideoDetailParam, UserSpaceParam } from '../common/AppRouter';
 import { VideoDetail, VideoItem, ReplyItem, PlayUrlInfo, VideoPage, VideoQualityOption, VideoRelationState,
   BiliEmote, BiliEmotePackage, FavoriteFolderItem, UserStat, SpaceArcData, SubtitleTrack, UgcSeasonEpisode } from '../model/Models';
@@ -178,10 +178,23 @@ export struct VideoDetailPage {
   @State heroHeight: number = 0;
   @State heroRadius: number = 0;
   @State heroOpacity: number = 1;
+  /** 详情页级稳定封面：跨过占位节点 -> XComponent 的替换期，只在官方首帧确认后淡出。 */
+  @State startupCoverVisible: boolean = true;
   /** 固定使用入口卡片携带的封面，详情接口返回后也不在起播途中换图。 */
   private entryCoverSource: string = '';
   /** 入场是否走了"卡片矩形放大"（有值且取到屏幕尺寸才算），退出时决定是否镜面收合。 */
   private entryFromRect: boolean = false;
+  /** 首页整卡一镜到底：快照与固定尺寸详情内容共同放在裁剪容器中缩放。 */
+  private entryFromWholeCard: boolean = false;
+  @State wholeCardAnimating: boolean = false;
+  @State wholeCardSnapshot: image.PixelMap | null = null;
+  @State wholeCardSnapshotOpacity: number = 0;
+  @State wholeCardScale: number = 1;
+  @State wholeCardTranslateX: number = 0;
+  @State wholeCardTranslateY: number = 0;
+  @State wholeCardClipHeight: number = 0;
+  @State wholeCardRadius: number = 0;
+  private wholeCardSnapshotHeight: number = 0;
   /** 卡片封面已在源矩形就位，等待下一次 VSync 开始。 */
   private entranceArmed: boolean = false;
   private initStarted: boolean = false;
@@ -589,17 +602,81 @@ export struct VideoDetailPage {
     this.aid = this.param.aid;
     this.entryCoverSource = this.param.cover ?? '';
     this.entryFromRect = false;
+    this.entryFromWholeCard = false;
+    this.wholeCardAnimating = false;
+    this.wholeCardSnapshot = null;
+    this.wholeCardSnapshotOpacity = 0;
+    this.wholeCardScale = 1;
+    this.wholeCardTranslateX = 0;
+    this.wholeCardTranslateY = 0;
+    this.wholeCardClipHeight = 0;
+    this.wholeCardRadius = 0;
+    this.wholeCardSnapshotHeight = 0;
     this.entranceArmed = false;
     this.initStarted = false;
     this.closing = false;
     this.entryContentOpacity = 1;
     this.heroVisible = false;
     this.heroOpacity = 1;
+    this.startupCoverVisible = true;
     this.refreshScreenSize();
-    this.prepareCardEntrance();
+    if (!this.prepareWholeCardEntrance()) this.prepareCardEntrance();
     // 首次 VSync 后立即移动封面；有 hero 时等飞行结束再启动详情加载，避免首帧大量状态更新抢占动画。
-    this.triggerEntranceExpansion();
-    if (!this.entryFromRect) this.startInit();
+    if (this.entryFromWholeCard) this.triggerWholeCardExpansion();
+    else this.triggerEntranceExpansion();
+    if (!this.entryFromRect && !this.entryFromWholeCard) this.startInit();
+  }
+
+  /**
+   * 华为官方 CardLongTakeTransition 的核心做法：目标页保持整屏布局，只缩放并裁剪外层容器；
+   * 这样动画期间不会因为宽高连续变化而让播放器、标题和工具栏反复重排。
+   */
+  private prepareWholeCardEntrance(): boolean {
+    const rect: ImageViewerSrcRect | undefined = this.param.cardRect;
+    const snapshot: image.PixelMap | null = AppStorage.get<image.PixelMap>(HERO_BG_SNAPSHOT_KEY) ?? null;
+    AppStorage.delete(HERO_BG_SNAPSHOT_KEY);
+    if (rect === undefined || snapshot === null || rect.w <= 0 || rect.h <= 0 ||
+      this.screenWidthVp <= 0 || this.screenHeightVp <= 0) return false;
+    const scale: number = rect.w / this.screenWidthVp;
+    if (!Number.isFinite(scale) || scale <= 0 || scale >= 1) return false;
+    const clipHeight: number = rect.h / scale;
+    this.entryFromWholeCard = true;
+    this.wholeCardAnimating = true;
+    this.wholeCardSnapshot = snapshot;
+    this.wholeCardSnapshotOpacity = 1;
+    this.wholeCardScale = scale;
+    this.wholeCardClipHeight = clipHeight;
+    this.wholeCardSnapshotHeight = clipHeight;
+    this.wholeCardTranslateX = rect.x - (this.screenWidthVp - rect.w) / 2;
+    this.wholeCardTranslateY = rect.y - (clipHeight - rect.h) / 2;
+    // 圆角会随容器一起缩放，除以 scale 后起始画面恰好保持卡片原有的 6vp 圆角。
+    this.wholeCardRadius = 6 / scale;
+    this.entryContentOpacity = 0;
+    return true;
+  }
+
+  private triggerWholeCardExpansion(): void {
+    if (!this.entryFromWholeCard || this.destroyed || this.closing) return;
+    this.getUIContext().postFrameCallback(new VideoHeroFrameCallback(() => {
+      if (this.destroyed || this.closing) return;
+      this.getUIContext().animateTo({ duration: 350, curve: Curve.EaseInOut, onFinish: () => {
+        this.wholeCardSnapshotOpacity = 0;
+        this.wholeCardAnimating = false;
+        this.startInit();
+      } }, () => {
+        this.wholeCardScale = 1;
+        this.wholeCardTranslateX = 0;
+        this.wholeCardTranslateY = 0;
+        this.wholeCardClipHeight = this.screenHeightVp;
+        this.wholeCardRadius = 0;
+      });
+      this.getUIContext().animateTo({ duration: 100, curve: Curve.Sharp }, () => {
+        this.entryContentOpacity = 1;
+      });
+      this.getUIContext().animateTo({ duration: 100, delay: 50, curve: Curve.Sharp }, () => {
+        this.wholeCardSnapshotOpacity = 0;
+      });
+    }));
   }
 
   /** 播放区在窗口中的 hero 矩形。入场期详情尚未返回，天然稳定为 16:9。 */
@@ -682,6 +759,37 @@ export struct VideoDetailPage {
   goBack(): void {
     if (this.closing) return;
     this.closing = true;
+    if (this.entryFromWholeCard && this.param.cardRect !== undefined && this.screenWidthVp > 0) {
+      const rect: ImageViewerSrcRect = this.param.cardRect;
+      const scale: number = rect.w / this.screenWidthVp;
+      const clipHeight: number = rect.h / scale;
+      // 从正常的整屏布局切回固定尺寸动画层；两者此刻视觉尺寸相同，不会产生跳帧。
+      this.wholeCardScale = 1;
+      this.wholeCardTranslateX = 0;
+      this.wholeCardTranslateY = 0;
+      this.wholeCardClipHeight = this.screenHeightVp;
+      this.wholeCardRadius = 0;
+      this.wholeCardSnapshotOpacity = 0;
+      this.entryContentOpacity = 1;
+      this.wholeCardAnimating = true;
+      this.getUIContext().postFrameCallback(new VideoHeroFrameCallback(() => {
+        this.beginHeroNavPop();
+        this.getUIContext().animateTo({ duration: 350, curve: Curve.EaseInOut }, () => {
+          this.wholeCardScale = scale;
+          this.wholeCardTranslateX = rect.x - (this.screenWidthVp - rect.w) / 2;
+          this.wholeCardTranslateY = rect.y - (clipHeight - rect.h) / 2;
+          this.wholeCardClipHeight = clipHeight;
+          this.wholeCardRadius = 6 / scale;
+        });
+        this.getUIContext().animateTo({ duration: 50, delay: 150, curve: Curve.Friction }, () => {
+          this.wholeCardSnapshotOpacity = 1;
+        });
+        this.getUIContext().animateTo({ duration: 50, delay: 200, curve: Curve.Friction }, () => {
+          this.entryContentOpacity = 0;
+        });
+      }));
+      return;
+    }
     const rect = this.param.srcRect;
     if (this.entryFromRect && rect !== undefined) {
       const start: ImageViewerSrcRect | undefined = this.playerHeroRect();
@@ -841,6 +949,17 @@ export struct VideoDetailPage {
       }
     }
     if (this.destroyed) return;
+    // 画质偏好「智能省流」：片源有高清晰可选时改起 720P，省流由用户偏好驱动（高码率/高清高码暂与自动一致）。
+    const qualityPref: number = AppStorage.get<number>('videoQualityPref') ?? 0;
+    if (qualityPref === 3 && info.quality > 64 &&
+      info.qualities.some((q: VideoQualityOption): boolean => q.qn === 64 && q.available)) {
+      const savedInfo: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, targetCid, 64);
+      if (savedInfo !== null && savedInfo.urls.length > 0 && !this.destroyed) {
+        info = savedInfo;
+      }
+    }
+    if (this.destroyed) return;
+    // 最终线路与画质确定后一次性提交，避免 XComponent 在首帧前被两组地址连续驱动。
     this.currentCid = targetCid;
     this.playUrl = info.url;
     this.playUrls = info.urls;
@@ -848,20 +967,6 @@ export struct VideoDetailPage {
     this.qualityOptions = info.qualities;
     this.subtitleTracks = info.subtitles;
     this.currentQuality = info.quality;
-    // 画质偏好「智能省流」：片源有高清晰可选时改起 720P，省流由用户偏好驱动（高码率/高清高码暂与自动一致）。
-    const qualityPref: number = AppStorage.get<number>('videoQualityPref') ?? 0;
-    if (qualityPref === 3 && info.quality > 64 &&
-      info.qualities.some((q: VideoQualityOption): boolean => q.qn === 64 && q.available)) {
-      const savedInfo: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, targetCid, 64);
-      if (savedInfo !== null && savedInfo.urls.length > 0 && !this.destroyed) {
-        this.playUrl = savedInfo.url;
-        this.playUrls = savedInfo.urls;
-        this.playAudioUrls = savedInfo.audioUrls;
-        this.qualityOptions = savedInfo.qualities;
-        this.subtitleTracks = savedInfo.subtitles;
-        this.currentQuality = savedInfo.quality;
-      }
-    }
     // last_play_time 为毫秒；续播位置 = 上次进度。
     this.initialSeekSeconds = Math.max(0, Math.floor(info.lastPlayTime / 1000));
     this.lastHeartbeatSeconds = -1;
@@ -2891,9 +2996,12 @@ export struct VideoDetailPage {
               onFullscreenExitStart: () => {
                 this.beginPlayerFullscreenExit();
               },
-              onPlayingChange: (playing: boolean) => {
-                this.onPlayerPlayingChange(playing);
-              },
+               onPlayingChange: (playing: boolean) => {
+                 this.onPlayerPlayingChange(playing);
+               },
+               onFirstFrameShown: () => {
+                 this.startupCoverVisible = false;
+               },
               onVideoSizeChange: (width: number, height: number) => {
                 this.onVideoSizeChange(width, height);
               },
@@ -2956,22 +3064,31 @@ export struct VideoDetailPage {
               },
               moreSheetHeight: this.moreSheetHeightValue(),
             })
-          } else {
-            Stack({ alignContent: Alignment.Center }) {
-              Image(this.entryCoverUrl())
-                .width('100%')
-                .height('100%')
-                .objectFit(ImageFit.Cover)
-              // 加载提示只压暗封面，不再切成“模糊底图 + 中间小图”，hero 落点连续。
-              Column()
-                .width('100%')
-                .height('100%')
-                .backgroundColor('#52000000')
-              Column() {
-                Text(this.playUrl.length === 0 && !this.loading ? '获取播放地址失败' : '加载播放地址中...')
-                  .fontSize(12)
-                  .fontColor('#FFFFFF')
-              }
+          }
+
+          // 该节点不随 playUrl 的到达而替换，持续覆盖 XComponent 创建/prepare 阶段的空 Surface。
+          if (this.entryCoverUrl().length > 0) {
+            Image(this.entryCoverUrl())
+              .id('video-detail-startup-cover')
+              .width('100%')
+              .height('100%')
+              .objectFit(ImageFit.Cover)
+              .opacity(this.startupCoverVisible ? 1 : 0)
+              .animation({ duration: 160, curve: Curve.EaseOut })
+              .hitTestBehavior(HitTestMode.None)
+          }
+
+          if (this.playUrl.length === 0) {
+            // 加载提示只压暗稳定封面，不再创建另一张会在 PlayerView 挂载时被销毁的 Image。
+            Column()
+              .width('100%')
+              .height('100%')
+              .backgroundColor('#52000000')
+              .hitTestBehavior(HitTestMode.None)
+            Column() {
+              Text(!this.loading ? '获取播放地址失败' : '加载播放地址中...')
+                .fontSize(12)
+                .fontColor('#FFFFFF')
             }
           }
         }
@@ -3071,8 +3188,21 @@ export struct VideoDetailPage {
       }
       }
       .width('100%')
-      .height('100%')
+      // 整卡转场期间保持目标页整屏布局，只由外层容器负责裁剪和缩放，避免内容重排。
+      .height(this.wholeCardAnimating && this.screenHeightVp > 0 ? this.screenHeightVp : '100%')
       .opacity(this.entryContentOpacity)
+
+      if (this.entryFromWholeCard && this.wholeCardSnapshot !== null) {
+        Image(this.wholeCardSnapshot)
+          .width('100%')
+          .height(this.wholeCardSnapshotHeight)
+          .position({ x: 0, y: 0 })
+          .objectFit(ImageFit.Fill)
+          .opacity(this.wholeCardSnapshotOpacity)
+          .syncLoad(true)
+          .hitTestBehavior(HitTestMode.None)
+          .zIndex(10)
+      }
 
       if (this.heroVisible && this.heroSource.length > 0) {
         Image(this.heroSource)
@@ -3105,11 +3235,16 @@ export struct VideoDetailPage {
           .animation({ duration: 140, curve: Curve.EaseOut }))
       }
     }
+    .scale({ x: this.wholeCardScale, y: this.wholeCardScale })
+    .translate({ x: this.wholeCardTranslateX, y: this.wholeCardTranslateY })
     .width('100%')
-    .height('100%')
-    .backgroundColor('#00000000')
+    .height(this.wholeCardAnimating && this.wholeCardClipHeight > 0 ? this.wholeCardClipHeight : '100%')
+    .borderRadius(this.wholeCardAnimating ? this.wholeCardRadius : 0)
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+    .clip(this.wholeCardAnimating)
     .onAreaChange((oldValue: Area, newValue: Area) => {
+      if (this.wholeCardAnimating) return;
       const height: number = Number.parseFloat(String(newValue.height));
       if (Number.isFinite(height) && height > 0 && Math.abs(height - this.pageHeightVp) > 0.5) {
         this.pageHeightVp = height;
