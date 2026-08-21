@@ -56,6 +56,8 @@ export interface ImageViewerParam {
   initialIndex: number;
   /** ArkUI 原生共享元素 ID；来源图与查看器使用同一 ID 即可自动往返。 */
   transitionId?: string;
+  /** 多图场景逐张对应的共享元素 ID；横滑后按当前图片匹配来源缩略格。 */
+  transitionIds?: Array<string>;
   /** 源缩略图在窗口中的矩形（vp）。Tabs 内 geometryTransition 坐标系错乱（按 Tabs 轨道
    *  布局坐标计算，非首屏 tab 整体偏移 N 屏宽），此时改用本字段做手动"从缩略图放大"入场。 */
   srcRect?: ImageViewerSrcRect;

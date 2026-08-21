@@ -11,6 +11,7 @@ import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATI
 import { Haptic } from '../common/Haptic';
 import { UserStore } from '../common/UserStore';
 import { FeedCardTitle, FeedCoverImage, FeedGradientMask } from './FeedCardParts';
+import { biliImageThumbnail } from '../common/ImageUrl';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface CardMenuButtonItem {
@@ -328,7 +329,13 @@ export struct VideoCard {
   private openDetail(): void {
     Haptic.light();
     if (this.video.bvid.length > 0 || this.video.aid > 0) {
-      const param: VideoDetailParam = { bvid: this.video.bvid, aid: this.video.aid, title: this.video.title, cover: this.video.cover };
+      const param: VideoDetailParam = {
+        bvid: this.video.bvid,
+        aid: this.video.aid,
+        title: this.video.title,
+        // FeedCoverImage 使用 900w 缩略图；hero 传同一 URL 才能命中已解码纹理缓存。
+        cover: biliImageThumbnail(this.video.cover, 900),
+      };
       // 只记录封面窗口矩形：详情页仅让封面飞向播放区，标题、数据和整页都不参与缩放。
       // 根页面 push 无共享元素转场，且要关默认右滑动画（push 第三参 false）。
       let srcRect: ImageViewerSrcRect | undefined = undefined;

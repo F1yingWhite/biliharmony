@@ -539,11 +539,13 @@ export struct DynCard {
 
   /** 动态里的投稿视频与首页视频共用同一套“封面 → 播放区”转场。 */
   private openVideo(item: DynamicItem): void {
+    const entryCoverWidth: number = item.dynId === this.item.dynId ? 480 : 240;
     const param: VideoDetailParam = {
       bvid: item.bvid,
       aid: item.aid,
       title: item.title,
-      cover: item.cover,
+      // 与卡片实际显示的缩略图保持同一 URL，hero 可直接复用已解码纹理。
+      cover: biliImageThumbnail(item.cover, entryCoverWidth),
     };
     let srcRect: ImageViewerSrcRect | undefined = undefined;
     try {
@@ -572,10 +574,12 @@ export struct DynCard {
     const rects: Array<ImageViewerSrcRect> = this.collectImageRects(item);
     const rect: ImageViewerSrcRect | undefined = index < rects.length && rects[index].w > 0 ? rects[index] : undefined;
     const ids: Array<string> = [];
+    const transitionIds: Array<string> = [];
     const previews: Array<string> = [];
     for (let i: number = 0; i < images.length; i++) {
       // 第 10 张以后都由第 9 格的“+N”入口承载，返回时也以该格为实时目标。
       ids.push(this.imgId(item.dynId, Math.min(i, 8)));
+      transitionIds.push(this.imgTransitionId(item.dynId, Math.min(i, 8)));
       previews.push(biliImageThumbnail(images[i], images.length === 1 ? 900 : 320));
     }
     const viewer: ImageViewerParam = {
@@ -586,6 +590,10 @@ export struct DynCard {
       srcIds: ids,
       srcPreviews: previews,
     };
+    if (this.sharedImageTransition) {
+      viewer.transitionId = this.imgTransitionId(item.dynId, Math.min(index, 8));
+      viewer.transitionIds = transitionIds;
+    }
     this.pushViewer(viewer);
   }
 
@@ -618,8 +626,14 @@ export struct DynCard {
     return rects;
   }
 
-  /** 官方 Navigation 自定义内容转场会在 hero 期间保活来源页，不再截屏垫底。 */
+  /** 普通 Navigation 层级使用 geometryTransition；根 Tabs 则使用窗口矩形 hero 规避坐标系偏移。 */
   private pushViewer(viewer: ImageViewerParam): void {
+    if ((viewer.transitionId ?? '').length > 0) {
+      this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
+        AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
+      });
+      return;
+    }
     AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
     AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
     AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer);
@@ -791,7 +805,7 @@ export struct DynCard {
           if (this.item.cover.length > 0) {
             ForEach([this.item.cover], (cover: string) => {
               Stack({ alignContent: Alignment.TopEnd }) {
-                Image(cover)
+                Image(biliImageThumbnail(cover, 480))
                   .width(132)
                   .height(78)
                   .objectFit(ImageFit.Cover)

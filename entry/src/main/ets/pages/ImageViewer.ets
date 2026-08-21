@@ -4,18 +4,20 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { systemShare } from '@kit.ShareKit';
 import { display, FrameCallback } from '@kit.ArkUI';
+import { image } from '@kit.ImageKit';
 import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   ImageViewerParam, ImageViewerSrcRect } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { BackButton } from '../components/BackButton';
 import { biliImageThumbnail } from '../common/ImageUrl';
 
-/** 返回时图片与黑底同步落定，再保留短暂稳定帧后完成 Navigation pop。 */
+/** 返回分三段：hero 落位、与来源缩略图交叉淡化、最后完成 Navigation pop。 */
 const IMAGE_HERO_ENTER_DURATION: number = 280;
 const IMAGE_BG_ENTER_DURATION: number = 260;
-const IMAGE_HERO_RETURN_DURATION: number = 280;
-const IMAGE_BG_RETURN_DURATION: number = 280;
-const IMAGE_NAV_RETURN_DURATION: number = 380;
+const IMAGE_HERO_RETURN_DURATION: number = 260;
+const IMAGE_HERO_HANDOFF_DURATION: number = 90;
+const IMAGE_BG_RETURN_DURATION: number = 330;
+const IMAGE_NAV_RETURN_DURATION: number = 400;
 
 /** 用 VSync 驱动 hero 首帧提交，避免固定 setTimeout 在高刷/负载变化时跳过起始矩形。 */
 class ImageHeroFrameCallback extends FrameCallback {
@@ -36,6 +38,7 @@ struct ZoomableImage {
   @Prop source: string = '';
   @Prop previewSource: string = '';
   @Prop transitionId: string = '';
+  @Prop snapshotId: string = '';
   onLongPress: () => void = () => {};
   onZoomChange: (zoomed: boolean) => void = () => {};
   onNaturalSize: (width: number, height: number) => void = () => {};
@@ -140,6 +143,7 @@ struct ZoomableImage {
         .width('100%')
         .height('100%')
         .objectFit(ImageFit.Contain)
+        .id(this.snapshotId)
         // 记录源图原始像素尺寸：单击时据此区分"点在画面上"与"点在黑色留白区"。
         .onComplete((event) => {
           if (event !== undefined) {
@@ -262,6 +266,8 @@ export struct ImageViewerPage {
   @State heroHeight: number = 0;
   @State heroRadius: number = 0;
   @State heroOpacity: number = 1;
+  /** GIF 返回时冻结的当前播放帧；避免两个 Image 动画时间轴不同导致切层闪烁。 */
+  @State heroFrame: image.PixelMap | null = null;
   /** 入场结束前屏蔽图片手势，避免打开动作的抬起事件穿透到新页面并立即触发关闭。 */
   @State interactionReady: boolean = true;
   private entryFromRect: boolean = false;
@@ -291,6 +297,7 @@ export struct ImageViewerPage {
     this.heroExitTarget = undefined;
     this.heroVisible = false;
     this.heroOpacity = 1;
+    this.heroFrame = null;
     this.naturalSizes.clear();
     this.interactionReady = true;
     this.viewerOpacity = 1;
@@ -311,6 +318,9 @@ export struct ImageViewerPage {
 
   /** 有 srcRect 时先让独立 hero 与源缩略图完全重合；图片解码完成后按原始比例飞到 Contain 落点。 */
   private prepareRectEntrance(): void {
+    // 来源与当前大图存在同名 geometryTransition 时由 ArkUI 复用同一个渲染节点，
+    // 不再额外创建 hero Image，避免退出时二次解码/上传纹理造成闪帧。
+    if (this.hasSystemGeometryTransition()) return;
     const rect: ImageViewerSrcRect | undefined = this.sourceRectFor(this.currentIndex);
     if (rect === undefined || rect.w <= 0 || rect.h <= 0) return;
     this.entryFromRect = true;
@@ -463,8 +473,9 @@ export struct ImageViewerPage {
       this.heroHandoffTimer = -1;
     }
     this.getUIContext().animateTo({ duration: 76, curve: Curve.EaseOut, onFinish: () => {
-      this.heroVisible = false;
-      this.heroOpacity = 1;
+      // 保持透明 hero 节点常驻并保留已解码纹理。返回时复用同一个 Image，避免重新插入
+      // 节点触发纹理上传而在大图上方闪出一帧。
+      this.heroOpacity = 0;
       this.enableInteractionAfterTapSettles();
     } }, () => {
       this.heroOpacity = 0;
@@ -515,6 +526,12 @@ export struct ImageViewerPage {
       clearTimeout(this.heroExitTimer);
       this.heroExitTimer = -1;
     }
+    if (this.hasSystemGeometryTransition()) {
+      this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
+        AppNavStack.pop(false);
+      });
+      return;
+    }
     // 根 Tabs 没有稳定的跨 Navigation 共享节点：仅把当前图片的独立 hero 镜面收回最初缩略图。
     // 已横滑到别张图片时源矩形已不匹配，改为短淡出，避免图片飞到错误卡片。
     const targetRect: ImageViewerSrcRect | undefined = this.exitSourceRectFor(this.currentIndex);
@@ -527,7 +544,10 @@ export struct ImageViewerPage {
       const start: ImageViewerSrcRect | undefined = this.containRect(naturalWidth, naturalHeight);
       if (start !== undefined) {
         const target: ImageViewerSrcRect = targetRect;
-        this.heroSource = this.sourcePreviewFor(this.currentIndex);
+        this.freezeCurrentGifFrame(start);
+        const exitSource: string = this.sourcePreviewFor(this.currentIndex);
+        const residentHero: boolean = this.heroVisible && this.heroSource === exitSource;
+        if (!residentHero) this.heroSource = exitSource;
         this.heroX = start.x;
         this.heroY = start.y;
         this.heroWidth = start.w;
@@ -539,10 +559,15 @@ export struct ImageViewerPage {
         this.heroVisible = true;
         this.heroExitTarget = target;
         this.heroExitPending = true;
-        this.heroExitTimer = setTimeout(() => {
-          this.heroExitTimer = -1;
-          this.startHeroExitFlight();
-        }, 260);
+        if (residentHero) {
+          // 节点与纹理均已在组件树中，下一帧即可开始交叉淡化，无需重新解码等待。
+          this.getUIContext().postFrameCallback(new ImageHeroFrameCallback(() => this.startHeroExitFlight()));
+        } else {
+          this.heroExitTimer = setTimeout(() => {
+            this.heroExitTimer = -1;
+            this.startHeroExitFlight();
+          }, 260);
+        }
         return;
       }
     }
@@ -564,7 +589,7 @@ export struct ImageViewerPage {
     });
   }
 
-  /** 退出 hero 解码完成后，先与当前大图交叉淡化，再启动缩回及 Navigation pop。 */
+  /** 退出 hero 解码完成后先覆盖当前大图，再启动缩回及 Navigation pop。 */
   private startHeroExitFlight(): void {
     if (!this.closing || !this.heroExitPending || this.heroExitTarget === undefined) return;
     this.heroExitPending = false;
@@ -574,9 +599,19 @@ export struct ImageViewerPage {
     }
     const target: ImageViewerSrcRect = this.heroExitTarget;
     this.getUIContext().animateTo({ duration: 60, curve: Curve.EaseOut, onFinish: () => {
+      // hero 已经完全盖住当前大图，此时再瞬时移除底图不会改变画面。
+      // 不能让两张图同时做反向透明度交叉：在黑底上 alpha 合成的中间帧会变暗，
+      // 表现为按下返回的瞬间闪一下。
+      this.viewerOpacity = 0;
       this.getUIContext().postFrameCallback(new ImageHeroFrameCallback(() => {
         this.beginHeroNavPop(IMAGE_NAV_RETURN_DURATION);
-        this.getUIContext().animateTo({ duration: IMAGE_HERO_RETURN_DURATION, curve: Curve.EaseOut }, () => {
+        this.getUIContext().animateTo({ duration: IMAGE_HERO_RETURN_DURATION, curve: Curve.EaseOut, onFinish: () => {
+          // Navigation 的来源页此时已经在下层保持渲染。hero 到达缩略图后渐隐，
+          // 让同位置的真实 Image 接管纹理，避免 pop 完成时整层移除造成一次硬切闪帧。
+          this.getUIContext().animateTo({ duration: IMAGE_HERO_HANDOFF_DURATION, curve: Curve.EaseOut }, () => {
+            this.heroOpacity = 0;
+          });
+        } }, () => {
           this.heroX = target.x;
           this.heroY = target.y;
           this.heroWidth = target.w;
@@ -589,7 +624,6 @@ export struct ImageViewerPage {
       }));
     } }, () => {
       this.heroOpacity = 1;
-      this.viewerOpacity = 0;
       this.uiOpacity = 0;
     });
   }
@@ -634,12 +668,51 @@ export struct ImageViewerPage {
     // geometryTransition 不接受空 ID（真机会直接报 4100001，并中断图片页构建）。
     // 手动 hero 动画和非当前 Swiper 页仍给一个仅查看器内部使用、不会命中源图的稳定 ID。
     if (index !== this.currentIndex) return 'image-viewer-idle-' + String(index);
+    const ids: Array<string> | undefined = this.param.transitionIds;
+    if (ids !== undefined && index >= 0 && index < ids.length && ids[index].length > 0) return ids[index];
     const base: string = this.param.transitionId ?? '';
     if (base.length === 0) return 'image-viewer-manual-' + String(index);
     if (index === this.param.initialIndex) return base;
     const suffix: string = '-' + String(this.param.initialIndex);
     const prefix: string = base.endsWith(suffix) ? base.substring(0, base.length - suffix.length) : base;
     return prefix + '-' + String(index);
+  }
+
+  private snapshotIdFor(index: number): string {
+    return 'image-viewer-frame-' + String(index);
+  }
+
+  private isCurrentGif(): boolean {
+    const source: string = this.currentUrl().toLowerCase();
+    const queryAt: number = source.indexOf('?');
+    const clean: string = queryAt >= 0 ? source.substring(0, queryAt) : source;
+    return clean.endsWith('.gif') || clean.indexOf('.gif@') >= 0;
+  }
+
+  /** 截取 GIF 当前已经渲染完成的画面区域，退出 hero 不再切换到另一时间轴的 GIF 节点。 */
+  private freezeCurrentGifFrame(rect: ImageViewerSrcRect): void {
+    this.heroFrame = null;
+    if (!this.isCurrentGif()) return;
+    try {
+      const left: number = Math.max(0, Math.round(this.getUIContext().vp2px(rect.x)));
+      const top: number = Math.max(0, Math.round(this.getUIContext().vp2px(rect.y)));
+      const right: number = Math.max(left + 1, Math.round(this.getUIContext().vp2px(rect.x + rect.w)));
+      const bottom: number = Math.max(top + 1, Math.round(this.getUIContext().vp2px(rect.y + rect.h)));
+      this.heroFrame = this.getUIContext().getComponentSnapshot().getSync(this.snapshotIdFor(this.currentIndex), {
+        waitUntilRenderFinished: true,
+        region: { left: left, top: top, right: right, bottom: bottom },
+      });
+    } catch (e) {
+      // 快照失败时沿用已验证的普通图片 hero 路径，返回操作不能被截图异常阻断。
+      this.heroFrame = null;
+    }
+  }
+
+  private hasSystemGeometryTransition(): boolean {
+    const ids: Array<string> | undefined = this.param.transitionIds;
+    if (ids !== undefined && this.currentIndex >= 0 && this.currentIndex < ids.length &&
+      ids[this.currentIndex].length > 0) return true;
+    return (this.param.transitionId ?? '').length > 0;
   }
 
   /** 查看原图：仅切换当前张，其余保持中图。 */
@@ -855,6 +928,7 @@ export struct ImageViewerPage {
               // alt 与来源缩略图使用完全相同的 URL，主图冷加载时可直接复用已解码纹理。
               previewSource: this.sourcePreviewFor(index),
               transitionId: this.transitionIdFor(index),
+              snapshotId: this.snapshotIdFor(index),
                onLongPress: () => {
                  if (this.interactionReady) this.actionMenuOpen = true;
                },
@@ -889,23 +963,36 @@ export struct ImageViewerPage {
 
       // 根页面的 hero 独立于 Swiper：只让一张不透明图片改变边界，避免整页控件和黑底跟着缩放。
       if (this.heroVisible && this.heroSource.length > 0) {
-        Image(this.heroSource)
-          .width(this.heroWidth)
-          .height(this.heroHeight)
-          .position({ x: this.heroX, y: this.heroY })
-          .objectFit(ImageFit.Cover)
-          .borderRadius(this.heroRadius)
-          .clip(true)
-          .opacity(this.heroOpacity)
-          .hitTestBehavior(HitTestMode.None)
-          .onComplete((event) => {
-            if (event === undefined) return;
-            if (this.closing && this.heroExitPending) {
-              this.startHeroExitFlight();
-            } else {
-              this.startHeroEntrance(Number(event.width), Number(event.height));
-            }
-          })
+        Stack() {
+          if (this.heroFrame !== null) {
+            Image(this.heroFrame)
+              .width('100%')
+              .height('100%')
+              .objectFit(ImageFit.Cover)
+              .hitTestBehavior(HitTestMode.None)
+          } else {
+            Image(this.heroSource)
+              .width('100%')
+              .height('100%')
+              .objectFit(ImageFit.Cover)
+              .hitTestBehavior(HitTestMode.None)
+              .onComplete((event) => {
+                if (event === undefined) return;
+                if (this.closing && this.heroExitPending) {
+                  this.startHeroExitFlight();
+                } else {
+                  this.startHeroEntrance(Number(event.width), Number(event.height));
+                }
+              })
+          }
+        }
+        .width(this.heroWidth)
+        .height(this.heroHeight)
+        .position({ x: this.heroX, y: this.heroY })
+        .borderRadius(this.heroRadius)
+        .clip(true)
+        .opacity(this.heroOpacity)
+        .hitTestBehavior(HitTestMode.None)
       }
 
       // 顶部只放返回键，页码固定在底部，不再悬在图片正中央。单击切换显隐（见 uiVisible）。

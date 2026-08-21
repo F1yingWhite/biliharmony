@@ -167,12 +167,14 @@ export struct VideoDetailPage {
   @State heroWidth: number = 0;
   @State heroHeight: number = 0;
   @State heroRadius: number = 0;
+  @State heroOpacity: number = 1;
   /** 固定使用入口卡片携带的封面，详情接口返回后也不在起播途中换图。 */
   private entryCoverSource: string = '';
   /** 入场是否走了"卡片矩形放大"（有值且取到屏幕尺寸才算），退出时决定是否镜面收合。 */
   private entryFromRect: boolean = false;
   /** 卡片封面已在源矩形就位，等待下一次 VSync 开始。 */
   private entranceArmed: boolean = false;
+  private initStarted: boolean = false;
   private closing: boolean = false;
   /** 系统返回/侧滑经 Index NavDestination 拦截后置位，页面内执行收合动画。 */
   @StorageProp('videoDetailCloseRequest') @Watch('onCloseRequested') closeRequest: number = 0;
@@ -477,15 +479,16 @@ export struct VideoDetailPage {
     this.entryCoverSource = this.param.cover ?? '';
     this.entryFromRect = false;
     this.entranceArmed = false;
+    this.initStarted = false;
     this.closing = false;
     this.entryContentOpacity = 1;
     this.heroVisible = false;
+    this.heroOpacity = 1;
     this.refreshScreenSize();
     this.prepareCardEntrance();
-    // 首次 VSync 后立即移动封面；详情请求与 hero 并行，不再等待网络结果。
+    // 首次 VSync 后立即移动封面；有 hero 时等飞行结束再启动详情加载，避免首帧大量状态更新抢占动画。
     this.triggerEntranceExpansion();
-    this.init().catch(() => {
-    });
+    if (!this.entryFromRect) this.startInit();
   }
 
   /** 播放区在窗口中的 hero 矩形。入场期详情尚未返回，天然稳定为 16:9。 */
@@ -512,6 +515,7 @@ export struct VideoDetailPage {
     this.heroWidth = rect.w;
     this.heroHeight = rect.h;
     this.heroRadius = 10;
+    this.heroOpacity = 1;
     this.heroVisible = true;
     this.entranceArmed = true;
   }
@@ -524,12 +528,15 @@ export struct VideoDetailPage {
     if (target === undefined) {
       this.heroVisible = false;
       this.entryContentOpacity = 1;
+      this.startInit();
       return;
     }
     this.getUIContext().postFrameCallback(new VideoHeroFrameCallback(() => {
       if (this.destroyed || this.closing) return;
       this.getUIContext().animateTo({ duration: 320, curve: Curve.EaseOut, onFinish: () => {
-        this.heroVisible = false;
+        // 节点透明保活：返回时复用同一张已解码封面，避免重新创建 Image 导致卡顿。
+        this.heroOpacity = 0;
+        this.startInit();
       } }, () => {
         this.heroX = target.x;
         this.heroY = target.y;
@@ -541,6 +548,13 @@ export struct VideoDetailPage {
         this.entryContentOpacity = 1;
       });
     }));
+  }
+
+  private startInit(): void {
+    if (this.initStarted || this.destroyed) return;
+    this.initStarted = true;
+    this.init().catch(() => {
+    });
   }
 
   onCloseRequested(): void {
@@ -568,6 +582,7 @@ export struct VideoDetailPage {
         this.heroHeight = start.h;
         this.heroRadius = 0;
         this.heroVisible = true;
+        this.heroOpacity = 1;
         this.getUIContext().postFrameCallback(new VideoHeroFrameCallback(() => {
           this.beginHeroNavPop();
           this.getUIContext().animateTo({ duration: 170, curve: Curve.EaseOut }, () => {
@@ -2814,6 +2829,7 @@ export struct VideoDetailPage {
           .position({ x: this.heroX, y: this.heroY })
           .objectFit(ImageFit.Cover)
           .borderRadius(this.heroRadius)
+          .opacity(this.heroOpacity)
           .clip(true)
           .hitTestBehavior(HitTestMode.None)
       }
