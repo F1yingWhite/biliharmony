@@ -19,6 +19,7 @@ import { PlayerPlaySettingsPage } from './PlayerPlaySettingsPage';
 import { common } from '@kit.AbilityKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { displaySync } from '@kit.ArkGraphics2D';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter, VideoShotData } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
 import { AppTheme, DanmakuSettings } from '../common/AppTheme';
@@ -83,6 +84,8 @@ export struct PlayerView {
   /** 当前全屏是否为竖屏全屏（竖屏视频）：决定顶栏让出状态栏高度。 */
   private fullscreenPortrait: boolean = false;
   onFullscreenChange: (fullscreen: boolean) => void = () => {};
+  /** 系统开始转回竖屏：父页只启动外层裁剪窗口的缩放，此时不改逻辑全屏和弹幕视口。 */
+  onFullscreenExitStart: () => void = () => {};
   onPlayingChange: (playing: boolean) => void = () => {};
   onResumeRequest: () => void = () => {};
   onDanmakuChange: (enabled: boolean) => void = () => {};
@@ -201,7 +204,12 @@ export struct PlayerView {
   private xcController: XComponentController = new XComponentController();
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
   private dmEngine: PlayerDanmakuEngine = new PlayerDanmakuEngine(this.ctx);
-  private dmTick: number = -1;
+  private dmLoopRunning: boolean = false;
+  private dmDisplaySync: displaySync.DisplaySync | null = null;
+  /** 高负载时自适应到约 30/20fps；位移仍按真实 DisplaySync 时间推进，不会变慢或漂移。 */
+  private dmLastFrameMs: number = 0;
+  /** 极少数 DisplaySync 初始化失败设备的兼容回退，不参与正常路径。 */
+  private dmFallbackTick: number = -1;
   private hideTimer: number = -1;
   private sourceIndex: number = 0;
   private retryingSource: boolean = false;
@@ -258,7 +266,9 @@ export struct PlayerView {
   // 600ms 兜底定时器防静音挂死。解决开播"先闻其声、后见画面"。
   private firstFrameMuteArmed: boolean = false;
   private firstFrameMuteTimer: number = -1;
-  private fullscreenExitTimer: number = -1;
+  private fullscreenExitPending: boolean = false;
+  private fullscreenExitAnimationStarted: boolean = false;
+  private fullscreenExitCancel: (() => void) | null = null;
   // AVPlayer 创建本身是异步的：代次使离页/换源前发起的 createAVPlayer 结果失效并立即释放。
   private playerCreateGeneration: number = 0;
   private playerCreating: boolean = false;
@@ -1087,6 +1097,7 @@ if (this.runtimeSources.length === 0) {
               this.endReplay();
             } else {
               // 自然播完：在播放区弹出「推荐/重播/分享」结束画面（覆盖整个视频播放区，不切全屏）。
+              this.clearSeekPreviewInteraction();
               this.endScreenOpen = true;
               this.onEnded();
             }
@@ -1254,6 +1265,7 @@ if (this.runtimeSources.length === 0) {
         this.showControls = true;
         this.onPlayingChange(false);
         this.updateAVSessionPlaybackState();
+        this.clearSeekPreviewInteraction();
         this.endScreenOpen = true;
         this.onEnded();
       }
@@ -1669,8 +1681,21 @@ if (this.runtimeSources.length === 0) {
     }
   }
 
+  private finishProgressPreviewInteraction(): void {
+    this.sliderDragging = false;
+    this.closeSeekPreview();
+  }
+
+  private clearSeekPreviewInteraction(): void {
+    this.sliderDragging = false;
+    this.gestureSeekPreview = -1;
+    this.closeSeekPreview();
+  }
+
   private releaseSeekPreview(): void {
     this.seekPreviewGeneration++;
+    this.sliderDragging = false;
+    this.gestureSeekPreview = -1;
     this.closeSeekPreview();
     this.videoShots = null;
     this.videoShotsLoading = false;
@@ -1865,6 +1890,7 @@ if (this.runtimeSources.length === 0) {
 
   /** 结束画面「重播」：从头开始再播一遍（seek 0 并恢复播放）。 */
   endReplay(): void {
+    this.clearSeekPreviewInteraction();
     this.endScreenOpen = false;
     const p: media.AVPlayer | null = this.player;
     if (p === null || !this.prepared) return;
@@ -1875,8 +1901,8 @@ if (this.runtimeSources.length === 0) {
       this.playheadSec = 0;
       this.curTime = 0;
       this.lastAudioSyncBucket = -1;
-      this.dmEngine.list = [];
-      this.dmEngine.cursor = 0;
+      // resetDanmakuAt 已把游标同步到开头；保留已加载列表，避免单集循环/手动重播后
+      // dmLoadedCid 仍命中去重逻辑、却因为列表被清空而整轮都没有弹幕。
       // seek 恢复播放：seek 到 0 后由 onSeekDone 回调自动 play。
       this.seekLocked = true;
       this.seekCtl?.request(0, true, true);
@@ -1971,26 +1997,53 @@ if (this.runtimeSources.length === 0) {
     }
   }
 
-  exitFullscreen(): void {
-    if (!this.fullscreen) {
+  /** 播放器内所有“返回”的唯一入口：全屏只退全屏，嵌入态才退详情页。 */
+  private handlePlayerBack(): void {
+    if (this.fullscreen) {
+      this.exitFullscreen();
       return;
     }
+    this.onBack();
+  }
+
+  exitFullscreen(): void {
+    if (!this.fullscreen || this.fullscreenExitPending) {
+      return;
+    }
+    this.showSideDrawer = false;
+    this.showControls = false;
+    this.fullscreenExitPending = true;
+    this.fullscreenExitAnimationStarted = false;
+    // 系统开始旋转的同一时刻收起播放器；DID_ROTATE 仅做状态收尾，不再串成两段动画。
+    this.fullscreenExitCancel = Immersive.duringPortraitRotation(
+      (): void => this.startFullscreenExitAnimation(),
+      (): void => this.finishFullscreenExit());
+    Immersive.setFullscreen(false);
+  }
+
+  private startFullscreenExitAnimation(): void {
+    if (!this.fullscreenExitPending || this.fullscreenExitAnimationStarted || this.destroyed) return;
+    this.fullscreenExitAnimationStarted = true;
+    // WILL_ROTATE 时仅收缩父页的裁剪窗口。内部 Surface、Canvas 和弹幕引擎仍按全屏尺寸
+    // 跟随系统旋转，否则会在横屏尺寸尚未稳定时被提前重排成竖屏轨道。
+    this.onFullscreenExitStart();
+  }
+
+  private finishFullscreenExit(): void {
+    if (!this.fullscreenExitPending) return;
+    if (!this.fullscreenExitAnimationStarted) this.startFullscreenExitAnimation();
+    this.fullscreenExitPending = false;
+    this.fullscreenExitAnimationStarted = false;
+    this.fullscreenExitCancel = null;
+    if (this.destroyed) return;
+    // DID_ROTATE 后窗口已经是最终竖屏尺寸，此时再一次性切换真实布局与弹幕视口。
     this.fullscreen = false;
     this.fullscreenPortrait = false;
     this.dmEngine.fullscreen = false;
-    this.showSideDrawer = false;
+    this.onFullscreenChange(false);
     this.restartDmLoopForViewport();
     this.applyVideoScaleType();
-    // 先恢复竖屏，待窗口尺寸稳定后再恢复详情布局，避免短暂套用横屏宽度。
-    // 在过渡结束前继续标记为全屏，使连续的返回手势也不会误把视频页弹出。
-    Immersive.setFullscreen(false);
-    if (this.fullscreenExitTimer >= 0) clearTimeout(this.fullscreenExitTimer);
-    this.fullscreenExitTimer = setTimeout(() => {
-      this.fullscreenExitTimer = -1;
-      if (this.destroyed) return;
-      this.onFullscreenChange(false);
-      AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
-    }, 240);
+    AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
   }
 
   applyVideoScaleType(): void {
@@ -2153,10 +2206,12 @@ if (this.runtimeSources.length === 0) {
     this.audioGateSeekPending = false;
     this.backgroundAudioOnly = false;
     this.backgroundVideoResumePending = false;
-    if (this.fullscreenExitTimer >= 0) {
-      clearTimeout(this.fullscreenExitTimer);
-      this.fullscreenExitTimer = -1;
+    if (this.fullscreenExitCancel !== null) {
+      this.fullscreenExitCancel();
+      this.fullscreenExitCancel = null;
     }
+    this.fullscreenExitPending = false;
+    this.fullscreenExitAnimationStarted = false;
     if (this.firstFrameMuteTimer >= 0) {
       clearTimeout(this.firstFrameMuteTimer);
       this.firstFrameMuteTimer = -1;
@@ -2164,6 +2219,7 @@ if (this.runtimeSources.length === 0) {
     this.firstFrameMuteArmed = false;
     this.audioStartPending = false;
     this.stopDmLoop(true);
+    this.releaseDmClock();
     this.dmEngine.clearCaches();
     Immersive.setKeepScreenOn(false);
     this.deactivateAVSession();
@@ -2196,38 +2252,50 @@ if (this.runtimeSources.length === 0) {
   }
 
   /** 统一绘制入口：画布上已经没有活动弹幕时顺带停掉定时器。 */
-  private renderDanmakuFrame(advance: boolean = true): void {
-    this.dmEngine.drawFrame(advance);
+  private renderDanmakuFrame(advance: boolean = true, frameTimeMs: number = Date.now()): void {
+    this.dmEngine.drawFrame(advance, frameTimeMs);
     if (this.dmEngine.active.length === 0) this.stopDmLoop(false);
   }
 
   startDmLoop(): void {
-    if (this.dmTick >= 0 || !this.danmakuOn || this.dmEngine.active.length === 0) {
+    if (this.dmLoopRunning || !this.danmakuOn || this.dmEngine.active.length === 0) {
       return;
     }
-    this.dmEngine.lastDrawMs = Date.now();
-    this.dmTick = setInterval(() => {
-      if (this.playing && this.danmakuOn && this.dmEngine.active.length > 0) {
-        this.renderDanmakuFrame();
+    this.dmEngine.lastDrawMs = 0;
+    this.dmLastFrameMs = 0;
+    this.dmLoopRunning = true;
+    try {
+      if (this.dmDisplaySync === null) {
+        const sync: displaySync.DisplaySync = displaySync.create();
+        sync.setExpectedFrameRateRange({ min: 30, max: 60, expected: 60 });
+        sync.on('frame', (info: displaySync.IntervalInfo): void => {
+          if (this.dmLoopRunning && this.playing && this.danmakuOn && this.dmEngine.active.length > 0) {
+            const frameTimeMs: number = info.timestamp / 1_000_000;
+            if (this.shouldRenderDmFrame(frameTimeMs)) this.renderDanmakuFrame(true, frameTimeMs);
+          }
+        });
+        this.dmDisplaySync = sync;
       }
-    // 仅在存在活动弹幕时运行；约 60fps 保持滚动平滑，无活动弹幕会立即停表。
-    }, 16);
+      this.dmDisplaySync.start();
+    } catch (e) {
+      // API 26 正常走 DisplaySync；仅为异常 ROM 保留可播放兜底。
+      this.dmFallbackTick = setInterval(() => {
+        if (this.dmLoopRunning && this.playing && this.danmakuOn && this.dmEngine.active.length > 0) {
+          const frameTimeMs: number = Date.now();
+          if (this.shouldRenderDmFrame(frameTimeMs)) this.renderDanmakuFrame(true, frameTimeMs);
+        }
+      }, 16);
+    }
   }
 
   /** 暂停/缓冲时只停时钟，保留已上屏弹幕；恢复播放后从当前帧继续推进。 */
   private pauseDmLoop(): void {
-    if (this.dmTick >= 0) {
-      clearInterval(this.dmTick);
-      this.dmTick = -1;
-    }
+    this.stopDmClock();
     this.dmEngine.lastDrawMs = 0;
   }
 
   stopDmLoop(clearActive: boolean): void {
-    if (this.dmTick >= 0) {
-      clearInterval(this.dmTick);
-      this.dmTick = -1;
-    }
+    this.stopDmClock();
     this.dmEngine.lastDrawMs = 0;
     if (clearActive) {
       this.dmEngine.clearActive();
@@ -2235,6 +2303,50 @@ if (this.runtimeSources.length === 0) {
       this.dmPinnedText = '';
     } else {
       this.dmEngine.clearCanvas();
+    }
+  }
+
+  private stopDmClock(): void {
+    this.dmLoopRunning = false;
+    this.dmLastFrameMs = 0;
+    if (this.dmDisplaySync !== null) {
+      try {
+        this.dmDisplaySync.stop();
+      } catch (e) {
+      }
+    }
+    if (this.dmFallbackTick >= 0) {
+      clearInterval(this.dmFallbackTick);
+      this.dmFallbackTick = -1;
+    }
+  }
+
+  private shouldRenderDmFrame(frameTimeMs: number): boolean {
+    // 少量弹幕保持 60fps；大量/极端弹幕量自适应到约 30/20fps，控制文字绘制与整层合成成本。
+    // 运动增量使用两次实际绘制的时间差，所以隔帧不会改变速度或音画同步。
+    // 全屏 4K 视频自身已经占用较高合成预算，约 32 条同屏弹幕后优先控制文字层成本；
+    // 竖屏画布更小，保留到 40 条再降频，普通密度仍维持 60fps。
+    const activeCount: number = this.dmEngine.active.length;
+    const denseThreshold: number = this.fullscreen ? 32 : 40;
+    const extremeThreshold: number = this.fullscreen ? 56 : 52;
+    // 不减少弹幕数量和轨道，仅降低繁忙画布的重绘频率：普通 60fps、较密 30fps、极密 20fps。
+    const minIntervalMs: number = activeCount >= extremeThreshold ? 45 :
+      (activeCount >= denseThreshold ? 30 : 0);
+    if (minIntervalMs > 0 && this.dmLastFrameMs > 0 && frameTimeMs - this.dmLastFrameMs < minIntervalMs) {
+      return false;
+    }
+    this.dmLastFrameMs = frameTimeMs;
+    return true;
+  }
+
+  private releaseDmClock(): void {
+    this.stopDmClock();
+    if (this.dmDisplaySync !== null) {
+      try {
+        this.dmDisplaySync.off('frame');
+      } catch (e) {
+      }
+      this.dmDisplaySync = null;
     }
   }
 
@@ -2258,7 +2370,7 @@ if (this.runtimeSources.length === 0) {
   }
 
   restartDmLoopForViewport(): void {
-    const shouldRestart: boolean = this.dmTick >= 0;
+    const shouldRestart: boolean = this.dmLoopRunning;
     this.stopDmLoop(false);
     this.dmEngine.clearCaches();
     // 横竖屏字号和轨道数不同，切换时立即重排，避免旋转后沿用旧坐标产生抽搐。
@@ -2632,7 +2744,7 @@ if (this.runtimeSources.length === 0) {
         .onClick(() => this.closeEndScreen())
       Row() {
         this.IconButton($r('app.media.ic_back'), 20, 36, 36, '#FFFFFF', false, () => {
-          this.onBack();
+          this.handlePlayerBack();
         })
         if (this.ownerFace.length > 0) {
           Image(this.ownerFace)
@@ -2726,6 +2838,7 @@ if (this.runtimeSources.length === 0) {
           type: XComponentType.SURFACE,
           controller: this.xcController,
         })
+          .id('qa_player_surface')
           .width('100%')
           .height('100%')
           .onLoad(() => {
@@ -2754,10 +2867,12 @@ if (this.runtimeSources.length === 0) {
       // 避免清缓冲造成的弹幕闪烁。
       Stack({ alignContent: Alignment.TopStart }) {
         Canvas(this.ctx)
+          .id('qa_player_danmaku_canvas')
           .width('100%')
           .height(this.danmakuFixedHeight > 0 ? this.danmakuFixedHeight : '100%')
           .hitTestBehavior(HitTestMode.None)
       }
+      .id('qa_player_danmaku_viewport')
       .width('100%')
       .height('100%')
       .clip(true)
@@ -2881,7 +2996,7 @@ if (this.runtimeSources.length === 0) {
                   .backgroundColor('#CC0B0C10')
                 Row() {
                   this.IconButton($r('app.media.ic_back'), 24, 42, 42, '#F2FFFFFF', false, () => {
-                    this.onBack();
+                    this.handlePlayerBack();
                   })
                   Blank()
                   Row({ space: 9 }) {
@@ -2946,7 +3061,7 @@ if (this.runtimeSources.length === 0) {
                 coined: this.coined,
                 favorited: this.favorited,
                 accent: this.accent,
-                onBack: () => this.exitFullscreen(),
+                onBack: () => this.handlePlayerBack(),
                 onLike: () => this.onLike(),
                 onCoin: () => this.onCoin(),
                 onFavorite: () => this.onFavorite(),
@@ -2959,7 +3074,7 @@ if (this.runtimeSources.length === 0) {
               // 底栏只保留 播放-进度-全屏，减少对画面内容的遮挡。
               Row() {
                 this.IconButton($r('app.media.ic_back'), 20, 36, 36, '#FFFFFF', false, () => {
-                  this.onBack();
+                  this.handlePlayerBack();
                 })
                 Blank()
                 this.IconButton($r('app.media.ic_more'), 20, 36, 36, '#FFFFFF', false, () => {
@@ -3000,6 +3115,7 @@ if (this.runtimeSources.length === 0) {
               onSpeed: () => this.openSettingsPage('speed'),
               onFullscreen: () => this.toggleFullscreen(),
               onProgressChange: (value: number, mode: SliderChangeMode) => this.onProgressSliderChange(value, mode),
+              onProgressInteractionEnd: () => this.finishProgressPreviewInteraction(),
               onDmDraftChange: (value: string) => this.onDmDraftChange(value),
               onDmSend: () => this.onDmSend(),
             })
@@ -3231,6 +3347,7 @@ if (this.runtimeSources.length === 0) {
       compact: compact,
       chapters: this.chapters,
       onChange: (value: number, mode: SliderChangeMode) => this.onProgressSliderChange(value, mode),
+      onInteractionEnd: () => this.finishProgressPreviewInteraction(),
     })
   }
 
@@ -3244,8 +3361,7 @@ if (this.runtimeSources.length === 0) {
       this.sliderDragValue = value;
       this.requestSeekPreview(value);
     } else {
-      this.sliderDragging = false;
-      this.closeSeekPreview();
+      this.finishProgressPreviewInteraction();
       if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
         Haptic.seek();
         this.seekTo(value, true);

@@ -7,11 +7,12 @@
   2. install    安装到模拟器/真机（可选 --skip-install）
   3. suite_all  全量 UI 回归
   4. suite_deep 深度链路回归
-  5. audit_ui   UI 对齐/重叠/越界审计
-  6. 汇总 SUMMARY.md
+  5. suite_player 播放器动画/交互/高负载回归
+  6. audit_ui   UI 对齐/重叠/越界审计
+  7. 汇总 SUMMARY.md
 
 用法:
-  python3 tool/qa/run_all.py [--skip-build] [--skip-install] [--only-audit]
+  python3 tool/qa/run_all.py [--skip-build] [--skip-install] [--skip-player] [--only-audit]
 """
 import argparse
 import shutil
@@ -45,6 +46,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--skip-build', action='store_true')
     ap.add_argument('--skip-install', action='store_true')
+    ap.add_argument('--skip-player', action='store_true')
+    ap.add_argument('--skip-player-performance', action='store_true')
+    ap.add_argument('--skip-player-ended', action='store_true')
     ap.add_argument('--only-audit', action='store_true')
     args = ap.parse_args()
 
@@ -69,31 +73,49 @@ def main():
     if args.only_audit:
         rc_all = 0
         rc_deep = 0
+        rc_player = 0
     else:
-        suite_args = ['--skip-install'] if args.skip_install else []
+        # HAP 已由 run_all 在上方统一安装；子套件不得重复安装并重置当前设备状态。
+        suite_args = ['--skip-install']
         rc_all = run_py('suite_all.py', suite_args)
         rc_deep = run_py('suite_deep.py', suite_args)
+        if args.skip_player:
+            rc_player = 0
+            log('跳过播放器专项')
+        else:
+            player_args = ['--skip-install']
+            if args.skip_player_performance:
+                player_args.append('--skip-performance')
+            if args.skip_player_ended:
+                player_args.append('--skip-ended')
+            rc_player = run_py('suite_player.py', player_args)
     rc_audit = run_py('audit_ui.py', ['--all'] if not args.only_audit else [])
 
     report_all = QA_DIR / 'qa_report.md'
+    report_player = QA_DIR / 'suite_player_report.md'
     lines = [
         '# BiliHarmony 全量测试汇总（Python 跨平台）',
         '',
         '- 时间: ' + __import__('time').strftime('%Y-%m-%d %H:%M:%S'),
-        '- 组件: qa_common.py / qa_build.py / suite_all.py / suite_deep.py / audit_ui.py',
+        '- 组件: qa_common.py / qa_build.py / suite_all.py / suite_deep.py / suite_player.py / audit_ui.py',
         '',
         '## 结果',
         f'- suite_all exit={rc_all}',
         f'- suite_deep exit={rc_deep}',
+        f'- suite_player exit={rc_player}',
         f'- audit_ui exit={rc_audit}',
         '',
         '## 最近报告内容',
         '',
         (report_all.read_text(encoding='utf-8') if report_all.exists() else '（无）'),
+        '',
+        '## 播放器专项报告',
+        '',
+        (report_player.read_text(encoding='utf-8') if report_player.exists() else '（无）'),
     ]
     summary.write_text('\n'.join(lines), encoding='utf-8')
     log(f'汇总: {summary}')
-    sys.exit(1 if (rc_all != 0 or rc_deep != 0 or rc_audit != 0) else 0)
+    sys.exit(1 if (rc_all != 0 or rc_deep != 0 or rc_player != 0 or rc_audit != 0) else 0)
 
 
 if __name__ == '__main__':

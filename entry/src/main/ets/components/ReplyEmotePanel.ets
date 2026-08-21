@@ -150,6 +150,7 @@ export struct ReplyEmotePanel {
 
   build() {
     Column() {
+      Column() {
       if (this.loading) {
         Row() {
           LoadingProgress().width(24).height(24).color(this.accent)
@@ -208,12 +209,20 @@ export struct ReplyEmotePanel {
         .scrollBar(BarState.Off)
         .alignListItem(ListItemAlign.Start)
       }
+      }
+      .width('100%')
+      .height(Math.max(1, this.panelHeight - this.bottomInset()))
+      .backgroundColor(this.isDark ? '#232428' : '#F5F6F8')
+      .border({ width: { top: 0.5 }, color: this.isDark ? '#333333' : '#E7E9EC' })
+      if (this.bottomInset() > 0) {
+        // 手势导航区保持页面底色，表情面板的视觉底边明确停在小白条上方。
+        Row()
+          .width('100%')
+          .height(this.bottomInset())
+          .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+      }
     }
     .width('100%')
     .height(this.panelHeight)
-    // 底边内缩系统导航区：分类条离屏幕底缘留出可点空间，避免滑到最底部时误触返回/导航。
-    .padding({ bottom: this.bottomInset() })
-    .backgroundColor(this.isDark ? '#232428' : '#F5F6F8')
-    .border({ width: { top: 0.5 }, color: this.isDark ? '#333333' : '#E7E9EC' })
   }
 }

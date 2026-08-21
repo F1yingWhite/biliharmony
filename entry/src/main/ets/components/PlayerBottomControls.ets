@@ -27,6 +27,7 @@ export struct PlayerBottomControls {
   onSpeed: () => void = () => {};
   onFullscreen: () => void = () => {};
   onProgressChange: (value: number, mode: SliderChangeMode) => void = () => {};
+  onProgressInteractionEnd: () => void = () => {};
   onDmDraftChange: (value: string) => void = () => {};
   onDmSend: () => void = () => {};
 
@@ -52,6 +53,7 @@ export struct PlayerBottomControls {
             compact: false,
             chapters: this.chapters,
             onChange: (value: number, mode: SliderChangeMode) => this.onProgressChange(value, mode),
+            onInteractionEnd: () => this.onProgressInteractionEnd(),
           })
           Text(formatDuration(this.duration)).fontSize(11).fontColor('#FFFFFF')
         }
@@ -128,6 +130,7 @@ export struct PlayerBottomControls {
           compact: false,
           chapters: this.chapters,
           onChange: (value: number, mode: SliderChangeMode) => this.onProgressChange(value, mode),
+          onInteractionEnd: () => this.onProgressInteractionEnd(),
         })
         Text(formatDuration(this.duration)).fontSize(11).fontColor('#FFFFFF')
         this.IconButton($r('app.media.ic_fullscreen'), 22, 34, '#FFFFFF', () => this.onFullscreen())

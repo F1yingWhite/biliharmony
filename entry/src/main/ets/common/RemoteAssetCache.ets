@@ -118,7 +118,8 @@ export class RemoteAssetCache {
       if (resp.result instanceof ArrayBuffer) {
         buffer = resp.result;
       } else if (ArrayBuffer.isView(resp.result)) {
-        buffer = (resp.result as ArrayBufferView).buffer as ArrayBuffer;
+        const view: ArrayBufferView = resp.result as ArrayBufferView;
+        buffer = view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer;
       } else {
         return url;
       }

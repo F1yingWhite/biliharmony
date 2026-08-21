@@ -1,4 +1,5 @@
 import { BiliEmote, BiliEmotePackage } from '../model/Models';
+import { Immersive } from '../common/Immersive';
 
 /** 视频评论与动态评论共用的底部发送栏。父页面只负责草稿与请求。 */
 @Component
@@ -9,6 +10,8 @@ export struct ReplyComposer {
   @Prop sending: boolean = false;
   @Prop emoteOpen: boolean = false;
   @Prop showEmoteButton: boolean = true;
+  /** 页面与回复详情 Sheet 可能同时挂载，焦点 ID 必须唯一，避免聚焦到底层编辑器。 */
+  @Prop focusId: string = 'reply_composer_editor';
   /** 宿主递增该值请求编辑器聚焦并拉起键盘（"回复某用户"等场景）。 */
   @Prop @Watch('onFocusTick') focusTick: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
@@ -21,12 +24,13 @@ export struct ReplyComposer {
   onSend: () => void = () => {};
   onToggleEmote: () => void = () => {};
   onRequestKeyboard: () => void = () => {};
+  onFocusChange: (focused: boolean) => void = () => {};
 
   private onFocusTick(): void {
     if (this.focusTick <= 0) return;
     // 请求系统焦点：RichEditor 获得焦点会自动弹键盘（enableKeyboardOnFocus(true)）。
     try {
-      this.getUIContext().getFocusController().requestFocus('reply_composer_editor');
+      this.getUIContext().getFocusController().requestFocus(this.focusId);
     } catch (e) {
       // 焦点请求失败不阻塞：用户仍可手动点击输入框。
     }
@@ -34,6 +38,19 @@ export struct ReplyComposer {
 
   private expanded(): boolean {
     return this.focused || this.emoteOpen || this.text.length > 0;
+  }
+
+  /**
+   * 没有键盘/表情面板托底时，输入栏自己避开手势导航条；键盘已弹出或表情面板
+   * 打开时由它们占据底部，避免重复留白。
+   */
+  private bottomPadding(): number {
+    if (this.focused || this.emoteOpen) return 8;
+    try {
+      return 8 + Immersive.bottomInset();
+    } catch (e) {
+      return 8;
+    }
   }
 
   private textStyle(): RichEditorTextStyle {
@@ -159,7 +176,7 @@ export struct ReplyComposer {
     Column({ space: this.expanded() ? 6 : 0 }) {
       Row({ space: 8 }) {
         RichEditor({ controller: this.editorController })
-          .id('reply_composer_editor')
+          .id(this.focusId)
           .layoutWeight(1)
           .caretColor(this.accent)
           .placeholder(this.placeholder, {
@@ -178,9 +195,13 @@ export struct ReplyComposer {
           })
           .onFocus(() => {
             this.focused = true;
+            this.onFocusChange(true);
             this.onRequestKeyboard();
           })
-          .onBlur(() => this.focused = false)
+          .onBlur(() => {
+            this.focused = false;
+            this.onFocusChange(false);
+          })
           .onClick(() => this.onRequestKeyboard())
           .onDidChange(() => {
             if (this.syncingEditor) return;
@@ -216,7 +237,7 @@ export struct ReplyComposer {
       }
     }
     .width('100%')
-    .padding({ left: 12, right: 12, top: this.expanded() ? 6 : 8, bottom: 8 })
+    .padding({ left: 12, right: 12, top: this.expanded() ? 6 : 8, bottom: this.bottomPadding() })
     .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
     .border({ width: { top: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
   }

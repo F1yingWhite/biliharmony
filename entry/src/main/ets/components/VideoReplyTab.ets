@@ -55,6 +55,7 @@ export struct VideoReplyTab {
   onSend: () => void = () => {};
   onToggleEmote: () => void = () => {};
   onRequestKeyboard: () => void = () => {};
+  onFocusChange: (focused: boolean) => void = () => {};
   onEmoteSelect: (item: BiliEmote) => void = () => {};
   onEmotePackageChange: (index: number) => void = () => {};
   onScrollFrame: (offset: number, scroller: Scroller, state: ScrollState) => number =
@@ -88,8 +89,8 @@ export struct VideoReplyTab {
                 onLike: (reply: ReplyItem) => this.onLike(reply),
                 onDislike: (reply: ReplyItem) => this.onDislike(reply),
                 onShare: (reply: ReplyItem) => this.onShare(reply),
-                // 主评论列表："回复"按钮 = 打开该评论的楼中楼面板（与 B 站一致），
-                // 面板内的"相关回复"列表再负责逐一选中/回复。
+                // 主评论列表：底部“回复”直接选中该楼层并聚焦下方输入栏；
+                // “共 N 条回复”预览条才进入楼中楼详情。
                 onSelectReply: (reply: ReplyItem) => this.onSelectReply(reply),
                 onOpenThread: (reply: ReplyItem) => this.onOpenThread(reply),
                 onDeleted: (reply: ReplyItem) => this.onDeleted(reply),
@@ -167,6 +168,7 @@ export struct VideoReplyTab {
       onSend: () => this.onSend(),
       onToggleEmote: () => this.onToggleEmote(),
       onRequestKeyboard: () => this.onRequestKeyboard(),
+      onFocusChange: (focused: boolean) => this.onFocusChange(focused),
     })
   }
 
