@@ -21,6 +21,7 @@ import { DecoratedAvatar } from '../components/UserDecorations';
 import { DynamicView } from '../views/DynamicView';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { UserApi } from '../api/UserApi';
+import { RemoteAssetCache } from '../common/RemoteAssetCache';
 
 // 投稿排序（order 参数）
 const ARC_ORDERS: Array<Record<string, string>> = [
@@ -58,6 +59,10 @@ export struct UserSpacePage {
   @State visualSpaceTab: number = 0;
   @State headerIndex: number = 0;
   @State headerVideoReadyIndex: number = -1;
+  @State collectionImageLocal: Map<string, string> = new Map<string, string>();
+  @State collectionMediaLocal: Map<string, string> = new Map<string, string>();
+  /** 当前正在播放的源固定到本次选页时的值，缓存完成不在半途中切源重播。 */
+  @State activeHeaderVideoSource: string = '';
   @State viewportWidth: number = 360;
   @State viewportHeight: number = 780;
   @StorageProp('accentColor') accent: string = '#FB7299';
@@ -104,6 +109,7 @@ export struct UserSpacePage {
         return;
       }
       this.info = info;
+      this.prepareHeaderAssetCache();
       // 统计放主流程 await：异步 .then 在部分 nav 模式（返回后又 push）下不触发，
       // info 能显示而 stat 恒 0 就是这个原因——两者对齐到同一 async 链。
       const stat: UserStat = await UserApi.getUserStat(this.param.mid);
@@ -240,7 +246,8 @@ export struct UserSpacePage {
     const images: Array<string> = [];
     for (let i: number = 0; i < this.info.collectionHeaders.length; i++) {
       const item: UserSpaceHeaderItem = this.info.collectionHeaders[i];
-      const url: string = item.fullCover.length > 0 ? item.fullCover : item.preview;
+      const source: string = item.fullCover.length > 0 ? item.fullCover : item.preview;
+      const url: string = this.collectionImageSource(source);
       if (url.length > 0) images.push(url);
     }
     if (images.length === 0 && this.info.topPhoto.length > 0) images.push(this.info.topPhoto);
@@ -259,7 +266,7 @@ export struct UserSpacePage {
 
   @Builder
   HeaderImage(url: string) {
-    Image(url)
+    Image(this.collectionImageSource(url))
       .width('100%')
       .height('100%')
       .objectFit(ImageFit.Cover)
@@ -270,6 +277,96 @@ export struct UserSpacePage {
 
   private headerPageNear(index: number): boolean {
     return Math.abs(index - this.headerIndex) <= 1;
+  }
+
+  private collectionImageSource(url: string): string {
+    const local: string | undefined = this.collectionImageLocal.get(url);
+    return local !== undefined && local.length > 0 ? local : url;
+  }
+
+  private collectionMediaSource(item: UserSpaceHeaderItem, index: number): string {
+    if (index === this.headerIndex && this.activeHeaderVideoSource.length > 0) return this.activeHeaderVideoSource;
+    const local: string | undefined = this.collectionMediaLocal.get(item.animationUrl);
+    return local !== undefined && local.length > 0 ? local : item.animationUrl;
+  }
+
+  /** 页面数据到达时同步恢复磁盘命中，首帧即可用本地路径，不先向 CDN 发一次请求。 */
+  private prepareHeaderAssetCache(): void {
+    const imageLocal: Map<string, string> = new Map<string, string>();
+    const mediaLocal: Map<string, string> = new Map<string, string>();
+    const topImages: Array<string> = [this.info.topPhoto, this.info.topPhotoDark];
+    for (let i: number = 0; i < topImages.length; i++) {
+      const url: string = topImages[i];
+      const cached: string = RemoteAssetCache.cachedCollectionImage(url);
+      if (cached !== url) imageLocal.set(url, cached);
+    }
+    for (let i: number = 0; i < this.info.collectionHeaders.length; i++) {
+      const item: UserSpaceHeaderItem = this.info.collectionHeaders[i];
+      const images: Array<string> = [item.preview, item.fullCover];
+      for (let j: number = 0; j < images.length; j++) {
+        const cached: string = RemoteAssetCache.cachedCollectionImage(images[j]);
+        if (cached !== images[j]) imageLocal.set(images[j], cached);
+      }
+      const media: string = RemoteAssetCache.cachedCollectionMedia(item.animationUrl);
+      if (media !== item.animationUrl) mediaLocal.set(item.animationUrl, media);
+    }
+    this.collectionImageLocal = imageLocal;
+    this.collectionMediaLocal = mediaLocal;
+    this.selectHeaderVideoSource(this.headerIndex);
+    this.primeHeaderAssets(this.headerIndex);
+  }
+
+  private selectHeaderVideoSource(index: number): void {
+    if (index < 0 || index >= this.info.collectionHeaders.length) {
+      this.activeHeaderVideoSource = '';
+      return;
+    }
+    const item: UserSpaceHeaderItem = this.info.collectionHeaders[index];
+    const local: string | undefined = this.collectionMediaLocal.get(item.animationUrl);
+    this.activeHeaderVideoSource = local !== undefined && local.length > 0 ? local : item.animationUrl;
+  }
+
+  private primeCollectionImage(url: string): void {
+    if (!url.startsWith('http') || this.collectionImageLocal.has(url)) return;
+    const generation: number = this.lifecycleGeneration;
+    RemoteAssetCache.ensureCollectionImage(url).then((local: string): void => {
+      if (this.destroyed || generation !== this.lifecycleGeneration || local === url) return;
+      const next: Map<string, string> = new Map<string, string>(this.collectionImageLocal);
+      next.set(url, local);
+      this.collectionImageLocal = next;
+    }).catch((): void => {
+    });
+  }
+
+  private primeCollectionMedia(url: string): void {
+    if (!url.startsWith('http') || this.collectionMediaLocal.has(url)) return;
+    const generation: number = this.lifecycleGeneration;
+    RemoteAssetCache.ensureCollectionMedia(url).then((local: string): void => {
+      if (this.destroyed || generation !== this.lifecycleGeneration || local === url) return;
+      const next: Map<string, string> = new Map<string, string>(this.collectionMediaLocal);
+      next.set(url, local);
+      this.collectionMediaLocal = next;
+      // activeHeaderVideoSource 故意不在此切换，避免当前网络视频播放中途重启。
+    }).catch((): void => {
+    });
+  }
+
+  private primeHeaderAssets(index: number): void {
+    if (this.info.collectionHeaders.length === 0) {
+      this.primeCollectionImage(this.info.topPhoto);
+      this.primeCollectionImage(this.info.topPhotoDark);
+      return;
+    }
+    const first: number = Math.max(0, index - 1);
+    const last: number = Math.min(this.info.collectionHeaders.length - 1, index + 1);
+    for (let i: number = first; i <= last; i++) {
+      const item: UserSpaceHeaderItem = this.info.collectionHeaders[i];
+      this.primeCollectionImage(item.preview);
+      this.primeCollectionImage(item.fullCover);
+    }
+    if (index >= 0 && index < this.info.collectionHeaders.length) {
+      this.primeCollectionMedia(this.info.collectionHeaders[index].animationUrl);
+    }
   }
 
   /** 同一组典藏保持稳定的响应式展示比例，切页时资料区不会上下跳。 */
@@ -326,8 +423,8 @@ export struct UserSpacePage {
     Stack({ alignContent: Alignment.TopStart }) {
       if (index === this.headerIndex && item.animationUrl.length > 0) {
         Video({
-          src: item.animationUrl,
-          previewUri: item.preview.length > 0 ? item.preview : item.fullCover,
+          src: this.collectionMediaSource(item, index),
+          previewUri: this.collectionImageSource(item.preview.length > 0 ? item.preview : item.fullCover),
           posterOptions: {
             showFirstFrame: false,
             contentTransitionEffect: ContentTransitionEffect.OPACITY,
@@ -349,7 +446,7 @@ export struct UserSpacePage {
       }
       if (this.headerPageNear(index)) {
         // Image 始终压在活动 Video 上方；只有收到首个有效播放进度并再等待一次合成提交后才淡出。
-        Image(item.preview.length > 0 ? item.preview : item.fullCover)
+        Image(this.collectionImageSource(item.preview.length > 0 ? item.preview : item.fullCover))
           .width(this.headerMediaWidth(item))
           .height(this.headerMediaHeight(item))
           .objectFit(ImageFit.Cover)
@@ -394,6 +491,8 @@ export struct UserSpacePage {
           this.headerVideoRevealPendingIndex = -1;
           this.headerVideoReadyIndex = -1;
           this.headerIndex = index;
+          this.selectHeaderVideoSource(index);
+          this.primeHeaderAssets(index);
         })
       } else if (this.info.collectionHeaders.length === 1) {
         this.CollectionHeaderPage(this.info.collectionHeaders[0], 0)

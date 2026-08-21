@@ -66,14 +66,27 @@ export struct ReplyRichText {
       if (image.length === 0 || this.emoteLocal.has(image) || this.emoteFailed.has(image)) {
         continue;
       }
+      const cached: string = EmoteImageCache.localPathOf(image);
+      if (cached !== image) {
+        const nextCached: Map<string, string> = new Map<string, string>(this.emoteLocal);
+        nextCached.set(image, cached);
+        this.emoteLocal = nextCached;
+        continue;
+      }
       EmoteImageCache.ensure(image).then((local: string) => {
         if (local !== image) {
-          this.emoteLocal.set(image, local);
+          const nextLocal: Map<string, string> = new Map<string, string>(this.emoteLocal);
+          nextLocal.set(image, local);
+          this.emoteLocal = nextLocal;
         } else {
-          this.emoteFailed.add(image);
+          const nextFailed: Set<string> = new Set<string>(this.emoteFailed);
+          nextFailed.add(image);
+          this.emoteFailed = nextFailed;
         }
       }).catch((): void => {
-        this.emoteFailed.add(image);
+        const nextFailed: Set<string> = new Set<string>(this.emoteFailed);
+        nextFailed.add(image);
+        this.emoteFailed = nextFailed;
       });
     }
   }
@@ -209,6 +222,27 @@ export struct ReplyRichText {
     return parts.length === 1 ? parts[0].text : '';
   }
 
+  /** 纯表情 Text 没有文字基线时，部分真机会把整行测成零高度。 */
+  private isImageOnlyContent(): boolean {
+    const parts: Array<ReplyRenderPart> = parseReplyContent(this.reply);
+    if (parts.length === 0) return false;
+    for (let i: number = 0; i < parts.length; i++) {
+      if (parts[i].image.length === 0) return false;
+    }
+    return true;
+  }
+
+  private richContentMinHeight(): number {
+    const parts: Array<ReplyRenderPart> = parseReplyContent(this.reply);
+    let height: number = this.lineHeight;
+    for (let i: number = 0; i < parts.length; i++) {
+      if (parts[i].image.length > 0) {
+        height = Math.max(height, parts[i].imageSize > 1 ? this.emoteSize * 2 : this.emoteSize);
+      }
+    }
+    return height;
+  }
+
   private measurePlainHeight(width: number): void {
     if (width <= 0) return;
     try {
@@ -241,6 +275,11 @@ export struct ReplyRichText {
         })
     } else {
       Text() {
+        if (this.isImageOnlyContent()) {
+          // ImageSpanAlignment.BOTTOM 依赖文本基线；零宽字符只提供基线，不产生可见内容或额外宽度。
+          Span('\u200B')
+            .fontSize(this.fontSize)
+        }
         ForEach(parseReplyContent(this.reply), (part: ReplyRenderPart) => {
           if (part.image.length > 0 && this.emoteFailed.has(part.image)) {
             // 加载失败：[表情名] 文字兜底（与旧版回退一致），避免行内空白块。
@@ -264,6 +303,7 @@ export struct ReplyRichText {
       .fontSize(this.fontSize)
       .lineHeight(this.lineHeight)
       .width('100%')
+      .constraintSize({ minHeight: this.richContentMinHeight() })
       .onAreaChange((_o: Area, n: Area): void => {
         this.contentWidth = Number(n.width);
         this.rebuildHits();

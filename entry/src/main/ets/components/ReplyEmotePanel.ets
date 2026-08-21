@@ -75,9 +75,18 @@ export struct ReplyEmotePanel {
 
   private primeOne(url: string): void {
     if (url.length === 0 || this.emoteLocal.has(url)) return;
+    const cached: string = EmoteImageCache.localPathOf(url);
+    if (cached !== url) {
+      const nextCached: Map<string, string> = new Map<string, string>(this.emoteLocal);
+      nextCached.set(url, cached);
+      this.emoteLocal = nextCached;
+      return;
+    }
     EmoteImageCache.ensure(url).then((local: string) => {
       if (local !== url) {
-        this.emoteLocal.set(url, local);
+        const nextLocal: Map<string, string> = new Map<string, string>(this.emoteLocal);
+        nextLocal.set(url, local);
+        this.emoteLocal = nextLocal;
       }
     }).catch(() => {
     });

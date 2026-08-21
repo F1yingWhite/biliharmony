@@ -10,12 +10,12 @@ import { Immersive } from '../common/Immersive';
 import { BackButton } from '../components/BackButton';
 import { biliImageThumbnail } from '../common/ImageUrl';
 
-/** 图片位移缩短一档；黑底仍比图片多淡出约 180ms，保持返回时缓慢变亮。 */
+/** 返回时图片与黑底同步落定，再保留短暂稳定帧后完成 Navigation pop。 */
 const IMAGE_HERO_ENTER_DURATION: number = 280;
 const IMAGE_BG_ENTER_DURATION: number = 260;
 const IMAGE_HERO_RETURN_DURATION: number = 280;
-const IMAGE_BG_RETURN_DURATION: number = 460;
-const IMAGE_NAV_RETURN_DURATION: number = 500;
+const IMAGE_BG_RETURN_DURATION: number = 280;
+const IMAGE_NAV_RETURN_DURATION: number = 380;
 
 /** 用 VSync 驱动 hero 首帧提交，避免固定 setTimeout 在高刷/负载变化时跳过起始矩形。 */
 class ImageHeroFrameCallback extends FrameCallback {

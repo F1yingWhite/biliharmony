@@ -1241,16 +1241,24 @@ export struct SearchPage {
     .width('100%')
   }
 
-  // ===== 结果态：综合 Tab 视频分区（双列卡片流） =====
+  // ===== 结果态：综合 Tab 视频分区（双列卡片行） =====
   @Builder
-  AllVideoGrid(section: SearchAllSection) {
-    Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
-      ForEach(section.videos, (item: VideoItem) => {
+  AllVideoRow(section: SearchAllSection, index: number) {
+    Row() {
+      Column() {
+        VideoCard({ video: section.videos[index], idPrefix: 'search-' })
+      }
+      .width('48.5%')
+      Blank()
+      if (index + 1 < section.videos.length) {
         Column() {
-          VideoCard({ video: item, idPrefix: 'search-' })
+          VideoCard({ video: section.videos[index + 1], idPrefix: 'search-' })
         }
         .width('48.5%')
-      }, (item: VideoItem) => item.bvid + String(item.aid))
+      } else {
+        Column()
+          .width('48.5%')
+      }
     }
     .width('100%')
     .padding({ left: 12, right: 12 })
@@ -1287,12 +1295,18 @@ export struct SearchPage {
                   }
                 }, (item: PgcSearchItem) => String(item.seasonId))
               } else if (section.type === SearchTypes.video) {
-                ListItem() {
-                  this.AllVideoGrid(section)
-                }
+                ForEach(section.videos, (item: VideoItem, index: number) => {
+                  if (index % 2 === 0) {
+                    ListItem() {
+                      this.AllVideoRow(section, index)
+                    }
+                  }
+                }, (item: VideoItem) => item.bvid + String(item.aid))
               }
             }
-          }, (section: SearchAllSection) => section.type)
+          // 综合翻页只扩充 video 分区；把条目数纳入该分区 key，确保 ForEach 重新发现新增行。
+          }, (section: SearchAllSection) => section.type === SearchTypes.video ?
+            section.type + '-' + String(section.videos.length) : section.type)
           ListItem() {
             LoadMoreFooter({
               loading: this.loadingMore,

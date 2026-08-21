@@ -31,10 +31,6 @@ export struct MineView {
   @State user: UserInfo = new UserInfo();
   @State stat: UserStat = new UserStat();
   @State autoDark: boolean = false;
-  // 清空缓存后自增，驱动 cacheSizeText 重算并刷新菜单行显示。
-  @State cacheVersion: number = 0;
-  // 主 Tab 索引广播：切回「我的」时重算缓存大小（Tabs 保活，aboutToAppear 只首次触发）。
-  @StorageProp('mainTabIndex') @Watch('onMainTabIndexChanged') mainTabIndex: number = 0;
   /** 定时深色：每分钟应用一次，跨时刻后自动切换明暗（无需重启）。 */
   private autoTimer: number = -1;
   /** 定时深色时段编辑（TimePicker 抽屉）状态；以小时/分钟数字存储，跨组件直接赋值驱动刷新。 */
@@ -509,7 +505,7 @@ export struct MineView {
 
         this.GroupDivider()
 
-        this.NavRow('清空缓存', { value: this.cacheSizeText() }, () => {
+        this.NavRow('清空缓存', { value: '点击查看' }, () => {
           this.confirmClearCache();
         })
 
@@ -541,19 +537,6 @@ export struct MineView {
       .clip(true)
     }
     .width('100%')
-  }
-
-  /** 递归统计缓存目录总大小，展示在菜单行右侧。 */
-  private cacheSizeText(): string {
-    // 引用 cacheVersion 建立依赖：清空缓存自增后本行自动重算刷新。
-    if (this.cacheVersion < 0) return '0 B';
-    try {
-      const dir: string = this.cacheDirPath();
-      if (dir.length === 0) return '0 B';
-      return this.formatBytes(this.dirSize(dir));
-    } catch (e) {
-      return '0 B';
-    }
   }
 
   /** 递归累加目录下所有文件的字节数（statSync 目录只给目录项大小，不等于内容总大小）。 */
@@ -613,19 +596,18 @@ export struct MineView {
     return context.cacheDir;
   }
 
-  /** 切回「我的」（索引 2）时重算缓存大小：Tabs 保活，aboutToAppear 只在首次触发。 */
-  private onMainTabIndexChanged(): void {
-    if (this.mainTabIndex !== 2) return;
-    this.cacheVersion++;
-    hilog.info(0x0000, 'BiliCache', 'cache size on mine-tab enter: %{public}d bytes',
-      this.dirSize(this.cacheDirPath()));
-  }
-
-  /** 清空缓存前的确认弹窗。 */
+  /** 用户点击缓存入口后才统计大小并展示确认弹窗。 */
   private confirmClearCache(): void {
+    const dir: string = this.cacheDirPath();
+    if (dir.length === 0) {
+      this.toast('无法访问缓存目录');
+      return;
+    }
+    const size: number = this.dirSize(dir);
+    hilog.info(0x0000, 'BiliCache', 'cache size on demand: %{public}d bytes', size);
     promptAction.showDialog({
       title: '清空缓存',
-      message: `将删除 ${this.cacheSizeText()} 的图片/弹幕等临时文件，不影响登录态。`,
+      message: `将删除 ${this.formatBytes(size)} 的图片/弹幕等临时文件，不影响登录态。`,
       buttons: [
         { text: '取消', color: '#9499A0' },
         { text: '清空', color: this.accent },
@@ -646,7 +628,6 @@ export struct MineView {
     }
     try {
       const freed: number = this.clearDir(dir);
-      this.cacheVersion++;
       hilog.info(0x0000, 'BiliCache', 'clearCache done: freed=%{public}d bytes from %{public}s', freed, dir);
       this.toast(freed > 0 ? `已清空 ${this.formatBytes(freed)}` : '缓存已是空的');
     } catch (e) {

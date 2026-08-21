@@ -1,7 +1,8 @@
 /**
  * 动态视图：关注动态 feed（需登录）
  */
-import { DynamicItem, DynamicPageData, BiliEmote, RelationUserItem, RelationUserPageData } from '../model/Models';
+import { DynamicItem, DynamicPageData, DynamicRichNode, BiliEmote, RelationUserItem,
+  RelationUserPageData } from '../model/Models';
 import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY, NAV_DYNAMIC_DETAIL,
   NAV_IMAGE_VIEWER,
   NAV_LIVE_ROOM, NAV_LOGIN,
@@ -46,34 +47,53 @@ class DynamicContentPart {
 // 表情拆分结果按动态 id 缓存（内容不可变），避免每次 build 重算 O(内容×表情数) 扫描。
 const DYN_PARTS_CACHE_LIMIT: number = 100;
 const dynPartsCache: Map<string, Array<DynamicContentPart>> = new Map<string, Array<DynamicContentPart>>();
+const DYN_RICH_DETAIL_CACHE_LIMIT: number = 80;
+const dynRichDetailCache: Map<string, DynamicItem> = new Map<string, DynamicItem>();
+const dynRichDetailInFlight: Map<string, Promise<DynamicItem | null>> =
+  new Map<string, Promise<DynamicItem | null>>();
 
-function contentPartsOf(item: DynamicItem, emoteVersion: number): Array<DynamicContentPart> {
-  // 同一 dynId 的 feed 简版与 detail 完整版可能拥有不同表情节点，缓存键必须包含节点签名。
-  let emoteSignature: string = '';
-  for (let i: number = 0; i < item.emotes.length; i++) {
-    emoteSignature += '|' + item.emotes[i].text + '=' + item.emotes[i].url;
-  }
-  // 版本号纳入缓存键：表情表加载完成后用旧缓存会永远拿不到表情图。
-  const cacheKey: string = item.dynId + '|v' + String(emoteVersion) + '|' + item.content + emoteSignature;
-  const cached: Array<DynamicContentPart> | undefined = dynPartsCache.get(cacheKey);
-  if (cached !== undefined) {
-    return cached;
-  }
+function ensureDynamicRichDetail(dynId: string): Promise<DynamicItem | null> {
+  const cached: DynamicItem | undefined = dynRichDetailCache.get(dynId);
+  if (cached !== undefined) return Promise.resolve(cached);
+  const running: Promise<DynamicItem | null> | undefined = dynRichDetailInFlight.get(dynId);
+  if (running !== undefined) return running;
+  const request: Promise<DynamicItem | null> = DynamicApi.getDynamicDetail(dynId).then((detail: DynamicItem | null) => {
+    if (detail !== null) {
+      if (dynRichDetailCache.size >= DYN_RICH_DETAIL_CACHE_LIMIT) {
+        const oldest: IteratorResult<string> = dynRichDetailCache.keys().next();
+        if (!oldest.done) dynRichDetailCache.delete(oldest.value);
+      }
+      dynRichDetailCache.set(dynId, detail);
+    }
+    return detail;
+  }).catch((): DynamicItem | null => null).finally(() => {
+    dynRichDetailInFlight.delete(dynId);
+  });
+  dynRichDetailInFlight.set(dynId, request);
+  return request;
+}
+
+function splitDynamicText(text: string, emotes: Array<BiliEmote>, keyPrefix: string): Array<DynamicContentPart> {
   const result: Array<DynamicContentPart> = [];
-  let rest: string = item.content;
+  let rest: string = text;
   let keyIndex: number = 0;
   while (rest.length > 0) {
     let foundAt: number = rest.length;
     let found: BiliEmote | null = null;
-    for (let i: number = 0; i < item.emotes.length; i++) {
-      const at: number = rest.indexOf(item.emotes[i].text);
-      if (at >= 0 && at < foundAt) { foundAt = at; found = item.emotes[i]; }
+    for (let i: number = 0; i < emotes.length; i++) {
+      const at: number = rest.indexOf(emotes[i].text);
+      if (at >= 0 && (at < foundAt || (at === foundAt && found !== null &&
+        emotes[i].text.length > found.text.length))) {
+        foundAt = at;
+        found = emotes[i];
+      }
     }
     // 兜底：接口没下发 emoji 节点时（直播预告等），用通用表情表解析 [xxx] 占位符。
     let fallbackUrl: string = '';
     let fallbackToken: string = '';
     if (found === null) {
-      const tokenMatch: RegExpExecArray | null = /\[[^\[\]]{1,16}\]/.exec(rest);
+      // 官方主题表情的名称可能很长（例如活动周年同人表情），16 字限制会把它留成原文。
+      const tokenMatch: RegExpExecArray | null = /\[[^\[\]]{1,64}\]/.exec(rest);
       if (tokenMatch !== null) {
         const url: string = EmoteResolver.lookup(tokenMatch[0]);
         if (url.length > 0) {
@@ -85,19 +105,51 @@ function contentPartsOf(item: DynamicItem, emoteVersion: number): Array<DynamicC
     }
     if (found === null && fallbackUrl.length === 0) {
       const part: DynamicContentPart = new DynamicContentPart();
-      part.text = rest; part.key = item.dynId + '-t' + String(keyIndex++); result.push(part); break;
+      part.text = rest; part.key = keyPrefix + '-t' + String(keyIndex++); result.push(part); break;
     }
     if (foundAt > 0) {
       const part: DynamicContentPart = new DynamicContentPart();
-      part.text = rest.substring(0, foundAt); part.key = item.dynId + '-t' + String(keyIndex++); result.push(part);
+      part.text = rest.substring(0, foundAt); part.key = keyPrefix + '-t' + String(keyIndex++); result.push(part);
     }
     const emotePart: DynamicContentPart = new DynamicContentPart();
     emotePart.image = found !== null ? found.displayUrl() : fallbackUrl;
     emotePart.imageSize = found !== null ? found.size : 1;
     emotePart.imageLabel = found !== null ? found.text : fallbackToken;
-    emotePart.key = item.dynId + '-e' + String(keyIndex++);
+    emotePart.key = keyPrefix + '-e' + String(keyIndex++);
     result.push(emotePart);
     rest = rest.substring(foundAt + (found !== null ? found.text.length : fallbackToken.length));
+  }
+  return result;
+}
+
+function contentPartsOf(item: DynamicItem, emoteVersion: number): Array<DynamicContentPart> {
+  // 同一 dynId 的 feed 简版与 detail 完整版可能拥有不同表情节点，缓存键必须包含节点签名。
+  let nodeSignature: string = '';
+  for (let i: number = 0; i < item.richNodes.length; i++) {
+    const node: DynamicRichNode = item.richNodes[i];
+    nodeSignature += '|n' + node.text + '=' + (node.emote !== null ? node.emote.displayUrl() : '');
+  }
+  // 版本号纳入缓存键：表情表加载完成后用旧缓存会永远拿不到表情图。
+  const cacheKey: string = item.dynId + '|v' + String(emoteVersion) + '|' + item.content + nodeSignature;
+  const cached: Array<DynamicContentPart> | undefined = dynPartsCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  let result: Array<DynamicContentPart> = [];
+  if (item.richNodes.length > 0) {
+    for (let i: number = 0; i < item.richNodes.length; i++) {
+      const node: DynamicRichNode = item.richNodes[i];
+      if (node.emote !== null && node.emote.displayUrl().length > 0) {
+        const emotePart: DynamicContentPart = new DynamicContentPart();
+        emotePart.image = node.emote.displayUrl();
+        emotePart.imageSize = node.emote.size;
+        emotePart.imageLabel = node.text;
+        emotePart.key = item.dynId + '-node-emote-' + String(i);
+        result.push(emotePart);
+      } else if (node.text.length > 0) {
+        result = result.concat(splitDynamicText(node.text, [], item.dynId + '-node-' + String(i)));
+      }
+    }
+  } else {
+    result = splitDynamicText(item.content, item.emotes, item.dynId);
   }
   if (dynPartsCache.size >= DYN_PARTS_CACHE_LIMIT) {
     const oldest: IteratorResult<string> = dynPartsCache.keys().next();
@@ -133,12 +185,15 @@ export struct DynCard {
   @State emoteLocal: Map<string, string> = new Map<string, string>();
   /** 确认加载失败的表情 URL：回退渲染 [表情名] 文字，避免行内空白块。 */
   @State emoteFailed: Set<string> = new Set<string>();
+  /** Feed 缺失表情节点时按动态 ID 补拉的详情正文；只替换正文渲染，不改卡片其他字段。 */
+  @State hydratedContent: DynamicItem = new DynamicItem();
   /** 图片宫格可用宽（onAreaChange 实测），用于按官方三列正方形单元计算高度。 */
   @State gridWidth: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   // 表情表加载完成后版本号 +1：引用它的 build 会重跑，拆分缓存键也随之失效。
   @StorageProp('emoteResolverVersion') emoteVer: number = 0;
+  private hydrateGeneration: number = 0;
 
   aboutToAppear(): void {
     EmoteResolver.ensureLoaded();
@@ -156,6 +211,10 @@ export struct DynCard {
     this.syncFromItem();
   }
 
+  aboutToDisappear(): void {
+    this.hydrateGeneration++;
+  }
+
   onItemChanged(): void {
     this.syncFromItem();
   }
@@ -164,24 +223,67 @@ export struct DynCard {
     this.liked = this.item.liked;
     this.likeCount = this.item.like;
     this.forwardCount = this.item.forward;
+    const cached: DynamicItem | undefined = dynRichDetailCache.get(this.item.dynId);
+    this.hydratedContent = cached !== undefined ? cached : new DynamicItem();
+    this.hydrateMissingRichContent();
     this.primeEmoteLocalCache();
+  }
+
+  private renderContentItem(): DynamicItem {
+    return this.hydratedContent.dynId === this.item.dynId ? this.hydratedContent : this.item;
+  }
+
+  private hasUnresolvedRichEmote(item: DynamicItem): boolean {
+    const tokenPattern: RegExp = /\[[^\[\]\r\n]{1,64}\]/;
+    if (item.richNodes.length === 0) return tokenPattern.test(item.content);
+    for (let i: number = 0; i < item.richNodes.length; i++) {
+      if (item.richNodes[i].emote === null && tokenPattern.test(item.richNodes[i].text)) return true;
+    }
+    return false;
+  }
+
+  /** Web Feed 会省略部分主题表情的 emoji 对象；只为含未解析占位符的可见卡片补拉详情。 */
+  private hydrateMissingRichContent(): void {
+    const item: DynamicItem = this.item;
+    const generation: number = ++this.hydrateGeneration;
+    if (this.detailMode || item.dynId.length === 0 || !this.hasUnresolvedRichEmote(item) ||
+      this.hydratedContent.dynId === item.dynId) return;
+    ensureDynamicRichDetail(item.dynId).then((detail: DynamicItem | null): void => {
+      if (generation !== this.hydrateGeneration || detail === null || this.item.dynId !== item.dynId) return;
+      this.hydratedContent = detail;
+      this.primeEmoteLocalCache();
+    }).catch((): void => {
+    });
   }
 
   /** 把内容里出现的表情 URL 逐一下载到本地缓存；完成后触发重渲染走本地路径。 */
   private primeEmoteLocalCache(): void {
-    const parts: Array<DynamicContentPart> = contentPartsOf(this.item, this.emoteVer);
+    const parts: Array<DynamicContentPart> = contentPartsOf(this.renderContentItem(), this.emoteVer);
     for (let i: number = 0; i < parts.length; i++) {
       const image: string = parts[i].image;
       if (image.length === 0 || this.emoteLocal.has(image) || this.emoteFailed.has(image)) continue;
+      const cached: string = EmoteImageCache.localPathOf(image);
+      if (cached !== image) {
+        const nextCached: Map<string, string> = new Map<string, string>(this.emoteLocal);
+        nextCached.set(image, cached);
+        this.emoteLocal = nextCached;
+        continue;
+      }
       EmoteImageCache.ensure(image).then((local: string) => {
         // 与 image 相同表示下载失败；只有拿到了本地路径才更新，否则记失败走 [表情名] 回退。
         if (local !== image) {
-          this.emoteLocal.set(image, local);
+          const nextLocal: Map<string, string> = new Map<string, string>(this.emoteLocal);
+          nextLocal.set(image, local);
+          this.emoteLocal = nextLocal;
         } else {
-          this.emoteFailed.add(image);
+          const nextFailed: Set<string> = new Set<string>(this.emoteFailed);
+          nextFailed.add(image);
+          this.emoteFailed = nextFailed;
         }
       }).catch(() => {
-        this.emoteFailed.add(image);
+        const nextFailed: Set<string> = new Set<string>(this.emoteFailed);
+        nextFailed.add(image);
+        this.emoteFailed = nextFailed;
       });
     }
   }
@@ -289,11 +391,11 @@ export struct DynCard {
   }
 
   private imgId(dynId: string, index: number): string {
-    return this.idPrefix + 'dynamic-img-' + dynId + '-' + String(index);
+    return this.idPrefix + 'dynamic-host-' + this.item.dynId + '-img-' + dynId + '-' + String(index);
   }
 
   private imgTransitionId(dynId: string, index: number): string {
-    return this.idPrefix + 'image-viewer-dynamic-' + dynId + '-' + String(index);
+    return this.idPrefix + 'image-viewer-host-' + this.item.dynId + '-img-' + dynId + '-' + String(index);
   }
 
   private cardId(): string {
@@ -302,7 +404,7 @@ export struct DynCard {
 
   private videoCoverId(item: DynamicItem): string {
     const videoId: string = item.bvid.length > 0 ? item.bvid : 'a' + String(item.aid);
-    return this.idPrefix + 'dynamic-video-cover-' + item.dynId + '-' + videoId;
+    return this.idPrefix + 'dynamic-video-host-' + this.item.dynId + '-cover-' + item.dynId + '-' + videoId;
   }
 
   /** 图文动态宫格：单图 2/3 宽正方形，多图三列正方形单元（对齐官方客户端）。
@@ -310,16 +412,20 @@ export struct DynCard {
   @Builder
   ImageGrid(item: DynamicItem, inset: number) {
     if (item.images.length === 1) {
-      Image(biliImageThumbnail(item.images[0], 900))
-        .width(this.gridCell(inset) * 2 + 4)
-        .height(this.gridCell(inset) * 2 + 4)
-        .objectFit(ImageFit.Cover)
-        .borderRadius(8)
-        .id(this.imgId(item.dynId, 0))
-        .geometryTransition(this.imgTransitionId(item.dynId, 0))
-        .onClick(() => {
-          this.openItemImage(item, 0);
-        })
+      // 单图也必须有内容级 key。DynCard 被 LazyForEach 复用时，旧 Image 节点会在新图加载前
+      // 保留上一条动态的位图，视觉上就像“下面的图片串到上面”。
+      ForEach(item.images.slice(0, 1), (src: string) => {
+        Image(biliImageThumbnail(src, 900))
+          .width(this.gridCell(inset) * 2 + 4)
+          .height(this.gridCell(inset) * 2 + 4)
+          .objectFit(ImageFit.Cover)
+          .borderRadius(8)
+          .id(this.imgId(item.dynId, 0))
+          .geometryTransition(this.imgTransitionId(item.dynId, 0))
+          .onClick(() => {
+            this.openItemImage(item, 0);
+          })
+      }, (src: string) => item.dynId + '-single-' + src)
     } else {
       Grid() {
         ForEach(item.images.slice(0, 9), (src: string, index: number) => {
@@ -554,12 +660,14 @@ export struct DynCard {
       if (item.title.length > 0) {
         Row({ space: 9 }) {
           if (item.cover.length > 0) {
-            Image(biliImageThumbnail(item.cover, 240))
-              .width(112)
-              .height(68)
-              .objectFit(ImageFit.Cover)
-              .borderRadius(6)
-              .id(this.videoCoverId(item))
+            ForEach([item.cover], (cover: string) => {
+              Image(biliImageThumbnail(cover, 240))
+                .width(112)
+                .height(68)
+                .objectFit(ImageFit.Cover)
+                .borderRadius(6)
+                .id(this.videoCoverId(item))
+            }, (cover: string) => item.dynId + '-forward-cover-' + cover)
           }
           Column({ space: 5 }) {
             Text(item.title).fontSize(13).fontColor(this.isDark ? '#E6E6E6' : '#18191C').maxLines(2)
@@ -639,10 +747,10 @@ export struct DynCard {
       })
 
       // 内容
-      if (this.item.content.length > 0) {
+      if (this.renderContentItem().content.length > 0) {
         // 行内流：与评论区一致，表情随文字同流换行（Flex 独立 item 会把表情挤到新行），底部对齐。
         Text() {
-          ForEach(contentPartsOf(this.item, this.emoteVer), (part: DynamicContentPart) => {
+          ForEach(contentPartsOf(this.renderContentItem(), this.emoteVer), (part: DynamicContentPart) => {
             if (part.image.length > 0 && this.emoteFailed.has(part.image)) {
               Span(part.imageLabel.length > 0 ? part.imageLabel : '[表情]')
             } else if (part.image.length > 0) {
@@ -665,26 +773,37 @@ export struct DynCard {
 
       // 图文/专栏动态图片宫格（详情态也走缩略图，内存友好；点击进 ImageViewer 时再拉原图）。
       if (this.item.images.length > 0) {
-        this.ImageGrid(this.item, 0)
+        Stack({ alignContent: Alignment.TopStart }) {
+          // 图片本身仍打开看图器；单图左右的留白属于动态卡片，点击应进入动态详情。
+          Row()
+            .width('100%')
+            .height(this.imageGridHeightFor(this.item.images.slice(0, 9), 0))
+            .onClick(() => this.openDetail())
+          this.ImageGrid(this.item, 0)
+        }
+        .width('100%')
+        .height(this.imageGridHeightFor(this.item.images.slice(0, 9), 0))
       }
 
       // 视频卡片
       if (this.item.title.length > 0) {
         Row({ space: 10 }) {
           if (this.item.cover.length > 0) {
-            Stack({ alignContent: Alignment.TopEnd }) {
-              Image(this.item.cover)
-                .width(132)
-                .height(78)
-                .objectFit(ImageFit.Cover)
-                .borderRadius(7)
-              if (this.item.badge.length > 0) {
-                Text(this.item.badge)
-                  .fontSize(9).fontColor('#FFFFFF').backgroundColor('#B3FB7299')
-                  .padding({ left: 5, right: 5, top: 2, bottom: 2 }).borderRadius(4).margin(5)
+            ForEach([this.item.cover], (cover: string) => {
+              Stack({ alignContent: Alignment.TopEnd }) {
+                Image(cover)
+                  .width(132)
+                  .height(78)
+                  .objectFit(ImageFit.Cover)
+                  .borderRadius(7)
+                if (this.item.badge.length > 0) {
+                  Text(this.item.badge)
+                    .fontSize(9).fontColor('#FFFFFF').backgroundColor('#B3FB7299')
+                    .padding({ left: 5, right: 5, top: 2, bottom: 2 }).borderRadius(4).margin(5)
+                }
               }
-            }
-            .id(this.videoCoverId(this.item))
+              .id(this.videoCoverId(this.item))
+            }, (cover: string) => this.item.dynId + '-video-cover-' + cover)
           }
           Column({ space: 6 }) {
             Text(this.item.title)

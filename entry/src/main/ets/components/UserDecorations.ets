@@ -2,21 +2,78 @@
  * 用户装扮公用组件。
  * 评论、动态和个人空间共用同一套头像/挂件比例，避免各页面分别调尺寸后互相漂移。
  */
+import { RemoteAssetCache } from '../common/RemoteAssetCache';
 
 @Component
 export struct DecoratedAvatar {
   @StorageProp('isDark') isDark: boolean = false;
   @Prop @Watch('onFaceChanged') face: string = '';
-  @Prop pendant: string = '';
+  @Prop @Watch('onPendantChanged') pendant: string = '';
   @Prop avatarSize: number = 40;
   @Prop containerSize: number = 54;
   @Prop pendantScale: number = 1.38;
   @Prop avatarBorderWidth: number = 0;
   @Prop avatarBorderColor: string = '#00FFFFFF';
   @State avatarLoaded: boolean = false;
+  @State faceLocal: string = '';
+  @State pendantLocal: string = '';
+  private faceGeneration: number = 0;
+  private pendantGeneration: number = 0;
+
+  aboutToAppear(): void {
+    this.primeFace();
+    this.primePendant();
+  }
+
+  aboutToDisappear(): void {
+    this.faceGeneration++;
+    this.pendantGeneration++;
+  }
 
   private onFaceChanged(): void {
     this.avatarLoaded = false;
+    this.primeFace();
+  }
+
+  private onPendantChanged(): void {
+    this.primePendant();
+  }
+
+  private primeFace(): void {
+    const url: string = this.face;
+    const generation: number = ++this.faceGeneration;
+    const cached: string = RemoteAssetCache.cachedAvatar(url);
+    this.faceLocal = cached !== url ? cached : '';
+    if (!url.startsWith('http') || cached !== url) return;
+    RemoteAssetCache.ensureAvatar(url).then((local: string): void => {
+      if (generation === this.faceGeneration && this.face === url && local !== url) {
+        this.avatarLoaded = false;
+        this.faceLocal = local;
+      }
+    }).catch((): void => {
+    });
+  }
+
+  private faceSource(): string {
+    return this.faceLocal.length > 0 ? this.faceLocal : this.face;
+  }
+
+  private primePendant(): void {
+    const url: string = this.pendant;
+    const generation: number = ++this.pendantGeneration;
+    const cached: string = RemoteAssetCache.cachedDecoration(url);
+    this.pendantLocal = cached !== url ? cached : '';
+    if (!url.startsWith('http') || cached !== url) return;
+    RemoteAssetCache.ensureDecoration(url).then((local: string): void => {
+      if (generation === this.pendantGeneration && this.pendant === url && local !== url) {
+        this.pendantLocal = local;
+      }
+    }).catch((): void => {
+    });
+  }
+
+  private pendantSource(): string {
+    return this.pendantLocal.length > 0 ? this.pendantLocal : this.pendant;
   }
 
   @Builder
@@ -28,40 +85,44 @@ export struct DecoratedAvatar {
         .fill(this.isDark ? '#303238' : '#E7E9EC')
         .opacity(this.avatarLoaded ? 0 : 1)
       if (this.avatarBorderWidth > 0) {
-        Image(this.face.length > 0 ? this.face : $r('app.media.placeholder_avatar_noface'))
-          .alt($r('app.media.placeholder_avatar_noface'))
-          .width(this.avatarSize)
-          .height(this.avatarSize)
-          .borderRadius(this.avatarSize / 2)
-          .objectFit(ImageFit.Cover)
-          .border({ width: this.avatarBorderWidth, color: this.avatarBorderColor })
-          .clip(true)
-          .opacity(this.avatarLoaded ? 1 : 0)
-          .animation({ duration: 120, curve: Curve.EaseOut })
-          .onComplete(() => {
-            this.avatarLoaded = true;
-          })
-          .onError(() => {
-            this.avatarLoaded = true;
-          })
+        ForEach([this.faceSource()], (source: string) => {
+          Image(source.length > 0 ? source : $r('app.media.placeholder_avatar_noface'))
+            .alt($r('app.media.placeholder_avatar_noface'))
+            .width(this.avatarSize)
+            .height(this.avatarSize)
+            .borderRadius(this.avatarSize / 2)
+            .objectFit(ImageFit.Cover)
+            .border({ width: this.avatarBorderWidth, color: this.avatarBorderColor })
+            .clip(true)
+            .opacity(this.avatarLoaded ? 1 : 0)
+            .animation({ duration: 120, curve: Curve.EaseOut })
+            .onComplete(() => {
+              this.avatarLoaded = true;
+            })
+            .onError(() => {
+              this.avatarLoaded = true;
+            })
+        }, (source: string) => source)
       } else {
         // ArkUI 即使收到 0 宽边框也可能在圆形裁切边缘留下半透明描边；
         // 普通头像与带挂件头像完全不挂 border 修饰器。
-        Image(this.face.length > 0 ? this.face : $r('app.media.placeholder_avatar_noface'))
-          .alt($r('app.media.placeholder_avatar_noface'))
-          .width(this.avatarSize)
-          .height(this.avatarSize)
-          .borderRadius(this.avatarSize / 2)
-          .objectFit(ImageFit.Cover)
-          .clip(true)
-          .opacity(this.avatarLoaded ? 1 : 0)
-          .animation({ duration: 120, curve: Curve.EaseOut })
-          .onComplete(() => {
-            this.avatarLoaded = true;
-          })
-          .onError(() => {
-            this.avatarLoaded = true;
-          })
+        ForEach([this.faceSource()], (source: string) => {
+          Image(source.length > 0 ? source : $r('app.media.placeholder_avatar_noface'))
+            .alt($r('app.media.placeholder_avatar_noface'))
+            .width(this.avatarSize)
+            .height(this.avatarSize)
+            .borderRadius(this.avatarSize / 2)
+            .objectFit(ImageFit.Cover)
+            .clip(true)
+            .opacity(this.avatarLoaded ? 1 : 0)
+            .animation({ duration: 120, curve: Curve.EaseOut })
+            .onComplete(() => {
+              this.avatarLoaded = true;
+            })
+            .onError(() => {
+              this.avatarLoaded = true;
+            })
+        }, (source: string) => source)
       }
     }
     .width(this.avatarSize)
@@ -72,7 +133,7 @@ export struct DecoratedAvatar {
     Stack({ alignContent: Alignment.Center }) {
       this.AvatarImage()
       if (this.pendant.length > 0) {
-        Image(this.pendant)
+        Image(this.pendantSource())
           .width(this.avatarSize * this.pendantScale)
           .height(this.avatarSize * this.pendantScale)
           .objectFit(ImageFit.Contain)
@@ -89,7 +150,7 @@ export struct DecoratedAvatar {
  *  原始宽高比显示为右上角小卡（官方动态卡片样式），编号叠加在图右侧 1:1 编号区。 */
 @Component
 export struct UserDecorationBanner {
-  @Prop imageUrl: string = '';
+  @Prop @Watch('onImageUrlChanged') imageUrl: string = '';
   @Prop numberPrefix: string = 'NO.';
   @Prop numberText: string = '';
   @Prop numberColor: string = '#FFFFFF';
@@ -102,6 +163,37 @@ export struct UserDecorationBanner {
   @Prop fitWidth: boolean = false;
   /** 图片原始宽高比（onComplete 实测），未加载完成前按 3:1 预留。 */
   @State imageAspect: number = 0;
+  @State imageLocal: string = '';
+  private imageGeneration: number = 0;
+
+  aboutToAppear(): void {
+    this.primeImage();
+  }
+
+  aboutToDisappear(): void {
+    this.imageGeneration++;
+  }
+
+  private onImageUrlChanged(): void {
+    this.imageAspect = 0;
+    this.primeImage();
+  }
+
+  private primeImage(): void {
+    const url: string = this.imageUrl;
+    const generation: number = ++this.imageGeneration;
+    const cached: string = RemoteAssetCache.cachedDecoration(url);
+    this.imageLocal = cached !== url ? cached : '';
+    if (!url.startsWith('http') || cached !== url) return;
+    RemoteAssetCache.ensureDecoration(url).then((local: string): void => {
+      if (generation === this.imageGeneration && this.imageUrl === url && local !== url) this.imageLocal = local;
+    }).catch((): void => {
+    });
+  }
+
+  private imageSource(): string {
+    return this.imageLocal.length > 0 ? this.imageLocal : this.imageUrl;
+  }
 
   private normalizedNumber(): string {
     // 不同接口可能返回 "No. 000318"、"NO.000318" 或纯编号，统一只保留下行数字。
@@ -123,7 +215,7 @@ export struct UserDecorationBanner {
   build() {
     Stack({ alignContent: this.fitWidth ? Alignment.Start : (this.numberOnLeft ? Alignment.TopStart : Alignment.TopEnd) }) {
       if (this.imageUrl.length > 0) {
-        Image(this.imageUrl)
+        Image(this.imageSource())
           .width(this.fitWidth ? this.bannerWidth() : '100%')
           .height(this.bannerHeight)
           .objectFit(this.fitWidth ? ImageFit.Contain : ImageFit.Cover)
@@ -176,12 +268,12 @@ export struct UserDecorationBanner {
               .maxLines(1)
               .letterSpacing(0)
           }
-            // 972:162 装扮图的最右侧 1:1 区域专门留给粉丝编号；
-            // 与背景图同高并右对齐，保持在装扮内容上层，不另加深色胶囊。
+            // 评论卡片右侧通常还有一段透明留白，编号向内收后能贴近装扮主体。
             .width(this.bannerHeight)
             .height(this.bannerHeight)
             .alignItems(HorizontalAlign.Center)
             .justifyContent(FlexAlign.Center)
+            .translate({ x: -12 })
             .hitTestBehavior(HitTestMode.None)
         }
       }
