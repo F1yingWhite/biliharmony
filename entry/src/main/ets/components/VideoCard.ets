@@ -4,10 +4,11 @@
  * @Reusable：LazyForEach 回收复用，数据通过 @Prop + aboutToReuse 刷新
  */
 import { display } from '@kit.ArkUI';
+import { image } from '@kit.ImageKit';
 import { VideoItem } from '../model/Models';
 import { formatCount, formatDuration } from '../common/Utils';
-import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY, NAV_VIDEO_DETAIL,
-  VideoDetailParam, ImageViewerSrcRect } from '../common/AppRouter';
+import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
+  NAV_VIDEO_DETAIL, VideoDetailParam, ImageViewerSrcRect } from '../common/AppRouter';
 import { Haptic } from '../common/Haptic';
 import { UserStore } from '../common/UserStore';
 import { FeedCardTitle, FeedCoverImage, FeedGradientMask } from './FeedCardParts';
@@ -31,6 +32,8 @@ export struct VideoCard {
    * 入场动画便从错误的矩形（常是右侧相邻 Tab）放大。各调用方传唯一前缀区分。
    */
   @Prop idPrefix: string = '';
+  /** 首页开启整卡到详情页的一镜到底；其他复用场景保留现有封面转场。 */
+  @Prop wholeCardTransition: boolean = false;
   /** UP 主信息行显示 ⋮（举报/不想看）：首页信息流开启（@Prop 保证跨容器复用不串台）。 */
   @Prop showMore: boolean = false;
   onReport: ((item: VideoItem) => void) | null = null;
@@ -43,6 +46,7 @@ export struct VideoCard {
     this.video = params.video as VideoItem;
     this.compact = params.compact === true;
     this.idPrefix = params.idPrefix === undefined ? '' : params.idPrefix as string;
+    this.wholeCardTransition = params.wholeCardTransition === true;
     // showMore 现为 @Prop（框架自动同步）；两个回调是普通属性，复用必须按新调用方重置。
     this.showMore = params.showMore === true;
     const report: Object | undefined = params['onReport'];
@@ -336,6 +340,30 @@ export struct VideoCard {
         // FeedCoverImage 使用 900w 缩略图；hero 传同一 URL 才能命中已解码纹理缓存。
         cover: biliImageThumbnail(this.video.cover, 900),
       };
+      if (this.wholeCardTransition) {
+        try {
+          const rect = this.getUIContext().getComponentUtils().getRectangleById(this.cardId());
+          const x: number = this.getUIContext().px2vp(rect.windowOffset.x);
+          const vpW: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().width);
+          if (rect.size.width > 0 && rect.size.height > 0 && x >= 0 && x < vpW) {
+            const snapshot: image.PixelMap = this.getUIContext().getComponentSnapshot().getSync(this.cardId(), {
+              waitUntilRenderFinished: true,
+            });
+            param.cardRect = {
+              x: x,
+              y: this.getUIContext().px2vp(rect.windowOffset.y),
+              w: this.getUIContext().px2vp(rect.size.width),
+              h: this.getUIContext().px2vp(rect.size.height),
+            };
+            // PixelMap 不能放进 NavPathStack 参数；官方示例同样通过页外存储把快照交给目标页。
+            AppStorage.setOrCreate<image.PixelMap>(HERO_BG_SNAPSHOT_KEY, snapshot);
+            this.pushDetail(param, undefined);
+            return;
+          }
+        } catch (e) {
+          // 截图或测量失败时回退到原有封面转场，点击不能因此失效。
+        }
+      }
       // 只记录封面窗口矩形：详情页仅让封面飞向播放区，标题、数据和整页都不参与缩放。
       // 根页面 push 无共享元素转场，且要关默认右滑动画（push 第三参 false）。
       let srcRect: ImageViewerSrcRect | undefined = undefined;
@@ -362,8 +390,8 @@ export struct VideoCard {
 
   /** 详情页 push：官方 Navigation 自定义内容转场在 hero 期间保活来源页。 */
   private pushDetail(param: VideoDetailParam, srcRect: ImageViewerSrcRect | undefined): void {
-    if (srcRect !== undefined) {
-      param.srcRect = srcRect;
+    if (param.cardRect !== undefined || srcRect !== undefined) {
+      if (srcRect !== undefined) param.srcRect = srcRect;
       AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
       AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
     }

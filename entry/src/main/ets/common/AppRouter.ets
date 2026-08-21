@@ -4,11 +4,11 @@
  */
 import { FavoriteFolderItem } from '../model/Models';
 
-/** Index 根 Stack 的组件 id：push 二级页前用它截屏做过渡底衬（见 hero 背景快照）。 */
+/** Index 根 Stack 的组件 id：需要整页过渡底衬时可截取该组件。 */
 export const APP_ROOT_SNAPSHOT_ID: string = 'bili-app-root';
 
-/** AppStorage 键：根首页截图 PixelMap。走 AppStorage 而非路由参数——NavPathStack 会克隆
- *  参数对象，原生 PixelMap 传不过去；push 前写入，目标页 aboutToAppear 读取、出栈时删除。 */
+/** AppStorage 键：整卡一镜到底的临时 PixelMap。走 AppStorage 而非路由参数——NavPathStack 会克隆
+ *  参数对象，原生 PixelMap 传不过去；push 前写入，目标页 aboutToAppear 读取并删除键。 */
 export const HERO_BG_SNAPSHOT_KEY: string = 'heroBgSnapshot';
 /** 使用 Navigation 官方自定义内容转场保活来源页，供独立 hero 在两页之上完成飞行。 */
 export const HERO_NAV_TRANSITION_ACTIVE_KEY: string = 'heroNavTransitionActive';
@@ -23,6 +23,8 @@ export interface VideoDetailParam {
   cover?: string;
   /** 点击卡片的窗口矩形（vp）：有值时详情页从卡片位置手动放大入场（根页面 push 无共享元素转场）。 */
   srcRect?: ImageViewerSrcRect;
+  /** 首页整卡一镜到底的窗口矩形（vp）；快照通过 HERO_BG_SNAPSHOT_KEY 单独传递。 */
+  cardRect?: ImageViewerSrcRect;
 }
 
 /** 用户空间页跳转参数 */

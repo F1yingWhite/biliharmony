@@ -3,7 +3,8 @@
  */
 import { DynamicItem, DynamicPageData, DynamicRichNode, BiliEmote, RelationUserItem,
   RelationUserPageData } from '../model/Models';
-import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY, NAV_DYNAMIC_DETAIL,
+import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
+  NAV_DYNAMIC_DETAIL,
   NAV_IMAGE_VIEWER,
   NAV_LIVE_ROOM, NAV_LOGIN,
   NAV_VIDEO_DETAIL,
@@ -27,6 +28,7 @@ import { EmoteImageCache } from '../common/EmoteImageCache';
 import { LiveApi } from '../api/LiveApi';
 import { UserApi } from '../api/UserApi';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { image } from '@kit.ImageKit';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -407,6 +409,11 @@ export struct DynCard {
     return this.idPrefix + 'dynamic-video-host-' + this.item.dynId + '-cover-' + item.dynId + '-' + videoId;
   }
 
+  private videoCardId(item: DynamicItem): string {
+    const videoId: string = item.bvid.length > 0 ? item.bvid : 'a' + String(item.aid);
+    return this.idPrefix + 'dynamic-video-host-' + this.item.dynId + '-card-' + item.dynId + '-' + videoId;
+  }
+
   /** 图文动态宫格：单图 2/3 宽正方形，多图三列正方形单元（对齐官方客户端）。
    *  超过 9 张时只展示前 9 张，第 9 张压暗并叠加 +N（官方同款处理）。 */
   @Builder
@@ -537,7 +544,7 @@ export struct DynCard {
     }
   }
 
-  /** 动态里的投稿视频与首页视频共用同一套“封面 → 播放区”转场。 */
+  /** 动态里的投稿视频与首页视频共用整卡扩展；快照失败时回退原有封面转场。 */
   private openVideo(item: DynamicItem): void {
     const entryCoverWidth: number = item.dynId === this.item.dynId ? 480 : 240;
     const param: VideoDetailParam = {
@@ -547,6 +554,28 @@ export struct DynCard {
       // 与卡片实际显示的缩略图保持同一 URL，hero 可直接复用已解码纹理。
       cover: biliImageThumbnail(item.cover, entryCoverWidth),
     };
+    try {
+      const cardArea = this.getUIContext().getComponentUtils().getRectangleById(this.videoCardId(item));
+      if (cardArea.size.width > 0 && cardArea.size.height > 0 &&
+        cardArea.windowOffset.x >= 0 && cardArea.windowOffset.y >= 0) {
+        const snapshot: image.PixelMap = this.getUIContext().getComponentSnapshot().getSync(this.videoCardId(item), {
+          waitUntilRenderFinished: true,
+        });
+        param.cardRect = {
+          x: this.getUIContext().px2vp(cardArea.windowOffset.x),
+          y: this.getUIContext().px2vp(cardArea.windowOffset.y),
+          w: this.getUIContext().px2vp(cardArea.size.width),
+          h: this.getUIContext().px2vp(cardArea.size.height),
+        };
+        AppStorage.setOrCreate<image.PixelMap>(HERO_BG_SNAPSHOT_KEY, snapshot);
+        AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
+        AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
+        AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+        return;
+      }
+    } catch (e) {
+      // 组件快照不可用时继续走下方已验证的封面矩形动画。
+    }
     let srcRect: ImageViewerSrcRect | undefined = undefined;
     try {
       const area = this.getUIContext().getComponentUtils().getRectangleById(this.videoCoverId(item));
@@ -692,6 +721,7 @@ export struct DynCard {
           }.layoutWeight(1).alignItems(HorizontalAlign.Start)
         }
         .width('100%')
+        .id(this.videoCardId(item))
         .onClick(() => {
           this.openMajor(item);
         })
@@ -836,6 +866,7 @@ export struct DynCard {
         .padding(8)
         .borderRadius(9)
         .backgroundColor(this.isDark ? '#222429' : '#F5F7F9')
+        .id(this.videoCardId(this.item))
         .onClick(() => {
           this.openMajor(this.item);
         })
