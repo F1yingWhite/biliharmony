@@ -7,6 +7,9 @@
 import { DanmakuItem } from '../api/BiliApi';
 import { ActiveDm, colorHex, parseSpecialDanmaku, SpecialTrack } from './PlayerDanmakuSupport';
 
+/** 未及时上屏的弹幕最多容忍一次播放器时间回调的抖动，避免繁忙片段形成延迟队列。 */
+const MAX_SPAWN_LATENCY_SECONDS: number = 0.75;
+
 /** 弹幕视口矩形（Canvas 像素坐标），供点击气泡定位。 */
 export class DmViewportRect {
   x: number = 0;
@@ -203,12 +206,24 @@ export class PlayerDanmakuEngine {
     if (this.enabled === false || this.list.length === 0) {
       return;
     }
+    // 弹幕是和播放时间绑定的即时内容，不是必须逐条消费的消息队列。画面繁忙时若停住游标，
+    // 旧弹幕会在数秒甚至数十秒后才出现。每次调度先跳过已经错过展示窗口的项目，始终追上播放头。
+    const earliestTime: number = Math.max(0, now - MAX_SPAWN_LATENCY_SECONDS);
+    let low: number = this.cursor;
+    let high: number = this.list.length;
+    while (low < high) {
+      const middle: number = Math.floor((low + high) / 2);
+      if (this.list[middle].time < earliestTime) low = middle + 1;
+      else high = middle;
+    }
+    this.cursor = low;
+
     // 数量同时受用户密度、实际轨道数和 Canvas 性能上限约束。
     const maxActive: number = this.maxActive();
     const spawnBudget: number = this.fullscreen ? 24 : 16;
     let spawned: number = 0;
     while (this.cursor < this.list.length && this.list[this.cursor].time <= now + 0.1 && spawned < spawnBudget) {
-      // 当前屏已满时暂停消费游标，待滚动弹幕出屏后再继续，避免把繁忙时段弹幕永久丢掉。
+      // 当前屏已满时等待空位；下次调度会先丢弃届时已过期的项，不让它们积压到后续时间点。
       if (this.active.length >= maxActive) {
         break;
       }

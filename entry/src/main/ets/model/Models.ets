@@ -1373,6 +1373,11 @@ export class RelationUserPageData {
 }
 
 // ===== 动态 =====
+export class DynamicRichNode {
+  text: string = '';
+  emote: BiliEmote | null = null;
+}
+
 export class DynamicItem {
   dynId: string = '';
   type: string = '';
@@ -1399,6 +1404,8 @@ export class DynamicItem {
   subtitle: string = '';
   images: Array<string> = [];
   emotes: Array<BiliEmote> = [];
+  /** 按接口原始顺序保存正文节点，避免从合并文本反查表情时错位或重复。 */
+  richNodes: Array<DynamicRichNode> = [];
   commentId: number = 0;
   commentType: number = 0;
   liveRoomId: number = 0;
@@ -1449,12 +1456,22 @@ export class DynamicItem {
     const descNodes: Array<Object> = asArray(descObj['rich_text_nodes']);
     for (let i: number = 0; i < descNodes.length; i++) {
       const node: Record<string, Object> = asObject(descNodes[i]);
-      const emoji: Record<string, Object> = asObject(node['emoji']);
+      const richNode: DynamicRichNode = new DynamicRichNode();
+      richNode.text = str(node, 'orig_text', str(node, 'text', ''));
+      let emoji: Record<string, Object> = asObject(node['emoji']);
+      if (Object.keys(emoji).length === 0 && str(node, 'type', '').indexOf('EMOJI') >= 0 &&
+        str(node, 'icon_url', '').length > 0) {
+        emoji = node;
+      }
       if (Object.keys(emoji).length > 0) {
         const emote: BiliEmote = BiliEmote.from(emoji);
         emote.text = str(node, 'orig_text', str(node, 'text', emote.text));
-        if (emote.text.length > 0 && emote.url.length > 0) d.emotes.push(emote);
+        if (emote.text.length > 0 && emote.url.length > 0) {
+          d.emotes.push(emote);
+          richNode.emote = emote;
+        }
       }
+      if (richNode.text.length > 0 || richNode.emote !== null) d.richNodes.push(richNode);
     }
     // 视频动态卡片
     const major: Record<string, Object> = asObject(dynamic['major']);
@@ -1490,16 +1507,35 @@ export class DynamicItem {
     const opus: Record<string, Object> = asObject(major['opus']);
     if (d.title.length === 0) d.title = str(opus, 'title', '');
     const summary: Record<string, Object> = asObject(opus['summary']);
-    if (d.content.length === 0) d.content = str(summary, 'text', '');
+    const summaryText: string = str(summary, 'text', '');
     const summaryNodes: Array<Object> = asArray(summary['rich_text_nodes']);
+    // OPUS 的 desc 常是 feed 摘要，而 summary 才是完整正文。正文和表情节点必须取自同一套数据，
+    // 否则长表情会留下半截占位文字，图片也会被插到错误位置。
+    if (summaryText.length > 0) {
+      d.content = summaryText;
+      if (summaryNodes.length > 0) {
+        d.emotes = [];
+        d.richNodes = [];
+      }
+    }
     for (let i: number = 0; i < summaryNodes.length; i++) {
       const node: Record<string, Object> = asObject(summaryNodes[i]);
-      const emoji: Record<string, Object> = asObject(node['emoji']);
+      const richNode: DynamicRichNode = new DynamicRichNode();
+      richNode.text = str(node, 'orig_text', str(node, 'text', ''));
+      let emoji: Record<string, Object> = asObject(node['emoji']);
+      if (Object.keys(emoji).length === 0 && str(node, 'type', '').indexOf('EMOJI') >= 0 &&
+        str(node, 'icon_url', '').length > 0) {
+        emoji = node;
+      }
       if (Object.keys(emoji).length > 0) {
         const emote: BiliEmote = BiliEmote.from(emoji);
         emote.text = str(node, 'orig_text', str(node, 'text', emote.text));
-        if (emote.text.length > 0 && emote.url.length > 0) d.emotes.push(emote);
+        if (emote.text.length > 0 && emote.url.length > 0) {
+          d.emotes.push(emote);
+          richNode.emote = emote;
+        }
       }
+      if (richNode.text.length > 0 || richNode.emote !== null) d.richNodes.push(richNode);
     }
     let pics: Array<Object> = asArray(opus['pics']);
     const draw: Record<string, Object> = asObject(major['draw']);

@@ -250,9 +250,10 @@ export struct PlayerView {
   private seekPreviewFetching: boolean = false;
   private seekPreviewGeneration: number = 0;
   private volumeRestoreTimer: number = -1;
-  /** 音画对齐：音频等待视频首个 timeUpdate（首帧上屏）后再 play 的挂起标记与兜底计时。 */
+  /** 音画对齐：音频等待视频播放头推进并定位到同一时刻后再 play。 */
   private audioStartPending: boolean = false;
-  private audioStartTimer: number = -1;
+  /** 音轨首播先对齐到视频播放头；等待本次 seekDone 后才允许出声。 */
+  private audioGateSeekPending: boolean = false;
   // 起播静音至首帧：play 时双轨音量置 0，首个 timeUpdate>50ms（首帧已上屏）恢复用户音量，
   // 600ms 兜底定时器防静音挂死。解决开播"先闻其声、后见画面"。
   private firstFrameMuteArmed: boolean = false;
@@ -475,10 +476,7 @@ if (this.runtimeSources.length === 0) {
     this.backgroundAudioOnly = true;
     this.backgroundVideoResumePending = false;
     this.audioStartPending = false;
-    if (this.audioStartTimer >= 0) {
-      clearTimeout(this.audioStartTimer);
-      this.audioStartTimer = -1;
-    }
+    this.audioGateSeekPending = false;
     this.disarmFirstFrameMute();
     try {
       video.pause();
@@ -692,6 +690,8 @@ if (this.runtimeSources.length === 0) {
     this.seekCtl?.cancel();
     this.backgroundAudioOnly = false;
     this.backgroundVideoResumePending = false;
+    this.audioStartPending = false;
+    this.audioGateSeekPending = false;
     const oldPlayer: media.AVPlayer | null = this.player;
     const oldAudioPlayer: media.AVPlayer | null = this.audioPlayer;
     this.player = null;
@@ -802,12 +802,9 @@ if (this.runtimeSources.length === 0) {
     const audio: media.AVPlayer | null = this.audioPlayer;
     this.shouldPlayAfterPrepare = false;
     this.muteImmediately();
-    // 取消首帧门控：否则 1.2s 兜底计时器会在暂停后把音频单独放出来。
+    // 取消首帧门控，避免暂停期间的 seekDone 再把音频轨单独放出来。
     this.audioStartPending = false;
-    if (this.audioStartTimer >= 0) {
-      clearTimeout(this.audioStartTimer);
-      this.audioStartTimer = -1;
-    }
+    this.audioGateSeekPending = false;
     try {
       if (video !== null && this.prepared) video.pause();
       if (audio !== null && this.audioPrepared) audio.pause();
@@ -1101,6 +1098,7 @@ if (this.runtimeSources.length === 0) {
         if (this.player !== p) return;
         this.firstRenderReady = true;
         this.revealFirstFrameIfReady();
+        this.tryStartGatedAudio();
       });
       p.on('error', (err: BusinessError) => {
         this.handlePlayerError(p, err.message);
@@ -1119,18 +1117,9 @@ if (this.runtimeSources.length === 0) {
         }
         this.dmEngine.lastPlayerTime = nextTime;
         this.playheadSec = nextTime;
-        // 音画对齐：视频首帧已上屏（首个播放时刻）后启动音频。
+        // 音画对齐：视频播放头开始推进后，将音频先定位到同一时间点再启动。
         if (this.audioStartPending && nextTime > 0.05) {
-          this.audioStartPending = false;
-          if (this.audioStartTimer >= 0) {
-            clearTimeout(this.audioStartTimer);
-            this.audioStartTimer = -1;
-          }
-          try {
-            const a: media.AVPlayer | null = this.audioPlayer;
-            if (a !== null && this.audioPrepared) a.play();
-          } catch (e) {
-          }
+          this.tryStartGatedAudio();
         }
         // seek 锁定时 AVPlayer 仍会上报 seek 前的位置，忽略这些旧回写，让进度条钉在目标值。
         if (!this.seekLocked && Math.floor(nextTime) !== Math.floor(this.curTime)) this.curTime = nextTime;
@@ -1273,6 +1262,17 @@ if (this.runtimeSources.length === 0) {
       this.handleAudioPlayerError(audio, err.message);
     });
     audio.on('seekDone', (position: number) => {
+      if (this.audioPlayer === audio && this.audioGateSeekPending) {
+        this.audioGateSeekPending = false;
+        if (this.audioStartPending && this.playing) {
+          this.audioStartPending = false;
+          try {
+            audio.play();
+          } catch (e) {
+          }
+        }
+        return;
+      }
       this.onAudioSeekDone(audio, position);
     });
     audio.on('timeUpdate', (timeMs: number) => {
@@ -1328,25 +1328,37 @@ if (this.runtimeSources.length === 0) {
     }
   }
 
-  /** 起播时将音频延迟到视频首帧（首个 timeUpdate > 0）后再播放，防止声音先于画面；1.2s 兜底。 */
+  /** 起播时先等待视频播放头推进，禁止超时后绕过画面门控单独播放音频。 */
   private gateAudioStart(): void {
     const audio: media.AVPlayer | null = this.audioPlayer;
     if (audio === null || !this.audioPrepared) return;
-    if (this.audioStartTimer >= 0) {
-      clearTimeout(this.audioStartTimer);
-    }
     this.audioStartPending = true;
-    this.audioStartTimer = setTimeout(() => {
-      this.audioStartTimer = -1;
-      this.audioStartPending = false;
-      // 兜底：视频首帧迟迟不来（长时间缓冲等）也不再继续等待，1.2s 后强制让音频跟上。
-      // 但若期间用户已暂停（playing=false），绝不能把音频单独放出来。
-      if (!this.playing) return;
-      try {
-        if (this.audioPlayer === audio && this.audioPrepared) audio.play();
-      } catch (e) {
+    this.audioGateSeekPending = false;
+  }
+
+  /** 视频已开始推进：先把尚未播放的 DASH 音轨定位到当前视频时间，再在 seekDone 后启动。 */
+  private tryStartGatedAudio(): void {
+    if (!this.audioStartPending || this.audioGateSeekPending || !this.playing) return;
+    const video: media.AVPlayer | null = this.player;
+    const audio: media.AVPlayer | null = this.audioPlayer;
+    if (video === null || !this.prepared || audio === null || !this.audioPrepared) return;
+    const targetMs: number = Math.max(0, video.currentTime);
+    try {
+      if (Math.abs(audio.currentTime - targetMs) > 80) {
+        this.audioGateSeekPending = true;
+        audio.seek(targetMs, media.SeekMode.SEEK_CLOSEST);
+      } else {
+        this.audioStartPending = false;
+        audio.play();
       }
-    }, 1200);
+    } catch (e) {
+      this.audioGateSeekPending = false;
+      this.audioStartPending = false;
+      try {
+        audio.play();
+      } catch (playError) {
+      }
+    }
   }
 
   async changeQuality(qn: number): Promise<void> {
@@ -1808,11 +1820,7 @@ if (this.runtimeSources.length === 0) {
     }
     if (this.playing) {
       this.audioStartPending = false;
-      // 首帧门控的 1.2s 兜底计时器也必须取消，否则暂停后它会到点把音频重新放出来。
-      if (this.audioStartTimer >= 0) {
-        clearTimeout(this.audioStartTimer);
-        this.audioStartTimer = -1;
-      }
+      this.audioGateSeekPending = false;
       try {
         if (!this.backgroundAudioOnly) p.pause();
         if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.pause();
@@ -2141,11 +2149,8 @@ if (this.runtimeSources.length === 0) {
       clearTimeout(this.volumeRestoreTimer);
       this.volumeRestoreTimer = -1;
     }
-    if (this.audioStartTimer >= 0) {
-      clearTimeout(this.audioStartTimer);
-      this.audioStartTimer = -1;
-    }
     this.audioStartPending = false;
+    this.audioGateSeekPending = false;
     this.backgroundAudioOnly = false;
     this.backgroundVideoResumePending = false;
     if (this.fullscreenExitTimer >= 0) {

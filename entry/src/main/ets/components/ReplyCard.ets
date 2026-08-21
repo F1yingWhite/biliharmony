@@ -19,6 +19,7 @@ import { pasteboard } from '@kit.BasicServicesKit';
 import { BiliApi, ActionResult } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
 import { CommentApi } from '../api/CommentApi';
+import { RemoteAssetCache } from '../common/RemoteAssetCache';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -63,6 +64,7 @@ export struct ReplyCard {
   @State mirrorLiked: boolean = false;
   @State mirrorDisliked: boolean = false;
   @State mirrorLike: number = 0;
+  @State nameplateLocal: string = '';
   private destroyed: boolean = false;
   private likeTimers: Set<number> = new Set<number>();
 
@@ -77,6 +79,7 @@ export struct ReplyCard {
   aboutToAppear(): void {
     this.destroyed = false;
     this.syncMirrorFromItem();
+    this.primeNameplate();
   }
 
   private syncMirrorFromItem(): void {
@@ -87,10 +90,26 @@ export struct ReplyCard {
 
   private onItemChanged(): void {
     this.syncMirrorFromItem();
+    this.primeNameplate();
   }
 
   private onVersionChanged(): void {
     this.syncMirrorFromItem();
+  }
+
+  private primeNameplate(): void {
+    const url: string = this.item.nameplate;
+    const cached: string = RemoteAssetCache.cachedDecoration(url);
+    this.nameplateLocal = cached !== url ? cached : '';
+    if (!url.startsWith('http') || cached !== url) return;
+    RemoteAssetCache.ensureDecoration(url).then((local: string): void => {
+      if (!this.destroyed && this.item.nameplate === url && local !== url) this.nameplateLocal = local;
+    }).catch((): void => {
+    });
+  }
+
+  private nameplateSource(): string {
+    return this.nameplateLocal.length > 0 ? this.nameplateLocal : this.item.nameplate;
   }
 
   aboutToDisappear(): void {
@@ -478,7 +497,7 @@ export struct ReplyCard {
                   .padding({ left: 3, right: 3 })
               }
               if (this.item.nameplate.length > 0) {
-                Image(this.item.nameplate).width(30).height(15).objectFit(ImageFit.Contain)
+                Image(this.nameplateSource()).width(30).height(15).objectFit(ImageFit.Contain)
               }
             }
             .height(18)
