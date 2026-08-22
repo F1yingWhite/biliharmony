@@ -935,13 +935,18 @@ export struct VideoDetailPage {
         break;
       }
     }
-    let info: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, initialCid);
+    // 当前没有自适应码率切换能力，“自动”若直接请求 127 会固定选中 4K。
+    // 手机上默认封顶 1080P；高码率类偏好才请求最高画质，智能省流固定 720P。
+    const qualityPref: number = AppStorage.get<number>('videoQualityPref') ?? 0;
+    const initialQuality: number = qualityPref === 3 ? 64 : (qualityPref === 0 ? 80 : 127);
+    let info: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, initialCid, initialQuality);
     if (info === null || info.urls.length === 0 || this.destroyed) return;
     // 多 P 视频上次停在其他分 P：直接切到该分 P 的地址，让续播位置与画面匹配。
     if (info.lastPlayCid > 0 && info.lastPlayCid !== initialCid && detail.pages.length > 1) {
       for (let i: number = 0; i < detail.pages.length; i++) {
         if (detail.pages[i].cid === info.lastPlayCid) {
-          const lastInfo: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, info.lastPlayCid);
+          const lastInfo: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, info.lastPlayCid,
+            initialQuality);
           if (lastInfo !== null && lastInfo.urls.length > 0 && this.destroyed === false) {
             info = lastInfo;
             targetCid = info.lastPlayCid;
@@ -952,15 +957,6 @@ export struct VideoDetailPage {
       }
     }
     if (this.destroyed) return;
-    // 画质偏好「智能省流」：片源有高清晰可选时改起 720P，省流由用户偏好驱动（高码率/高清高码暂与自动一致）。
-    const qualityPref: number = AppStorage.get<number>('videoQualityPref') ?? 0;
-    if (qualityPref === 3 && info.quality > 64 &&
-      info.qualities.some((q: VideoQualityOption): boolean => q.qn === 64 && q.available)) {
-      const savedInfo: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, targetCid, 64);
-      if (savedInfo !== null && savedInfo.urls.length > 0 && !this.destroyed) {
-        info = savedInfo;
-      }
-    }
     if (this.destroyed) return;
     // 最终线路与画质确定后一次性提交，避免 XComponent 在首帧前被两组地址连续驱动。
     this.currentCid = targetCid;

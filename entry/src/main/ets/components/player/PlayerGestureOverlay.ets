@@ -1,4 +1,3 @@
-import { formatDuration } from '../../common/Utils';
 import { image } from '@kit.ImageKit';
 
 /** 在线人数、长按倍速、横滑预览、音量/亮度的轻量叠层。 */
@@ -51,7 +50,7 @@ export struct PlayerGestureOverlay {
         Text(this.onlineTotal + '人正在看')
           .fontSize(10)
           .fontColor('#CFFFFFFF')
-          .shadow({ radius: 2, color: '#99000000', offsetX: 0, offsetY: 1 })
+          .textShadow({ radius: 2, color: '#99000000', offsetX: 0, offsetY: 1 })
           .position({ x: this.fullscreen ? 66 : 14, y: this.fullscreen ? 56 : 14 })
       }
 
@@ -112,14 +111,14 @@ export struct PlayerGestureOverlay {
       .aspectRatio(16 / 9)
       .borderRadius(5)
       .clip(true)
-      .border({ width: 1.5, color: '#F2FFFFFF' })
       .shadow({ radius: 5, color: '#77000000', offsetY: 1 })
 
       Text(this.formatSeekTime(this.seekPreviewTime()) + ' / ' + this.formatSeekTime(this.duration))
         .fontSize(this.fullscreen ? 18 : 17)
         .fontWeight(FontWeight.Bold)
         .fontColor('#FFFFFFFF')
-        .shadow({ radius: 3, color: '#CC000000', offsetX: 0, offsetY: 1 })
+        // Text 上使用组件 shadow 会投影整个矩形边界，表现为时间文字外有一层方框。
+        .textShadow({ radius: 3, color: '#CC000000', offsetX: 0, offsetY: 1 })
     }
     .align(Alignment.Center)
   }
@@ -171,9 +170,7 @@ export struct PlayerGestureOverlay {
           .fontWeight(FontWeight.Medium)
           .fontColor('#FFFFFF')
       } else {
-        Text(this.gestureAdjustPercent >= 0 ?
-          ((this.gestureAdjustKind === '亮度' ? '☀' : '♪') + ' ' + this.gestureAdjustPercent + '%') :
-          (formatDuration(this.gestureSeekPreview) + ' / ' + formatDuration(this.duration)))
+        Text((this.gestureAdjustKind === '亮度' ? '☀' : '♪') + ' ' + this.gestureAdjustPercent + '%')
           .fontSize(12)
           .fontWeight(FontWeight.Medium)
           .fontColor('#FFFFFF')
