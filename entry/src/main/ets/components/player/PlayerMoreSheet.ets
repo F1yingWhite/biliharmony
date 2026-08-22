@@ -24,6 +24,7 @@ export struct PlayerMoreSheet {
   onChapters: () => void = () => {};
   onSubtitleToggle: (next: boolean) => void = () => {};
   onSponsorToggle: (next: boolean) => void = () => {};
+  onSponsorSettings: () => void = () => {};
   onShare: () => void = () => {};
   onCopyLink: () => void = () => {};
   onStub: (message: string) => void = () => {};
@@ -376,8 +377,13 @@ export struct PlayerMoreSheet {
 
             Row() {
               this.RowIcon($r('app.media.ic_ad_skip'))
-              this.RowLabel('广告空降')
-              Blank()
+              Row() {
+                this.RowLabel('空降助手')
+                Blank()
+                this.Chevron()
+              }
+              .layoutWeight(1)
+              .onClick(() => this.onSponsorSettings())
               this.TinySwitch(this.sponsorOn, (next: boolean): void => this.onSponsorToggle(next))
             }
             .width('100%')

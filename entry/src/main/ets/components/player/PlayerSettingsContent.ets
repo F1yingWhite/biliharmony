@@ -1,4 +1,5 @@
 import { DanmakuItem, DmFilterRule, VideoChapter } from '../../api/BiliApi';
+import { SponsorBlockCategory, SponsorBlockSegment } from '../../common/SponsorBlock';
 import { BasicDataSource } from '../../common/BasicDataSource';
 import { SubtitleTrack, VideoQualityOption } from '../../model/Models';
 import { DanmakuListPanel } from './DanmakuListPanel';
@@ -6,6 +7,7 @@ import { DmFilterPanel } from './DmFilterPanel';
 import { PlayerMoreSheet } from './PlayerMoreSheet';
 import { PlayerPlaySettingsPage } from './PlayerPlaySettingsPage';
 import { PlayerSettingsPanel } from './PlayerSettingsPanel';
+import { SponsorBlockPanel } from './SponsorBlockPanel';
 
 @Component
 export struct PlayerSettingsContent {
@@ -21,11 +23,23 @@ export struct PlayerSettingsContent {
   @Prop mirrorOn: boolean = false;
   @Prop timerMinutes: number = 0;
   @Prop sponsorOn: boolean = false;
+  @Link sponsorCategories: Array<SponsorBlockCategory>;
+  @Link sponsorSegments: Array<SponsorBlockSegment>;
+  @Link sponsorDraftStart: number;
+  @Link sponsorDraftEnd: number;
+  @Link sponsorDraftCategory: string;
+  @Link sponsorDraftAction: string;
+  @Link sponsorSubmitting: boolean;
+  @Link sponsorUserLoading: boolean;
+  @Link sponsorUserName: string;
+  @Link sponsorUserStats: string;
+  @Link sponsorWarningReason: string;
   @Prop subtitleOn: boolean = false;
   @Prop subtitleIndex: number = -1;
   @Prop subtitles: Array<SubtitleTrack> = [];
   @Prop chapters: Array<VideoChapter> = [];
   @Prop currentTime: number = 0;
+  @Prop duration: number = 0;
   @Prop qualityOptions: Array<VideoQualityOption> = [];
   @Prop activeQuality: number = 0;
   @Prop dmOpacity: number = 0.85;
@@ -71,6 +85,22 @@ export struct PlayerSettingsContent {
   onMirrorChange: (next: boolean) => void = () => {};
   onSubtitleToggle: (next: boolean) => void = () => {};
   onSponsorToggle: (next: boolean) => void = () => {};
+  onSponsorModeChange: (category: string, mode: number) => void = () => {};
+  onSponsorRefresh: () => void = () => {};
+  onSponsorMarkStart: () => void = () => {};
+  onSponsorMarkEnd: () => void = () => {};
+  onSponsorDraftStartChange: (value: number) => void = () => {};
+  onSponsorDraftEndChange: (value: number) => void = () => {};
+  onSponsorDraftCategoryChange: (value: string) => void = () => {};
+  onSponsorDraftActionChange: (value: string) => void = () => {};
+  onSponsorPreview: () => void = () => {};
+  onSponsorClear: () => void = () => {};
+  onSponsorSubmit: () => void = () => {};
+  onSponsorSegmentSeek: (segment: SponsorBlockSegment) => void = () => {};
+  onSponsorSegmentVote: (segment: SponsorBlockSegment, type: number) => void = () => {};
+  onSponsorUserNameChange: (value: string) => void = () => {};
+  onSponsorSaveUserName: () => void = () => {};
+  onSponsorAcknowledgeWarning: () => void = () => {};
   onShare: () => void = () => {};
   onCopyLink: () => void = () => {};
   onStub: (message: string) => void = () => {};
@@ -180,6 +210,41 @@ export struct PlayerSettingsContent {
                     this.EmbeddedPanel(0)
                   } else if (this.page === 'chapters') {
                     this.EmbeddedPanel(2)
+                  } else if (this.page === 'sponsor') {
+                    SponsorBlockPanel({
+                      forceDark: this.fullscreen || this.isDark,
+                      accent: this.accent,
+                      currentTime: this.currentTime,
+                      duration: this.duration,
+                      categories: $sponsorCategories,
+                      segments: $sponsorSegments,
+                      draftStart: $sponsorDraftStart,
+                      draftEnd: $sponsorDraftEnd,
+                      draftCategory: $sponsorDraftCategory,
+                      draftAction: $sponsorDraftAction,
+                      submitting: $sponsorSubmitting,
+                      userLoading: $sponsorUserLoading,
+                      userName: $sponsorUserName,
+                      userStats: $sponsorUserStats,
+                      warningReason: $sponsorWarningReason,
+                      onModeChange: (category: string, mode: number) => this.onSponsorModeChange(category, mode),
+                      onRefresh: () => this.onSponsorRefresh(),
+                      onMarkStart: () => this.onSponsorMarkStart(),
+                      onMarkEnd: () => this.onSponsorMarkEnd(),
+                      onDraftStartChange: (value: number) => this.onSponsorDraftStartChange(value),
+                      onDraftEndChange: (value: number) => this.onSponsorDraftEndChange(value),
+                      onDraftCategoryChange: (value: string) => this.onSponsorDraftCategoryChange(value),
+                      onDraftActionChange: (value: string) => this.onSponsorDraftActionChange(value),
+                      onPreview: () => this.onSponsorPreview(),
+                      onClear: () => this.onSponsorClear(),
+                      onSubmit: () => this.onSponsorSubmit(),
+                      onSegmentSeek: (segment: SponsorBlockSegment) => this.onSponsorSegmentSeek(segment),
+                      onSegmentVote: (segment: SponsorBlockSegment, type: number) =>
+                        this.onSponsorSegmentVote(segment, type),
+                      onUserNameChange: (value: string) => this.onSponsorUserNameChange(value),
+                      onSaveUserName: () => this.onSponsorSaveUserName(),
+                      onAcknowledgeWarning: () => this.onSponsorAcknowledgeWarning(),
+                    })
                   }
                 }
                 .width('100%')
@@ -217,6 +282,7 @@ export struct PlayerSettingsContent {
           onChapters: () => this.onOpenPage('chapters'),
           onSubtitleToggle: (next: boolean) => this.onSubtitleToggle(next),
           onSponsorToggle: (next: boolean) => this.onSponsorToggle(next),
+          onSponsorSettings: () => this.onOpenPage('sponsor'),
           onShare: () => this.onShare(),
           onCopyLink: () => this.onCopyLink(),
           onStub: (message: string) => this.onStub(message),

@@ -145,7 +145,9 @@ commentBaseUrl https://comment.bilibili.com  // 弹幕 xml
 - `getOnlineTotal` → `/x/pl/online/total`
 - `getVideoChapters` → `/x/pl/v2`（章节）
 - `getSubtitleCues` → CC 字幕
-- `getSponsorSegments` → `bsbsb.top/api/skipSegments`（SponsorBlock for Bilibili）
+- `SponsorBlockApi.getSegments` → `bsbsb.top/api/skipSegments/{SHA256(BVID)[:4]}`（按当前 cid 过滤，直查协议回退）
+- `SponsorBlockApi.submit/vote/reportViewed` → 空降片段投稿、投票与跳过统计
+- `SponsorBlockApi.getUserInfo/setUsername/acknowledgeWarning` → 空降社区身份与提醒
 
 **互动（登录 + CSRF）**
 - `likeVideo` / `dislikeVideo` / `coinVideo` / `reportShare`

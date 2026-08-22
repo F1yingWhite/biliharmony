@@ -1,4 +1,5 @@
 import { VideoChapter } from '../../api/BiliApi';
+import { SponsorBlockSegment } from '../../common/SponsorBlock';
 import { formatDuration } from '../../common/Utils';
 import { PlayerProgressBar } from './PlayerProgressBar';
 
@@ -8,6 +9,7 @@ export struct PlayerCompactControls {
   @Prop progress: number = 0;
   @Prop duration: number = 0;
   @Prop chapters: Array<VideoChapter> = [];
+  @Prop sponsorSegments: Array<SponsorBlockSegment> = [];
   @Prop titleColor: string = '#FFFFFF';
   onBack: () => void = () => {};
   onPlay: () => void = () => {};
@@ -76,6 +78,7 @@ export struct PlayerCompactControls {
             duration: this.duration,
             compact: true,
             chapters: this.chapters,
+            sponsorSegments: this.sponsorSegments,
             onChange: (value: number, mode: SliderChangeMode) => this.onProgressChange(value, mode),
             onInteractionEnd: () => this.onProgressInteractionEnd(),
           })
