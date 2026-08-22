@@ -21,12 +21,12 @@
 .DS_Store
 
 # Flutter reference project (PiliPlus 原工程)
-/PiliPlus/
-/PiliPlus/.dart_tool
-/PiliPlus/build
-/PiliPlus/.flutter-plugins*
-/PiliPlus/android/.gradle
-/PiliPlus/android/local.properties
+/docs/ref/PiliPlus/
+/docs/ref/PiliPlus/.dart_tool
+/docs/ref/PiliPlus/build
+/docs/ref/PiliPlus/.flutter-plugins*
+/docs/ref/PiliPlus/android/.gradle
+/docs/ref/PiliPlus/android/local.properties
 
 # 本地测试临时目录
 /tool/*
