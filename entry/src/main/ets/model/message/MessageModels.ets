@@ -59,6 +59,10 @@ export class PrivateMessageItem {
   richBvid: string = '';
   richAid: number = 0;
   richDesc: string = '';
+  /** msg_type=2 的原图及尺寸；与视频推荐卡字段分开，避免把图片 URL 当成跳转链接。 */
+  imageUrl: string = '';
+  imageWidth: number = 0;
+  imageHeight: number = 0;
 
   static from(o: Object): PrivateMessageItem {
     const j: Record<string, Object> = asObject(o);
@@ -76,6 +80,11 @@ export class PrivateMessageItem {
       item.richBvid = str(content, 'bvid', '');
       item.richAid = asNumber(content['aid'], 0);
       item.richDesc = str(content, 'description', str(content, 'desc', ''));
+      if (item.type === 2) {
+        item.imageUrl = toHttps(str(content, 'url', str(content, 'image_url', str(content, 'pic_url', ''))));
+        item.imageWidth = asNumber(content['width'], asNumber(content['image_width'], 0));
+        item.imageHeight = asNumber(content['height'], asNumber(content['image_height'], 0));
+      }
     } catch (e) {
       // 普通文本消息没有 JSON 富文本字段。
     }
