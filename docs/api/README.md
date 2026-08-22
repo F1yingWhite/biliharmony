@@ -68,8 +68,8 @@ curated catalog and `Constants.ets`, 370 remain as unreviewed candidates.
 Reproduce the snapshot from the repository root:
 
 ```sh
-node api/bilibili_web_api_bfs.mjs \
-  --out api/bilibili-web-bfs-discovery.json \
+node docs/api/bilibili_web_api_bfs.mjs \
+  --out docs/api/bilibili-web-bfs-discovery.json \
   --depth 1 --max-pages 36 --max-assets 120 --asset-depth 1 --delay-ms 180
 ```
 

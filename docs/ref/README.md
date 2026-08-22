@@ -1,6 +1,6 @@
-# UI 设计参考截图索引
+# 设计与上游实现参考
 
-为 BiliHaromny（HarmonyOS B 站客户端）收集的界面设计参考，分两类：BewlyCat / BewlyBewly 浏览器插件（重做 B 站首页的优秀案例）与 B 站官方手机 App（App Store 国区截图）。
+这里集中保存 BiliHaromny（HarmonyOS B 站客户端）的界面设计参考和上游实现对照资料。
 
 ## 1. BewlyCat / BewlyBewly 插件截图（`bewlycat/`）
 
@@ -29,3 +29,8 @@
 ## 验证
 
 所有文件均经 `file` 命令确认为真实图片（PNG / JPEG），非 404 HTML；尺寸与字节数如上表及目录所列。
+
+## 3. PiliPlus 上游源码（`PiliPlus/`）
+
+该目录是本地克隆的 Flutter 上游参考工程，用于核对 Bilibili 接口、模型字段和交互逻辑。
+它保留自己的 Git 历史，并由主仓库的 `.gitignore` 排除，不随 BiliHaromny 提交或打包。

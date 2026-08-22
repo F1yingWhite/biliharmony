@@ -146,7 +146,8 @@
 | mpv/media_kit 播放 | 系统 AVPlayer + 自研 Canvas 弹幕引擎 |
 | lib/models/* | model/Models.ets / LiveModels.ets |
 
-原始 PiliPlus 工程保留在 PiliPlus/ 目录作为对照参考。
+原始 PiliPlus 工程保留在 `docs/ref/PiliPlus/` 目录作为对照参考；它是本地忽略的上游源码仓库，
+不会随 BiliHaromny 一起提交或打包。
 
 ## 文档
 
@@ -155,6 +156,8 @@
 - `docs/ArkUI易错清单.md` — 本工程踩过的 ArkUI 坑与提交前自检清单（开发前必读）
 - `docs/ref/README.md` — 设计参考截图索引（BewlyCat / B 站官方 App）
 - `docs/ref/` — 参考截图素材
+- `docs/AUDIT_API_MODEL_REPORT.md` — API 层与模型层审计报告
+- `docs/api/` — B 站 Web API 调研清单、发现快照与复现脚本
 
 ## 待完善（Roadmap）
 
