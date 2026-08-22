@@ -264,10 +264,17 @@ export struct PlayerView {
   private audioStartPending: boolean = false;
   /** 音轨首播先对齐到视频播放头；等待本次 seekDone 后才允许出声。 */
   private audioGateSeekPending: boolean = false;
+  /** 音轨门控 seek 的目标与看门狗；回调丢失时也必须恢复声音，不能永久静音。 */
+  private audioGateSeekTargetMs: number = -1;
+  private audioGateTimer: number = -1;
   // 起播静音至首帧：play 时双轨音量置 0，首个 timeUpdate>50ms（首帧已上屏）恢复用户音量，
-  // 600ms 兜底定时器防静音挂死。解决开播"先闻其声、后见画面"。
+  // seek 恢复时还会校验 timeUpdate 已落到目标附近，避免旧位置回调提前放声。
   private firstFrameMuteArmed: boolean = false;
   private firstFrameMuteTimer: number = -1;
+  private firstFrameMuteTargetMs: number = -1;
+  /** 慢 seek 时用预览帧/封面挡住 Surface，直到新位置开始推进。 */
+  @State seekRecoveryCoverVisible: boolean = false;
+  private seekRecoveryActive: boolean = false;
   private fullscreenExitPending: boolean = false;
   private fullscreenExitAnimationStarted: boolean = false;
   private fullscreenExitCancel: (() => void) | null = null;
@@ -301,36 +308,35 @@ export struct PlayerView {
         (): media.AVPlayer | null => this.audioPlayer,
         (): boolean => this.prepared,
         (): boolean => this.audioPrepared,
-        (): void => {
-          // 新一轮双轨 seek 接管音频定位；旧的首帧门控回调不能再单独启动音轨，
-          // 否则连续快进/后退时会吞掉本轮 seekDone，最终让音频停在 pause 状态。
-          this.audioStartPending = false;
-          this.audioGateSeekPending = false;
+        (targetMs: number, resumePlaying: boolean): void => {
+          this.preparePlayersForSeek(targetMs, resumePlaying);
           this.stopDmLoop(false);
         },
         (on: boolean): void => {
           this.buffering = on;
+          if (on) this.seekRecoveryCoverVisible = true;
         },
-        (resume: boolean): void => {
+        (resume: boolean, targetMs: number): void => {
           const video: media.AVPlayer | null = this.player;
           if (resume && video !== null && this.prepared) {
             try {
-              if (!this.playing) {
-                // seek 后恢复播放同样静音等首帧：新位置解码帧上屏前不放声。
-                this.armFirstFrameMute();
-                video.play();
-              }
+              // seek 后恢复播放同样静音等目标帧：新位置开始推进前不放声。
+              const actualTargetMs: number = video.currentTime >= 0 ? video.currentTime : targetMs;
+              this.armFirstFrameMute(actualTargetMs, 1800);
+              if (video.state !== 'playing') video.play();
               // 音频仍按首帧对齐节奏启动（若已播放则幂等无副作用）。
               this.gateAudioStart();
             } catch (e) {
             }
-            // 双音轨延迟启动：首个 timeUpdate 时才播放音频轨，与视频新位置的解码帧同步出声。
-            if (this.audioPlayer !== null && this.audioPrepared) this.audioStartPending = true;
+          } else {
+            this.seekRecoveryActive = false;
+            this.seekRecoveryCoverVisible = false;
+            this.restoreUserVolume();
           }
-          this.buffering = false;
           // seek 完成：解锁进度回写，让 timeUpdate 接管进度显示。
           this.seekLocked = false;
-          if (this.playing) this.startDmLoop();
+          // 播放中的 seek 要等新位置首个 timeUpdate 再撤遮罩/缓冲；暂停态可直接显示定位帧。
+          if (!resume) this.buffering = false;
         },
         (video: media.AVPlayer | null, targetMs: number): void => {
           if (video !== null) this.recoverPlayersAfterSeekStall(video, targetMs);
@@ -357,7 +363,10 @@ export struct PlayerView {
         },
         (value: number): void => {
           if (this.gestureSeekPreview >= 0 && value === -1) {
-            this.seekTo(this.gestureSeekPreview, true);
+            const preview: number = this.gestureSeekPreview;
+            Haptic.seek();
+            // 交互拖动优先关键帧定位；精确解码留给续播/章节等低频场景。
+            this.seekTo(preview, false);
             this.gestureSeekPreview = -1;
             this.closeSeekPreview();
           }
@@ -430,7 +439,7 @@ if (this.runtimeSources.length === 0) {
         if (this.playing) this.togglePlay();
       },
       (timeMs: number): void => {
-        this.seekTo(timeMs / 1000, true);
+        this.seekTo(timeMs / 1000, false);
       },
       this.avSessionMetadata(),
       this.avSessionPlaybackState(),
@@ -492,7 +501,7 @@ if (this.runtimeSources.length === 0) {
     this.backgroundAudioOnly = true;
     this.backgroundVideoResumePending = false;
     this.audioStartPending = false;
-    this.audioGateSeekPending = false;
+    this.cancelAudioGate();
     this.disarmFirstFrameMute();
     try {
       video.pause();
@@ -707,7 +716,10 @@ if (this.runtimeSources.length === 0) {
     this.backgroundAudioOnly = false;
     this.backgroundVideoResumePending = false;
     this.audioStartPending = false;
-    this.audioGateSeekPending = false;
+    this.cancelAudioGate();
+    this.cancelFirstFrameMute(false);
+    this.seekRecoveryActive = false;
+    this.seekRecoveryCoverVisible = false;
     const oldPlayer: media.AVPlayer | null = this.player;
     const oldAudioPlayer: media.AVPlayer | null = this.audioPlayer;
     this.player = null;
@@ -809,7 +821,7 @@ if (this.runtimeSources.length === 0) {
 
   onExternalSeekRequested(): void {
     const seconds: number = AppStorage.get<number>('videoSeekRequestSeconds') ?? -1;
-    if (seconds >= 0) this.seekTo(seconds, true);
+    if (seconds >= 0) this.seekTo(seconds, false);
   }
 
   onPlaybackStopRequested(): void {
@@ -820,7 +832,10 @@ if (this.runtimeSources.length === 0) {
     this.muteImmediately();
     // 取消首帧门控，避免暂停期间的 seekDone 再把音频轨单独放出来。
     this.audioStartPending = false;
-    this.audioGateSeekPending = false;
+    this.cancelAudioGate();
+    this.cancelFirstFrameMute(false);
+    this.seekRecoveryActive = false;
+    this.seekRecoveryCoverVisible = false;
     try {
       if (video !== null && this.prepared) video.pause();
       if (audio !== null && this.audioPrepared) audio.pause();
@@ -854,31 +869,66 @@ if (this.runtimeSources.length === 0) {
     }
   }
 
-  /** 起播/恢复播放前调用：双轨静音并挂 600ms 兜底，等首个 timeUpdate 确认首帧上屏后恢复音量。 */
-  private armFirstFrameMute(): void {
-    if (this.firstFrameMuteTimer >= 0) clearTimeout(this.firstFrameMuteTimer);
-    this.firstFrameMuteArmed = true;
-    this.muteImmediately();
-    this.firstFrameMuteTimer = setTimeout(() => {
-      this.firstFrameMuteTimer = -1;
-      this.disarmFirstFrameMute();
-    }, 600);
-  }
-
-  /** 首帧已上屏（或兜底超时）：恢复用户手势音量。未武装时不写音量，避免与离页临时静音互踩。 */
-  private disarmFirstFrameMute(): void {
-    if (!this.firstFrameMuteArmed) return;
-    this.firstFrameMuteArmed = false;
-    if (this.firstFrameMuteTimer >= 0) {
-      clearTimeout(this.firstFrameMuteTimer);
-      this.firstFrameMuteTimer = -1;
-    }
+  private restoreUserVolume(): void {
     try {
       const restoreVolume: number = (this.gestureCtl?.gestureVolume ?? 100) / 100;
       if (this.player !== null && this.prepared) this.player.setVolume(restoreVolume);
       if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.setVolume(restoreVolume);
     } catch (e) {
       // 播放器正处于切源/释放边界时无需重复处理。
+    }
+  }
+
+  /** 新 seek 接管播放器前清掉旧的首帧/音轨门控；旧回调不得恢复声音或误判完成。 */
+  private preparePlayersForSeek(targetMs: number, resumePlaying: boolean): void {
+    this.cancelFirstFrameMute(false);
+    this.cancelAudioGate();
+    this.audioStartPending = false;
+    this.seekRecoveryActive = resumePlaying;
+    this.seekRecoveryCoverVisible = false;
+    if (resumePlaying) this.muteImmediately();
+    hilog.info(0x0000, 'BiliPlayback',
+      'seek.dispatch target=%{public}d resume=%{public}s', targetMs, String(resumePlaying));
+  }
+
+  /** 起播/恢复播放前调用：双轨静音并等目标附近的首个 timeUpdate，超时后安全恢复。 */
+  private armFirstFrameMute(targetMs: number = -1, fallbackMs: number = 900): void {
+    if (this.firstFrameMuteTimer >= 0) clearTimeout(this.firstFrameMuteTimer);
+    this.firstFrameMuteArmed = true;
+    this.firstFrameMuteTargetMs = targetMs;
+    this.muteImmediately();
+    this.firstFrameMuteTimer = setTimeout(() => {
+      this.firstFrameMuteTimer = -1;
+      this.disarmFirstFrameMute();
+    }, fallbackMs);
+  }
+
+  private cancelFirstFrameMute(restore: boolean): void {
+    if (this.firstFrameMuteTimer >= 0) {
+      clearTimeout(this.firstFrameMuteTimer);
+      this.firstFrameMuteTimer = -1;
+    }
+    this.firstFrameMuteArmed = false;
+    this.firstFrameMuteTargetMs = -1;
+    if (restore) this.restoreUserVolume();
+  }
+
+  /** 过滤 seek 前排队的旧 timeUpdate；关键帧定位允许与请求位置存在一个 GOP 的偏差。 */
+  private canReleaseFrameMute(timeMs: number): boolean {
+    if (!this.firstFrameMuteArmed) return false;
+    if (this.firstFrameMuteTargetMs < 0) return timeMs > 50;
+    return Math.abs(timeMs - this.firstFrameMuteTargetMs) <= 1200;
+  }
+
+  /** 首帧已上屏（或兜底超时）：恢复用户手势音量。未武装时不写音量，避免与离页临时静音互踩。 */
+  private disarmFirstFrameMute(): void {
+    if (!this.firstFrameMuteArmed) return;
+    this.cancelFirstFrameMute(true);
+    if (this.seekRecoveryActive) {
+      this.seekRecoveryActive = false;
+      this.seekRecoveryCoverVisible = false;
+      this.buffering = false;
+      if (this.playing) this.startDmLoop();
     }
   }
 
@@ -1088,6 +1138,9 @@ if (this.runtimeSources.length === 0) {
           // 后台音乐模式只暂停视频轨；逻辑播放态和 AVSession 仍由音频轨维持。
           this.pauseDmLoop();
           Immersive.setKeepScreenOn(false);
+        } else if (state === 'paused' && ((this.seekCtl?.seekInFlight ?? false) || this.seekRecoveryActive)) {
+          // seek 内部暂停只是解码状态切换，不能把逻辑播放态、系统媒体会话和控制栏改成“用户暂停”。
+          this.pauseDmLoop();
         } else if (state === 'paused' || state === 'completed') {
           this.resumeTransitionActive = false;
           this.playing = false;
@@ -1124,12 +1177,12 @@ if (this.runtimeSources.length === 0) {
         this.handlePlayerError(p, err.message);
       });
       p.on('seekDone', (position: number) => {
-        this.onVideoSeekDone(p);
+        this.onVideoSeekDone(p, position);
       });
       p.on('timeUpdate', (t: number) => {
         if (this.player !== p) return;
-        // 起播静音恢复点：首个 timeUpdate>50ms 说明首帧已解码上屏，此时再放声（先画后声）。
-        if (this.firstFrameMuteArmed && t > 50) this.disarmFirstFrameMute();
+        // 起播/seek 静音恢复点：seek 后必须等播放头落到目标附近，不能让旧位置回调提前放声。
+        if (this.canReleaseFrameMute(t)) this.disarmFirstFrameMute();
         // AVPlayer 上报毫秒，播放器 UI/弹幕内部统一使用秒。
         const nextTime: number = t / 1000;
         if (this.dmEngine.lastPlayerTime > 0 && (nextTime < this.dmEngine.lastPlayerTime - 0.5 || nextTime > this.dmEngine.lastPlayerTime + 2.5)) {
@@ -1165,7 +1218,8 @@ if (this.runtimeSources.length === 0) {
         if (!this.audioStartPending && (this.seekCtl?.seekInFlight ?? true) === false && audio !== null && this.audioPrepared && syncBucket !== this.lastAudioSyncBucket &&
           Math.abs(audio.currentTime - t) > 900) {
           this.lastAudioSyncBucket = syncBucket;
-          audio.seek(t, media.SeekMode.SEEK_CLOSEST);
+          // 音频 seek 不使用视频关键帧模式。
+          audio.seek(t);
         }
       });
       p.on('durationUpdate', (d: number) => {
@@ -1179,7 +1233,7 @@ if (this.runtimeSources.length === 0) {
           this.pauseDmLoop();
         } else if (infoType === media.BufferingInfoType.BUFFERING_END) {
           // seek 尚未完成音轨对齐时不能提前隐藏 loading 或恢复弹幕时钟。
-          if ((this.seekCtl?.seekInFlight ?? true) === false) {
+          if ((this.seekCtl?.seekInFlight ?? true) === false && !this.seekRecoveryActive) {
             this.buffering = false;
             this.startDmLoop();
           }
@@ -1290,14 +1344,9 @@ if (this.runtimeSources.length === 0) {
         return;
       }
       if (this.audioPlayer === audio && this.audioGateSeekPending) {
-        this.audioGateSeekPending = false;
-        if (this.audioStartPending && this.playing) {
-          this.audioStartPending = false;
-          try {
-            audio.play();
-          } catch (e) {
-          }
-        }
+        // 只消费门控自己发出的 seek；用户 seek 的回调交给 PlayerSeekController。
+        if (this.audioGateSeekTargetMs < 0 || Math.abs(position - this.audioGateSeekTargetMs) > 500) return;
+        this.finishGatedAudioStart(audio);
         return;
       }
       this.onAudioSeekDone(audio, position);
@@ -1359,8 +1408,8 @@ if (this.runtimeSources.length === 0) {
   private gateAudioStart(): void {
     const audio: media.AVPlayer | null = this.audioPlayer;
     if (audio === null || !this.audioPrepared) return;
+    this.cancelAudioGate();
     this.audioStartPending = true;
-    this.audioGateSeekPending = false;
   }
 
   /** 视频已开始推进：先把尚未播放的 DASH 音轨定位到当前视频时间，再在 seekDone 后启动。 */
@@ -1373,19 +1422,49 @@ if (this.runtimeSources.length === 0) {
     try {
       if (Math.abs(audio.currentTime - targetMs) > 80) {
         this.audioGateSeekPending = true;
-        audio.seek(targetMs, media.SeekMode.SEEK_CLOSEST);
+        this.audioGateSeekTargetMs = targetMs;
+        // 音频 seek 不传视频关键帧模式；丢回调时看门狗仍会放行，避免永久无声。
+        audio.seek(targetMs);
+        if (this.audioGateTimer >= 0) clearTimeout(this.audioGateTimer);
+        this.audioGateTimer = setTimeout(() => {
+          this.audioGateTimer = -1;
+          if (this.audioPlayer === audio && this.audioGateSeekPending &&
+            this.audioGateSeekTargetMs === targetMs) {
+            hilog.warn(0x0000, 'BiliPlayback', 'audioGate.timeout target=%{public}d', targetMs);
+            this.finishGatedAudioStart(audio);
+          }
+        }, 1500);
       } else {
-        this.audioStartPending = false;
-        audio.play();
+        this.finishGatedAudioStart(audio);
       }
     } catch (e) {
-      this.audioGateSeekPending = false;
-      this.audioStartPending = false;
-      try {
-        audio.play();
-      } catch (playError) {
-      }
+      this.finishGatedAudioStart(audio);
     }
+  }
+
+  private finishGatedAudioStart(audio: media.AVPlayer): void {
+    if (this.audioGateTimer >= 0) {
+      clearTimeout(this.audioGateTimer);
+      this.audioGateTimer = -1;
+    }
+    this.audioGateSeekPending = false;
+    this.audioGateSeekTargetMs = -1;
+    this.audioStartPending = false;
+    if (this.audioPlayer !== audio || !this.audioPrepared || !this.playing) return;
+    try {
+      audio.play();
+    } catch (e) {
+    }
+  }
+
+  private cancelAudioGate(): void {
+    if (this.audioGateTimer >= 0) {
+      clearTimeout(this.audioGateTimer);
+      this.audioGateTimer = -1;
+    }
+    this.audioGateSeekPending = false;
+    this.audioGateSeekTargetMs = -1;
+    this.audioStartPending = false;
   }
 
   async changeQuality(qn: number): Promise<void> {
@@ -1403,6 +1482,11 @@ if (this.runtimeSources.length === 0) {
       const oldPlayer: media.AVPlayer | null = this.player;
       const oldAudioPlayer: media.AVPlayer | null = this.audioPlayer;
       this.invalidatePlayerCreation();
+      this.seekCtl?.cancel();
+      this.cancelAudioGate();
+      this.cancelFirstFrameMute(false);
+      this.seekRecoveryActive = false;
+      this.seekRecoveryCoverVisible = false;
       this.resumeAfterPrepare = this.playheadSec;
       this.shouldPlayAfterPrepare = this.playing;
       this.runtimeSources = info.urls;
@@ -1554,13 +1638,8 @@ if (this.runtimeSources.length === 0) {
   private endPlayerPan(): void {
     const ctl: PlayerGestureController | null = this.gestureCtl;
     if (ctl === null) return;
-    const preview: number = this.gestureSeekPreview;
+    // PlayerGestureController.endPan 会通过 onSeek 唯一提交本次目标；这里不再重复 seek。
     ctl.endPan();
-    if (preview >= 0) {
-      Haptic.seek();
-      this.seekTo(preview, true);
-      this.gestureSeekPreview = -1;
-    }
     this.closeSeekPreview();
     this.gestureAdjustKind = '';
     this.gestureAdjustPercent = -1;
@@ -1778,6 +1857,11 @@ if (this.runtimeSources.length === 0) {
     }
     this.retryingSource = true;
     this.invalidatePlayerCreation();
+    this.seekCtl?.cancel();
+    this.cancelAudioGate();
+    this.cancelFirstFrameMute(false);
+    this.seekRecoveryActive = false;
+    this.seekRecoveryCoverVisible = false;
     this.resumeAfterPrepare = this.playheadSec;
     this.shouldPlayAfterPrepare = this.playing;
     this.player = null;
@@ -1820,6 +1904,11 @@ if (this.runtimeSources.length === 0) {
     }
     this.retryingSource = true;
     this.invalidatePlayerCreation();
+    this.seekCtl?.cancel();
+    this.cancelAudioGate();
+    this.cancelFirstFrameMute(false);
+    this.seekRecoveryActive = false;
+    this.seekRecoveryCoverVisible = false;
     this.resumeAfterPrepare = this.playheadSec;
     this.shouldPlayAfterPrepare = this.playing;
     const video: media.AVPlayer | null = this.player;
@@ -1860,7 +1949,8 @@ if (this.runtimeSources.length === 0) {
     }
     if (this.playing) {
       this.audioStartPending = false;
-      this.audioGateSeekPending = false;
+      this.cancelAudioGate();
+      this.cancelFirstFrameMute(true);
       try {
         if (!this.backgroundAudioOnly) p.pause();
         if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.pause();
@@ -1890,7 +1980,7 @@ if (this.runtimeSources.length === 0) {
       this.onResumeRequest();
       try {
         // 恢复播放同样先静音等首帧（pause 期间画面虽在，但 resume 后首个解码帧仍可能滞后于声音）。
-        this.armFirstFrameMute();
+        this.armFirstFrameMute(Math.max(0, p.currentTime), 1200);
         p.play();
         // 音频等视频首帧上屏后再启动（同一节奏，避免先闻其声）。
         this.gateAudioStart();
@@ -1956,8 +2046,8 @@ if (this.runtimeSources.length === 0) {
     this.seekCtl?.request(targetMs, precise, this.playing);
   }
 
-  onVideoSeekDone(video: media.AVPlayer): void {
-    this.seekCtl?.onVideoSeekDone(video);
+  onVideoSeekDone(video: media.AVPlayer, position: number): void {
+    this.seekCtl?.onVideoSeekDone(video, position);
   }
 
   onAudioSeekDone(audio: media.AVPlayer, position: number): void {
@@ -1968,6 +2058,10 @@ if (this.runtimeSources.length === 0) {
     if (this.player !== stalledVideo) return;
     const resume: boolean = this.seekCtl?.seekResumePlaying ?? false;
     this.seekCtl?.cancel();
+    this.cancelAudioGate();
+    this.cancelFirstFrameMute(false);
+    this.seekRecoveryActive = false;
+    this.seekRecoveryCoverVisible = false;
     this.seekLocked = false;
     this.invalidatePlayerCreation();
     const stalledAudio: media.AVPlayer | null = this.audioPlayer;
@@ -2218,7 +2312,7 @@ if (this.runtimeSources.length === 0) {
       this.volumeRestoreTimer = -1;
     }
     this.audioStartPending = false;
-    this.audioGateSeekPending = false;
+    this.cancelAudioGate();
     this.backgroundAudioOnly = false;
     this.backgroundVideoResumePending = false;
     if (this.fullscreenExitCancel !== null) {
@@ -2227,11 +2321,9 @@ if (this.runtimeSources.length === 0) {
     }
     this.fullscreenExitPending = false;
     this.fullscreenExitAnimationStarted = false;
-    if (this.firstFrameMuteTimer >= 0) {
-      clearTimeout(this.firstFrameMuteTimer);
-      this.firstFrameMuteTimer = -1;
-    }
-    this.firstFrameMuteArmed = false;
+    this.cancelFirstFrameMute(false);
+    this.seekRecoveryActive = false;
+    this.seekRecoveryCoverVisible = false;
     this.audioStartPending = false;
     this.stopDmLoop(true);
     this.releaseDmClock();
@@ -2876,6 +2968,16 @@ if (this.runtimeSources.length === 0) {
           .animation({ duration: 200, curve: Curve.EaseOut })
       }
 
+      // seek 超过 180ms 才启用遮罩：优先复用拖动时已解出的目标预览帧，否则用封面兜底。
+      // 快速 seek 不增加任何转场；慢 seek 则不暴露 Surface 重取关键帧期间的黑屏。
+      if (this.seekRecoveryCoverVisible && (this.seekPreviewFrame !== null || this.videoCover.length > 0)) {
+        Image(this.seekPreviewFrame !== null ? this.seekPreviewFrame : this.videoCover)
+          .width('100%')
+          .height('100%')
+          .objectFit(ImageFit.Cover)
+          .hitTestBehavior(HitTestMode.None)
+      }
+
       // 弹幕层：位于视频画面与控件层之间（层级顺序 视频 < 弹幕 < 其他组件），
       // 控制条/弹幕输入/气泡/字幕始终浮在弹幕之上。画布节点高度恒定为 danmakuFixedHeight，
       // 收起/展开动画期只有本包裹层裁剪窗口收缩，Canvas 后备缓冲不被逐帧 resize，
@@ -3379,7 +3481,7 @@ if (this.runtimeSources.length === 0) {
       this.finishProgressPreviewInteraction();
       if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
         Haptic.seek();
-        this.seekTo(value, true);
+        this.seekTo(value, false);
       }
     }
   }
