@@ -17,7 +17,8 @@ import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { DEBUG } from 'BuildProfile';
 import { displaySync } from '@kit.ArkGraphics2D';
-import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter } from '../../api/BiliApi';
+import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, VideoChapter } from '../../api/BiliApi';
+import { SponsorBlockApi, SponsorBlockResult, SponsorBlockUserInfo } from '../../api/SponsorBlockApi';
 import { UserStore } from '../../common/UserStore';
 import { AppTheme, DanmakuSettings } from '../../common/AppTheme';
 import { Haptic } from '../../common/Haptic';
@@ -38,6 +39,9 @@ import { PlayerSettingsContent } from './PlayerSettingsContent';
 import { PlayerCompactControls } from './PlayerCompactControls';
 import { DanmakuPinResult, PlayerDanmakuInteractionController } from './PlayerDanmakuInteractionController';
 import { PlayerDanmakuAction } from './PlayerDanmakuAction';
+import { SponsorBlockCategory, SponsorBlockMode, SponsorBlockSegment, SponsorBlockStore,
+  sponsorBlockActionLabel, sponsorBlockCategory, sponsorBlockSupportedActions } from '../../common/SponsorBlock';
+import { SponsorBlockNotice } from './SponsorBlockNotice';
 
 /** showDialog 按钮的声明类型（promptAction 的 Button 命名空间类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -222,8 +226,33 @@ export struct PlayerView {
   private lastAudioSyncBucket: number = -1;
   /** 每 15 秒同步一次系统媒体进度。 */
   private lastSystemPlaybackBucket: number = -1;
-  private sponsorSegments: Array<SponsorSegment> = [];
-  private lastSponsorUuid: string = '';
+  @State sponsorSegments: Array<SponsorBlockSegment> = [];
+  @State sponsorCategories: Array<SponsorBlockCategory> = SponsorBlockStore.categories();
+  @State sponsorNoticeVisible: boolean = false;
+  @State sponsorNoticeTitle: string = '';
+  @State sponsorNoticeDetail: string = '';
+  @State sponsorNoticeColor: string = '#00D400';
+  @State sponsorNoticeManual: boolean = false;
+  @State sponsorNoticeCanUndo: boolean = false;
+  @State sponsorNoticeCanVote: boolean = false;
+  @State sponsorFullLabel: string = '';
+  @State sponsorDraftStart: number = -1;
+  @State sponsorDraftEnd: number = -1;
+  @State sponsorDraftCategory: string = 'sponsor';
+  @State sponsorDraftAction: string = 'skip';
+  @State sponsorSubmitting: boolean = false;
+  @State sponsorUserLoading: boolean = false;
+  @State sponsorUserName: string = '';
+  @State sponsorUserStats: string = '';
+  @State sponsorWarningReason: string = '';
+  @StorageProp('sponsorBlockSettingsRevision') @Watch('onSponsorSettingsChanged') sponsorSettingsRevision: number = 0;
+  private sponsorNoticeSegment: SponsorBlockSegment | null = null;
+  private sponsorNoticeTimer: number = -1;
+  private sponsorUndoTime: number = -1;
+  private sponsorMuted: boolean = false;
+  private sponsorHandled: Set<string> = new Set<string>();
+  private sponsorDismissed: Set<string> = new Set<string>();
+  private sponsorViewed: Set<string> = new Set<string>();
   private subtitleCtl: PlayerSubtitleController | null = null;
   private avSessionHelper: PlayerAvSessionHelper | null = null;
   private dmListSource: BasicDataSource<DanmakuItem> = new BasicDataSource<DanmakuItem>();
@@ -291,6 +320,7 @@ export struct PlayerView {
   aboutToAppear(): void {
     // 被其他 NavDestination 覆盖时 aboutToDisappear 已置位；返回同一实例时恢复。
     this.destroyed = false;
+    this.sponsorCategories = SponsorBlockStore.categories();
     this.restoreDanmakuSettings();
     this.onDanmakuEngineReady(this.dmEngine);
     this.showControls = false;
@@ -418,6 +448,11 @@ if (this.runtimeSources.length === 0) {
 
   onQualityOptionsChanged(): void {
     if (this.qualityOptions.length > 0) this.runtimeQualityOptions = this.qualityOptions;
+  }
+
+  onSponsorSettingsChanged(): void {
+    this.sponsorCategories = SponsorBlockStore.categories();
+    this.updateSponsorFullLabel();
   }
 
   private ensureAVSession(): void {
@@ -801,6 +836,7 @@ if (this.runtimeSources.length === 0) {
     this.invalidatePlayerCreation();
     AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
     this.endHoldSpeed();
+    this.clearSponsorNoticeTimer();
     this.resumeAfterPrepare = this.playheadSec;
     this.shouldPlayAfterPrepare = false;
     this.muteImmediately();
@@ -854,7 +890,7 @@ if (this.runtimeSources.length === 0) {
       this.volumeRestoreTimer = -1;
       if (this.destroyed) return;
       try {
-        const restoreVolume: number = (this.gestureCtl?.gestureVolume ?? 100) / 100;
+        const restoreVolume: number = this.sponsorMuted ? 0 : (this.gestureCtl?.gestureVolume ?? 100) / 100;
         if (this.player === video && video !== null && this.prepared) video.setVolume(restoreVolume);
         if (this.audioPlayer === audio && audio !== null && this.audioPrepared) audio.setVolume(restoreVolume);
       } catch (e) {
@@ -873,7 +909,7 @@ if (this.runtimeSources.length === 0) {
 
   private restoreUserVolume(): void {
     try {
-      const restoreVolume: number = (this.gestureCtl?.gestureVolume ?? 100) / 100;
+      const restoreVolume: number = this.sponsorMuted ? 0 : (this.gestureCtl?.gestureVolume ?? 100) / 100;
       if (this.player !== null && this.prepared) this.player.setVolume(restoreVolume);
       if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.setVolume(restoreVolume);
     } catch (e) {
@@ -936,17 +972,323 @@ if (this.runtimeSources.length === 0) {
     }
   }
 
-  async loadSponsorSegments(): Promise<void> {
+  async loadSponsorSegments(ignoreCache: boolean = false): Promise<void> {
     const bvid: string = this.bvid;
     const cid: number = this.cid;
+    this.sponsorSegments = [];
+    this.resetSponsorRuntime();
     try {
-      const segments: Array<SponsorSegment> = await BiliApi.getSponsorSegments(bvid, cid);
+      const segments: Array<SponsorBlockSegment> = await SponsorBlockApi.getSegments(bvid, cid, ignoreCache);
       if (this.destroyed || this.bvid !== bvid || this.cid !== cid) return;
       this.sponsorSegments = segments;
-      this.lastSponsorUuid = '';
+      this.updateSponsorFullLabel();
     } catch (e) {
       // 空降数据是增强能力，请求失败不能影响播放器主流程。
     }
+  }
+
+  private sponsorKey(segment: SponsorBlockSegment): string {
+    return segment.uuid.length > 0 ? segment.uuid : segment.category + ':' +
+      segment.start.toFixed(3) + ':' + segment.end.toFixed(3);
+  }
+
+  private resetSponsorRuntime(): void {
+    this.sponsorHandled.clear();
+    this.sponsorDismissed.clear();
+    this.sponsorViewed.clear();
+    this.setSponsorMuted(false);
+    this.sponsorUndoTime = -1;
+    this.sponsorFullLabel = '';
+    this.hideSponsorNotice(false);
+  }
+
+  private clearSponsorNoticeTimer(): void {
+    if (this.sponsorNoticeTimer >= 0) {
+      clearTimeout(this.sponsorNoticeTimer);
+      this.sponsorNoticeTimer = -1;
+    }
+  }
+
+  private updateSponsorFullLabel(): void {
+    this.sponsorFullLabel = '';
+    for (let i: number = 0; i < this.sponsorSegments.length; i++) {
+      const segment: SponsorBlockSegment = this.sponsorSegments[i];
+      if (segment.actionType === 'full' && SponsorBlockStore.modeFor(segment.category) !== SponsorBlockMode.DISABLED) {
+        this.sponsorFullLabel = sponsorBlockCategory(segment.category).label;
+        return;
+      }
+    }
+  }
+
+  private showSponsorNotice(segment: SponsorBlockSegment, manual: boolean, canUndo: boolean): void {
+    const category: SponsorBlockCategory = sponsorBlockCategory(segment.category);
+    this.clearSponsorNoticeTimer();
+    this.sponsorNoticeSegment = segment;
+    this.sponsorNoticeTitle = (canUndo ? '已空降 ' : '') + category.label;
+    this.sponsorNoticeDetail = sponsorBlockActionLabel(segment.actionType) + ' · ' +
+      formatDuration(segment.start) + ' - ' + formatDuration(segment.end);
+    this.sponsorNoticeColor = category.color;
+    this.sponsorNoticeManual = manual;
+    this.sponsorNoticeCanUndo = canUndo;
+    this.sponsorNoticeCanVote = segment.uuid.length > 0;
+    this.sponsorNoticeVisible = true;
+    const autoCloseDelay: number = manual ? 6000 : (canUndo ? 5000 : 3500);
+    this.sponsorNoticeTimer = setTimeout(() => {
+      this.sponsorNoticeTimer = -1;
+      // 手动提示超时等同于用户关闭，防止仍处于片段内时下一次进度回调立即重弹。
+      this.hideSponsorNotice(manual);
+    }, autoCloseDelay);
+  }
+
+  private hideSponsorNotice(dismiss: boolean = true): void {
+    this.clearSponsorNoticeTimer();
+    if (dismiss && this.sponsorNoticeSegment !== null) {
+      this.sponsorDismissed.add(this.sponsorKey(this.sponsorNoticeSegment));
+    }
+    this.sponsorNoticeVisible = false;
+    this.sponsorNoticeManual = false;
+    this.sponsorNoticeCanUndo = false;
+    this.sponsorNoticeSegment = null;
+  }
+
+  private setSponsorMuted(muted: boolean): void {
+    if (this.sponsorMuted === muted) return;
+    this.sponsorMuted = muted;
+    if (muted) this.muteImmediately();
+    else if (!this.firstFrameMuteArmed) this.restoreUserVolume();
+  }
+
+  private recordSponsorView(segment: SponsorBlockSegment, seconds: number): void {
+    const key: string = this.sponsorKey(segment);
+    if (this.sponsorViewed.has(key)) return;
+    this.sponsorViewed.add(key);
+    if (seconds > 0) SponsorBlockStore.recordSkip(seconds);
+    SponsorBlockApi.reportViewed(segment.uuid).catch(() => {});
+  }
+
+  private executeSponsorSegment(segment: SponsorBlockSegment, now: number): void {
+    const key: string = this.sponsorKey(segment);
+    this.sponsorHandled.add(key);
+    this.sponsorDismissed.delete(key);
+    if (segment.actionType === 'mute') {
+      this.sponsorUndoTime = now;
+      this.setSponsorMuted(true);
+      this.showSponsorNotice(segment, false, true);
+      return;
+    }
+    if (segment.actionType === 'poi') {
+      this.sponsorUndoTime = now;
+      this.seekTo(segment.start, true);
+      this.showSponsorNotice(segment, false, true);
+      return;
+    }
+    if (segment.actionType === 'full') {
+      this.showSponsorNotice(segment, false, false);
+      return;
+    }
+    this.sponsorUndoTime = now;
+    this.seekTo(segment.end + 0.01, true);
+    this.recordSponsorView(segment, Math.max(0, segment.end - now));
+    this.showSponsorNotice(segment, false, true);
+  }
+
+  private undoSponsorSkip(): void {
+    const segment: SponsorBlockSegment | null = this.sponsorNoticeSegment;
+    if (segment === null) return;
+    if (segment.actionType === 'mute') {
+      this.setSponsorMuted(false);
+    } else if (this.sponsorUndoTime >= 0) {
+      this.seekTo(this.sponsorUndoTime, true);
+    }
+    this.sponsorHandled.add(this.sponsorKey(segment));
+    this.hideSponsorNotice(false);
+  }
+
+  private sponsorNoticePrimary(): void {
+    const segment: SponsorBlockSegment | null = this.sponsorNoticeSegment;
+    if (segment === null) return;
+    if (this.sponsorNoticeCanUndo) this.undoSponsorSkip();
+    else this.executeSponsorSegment(segment, this.playheadSec);
+  }
+
+  private voteSponsor(type: number): void {
+    const segment: SponsorBlockSegment | null = this.sponsorNoticeSegment;
+    if (segment === null) return;
+    this.voteSponsorSegment(segment, type);
+  }
+
+  private voteSponsorSegment(segment: SponsorBlockSegment, type: number): void {
+    SponsorBlockApi.vote(segment.uuid, type).then((result: SponsorBlockResult) => {
+      this.toast(result.message);
+      if (!result.ok) return;
+      segment.votes += type === 1 ? 1 : -1;
+      if (type === 0) {
+        const key: string = this.sponsorKey(segment);
+        this.sponsorSegments = this.sponsorSegments.filter((item: SponsorBlockSegment) =>
+          this.sponsorKey(item) !== key);
+        this.setSponsorMuted(false);
+        this.hideSponsorNotice(false);
+      } else {
+        this.sponsorSegments = this.sponsorSegments.slice();
+      }
+    }).catch(() => this.toast('投票失败，请稍后重试'));
+  }
+
+  private changeSponsorMode(category: string, mode: number): void {
+    SponsorBlockStore.setMode(category, mode);
+    this.sponsorCategories = SponsorBlockStore.categories();
+    this.updateSponsorFullLabel();
+  }
+
+  private markSponsorStart(): void {
+    this.sponsorDraftStart = Math.max(0, this.playheadSec);
+    if (this.sponsorDraftAction === 'poi') this.sponsorDraftEnd = this.sponsorDraftStart;
+  }
+
+  private markSponsorEnd(): void {
+    this.sponsorDraftEnd = Math.max(0, this.playheadSec);
+    if (this.sponsorDraftStart < 0) this.sponsorDraftStart = 0;
+  }
+
+  private changeSponsorDraftCategory(category: string): void {
+    this.sponsorDraftCategory = category;
+    const actions: Array<string> = sponsorBlockSupportedActions(category);
+    if (actions.indexOf(this.sponsorDraftAction) < 0) this.sponsorDraftAction = actions[0];
+    if (this.sponsorDraftAction === 'poi') this.sponsorDraftEnd = this.sponsorDraftStart;
+    if (this.sponsorDraftAction === 'full') {
+      this.sponsorDraftStart = 0;
+      this.sponsorDraftEnd = 0;
+    }
+  }
+
+  private changeSponsorDraftAction(action: string): void {
+    this.sponsorDraftAction = action;
+    if (action === 'poi') this.sponsorDraftEnd = this.sponsorDraftStart;
+    if (action === 'full') {
+      this.sponsorDraftStart = 0;
+      this.sponsorDraftEnd = 0;
+    }
+  }
+
+  private clearSponsorDraft(): void {
+    this.sponsorDraftStart = -1;
+    this.sponsorDraftEnd = -1;
+    this.sponsorDraftCategory = 'sponsor';
+    this.sponsorDraftAction = 'skip';
+  }
+
+  private previewSponsorDraft(): void {
+    if (this.sponsorDraftStart < 0) return;
+    this.seekTo(this.sponsorDraftStart, true);
+    this.closeSettingPanels();
+  }
+
+  private seekSponsorSegment(segment: SponsorBlockSegment): void {
+    this.sponsorHandled.add(this.sponsorKey(segment));
+    this.seekTo(segment.start, true);
+    this.closeSettingPanels();
+  }
+
+  private async submitSponsorDraft(): Promise<void> {
+    if (this.sponsorSubmitting) return;
+    const actions: Array<string> = sponsorBlockSupportedActions(this.sponsorDraftCategory);
+    if (actions.indexOf(this.sponsorDraftAction) < 0) {
+      this.toast('该分类不支持所选动作');
+      return;
+    }
+    let start: number = this.sponsorDraftStart;
+    let end: number = this.sponsorDraftEnd;
+    if (this.sponsorDraftAction === 'full') {
+      start = 0;
+      end = 0;
+    } else if (this.sponsorDraftAction === 'poi') {
+      end = start;
+    } else if (start < 0 || end <= start) {
+      this.toast('结束时间必须晚于开始时间');
+      return;
+    }
+    if (start < 0 || (this.duration > 0 && (start > this.duration || end > this.duration + 0.5))) {
+      this.toast('片段时间超出视频范围');
+      return;
+    }
+    const segment: SponsorBlockSegment = new SponsorBlockSegment();
+    segment.start = start;
+    segment.end = end;
+    segment.cid = String(this.cid);
+    segment.category = this.sponsorDraftCategory;
+    segment.actionType = this.sponsorDraftAction;
+    segment.videoDuration = this.duration;
+    this.sponsorSubmitting = true;
+    try {
+      const result: SponsorBlockResult = await SponsorBlockApi.submit(this.bvid, this.cid, this.duration, [segment]);
+      if (!result.ok) {
+        this.toast(result.message);
+        return;
+      }
+      if (result.uuids.length > 0) segment.uuid = result.uuids[0];
+      this.sponsorSegments = this.sponsorSegments.concat([segment]);
+      this.sponsorSegments.sort((a: SponsorBlockSegment, b: SponsorBlockSegment) => a.start - b.start);
+      this.updateSponsorFullLabel();
+      this.clearSponsorDraft();
+      this.toast(result.message);
+      this.loadSponsorUserInfo(true).catch(() => {});
+    } catch (e) {
+      this.toast('提交失败，请稍后重试');
+    } finally {
+      this.sponsorSubmitting = false;
+    }
+  }
+
+  private async loadSponsorUserInfo(ignoreCache: boolean = false): Promise<void> {
+    if (this.sponsorUserLoading) return;
+    this.sponsorUserLoading = true;
+    try {
+      const info: SponsorBlockUserInfo | null = await SponsorBlockApi.getUserInfo(ignoreCache);
+      if (this.destroyed || info === null) return;
+      this.sponsorUserName = info.userName;
+      this.sponsorUserStats = String(info.segmentCount) + ' 个投稿 · ' + String(info.viewCount) +
+        ' 次帮助 · 节省 ' + info.minutesSaved.toFixed(1) + ' 分钟' + (info.vip ? ' · VIP' : '');
+      this.sponsorWarningReason = info.warnings > 0 ? info.warningReason : '';
+    } finally {
+      this.sponsorUserLoading = false;
+    }
+  }
+
+  private async saveSponsorUsername(): Promise<void> {
+    const name: string = this.sponsorUserName.trim();
+    if (name.length > 64) {
+      this.toast('昵称不能超过 64 个字符');
+      return;
+    }
+    const result: SponsorBlockResult = await SponsorBlockApi.setUsername(name);
+    this.toast(result.message);
+    if (result.ok) this.loadSponsorUserInfo(true).catch(() => {});
+  }
+
+  private async acknowledgeSponsorWarning(): Promise<void> {
+    const result: SponsorBlockResult = await SponsorBlockApi.acknowledgeWarning();
+    this.toast(result.message);
+    if (result.ok) this.sponsorWarningReason = '';
+  }
+
+  private setSponsorEnabled(next: boolean): void {
+    this.sponsorSkipEnabled = next;
+    AppTheme.persistSponsorSkip(next);
+    if (!next) {
+      this.setSponsorMuted(false);
+      this.hideSponsorNotice(false);
+    }
+    this.toast(next ? '空降助手已开启' : '空降助手已关闭');
+  }
+
+  private visibleSponsorSegments(): Array<SponsorBlockSegment> {
+    const result: Array<SponsorBlockSegment> = [];
+    for (let i: number = 0; i < this.sponsorSegments.length; i++) {
+      if (SponsorBlockStore.modeFor(this.sponsorSegments[i].category) !== SponsorBlockMode.DISABLED) {
+        result.push(this.sponsorSegments[i]);
+      }
+    }
+    return result;
   }
 
   async loadVideoChapters(): Promise<void> {
@@ -963,16 +1305,38 @@ if (this.runtimeSources.length === 0) {
   }
 
   maybeSkipSponsor(now: number): boolean {
-    if (!this.sponsorSkipEnabled || this.sponsorSegments.length === 0) return false;
+    if (!this.sponsorSkipEnabled || this.sponsorSegments.length === 0) {
+      this.setSponsorMuted(false);
+      return false;
+    }
+    let keepMuted: boolean = false;
+    let activeManual: boolean = false;
     for (let i: number = 0; i < this.sponsorSegments.length; i++) {
-      const segment: SponsorSegment = this.sponsorSegments[i];
-      if (now >= segment.start && now < segment.end - 0.08 && this.lastSponsorUuid !== segment.uuid) {
-        this.lastSponsorUuid = segment.uuid;
-        this.seekTo(segment.end + 0.05, true);
-        this.toast(segment.category === 'sponsor' ? '已跳过赞助广告' : '已跳过推广片段');
-        return true;
+      const segment: SponsorBlockSegment = this.sponsorSegments[i];
+      const mode: number = SponsorBlockStore.modeFor(segment.category);
+      if (mode === SponsorBlockMode.DISABLED || segment.actionType === 'full' || segment.actionType === 'poi') continue;
+      const inside: boolean = now >= segment.start && now < segment.end - 0.04;
+      if (!inside) continue;
+      const key: string = this.sponsorKey(segment);
+      if (segment.actionType === 'mute' && (mode === SponsorBlockMode.AUTO || this.sponsorHandled.has(key))) {
+        keepMuted = true;
+      }
+      if (this.sponsorHandled.has(key) || this.sponsorDismissed.has(key)) continue;
+      if (mode === SponsorBlockMode.AUTO) {
+        this.executeSponsorSegment(segment, now);
+        this.setSponsorMuted(segment.actionType === 'mute');
+        return segment.actionType === 'skip';
+      }
+      if (mode === SponsorBlockMode.MANUAL) {
+        activeManual = true;
+        if (!this.sponsorNoticeVisible || this.sponsorNoticeSegment === null ||
+          this.sponsorKey(this.sponsorNoticeSegment) !== key) {
+          this.showSponsorNotice(segment, true, false);
+        }
       }
     }
+    this.setSponsorMuted(keepMuted);
+    if (!activeManual && this.sponsorNoticeManual) this.hideSponsorNotice(false);
     return false;
   }
 
@@ -1100,7 +1464,7 @@ if (this.runtimeSources.length === 0) {
           this.reportVideoSize(p);
           try {
             p.setPlaybackRate(this.playbackRate);
-            p.setVolume((this.gestureCtl?.gestureVolume ?? 100) / 100);
+            p.setVolume(this.sponsorMuted ? 0 : (this.gestureCtl?.gestureVolume ?? 100) / 100);
           } catch (e) {
             // 某些视频解码器不支持非常用倍速，保持 1x 即可。
           }
@@ -1301,7 +1665,7 @@ if (this.runtimeSources.length === 0) {
         this.audioPrepared = true;
         try {
           audio.setPlaybackRate(this.playbackRate);
-          audio.setVolume((this.gestureCtl?.gestureVolume ?? 100) / 100);
+          audio.setVolume(this.sponsorMuted ? 0 : (this.gestureCtl?.gestureVolume ?? 100) / 100);
         } catch (e) {
           // 倍速不被音频解码器支持时，设置入口会统一回退到 1x。
         }
@@ -1583,7 +1947,7 @@ if (this.runtimeSources.length === 0) {
   }
 
   private applyGestureVolume(value: number): void {
-    const normalized: number = Math.max(0, Math.min(1, value / 100));
+    const normalized: number = this.sponsorMuted ? 0 : Math.max(0, Math.min(1, value / 100));
     try {
       if (this.player !== null && this.prepared) this.player.setVolume(normalized);
       if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.setVolume(normalized);
@@ -1876,6 +2240,10 @@ if (this.runtimeSources.length === 0) {
     this.resumeTransitionActive = this.compactMode && !this.fullscreen;
     this.onResumeRequest();
     try {
+      this.sponsorHandled.clear();
+      this.sponsorDismissed.clear();
+      this.setSponsorMuted(false);
+      this.hideSponsorNotice(false);
       this.resetDanmakuAt(0);
       this.playheadSec = 0;
       this.curTime = 0;
@@ -2095,6 +2463,7 @@ if (this.runtimeSources.length === 0) {
   /** 切换更多菜单/抽屉内页：push/pop 式过渡（子页从右滑入，menu 向左滑出）。 */
   private openSheetPage(page: string): void {
     if (page === this.moreSheetPage) return;
+    if (page === 'sponsor') this.loadSponsorUserInfo(false).catch(() => {});
     if (this.moreSheetPage === 'menu' && page !== 'menu') {
       this.settingsOpenedDirectly = false;
     }
@@ -2641,6 +3010,34 @@ if (this.runtimeSources.length === 0) {
         panStartTime: this.gestureCtl?.panStartTime ?? 0,
         duration: this.duration,
       })
+      if (this.sponsorFullLabel.length > 0 && this.sponsorSkipEnabled) {
+        Text(this.sponsorFullLabel)
+          .fontSize(11)
+          .fontColor('#FFFFFF')
+          .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+          .borderRadius(4)
+          .backgroundColor('#B3008A5C')
+          .align(Alignment.TopEnd)
+          .margin({ top: this.fullscreen ? 52 : 10, right: 10 })
+          .hitTestBehavior(HitTestMode.None)
+          .zIndex(72)
+      }
+      if (this.sponsorNoticeVisible && !this.endScreenOpen) {
+        SponsorBlockNotice({
+          title: this.sponsorNoticeTitle,
+          detail: this.sponsorNoticeDetail,
+          color: this.sponsorNoticeColor,
+          manual: this.sponsorNoticeManual,
+          canUndo: this.sponsorNoticeCanUndo,
+          canVote: this.sponsorNoticeCanVote,
+          onPrimary: () => this.sponsorNoticePrimary(),
+          onVote: (type: number) => this.voteSponsor(type),
+          onClose: () => this.hideSponsorNotice(true),
+        })
+          .align(Alignment.BottomEnd)
+          .margin({ bottom: this.fullscreen ? 88 : 48, right: 10 })
+          .zIndex(95)
+      }
       // 竖屏收起控件后仍保留 1.5vp 的播放进度提示，紧贴画面底边且不响应触摸。
       if (!this.fullscreen && !this.showControls && this.duration > 0 &&
         this.errorText.length === 0 && !this.endScreenOpen) {
@@ -2668,6 +3065,7 @@ if (this.runtimeSources.length === 0) {
               progress: this.progressDisplayTime(),
               duration: this.duration,
               chapters: this.chapters,
+              sponsorSegments: this.visibleSponsorSegments(),
               titleColor: this.sheetTitleColor(),
               onBack: () => this.handlePlayerBack(),
               onPlay: () => this.togglePlay(),
@@ -2720,6 +3118,7 @@ if (this.runtimeSources.length === 0) {
               danmakuOn: this.danmakuOn,
               sponsorEnabled: this.sponsorSkipEnabled,
               chapters: this.chapters,
+              sponsorSegments: this.visibleSponsorSegments(),
               progress: this.progressDisplayTime(),
               duration: this.duration,
               qualityLoading: this.qualityLoading,
@@ -2731,9 +3130,7 @@ if (this.runtimeSources.length === 0) {
               onDanmaku: () => this.toggleDanmaku(),
               onDanmakuSettings: () => this.openSettingsPage('dm'),
               onSponsor: () => {
-                this.sponsorSkipEnabled = !this.sponsorSkipEnabled;
-                AppTheme.persistSponsorSkip(this.sponsorSkipEnabled);
-                this.toast(this.sponsorSkipEnabled ? '广告空降已开启' : '广告空降已关闭');
+                this.setSponsorEnabled(!this.sponsorSkipEnabled);
               },
               onChapter: () => this.openSettingsPage('chapters'),
               onQuality: () => this.openSettingsPage('quality'),
@@ -2947,11 +3344,23 @@ if (this.runtimeSources.length === 0) {
       mirrorOn: this.mirrorOn,
       timerMinutes: this.timerMinutes,
       sponsorOn: this.sponsorSkipEnabled,
+      sponsorCategories: $sponsorCategories,
+      sponsorSegments: $sponsorSegments,
+      sponsorDraftStart: $sponsorDraftStart,
+      sponsorDraftEnd: $sponsorDraftEnd,
+      sponsorDraftCategory: $sponsorDraftCategory,
+      sponsorDraftAction: $sponsorDraftAction,
+      sponsorSubmitting: $sponsorSubmitting,
+      sponsorUserLoading: $sponsorUserLoading,
+      sponsorUserName: $sponsorUserName,
+      sponsorUserStats: $sponsorUserStats,
+      sponsorWarningReason: $sponsorWarningReason,
       subtitleOn: this.subtitleOn,
       subtitleIndex: this.subtitleIndex,
       subtitles: this.subtitles,
       chapters: this.chapters,
       currentTime: this.curTime,
+      duration: this.duration,
       qualityOptions: this.runtimeQualityOptions,
       activeQuality: this.activeQuality,
       dmOpacity: this.dmOpacity,
@@ -3003,10 +3412,27 @@ if (this.runtimeSources.length === 0) {
       onMirrorChange: (next: boolean) => this.mirrorOn = next,
       onSubtitleToggle: (next: boolean) => this.toggleSubtitle(next),
       onSponsorToggle: (next: boolean) => {
-        this.sponsorSkipEnabled = next;
-        AppTheme.persistSponsorSkip(next);
-        this.toast(next ? '广告空降已开启' : '广告空降已关闭');
+        this.setSponsorEnabled(next);
       },
+      onSponsorModeChange: (category: string, mode: number) => this.changeSponsorMode(category, mode),
+      onSponsorRefresh: () => {
+        this.loadSponsorSegments(true);
+        this.loadSponsorUserInfo(true).catch(() => {});
+      },
+      onSponsorMarkStart: () => this.markSponsorStart(),
+      onSponsorMarkEnd: () => this.markSponsorEnd(),
+      onSponsorDraftStartChange: (value: number) => this.sponsorDraftStart = value,
+      onSponsorDraftEndChange: (value: number) => this.sponsorDraftEnd = value,
+      onSponsorDraftCategoryChange: (value: string) => this.changeSponsorDraftCategory(value),
+      onSponsorDraftActionChange: (value: string) => this.changeSponsorDraftAction(value),
+      onSponsorPreview: () => this.previewSponsorDraft(),
+      onSponsorClear: () => this.clearSponsorDraft(),
+      onSponsorSubmit: () => this.submitSponsorDraft().catch(() => {}),
+      onSponsorSegmentSeek: (segment: SponsorBlockSegment) => this.seekSponsorSegment(segment),
+      onSponsorSegmentVote: (segment: SponsorBlockSegment, type: number) => this.voteSponsorSegment(segment, type),
+      onSponsorUserNameChange: (value: string) => this.sponsorUserName = value,
+      onSponsorSaveUserName: () => this.saveSponsorUsername().catch(() => this.toast('昵称更新失败')),
+      onSponsorAcknowledgeWarning: () => this.acknowledgeSponsorWarning().catch(() => this.toast('操作失败')),
       onShare: () => this.onShare(),
       onCopyLink: () => this.copyShareLink(),
       onStub: (message: string) => this.toast(message),

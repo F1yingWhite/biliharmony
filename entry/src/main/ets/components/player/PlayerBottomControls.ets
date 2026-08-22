@@ -1,4 +1,5 @@
 import { VideoChapter } from '../../api/BiliApi';
+import { SponsorBlockSegment } from '../../common/SponsorBlock';
 import { formatDuration } from '../../common/Utils';
 import { PlayerProgressBar } from './PlayerProgressBar';
 
@@ -10,6 +11,7 @@ export struct PlayerBottomControls {
   @Prop danmakuOn: boolean = true;
   @Prop sponsorEnabled: boolean = true;
   @Prop chapters: Array<VideoChapter> = [];
+  @Prop sponsorSegments: Array<SponsorBlockSegment> = [];
   @Prop progress: number = 0;
   @Prop duration: number = 0;
   @Prop qualityLoading: boolean = false;
@@ -52,6 +54,7 @@ export struct PlayerBottomControls {
             duration: this.duration,
             compact: false,
             chapters: this.chapters,
+            sponsorSegments: this.sponsorSegments,
             onChange: (value: number, mode: SliderChangeMode) => this.onProgressChange(value, mode),
             onInteractionEnd: () => this.onProgressInteractionEnd(),
           })
@@ -129,6 +132,7 @@ export struct PlayerBottomControls {
           duration: this.duration,
           compact: false,
           chapters: this.chapters,
+          sponsorSegments: this.sponsorSegments,
           onChange: (value: number, mode: SliderChangeMode) => this.onProgressChange(value, mode),
           onInteractionEnd: () => this.onProgressInteractionEnd(),
         })

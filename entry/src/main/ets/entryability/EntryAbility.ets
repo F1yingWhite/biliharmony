@@ -8,6 +8,7 @@ import { UserStore } from '../common/UserStore';
 import { SearchHistoryStore } from '../common/SearchHistoryStore';
 import { EmoteResolver } from '../common/EmoteResolver';
 import { RemoteAssetCache } from '../common/RemoteAssetCache';
+import { SponsorBlockStore } from '../common/SponsorBlock';
 
 const DOMAIN: number = 0x0000;
 const TAG: string = 'BiliHarmony';
@@ -24,6 +25,9 @@ export default class EntryAbility extends UIAbility {
     AppTheme.init(this.context);
     AppTheme.initThemeStore(this.context).catch(() => {
       // 主题偏好恢复失败不影响启动；PersistentStorage 默认值兜底。
+    });
+    SponsorBlockStore.init(this.context).catch(() => {
+      // 空降助手设置恢复失败时使用上游默认分类策略。
     });
     AppTheme.bindNativeModeApplier((mode: string) => this.applyNativeThemeMode(mode));
     AppTheme.applyCurrentMode();

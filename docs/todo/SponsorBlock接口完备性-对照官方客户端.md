@@ -1,5 +1,7 @@
 # SponsorBlock（小电视空降助手）接口完备性盘点 —— 对照官方客户端
 
+> **2026-08-22 完成状态：** P0 读侧、P1 贡献闭环与 P2 社区身份/计数均已原生实现，入口位于播放器「更多 → 空降助手」。实现包含哈希查询与旧协议回退、cid 隔离、10 分钟缓存/强制刷新、11 类四档策略、`skip/mute/full/poi`、进度条标记、提示/撤销、投稿/赞踩/观看统计、匿名 ID、昵称/贡献统计/版主提醒。P3 的 B 站→YouTube port 映射系列按本文原定边界不纳入 B 站数据闭环。
+
 > 2026-08-19 盘点。对照对象：https://github.com/hanydd/BilibiliSponsorBlock （已 clone 至 `/tmp/bilibili-sponsorblock`，commit `07ddf7c`）。
 > 服务地址：`https://bsbsb.top`（官方 `config.json` 默认 `https://www.bsbsb.top`，已实测两者均可达，本地代码用的是不带 `www` 的）。
 > 本文所有接口行为均已对真实服务器请求验证。

@@ -254,7 +254,8 @@ export class HttpClient {
     const request: http.HttpRequest = http.createHttp();
     try {
       const headers: Record<string, string> = HttpClient.mergeHeaders(extraHeaders);
-      if (method === http.RequestMethod.POST) {
+      if (method === http.RequestMethod.POST && headers['Content-Type'] === undefined &&
+        headers['content-type'] === undefined) {
         headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=utf-8';
       }
       const options: http.HttpRequestOptions = {

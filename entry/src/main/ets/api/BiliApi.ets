@@ -59,13 +59,6 @@ export class DanmakuItem {
   }
 }
 
-export class SponsorSegment {
-  start: number = 0;
-  end: number = 0;
-  category: string = '';
-  uuid: string = '';
-}
-
 export class VideoChapter {
   from: number = 0;
   to: number = 0;
@@ -432,38 +425,6 @@ export class BiliApi {
     for (let i: number = 0; i < list.length; i++) {
       result.push(VideoItem.fromHotItem(list[i]));
     }
-    return result;
-  }
-
-  static async getSponsorSegments(bvid: string, cid: number): Promise<Array<SponsorSegment>> {
-    if (bvid.length === 0) return [];
-    const url: string = Api.sponsorSegments + '?' + HttpClient.buildQuery({ 'videoID': bvid, 'cid': String(cid) });
-    const resp: HttpResponse = await HttpClient.get(url, {
-      'Origin': 'harmony://com.piliplus.harmony',
-      'x-ext-version': 'BiliHarmony/1.0',
-      'Accept': 'application/json',
-    });
-    if (!resp.ok) return [];
-    const raw: Array<Object> = resp.jsonArray();
-    const result: Array<SponsorSegment> = [];
-    for (let i: number = 0; i < raw.length; i++) {
-      const item: Record<string, Object> = asObject(raw[i]);
-      const category: string = str(item, 'category', '');
-      if (category !== 'sponsor' && category !== 'selfpromo') continue;
-      if (str(item, 'actionType', 'skip') !== 'skip') continue;
-      const segment: Array<Object> = asArray(item['segment']);
-      if (segment.length < 2) continue;
-      const start: number = asNumber(segment[0], -1);
-      const end: number = asNumber(segment[1], -1);
-      if (start < 0 || end <= start) continue;
-      const parsed: SponsorSegment = new SponsorSegment();
-      parsed.start = start;
-      parsed.end = end;
-      parsed.category = category;
-      parsed.uuid = str(item, 'UUID', '');
-      result.push(parsed);
-    }
-    result.sort((a: SponsorSegment, b: SponsorSegment) => a.start - b.start);
     return result;
   }
 
