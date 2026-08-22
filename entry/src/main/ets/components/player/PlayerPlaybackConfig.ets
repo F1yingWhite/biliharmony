@@ -12,11 +12,11 @@ export class PlayerPlaybackConfig {
 
   static videoStrategy(showFirstFrame: boolean = true): media.PlaybackStrategy {
     return {
-      // 播放中缓冲目标加大到 20s：网络抖动时更不容易二次卡顿。
-      preferredBufferDuration: 20,
-      preferredBufferDurationForPlaying: 0.8,
-      // 起播/seek 后只要有 2s 缓冲就开播（原 3s；低于 2 会被系统判定非法参数）。
-      thresholdForAutoQuickPlay: 2,
+      // 只使用 AVPlayer 内存缓冲。12s 足以覆盖常见网络抖动，也避免高码率片源抢跑过多数据。
+      preferredBufferDuration: 12,
+      preferredBufferDurationForPlaying: 1,
+      // API 26 建议最大水线至少比起播水线高 2s。
+      thresholdForAutoQuickPlay: 3,
       // 续播场景关闭“先显示第 0 帧”：否则会闪一下片头再跳到续播点。
       showFirstFrameOnPrepare: showFirstFrame,
     };
@@ -24,9 +24,9 @@ export class PlayerPlaybackConfig {
 
   static audioStrategy(): media.PlaybackStrategy {
     return {
-      preferredBufferDuration: 20,
-      preferredBufferDurationForPlaying: 0.5,
-      thresholdForAutoQuickPlay: 2,
+      preferredBufferDuration: 12,
+      preferredBufferDurationForPlaying: 1,
+      thresholdForAutoQuickPlay: 3,
     };
   }
 

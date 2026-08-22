@@ -279,6 +279,8 @@ export struct PlayerView {
   private backgroundAudioOnly: boolean = false;
   /** 从后台音乐模式回到前台时，等待双轨 seek 完成并恢复视频。 */
   private backgroundVideoResumePending: boolean = false;
+  /** 同一次 seek 超时最多重建一次，避免故障源形成释放/重建/重新下载死循环。 */
+  private seekRecoveryAttempts: number = 0;
   // 已加载弹幕对应的 cid，避免 aboutToAppear 与换源触发的并发/重复加载。
   private dmLoadedCid: number = -1;
   // 弹幕分段加载状态（0 基段号）；分段首段失败时 dmSegFallback 置位，整体回退 XML 整段接口。
@@ -295,7 +297,6 @@ export struct PlayerView {
     this.endScreenOpen = false;
     AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
     AppStorage.setOrCreate<number>('videoFullscreenExitRequest', 0);
-    AppStorage.setOrCreate<number>('videoQualityPref', 0);
     if (this.seekCtl === null) {
       this.seekCtl = new PlayerSeekController(
         (): media.AVPlayer | null => this.player,
@@ -311,6 +312,7 @@ export struct PlayerView {
           if (on) this.seekRecoveryCoverVisible = true;
         },
         (resume: boolean, targetMs: number): void => {
+          this.seekRecoveryAttempts = 0;
           const video: media.AVPlayer | null = this.player;
           if (resume && video !== null && this.prepared) {
             try {
@@ -359,9 +361,8 @@ export struct PlayerView {
           if (this.gestureSeekPreview >= 0 && value === -1) {
             const preview: number = this.gestureSeekPreview;
             Haptic.seek();
-            // 拖动过程的缩略图仍按关键帧预览；松手后的唯一一次正式 seek 必须精确落点，
-            // 否则 SEEK_PREV_SYNC 会把 22s 主动吸附到前一个关键帧（例如 20s）。
-            this.seekTo(preview, true);
+            // 网络视频按 SDK 推荐的关键帧模式定位，避免 4K 精确解码长期阻塞。
+            this.seekTo(preview);
             this.gestureSeekPreview = -1;
             this.closeSeekPreview();
           }
@@ -1369,11 +1370,13 @@ if (this.runtimeSources.length === 0) {
     if (this.resumeAfterPrepare > 0) {
       const resumeAt: number = this.resumeAfterPrepare;
       const resumePlaying: boolean = this.shouldPlayAfterPrepare;
+      const recoveringSeek: boolean = this.seekRecoveryAttempts > 0;
       this.resumeAfterPrepare = -1;
       this.shouldPlayAfterPrepare = false;
       if (this.seekCtl !== null) this.seekCtl.seekResumePlaying = resumePlaying;
       // 重建/切清晰度后也走同一串行 seek，不能在 seekDone 前让两条轨道各自起播。
-      this.seekTo(resumeAt, true);
+      // seek 超时重建后的这一次定位必须保留重试计数，否则会重新进入无限重建循环。
+      this.seekTo(resumeAt, true, !recoveringSeek);
       return;
     }
     this.resumeAfterPrepare = -1;
@@ -1894,7 +1897,7 @@ if (this.runtimeSources.length === 0) {
     this.showControls = true;
   }
 
-  seekTo(positionSec: number, precise: boolean = false): void {
+  seekTo(positionSec: number, precise: boolean = false, resetRecoveryAttempts: boolean = true): void {
     const p: media.AVPlayer | null = this.player;
     if (p === null || !this.prepared) return;
     const clampedRaw: number = Math.max(0, Math.min(this.duration > 0 ? this.duration : positionSec, positionSec));
@@ -1915,6 +1918,7 @@ if (this.runtimeSources.length === 0) {
     // 从目标值弹回旧位置再跳过去（视觉上"抖动"）。用 seek 锁让进度显示钉住目标值，
     // 等 seekDone 解锁后再跟随正常 timeUpdate。
     this.seekLocked = true;
+    if (resetRecoveryAttempts) this.seekRecoveryAttempts = 0;
     this.seekCtl?.request(targetMs, precise, this.playing);
   }
 
@@ -1929,6 +1933,27 @@ if (this.runtimeSources.length === 0) {
   private async recoverPlayersAfterSeekStall(stalledVideo: media.AVPlayer, targetMs: number): Promise<void> {
     if (this.player !== stalledVideo) return;
     const resume: boolean = this.seekCtl?.seekResumePlaying ?? false;
+    if (this.seekRecoveryAttempts >= 1) {
+      this.seekCtl?.cancel();
+      this.cancelAudioGate();
+      this.cancelFirstFrameMute(true);
+      this.seekRecoveryActive = false;
+      this.seekRecoveryCoverVisible = false;
+      this.seekLocked = false;
+      this.buffering = false;
+      try {
+        if (resume && this.prepared) {
+          if (stalledVideo.state !== 'playing') stalledVideo.play();
+          this.gateAudioStart();
+        }
+      } catch (e) {
+        this.errorText = '定位失败，请重试';
+      }
+      // 本次恢复链已经结束；下一次用户主动定位应重新获得一次恢复机会。
+      this.seekRecoveryAttempts = 0;
+      return;
+    }
+    this.seekRecoveryAttempts++;
     this.seekCtl?.cancel();
     this.cancelAudioGate();
     this.cancelFirstFrameMute(false);
