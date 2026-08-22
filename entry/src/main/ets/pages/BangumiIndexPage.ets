@@ -4,7 +4,7 @@
  */
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, NAV_BANGUMI_DETAIL, NAV_BANGUMI_TIMELINE, BangumiDetailParam } from '../common/AppRouter';
-import { BiliApi } from '../api/BiliApi';
+import { BangumiApi } from '../api/BangumiApi';
 import { BangumiIndexItem } from '../model/Models';
 import { LoadingView } from '../components/LoadingView';
 import { PageHeader } from '../components/PageHeader';
@@ -70,7 +70,7 @@ export struct BangumiIndexPage {
     const seq: number = BangumiIndexPage.requestSeq;
     try {
       const pn: number = reset ? 1 : this.page + 1;
-      const data = await BiliApi.getBangumiIndex(this.type, this.finish, pn, 0);
+      const data = await BangumiApi.getIndex(this.type, this.finish, pn, 0);
       // 筛选切换后到达的旧响应直接丢弃，避免张冠李戴。
       if (this.requestKey !== key || seq !== BangumiIndexPage.requestSeq) {
         return;

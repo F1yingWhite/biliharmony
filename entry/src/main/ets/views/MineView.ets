@@ -497,7 +497,7 @@ export struct MineView {
       // ===== 组3：关于 / 清空缓存 / 退出登录 =====
       Column() {
         this.NavRow('关于', { value: 'v1.0.0' }, () => {
-          promptAction.showDialog({
+          this.getUIContext().getPromptAction().showDialog({
             title: 'BiliHaromny',
             message: '基于开源项目 PiliPlus 移植的鸿蒙原生哔哩哔哩第三方客户端（API 26）。\n支持沉浸式全屏、封面取色动态主题、环境光自适应。\n仅供学习交流使用。',
             buttons: [{ text: '知道了', color: this.accent }],
@@ -606,7 +606,7 @@ export struct MineView {
     }
     const size: number = this.dirSize(dir);
     if (DEBUG) hilog.info(0x0000, 'BiliCache', 'cache size on demand: %{public}d bytes', size);
-    promptAction.showDialog({
+    this.getUIContext().getPromptAction().showDialog({
       title: '清空缓存',
       message: `将删除 ${this.formatBytes(size)} 的图片/弹幕等临时文件，不影响登录态。`,
       buttons: [
@@ -675,7 +675,7 @@ export struct MineView {
           .contentEndOffset(Immersive.bottomInset() + 76)
           .padding({ left: 10, right: 10 })
           .scrollBar(BarState.Off)
-          .onScroll((offset: number) => {
+          .onDidScroll((offset: number) => {
             AppTheme.updateHeaderFade(offset);
           })
         }

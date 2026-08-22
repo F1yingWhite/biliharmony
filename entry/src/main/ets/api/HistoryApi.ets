@@ -64,4 +64,15 @@ export class HistoryApi {
   static async clearWatchLater(): Promise<ActionResult> {
     return postVideoAction(Api.toviewClear, {});
   }
+
+  static async deleteHistoryItem(bvid: string): Promise<ActionResult> {
+    if (bvid.length === 0) return new ActionResult(false, '参数无效');
+    return postVideoAction(Api.historyDelete, {
+      'aid': '', 'kid': bvid, 'platform': 'web',
+    });
+  }
+
+  static async clearHistory(): Promise<ActionResult> {
+    return postVideoAction(Api.historyClear, { 'platform': 'web' });
+  }
 }

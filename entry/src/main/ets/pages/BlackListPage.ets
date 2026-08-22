@@ -5,7 +5,7 @@ import { AppNavStack, NAV_USER_SPACE, UserSpaceParam } from '../common/AppRouter
 import { Immersive } from '../common/Immersive';
 import { ActionResult } from '../api/BiliApi';
 import { RelationUserItem, RelationUserPageData } from '../model/Models';
-import { BiliApi } from '../api/BiliApi';
+import { UserApi } from '../api/UserApi';
 import { PageHeader } from '../components/PageHeader';
 import { DecoratedAvatar } from '../components/UserDecorations';
 import { formatCount } from '../common/Utils';
@@ -41,7 +41,7 @@ export struct BlackListPage {
       this.page = 1;
     }
     try {
-      const data: RelationUserPageData = await BiliApi.getBlackList(this.page);
+      const data: RelationUserPageData = await UserApi.getBlackList(this.page);
       if (this.destroyed) return;
       this.users = reset ? data.users : this.users.concat(data.users);
       this.total = data.total;
@@ -64,7 +64,7 @@ export struct BlackListPage {
     if (this.actionBusy) return;
     this.actionBusy = true;
     try {
-      const result: ActionResult = await BiliApi.blockUser(item.mid, false);
+      const result: ActionResult = await UserApi.setBlocked(item.mid, false);
       if (this.destroyed) return;
       if (result.ok) {
         const next: Array<RelationUserItem> = this.users.slice();

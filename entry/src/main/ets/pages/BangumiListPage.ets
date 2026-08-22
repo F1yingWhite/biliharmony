@@ -4,7 +4,7 @@
  */
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, NAV_BANGUMI_DETAIL, BangumiDetailParam } from '../common/AppRouter';
-import { BiliApi } from '../api/BiliApi';
+import { BangumiApi } from '../api/BangumiApi';
 import { UserStore } from '../common/UserStore';
 import { WatchLaterSeasonItem } from '../model/Models';
 import { LoadingView } from '../components/LoadingView';
@@ -44,7 +44,7 @@ export struct BangumiListPage {
         return;
       }
       const pn: number = reset ? 1 : this.page + 1;
-      const list: Array<WatchLaterSeasonItem> = await BiliApi.getBangumiFollowList(this.type, pn, mid);
+      const list: Array<WatchLaterSeasonItem> = await BangumiApi.getFollowList(this.type, pn, mid);
       if (list.length === 0 && reset) {
         this.errorText = '还没有追番，去番剧详情页点「+ 追番」吧';
       }

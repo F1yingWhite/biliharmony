@@ -16,9 +16,9 @@ import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO
 import { VideoDetail, VideoItem, ReplyItem, PlayUrlInfo, VideoPage, VideoQualityOption, VideoRelationState,
   BiliEmote, BiliEmotePackage, FavoriteFolderItem, UserStat, SpaceArcData, SubtitleTrack, UgcSeasonEpisode } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
-import { PlayerView } from '../components/PlayerView';
+import { PlayerView } from '../components/player/PlayerView';
 import { AppTheme } from '../common/AppTheme';
-import { PlayerDanmakuEngine } from '../components/PlayerDanmakuEngine';
+import { PlayerDanmakuEngine } from '../components/player/PlayerDanmakuEngine';
 import { LoadingView } from '../components/LoadingView';
 import { ImageColor, ImagePalette } from '../common/ImageColor';
 import { UserStore } from '../common/UserStore';
@@ -26,15 +26,15 @@ import { asNumber, asObject, colorWithAlpha, formatCount, formatDate } from '../
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
-import { ReplyEmotePanel } from '../components/ReplyEmotePanel';
-import { ReplyThreadPanel } from '../components/ReplyThreadPanel';
-import { RelatedVideoRow } from '../components/VideoRelatedRow';
-import { VideoReplyTab } from '../components/VideoReplyTab';
-import { CoinSheetView } from '../components/CoinSheetView';
-import { FavPickSheetView } from '../components/FavPickSheetView';
-import { VideoActionItem } from '../components/VideoActionItem';
+import { ReplyEmotePanel } from '../components/reply/ReplyEmotePanel';
+import { ReplyThreadPanel } from '../components/reply/ReplyThreadPanel';
+import { RelatedVideoRow } from '../components/video/VideoRelatedRow';
+import { VideoReplyTab } from '../components/video/VideoReplyTab';
+import { CoinSheetView } from '../components/video/CoinSheetView';
+import { FavPickSheetView } from '../components/video/FavPickSheetView';
+import { VideoActionItem } from '../components/video/VideoActionItem';
 import { ReplyShareCard, makeReplyQr, makeReplyShareSnapshot,
-  sharePixelMapAsImage } from '../components/ReplyShareCard';
+  sharePixelMapAsImage } from '../components/reply/ReplyShareCard';
 import { safeToast } from '../common/Toast';
 import { CommentApi } from '../api/CommentApi';
 import { FavoriteApi } from '../api/FavoriteApi';
@@ -1148,7 +1148,7 @@ export struct VideoDetailPage {
     }
     this.followLoading = true;
     try {
-      const attribute: number | null = await BiliApi.getUserRelation(this.detail.upMid);
+      const attribute: number | null = await UserApi.getRelation(this.detail.upMid);
       if (this.destroyed) return;
       if (attribute !== null) {
         // 2 为已关注，6 为互相关注；128 是拉黑，不能误显示为已关注。
@@ -1172,7 +1172,7 @@ export struct VideoDetailPage {
     this.following = next;
     this.followLoading = true;
     try {
-      const result: ActionResult = await BiliApi.modifyUserRelation(this.detail.upMid, next);
+      const result: ActionResult = await UserApi.setFollowed(this.detail.upMid, next);
       if (this.destroyed) return;
       if (!result.ok) {
         this.following = previous;
