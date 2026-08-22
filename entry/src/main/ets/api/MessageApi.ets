@@ -144,17 +144,17 @@ export class MessageApi {
     return result;
   }
 
-  /** 将指定会话确认到最后一条已展示消息，对齐 PiliPlus 的 update_ack 行为。 */
-  static async markPrivateMessagesRead(talkerId: number, ackSeqno: number): Promise<ActionResult> {
-    if (talkerId <= 0 || ackSeqno <= 0) return new ActionResult(false, '无可确认的私信');
+  /** 将指定会话确认到最后一条已展示消息；ackSeqno=0 时由服务端确认到最新消息。 */
+  static async markPrivateMessagesRead(talkerId: number, ackSeqno: number = 0): Promise<ActionResult> {
+    if (talkerId <= 0) return new ActionResult(false, '无可确认的私信');
     return actionWithCsrf('登录状态缺少 CSRF', '已读', '标记已读失败',
       async (csrf: string): Promise<HttpResponse> => {
         const params: Record<string, string> = {
-          'talker_id': String(talkerId), 'session_type': '1', 'ack_seqno': String(ackSeqno),
+          'talker_id': String(talkerId), 'session_type': '1',
           'build': '0', 'mobi_app': 'web', 'csrf_token': csrf, 'csrf': csrf,
         };
-        await WbiSign.encWbi(params);
-        return webGet(Api.ackSessionMessage, params, 'https://message.bilibili.com/');
+        if (ackSeqno > 0) params['ack_seqno'] = String(ackSeqno);
+        return webPost(Api.ackSessionMessage, params, 'https://message.bilibili.com/');
       });
   }
 
@@ -193,6 +193,25 @@ export class MessageApi {
     result.like = asNumber(data['like'], 0);
     result.sysMsg = asNumber(data['sys_msg'], 0);
     return result;
+  }
+
+  /**
+   * 通知中心全部已读：回复/@/赞接口会在读取首屏时推进服务端已读状态；系统通知需额外上报游标。
+   * 任何一步失败都返回失败，调用方不能先清本地角标再用成功提示掩盖服务端失败。
+   */
+  static async markAllNotificationsRead(): Promise<ActionResult> {
+    const kinds: Array<string> = ['reply', 'at', 'like'];
+    for (let i: number = 0; i < kinds.length; i++) {
+      const page: MsgNotifyPageData = await MessageApi.getMsgFeedNotify(kinds[i]);
+      if (page.error.length > 0) return new ActionResult(false, page.error);
+    }
+    const sysPage: MsgNotifyPageData = await MessageApi.getSysNotifications();
+    if (sysPage.error.length > 0) return new ActionResult(false, sysPage.error);
+    if (sysPage.items.length > 0 && sysPage.items[0].sysCursor.length > 0) {
+      const result: ActionResult = await MessageApi.updateSysMsgCursor(sysPage.items[0].sysCursor);
+      if (!result.ok) return result;
+    }
+    return new ActionResult(true, '已标记全部已读');
   }
 
   /** 通知流通用入口：kind = reply | at | like，cursor 分页（id + 时间戳）。 */

@@ -1,7 +1,11 @@
 /** B 站消息中心：私信会话/聊天 + 回复我的/@我/收到的赞/系统通知 五个分类 Tab。 */
 import { AppTheme } from '../common/AppTheme';
+import { display } from '@kit.ArkUI';
+import { image } from '@kit.ImageKit';
 import { Immersive } from '../common/Immersive';
-import { AppNavStack, NAV_LOGIN, NAV_VIDEO_DETAIL, VideoDetailParam } from '../common/AppRouter';
+import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
+  ImageViewerParam, ImageViewerSrcRect, NAV_IMAGE_VIEWER, NAV_LOGIN, NAV_VIDEO_DETAIL,
+  VideoDetailParam } from '../common/AppRouter';
 import { BiliApi, ActionResult } from '../api/BiliApi';
 import { MessageSessionItem, MessageSessionPageData, PrivateMessageItem, PrivateMessagePageData } from '../model/Models';
 import { UserStore } from '../common/UserStore';
@@ -13,6 +17,7 @@ import { MsgNotifyList } from '../components/MsgNotifyList';
 import { PageHeader } from '../components/PageHeader';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { MessageApi } from '../api/MessageApi';
+import { biliImageOriginal, biliImageThumbnail } from '../common/ImageUrl';
 
 @Component
 export struct MessagesPage {
@@ -28,6 +33,7 @@ export struct MessagesPage {
   @State minSeqno: number = 0;
   @State draft: string = '';
   @State sending: boolean = false;
+  @State readAllLoading: boolean = false;
   /** 顶部分类 Tab：0 私信 1 回复 2 @我 3 赞 4 系统 */
   @State activeTab: number = 0;
   @StorageProp('messageThreadOpen') threadOpen: boolean = false;
@@ -123,19 +129,10 @@ export struct MessagesPage {
       this.hasMore = data.hasMore;
       if (reset && this.messages.length > 0) {
         const ackSeqno: number = this.messages[this.messages.length - 1].seqno;
-        // 打开会话即在本地消除红点，同时向 B 站回写最后已读 seqno。
-        const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
-        for (let i: number = 0; i < all.length; i++) {
-          if (all[i].talkerId === talkerId) {
-            const updated: MessageSessionItem = all[i].clone();
-            updated.unread = 0;
-            all[i] = updated;
-            this.sessionsSource.updateItem(i, updated);
-          }
-        }
-        this.sessionsSource.reset(all);
-        this.current.unread = 0;
-        MessageApi.markPrivateMessagesRead(talkerId, ackSeqno).catch(() => {
+        // 服务端确认成功后再清本地红点，避免请求失败时退出会话又恢复成未读。
+        MessageApi.markPrivateMessagesRead(talkerId, ackSeqno).then((result: ActionResult) => {
+          if (result.ok) this.clearSessionUnread(talkerId);
+        }).catch(() => {
         });
       }
     } catch (e) {
@@ -302,11 +299,135 @@ export struct MessagesPage {
     }
   }
 
+  private clearSessionUnread(talkerId: number): void {
+    const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
+    for (let i: number = 0; i < all.length; i++) {
+      if (all[i].talkerId !== talkerId || all[i].unread === 0) continue;
+      const updated: MessageSessionItem = all[i].clone();
+      updated.unread = 0;
+      all[i] = updated;
+      this.sessionsSource.updateItem(i, updated);
+    }
+    this.sessionsSource.reset(all);
+    if (this.current.talkerId === talkerId) this.current.unread = 0;
+  }
+
+  private async markAllRead(): Promise<void> {
+    if (this.readAllLoading) return;
+    this.readAllLoading = true;
+    let failed: number = 0;
+    try {
+      const notifyResult: ActionResult = await MessageApi.markAllNotificationsRead();
+      if (notifyResult.ok) MsgUnreadStore.clearAll();
+      else failed++;
+
+      const sessions: Array<MessageSessionItem> = this.sessionsSource.getAll();
+      for (let i: number = 0; i < sessions.length; i++) {
+        if (sessions[i].unread <= 0) continue;
+        const result: ActionResult = await MessageApi.markPrivateMessagesRead(sessions[i].talkerId);
+        if (result.ok) this.clearSessionUnread(sessions[i].talkerId);
+        else failed++;
+      }
+      this.getUIContext().getPromptAction().showToast({
+        message: failed === 0 ? '已标记全部已读' : '部分消息标记失败，请稍后重试',
+      });
+    } catch (e) {
+      this.getUIContext().getPromptAction().showToast({ message: '标记已读失败，请稍后重试' });
+    } finally {
+      this.readAllLoading = false;
+    }
+  }
+
+  private richMediaId(item: PrivateMessageItem): string {
+    return 'private-message-media-' + String(item.seqno);
+  }
+
+  private richCardId(item: PrivateMessageItem): string {
+    return 'private-message-card-' + String(item.seqno);
+  }
+
+  private imageMessageHeight(item: PrivateMessageItem): number {
+    if (item.imageWidth <= 0 || item.imageHeight <= 0) return 180;
+    return Math.max(120, Math.min(300, 240 * item.imageHeight / item.imageWidth));
+  }
+
+  private componentRect(id: string): ImageViewerSrcRect | undefined {
+    try {
+      const area = this.getUIContext().getComponentUtils().getRectangleById(id);
+      if (area.size.width <= 0 || area.size.height <= 0 || area.windowOffset.x < 0 || area.windowOffset.y < 0) {
+        return undefined;
+      }
+      const x: number = this.getUIContext().px2vp(area.windowOffset.x);
+      const screenWidth: number = this.getUIContext().px2vp(display.getDefaultDisplaySync().width);
+      if (x >= screenWidth) return undefined;
+      return {
+        x: x,
+        y: this.getUIContext().px2vp(area.windowOffset.y),
+        w: this.getUIContext().px2vp(area.size.width),
+        h: this.getUIContext().px2vp(area.size.height),
+      };
+    } catch (e) {
+      return undefined;
+    }
+  }
+
+  private openRichMessage(item: PrivateMessageItem): void {
+    if (item.imageUrl.length > 0) {
+      const rect: ImageViewerSrcRect | undefined = this.componentRect(this.richMediaId(item));
+      const preview: string = biliImageThumbnail(item.imageUrl, 640);
+      const viewer: ImageViewerParam = {
+        images: [biliImageOriginal(item.imageUrl)],
+        initialIndex: 0,
+        srcIds: [this.richMediaId(item)],
+        srcPreviews: [preview],
+      };
+      if (rect !== undefined) {
+        viewer.srcRect = rect;
+        viewer.srcRects = [rect];
+        AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
+        AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
+      }
+      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer);
+      return;
+    }
+    if (item.richBvid.length === 0 && item.richAid <= 0) return;
+    const param: VideoDetailParam = {
+      bvid: item.richBvid,
+      aid: item.richAid,
+      title: item.richTitle.length > 0 ? item.richTitle : item.text,
+      cover: item.richCover,
+    };
+    try {
+      const cardRect: ImageViewerSrcRect | undefined = this.componentRect(this.richCardId(item));
+      if (cardRect !== undefined) {
+        const snapshot: image.PixelMap = this.getUIContext().getComponentSnapshot().getSync(this.richCardId(item), {
+          waitUntilRenderFinished: true,
+        });
+        param.cardRect = cardRect;
+        AppStorage.setOrCreate<image.PixelMap>(HERO_BG_SNAPSHOT_KEY, snapshot);
+        AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
+        AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
+        AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+        return;
+      }
+    } catch (e) {
+      // 快照或测量失败时回退到封面 hero，不能阻断视频打开。
+    }
+    const coverRect: ImageViewerSrcRect | undefined = this.componentRect(this.richMediaId(item));
+    if (coverRect !== undefined && item.richCover.length > 0) {
+      param.srcRect = coverRect;
+      AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
+      AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
+    }
+    AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+  }
+
   @Builder
   RichMessageCard(item: PrivateMessageItem) {
     Row({ space: 8 }) {
       if (item.richCover.length > 0) {
         Image(item.richCover)
+          .id(this.richMediaId(item))
           .width(64)
           .height(64)
           .borderRadius(8)
@@ -330,20 +451,24 @@ export struct MessagesPage {
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
     }
-    .width('100%')
+    .width(280)
     .padding(8)
     .borderRadius(10)
     .backgroundColor(this.isDark ? '#25262A' : '#E8EAED')
-    .onClick(() => {
-      if (item.richBvid.length > 0 || item.richAid > 0) {
-        const param: VideoDetailParam = {
-          bvid: item.richBvid,
-          aid: item.richAid,
-          title: item.richTitle.length > 0 ? item.richTitle : item.text,
-        };
-        AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
-      }
-    })
+    .id(this.richCardId(item))
+    .onClick(() => this.openRichMessage(item))
+  }
+
+  @Builder
+  ImageMessageCard(item: PrivateMessageItem) {
+    Image(biliImageThumbnail(item.imageUrl, 640))
+      .id(this.richMediaId(item))
+      .width(240)
+      .height(this.imageMessageHeight(item))
+      .objectFit(ImageFit.Cover)
+      .borderRadius(10)
+      .clip(true)
+      .onClick(() => this.openRichMessage(item))
   }
 
   @Builder
@@ -351,23 +476,27 @@ export struct MessagesPage {
     Row() {
       if (item.senderId === (UserStore.current?.mid ?? 0)) Blank()
       Column({ space: 4 }) {
-        if (item.richTitle.length > 0 || item.richCover.length > 0 || item.richUrl.length > 0) {
+        if (item.imageUrl.length > 0) {
+          this.ImageMessageCard(item)
+        } else if (item.richTitle.length > 0 || item.richCover.length > 0 || item.richUrl.length > 0) {
           this.RichMessageCard(item)
         } else {
           Text(item.text)
             .fontSize(14)
             .fontColor(item.senderId === (UserStore.current?.mid ?? 0) ? '#FFFFFF' : (this.isDark ? '#FFFFFF' : '#18191C'))
             .lineHeight(20)
+            .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+            .borderRadius(14)
+            .backgroundColor(item.senderId === (UserStore.current?.mid ?? 0) ? this.accent :
+              (this.isDark ? '#303136' : '#F1F3F5'))
         }
         Text(formatRelativeTime(item.timestamp))
           .fontSize(9)
           .fontColor(item.senderId === (UserStore.current?.mid ?? 0) ? '#CCFFFFFF' : '#9499A0')
+          .padding({ left: 4, right: 4 })
       }
       .alignItems(item.senderId === (UserStore.current?.mid ?? 0) ? HorizontalAlign.End : HorizontalAlign.Start)
-      .constraintSize({ maxWidth: '76%' })
-      .padding({ left: 12, right: 12, top: 8, bottom: 7 })
-      .borderRadius(14)
-      .backgroundColor(item.senderId === (UserStore.current?.mid ?? 0) ? this.accent : (this.isDark ? '#303136' : '#F1F3F5'))
+      .constraintSize({ maxWidth: 280 })
       if (item.senderId !== (UserStore.current?.mid ?? 0)) Blank()
     }
     .width('100%')
@@ -505,16 +634,16 @@ export struct MessagesPage {
     .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
   }
 
-  /** 消息首页头栏「全部已读」：本地清空四类通知角标（服务端无批量已读接口，网页端同样如此）。 */
+  /** 消息首页头栏「全部已读」：服务端确认通知分类和当前已加载的私信会话。 */
   @Builder
   ReadAllButton() {
-    Text('全部已读')
+    Text(this.readAllLoading ? '处理中…' : '全部已读')
       .fontSize(12)
-      .fontColor('#B0B3B8')
+      .fontColor(this.readAllLoading ? '#73767A' : '#B0B3B8')
       .padding({ left: 18, right: 2, top: 8, bottom: 8 })
       .onClick(() => {
-        MsgUnreadStore.clearAll();
-        this.getUIContext().getPromptAction().showToast({ message: '已标记全部已读' });
+        this.markAllRead().catch(() => {
+        });
       })
   }
 
@@ -600,6 +729,8 @@ export struct MessagesPage {
       .layoutWeight(1)
       .padding({ left: 10, right: 10 })
       .scrollBar(BarState.Off)
+      .contentEndOffset(12)
+      .clip(true)
       this.Composer()
     }
     .width('100%')
