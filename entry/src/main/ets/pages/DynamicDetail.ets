@@ -604,7 +604,7 @@ export struct DynamicDetailPage {
                   this.replies = this.replies.filter((x: ReplyItem) => x.rpid !== item.rpid);
                 },
               })
-            // 稳定 key（ForEach 走 item 引用的 @Prop 同步 + 新数组引用；rev 会导致重建闪烁）。
+            // 稳定 key：点赞视觉态由 ReplyCard 的 @State 镜像原地刷新，避免整卡重建闪烁。
             }, (reply: ReplyItem) => String(reply.rpid))
             if (this.repliesHasMore) {
               Text(this.repliesLoading ? '加载中…' : '加载更多评论')

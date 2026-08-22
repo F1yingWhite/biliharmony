@@ -1134,7 +1134,11 @@ export class ReplyItem {
     const upAction: Record<string, Object> = asObject(j['up_action']);
     r.upLiked = asBool(upAction['like'], false);
     r.ctime = asNumber(j['ctime'], 0);
-    r.count = asNumber(j['count'], 0);
+    // `count` 会保留已删除、折叠或当前账号不可见的历史回复数；楼中楼接口实际
+    // 可返回的数量由 `rcount` 表示。优先使用 rcount，避免主列表显示“4 条回复”，
+    // 进入详情后 page.count=0、replies=null 的假入口。旧协议没有 rcount 时再回退。
+    r.count = j['rcount'] !== undefined && j['rcount'] !== null ?
+      asNumber(j['rcount'], 0) : asNumber(j['count'], 0);
     const levelInfo: Record<string, Object> = asObject(member['level_info']);
     r.level = asNumber(levelInfo['current_level'], 0);
     const replyControl: Record<string, Object> = asObject(j['reply_control']);

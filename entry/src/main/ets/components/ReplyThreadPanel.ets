@@ -164,8 +164,7 @@ export struct ReplyThreadPanel {
               onNavigate: (action: () => void) => this.onNavigate(action),
             })
           }
-          // 列表以稳定 rpid 为 key：点赞/点踩由 ReplyCard 内部镜像即时翻转，
-          // 不做 key 重建（重建会导致"闪一下"）。**不要改成 rev key**
+          // 稳定 key 保留组件，由 ReplyCard 的 @State 镜像原地刷新点赞态与计数。
         }, (item: ReplyItem) => String(item.rpid))
         ListItem() {
           Row() {

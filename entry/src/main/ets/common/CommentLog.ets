@@ -1,4 +1,5 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { DEBUG } from 'BuildProfile';
 
 /** 评论链路诊断日志。只记录标识、计数和状态，不记录正文、Cookie 或请求签名。 */
 export class CommentLog {
@@ -21,14 +22,17 @@ export class CommentLog {
   }
 
   static info(event: string, details: string = ''): void {
+    if (!DEBUG) return;
     hilog.info(CommentLog.DOMAIN, CommentLog.TAG, '%{public}s %{public}s', event, details);
   }
 
   static warn(event: string, details: string = ''): void {
+    if (!DEBUG) return;
     hilog.warn(CommentLog.DOMAIN, CommentLog.TAG, '%{public}s %{public}s', event, details);
   }
 
   static error(event: string, details: string = ''): void {
+    if (!DEBUG) return;
     hilog.error(CommentLog.DOMAIN, CommentLog.TAG, '%{public}s %{public}s', event, details);
   }
 }

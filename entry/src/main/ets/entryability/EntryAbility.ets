@@ -1,5 +1,6 @@
 import { AbilityConstant, Configuration, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { DEBUG } from 'BuildProfile';
 import { KeyboardAvoidMode, window } from '@kit.ArkUI';
 import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
@@ -26,7 +27,7 @@ export default class EntryAbility extends UIAbility {
     });
     AppTheme.bindNativeModeApplier((mode: string) => this.applyNativeThemeMode(mode));
     AppTheme.applyCurrentMode();
-    hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onCreate');
+    if (DEBUG) hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onCreate');
   }
 
   private applyNativeThemeMode(mode: string): void {
@@ -49,7 +50,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onDestroy(): void {
-    hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onDestroy');
+    if (DEBUG) hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onDestroy');
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
@@ -61,7 +62,7 @@ export default class EntryAbility extends UIAbility {
     Immersive.enableImmersive(false, false);
     windowStage.loadContent('pages/Index', (err) => {
       if (err.code) {
-        hilog.error(DOMAIN, TAG, 'Failed to load the content. Cause: %{public}s', JSON.stringify(err));
+        if (DEBUG) hilog.error(DOMAIN, TAG, 'Failed to load the content. Cause: %{public}s', JSON.stringify(err));
         return;
       }
       // UIContext 只有在页面内容加载完成后才可用；过早同步获取会让部分真机的 Ability 启动失败。
@@ -69,24 +70,24 @@ export default class EntryAbility extends UIAbility {
         // RESIZE 只压缩可用内容区，让底部评论输入栏贴着键盘上移，不再把视频详情整页顶走。
         windowStage.getMainWindowSync().getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE);
       } catch (e) {
-        hilog.warn(DOMAIN, TAG, 'Set keyboard avoid mode failed: %{public}s', JSON.stringify(e));
+        if (DEBUG) hilog.warn(DOMAIN, TAG, 'Set keyboard avoid mode failed: %{public}s', JSON.stringify(e));
       }
-      hilog.info(DOMAIN, TAG, 'Succeeded in loading the content.');
+      if (DEBUG) hilog.info(DOMAIN, TAG, 'Succeeded in loading the content.');
     });
   }
 
   onWindowStageDestroy(): void {
-    hilog.info(DOMAIN, TAG, 'Ability onWindowStageDestroy');
+    if (DEBUG) hilog.info(DOMAIN, TAG, 'Ability onWindowStageDestroy');
   }
 
   onForeground(): void {
     AppStorage.setOrCreate<boolean>('appInBackground', false);
     if (AppTheme.getMode() === AppTheme.MODE_SYSTEM) this.syncSystemTheme();
-    hilog.info(DOMAIN, TAG, 'Ability onForeground');
+    if (DEBUG) hilog.info(DOMAIN, TAG, 'Ability onForeground');
   }
 
   onBackground(): void {
     AppStorage.setOrCreate<boolean>('appInBackground', true);
-    hilog.info(DOMAIN, TAG, 'Ability onBackground');
+    if (DEBUG) hilog.info(DOMAIN, TAG, 'Ability onBackground');
   }
 }
