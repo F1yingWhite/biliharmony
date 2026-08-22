@@ -29,6 +29,7 @@ export struct VideoReplyTab {
   @Prop sortMode: number = 3;
   @Prop loading: boolean = false;
   @Prop hasMore: boolean = false;
+  @Prop errorText: string = '';
   @Prop version: number = 0;
   @Prop draft: string = '';
   @Prop sending: boolean = false;
@@ -68,8 +69,10 @@ export struct VideoReplyTab {
         Column() {
           LoadingView({
             loading: this.loading,
-            empty: !this.loading,
+            // 错误与真实空列表互斥；LoadingView 的空态优先级高于错误态。
+            empty: !this.loading && this.errorText.length === 0,
             emptyText: '还没有评论，快来抢沙发～',
+            errorText: this.errorText,
             onRetry: () => {
               this.onLoadMore(true);
             },
@@ -96,7 +99,8 @@ export struct VideoReplyTab {
                 onDeleted: (reply: ReplyItem) => this.onDeleted(reply),
               })
             }
-            // 稳定 key + updateItem 定向刷新（不重建组件）。rev 进 key 会引发重建闪烁。
+            // 保持稳定 key，让 ReplyCard 的 @State 镜像原地更新；把 rev 放进 key 会销毁并
+            // 重建整张卡片，造成闪烁，触摸尚未结束时还可能再次命中新卡。
           }, (item: ReplyItem) => String(item.rpid))
           ListItem() {
             this.loadMoreFooter({

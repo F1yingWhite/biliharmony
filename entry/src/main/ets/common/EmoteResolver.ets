@@ -7,6 +7,7 @@
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { DEBUG } from 'BuildProfile';
 import { CommentApi } from '../api/CommentApi';
 import { BiliEmotePackage } from '../model/Models';
 
@@ -46,7 +47,9 @@ export class EmoteResolver {
       // 未命中诊断：接口未下发 emoji 节点且表情表也没有时的唯一线索。
       if (!missedLogged.has(text)) {
         missedLogged.add(text);
-        hilog.info(0x0000, 'BiliEmote', 'resolver miss: %{public}s (tableSize=%{public}d)', text, table.size);
+        if (DEBUG) {
+          hilog.info(0x0000, 'BiliEmote', 'resolver miss: %{public}s (tableSize=%{public}d)', text, table.size);
+        }
       }
       return '';
     }
@@ -81,8 +84,10 @@ export class EmoteResolver {
         loaded = true;
         EmoteResolver.persist();
       }
-      hilog.info(0x0000, 'BiliEmote', 'resolver refresh done: packages=%{public}d tableSize=%{public}d',
-        packages.length, table.size);
+      if (DEBUG) {
+        hilog.info(0x0000, 'BiliEmote', 'resolver refresh done: packages=%{public}d tableSize=%{public}d',
+          packages.length, table.size);
+      }
       if (changed || loaded) {
         AppStorage.setOrCreate<number>(VERSION_KEY, EmoteResolver.version() + 1);
       }
@@ -120,7 +125,9 @@ export class EmoteResolver {
         }
         if (table.size > 0) {
           loaded = true;
-          hilog.info(0x0000, 'BiliEmote', 'resolver restored from disk: tableSize=%{public}d', table.size);
+          if (DEBUG) {
+            hilog.info(0x0000, 'BiliEmote', 'resolver restored from disk: tableSize=%{public}d', table.size);
+          }
           // 触发一次订阅方重渲染：卡片表情立刻有图，不等接口返回。
           AppStorage.setOrCreate<number>(VERSION_KEY, EmoteResolver.version() + 1);
         }

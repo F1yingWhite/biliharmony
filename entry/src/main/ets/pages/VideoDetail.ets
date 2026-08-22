@@ -103,6 +103,7 @@ export struct VideoDetailPage {
   @State replyCursor: string = '';
   @State replyHasMore: boolean = true;
   @State replyLoading: boolean = false;
+  @State replyLoadError: string = '';
   @State replyPrefetchCount: number = 0;
   // 回复详情是视频页内的二级导航状态；放入 AppStorage 供 NavDestination
   // 的系统返回/侧滑回调优先关闭，避免直接把整个视频页弹出。
@@ -588,6 +589,7 @@ export struct VideoDetailPage {
     this.destroyed = false;
     // 上次离页时未完成的请求会因 destroyed 跳过 finally 写状态；返回页面时统一解锁。
     this.replyLoading = false;
+    this.replyLoadError = '';
     this.threadLoading = false;
     this.replySending = false;
     this.emoteLoading = false;
@@ -1705,6 +1707,7 @@ export struct VideoDetailPage {
       return;
     }
     this.replyLoading = true;
+    this.replyLoadError = '';
     if (reset) this.replyPrefetchCount = 0;
     const cursor: string = reset ? '' : this.replyCursor;
     const startedAt: number = Date.now();
@@ -1740,6 +1743,9 @@ export struct VideoDetailPage {
         ' hasMore=' + String(this.replyHasMore) + ' ms=' + String(CommentLog.elapsed(startedAt)));
     } catch (e) {
       // 评论加载失败保持现有列表，replyLoading 复位后空态/重试入口正常可用。
+      if (!this.destroyed && this.replySource.isEmpty()) {
+        this.replyLoadError = '评论加载失败，请检查网络后重试';
+      }
       CommentLog.error('ui.replies.error', 'aid=' + String(this.detail.aid) + ' reset=' + String(reset) +
         ' cursorLen=' + String(cursor.length) + ' ms=' + String(CommentLog.elapsed(startedAt)) +
         ' error=' + CommentLog.errorText(e as Object));
@@ -2851,6 +2857,7 @@ export struct VideoDetailPage {
           sortMode: this.replySortMode,
           loading: this.replyLoading,
           hasMore: this.replyHasMore,
+          errorText: this.replyLoadError,
           version: this.replyLikeVersion,
           draft: this.replyDraft,
           sending: this.replySending,

@@ -7,7 +7,6 @@ import { Api, Constants } from '../common/Constants';
 import { asArray, asObject } from '../common/Utils';
 import { BiliEmotePackage, ReplyData, ReplyItem } from '../model/Models';
 import { ActionResult, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
-import { hilog } from '@kit.PerformanceAnalysisKit';
 import { CommentLog } from '../common/CommentLog';
 
 export class CommentApi {
@@ -85,6 +84,8 @@ export class CommentApi {
       const resp: HttpResponse = await webGet(Api.replyList + '/main', params, 'https://www.bilibili.com/');
       let data: Record<string, Object> | null = getData(resp);
       let path: string = 'main';
+      let failureStatus: number = resp.status;
+      let failureCode: number = CommentApi.responseCode(resp);
       CommentLog.info('api.replies.transport', 'req=' + String(requestId) + ' path=main status=' +
         String(resp.status) + ' code=' + String(CommentApi.responseCode(resp)) + ' data=' + String(data !== null));
       if (data === null) {
@@ -97,14 +98,20 @@ export class CommentApi {
         const fallbackResp: HttpResponse = await webGet(Api.replyList + '/wbi/main', fallback, 'https://www.bilibili.com/');
         data = getData(fallbackResp);
         path = 'wbi-main';
+        failureStatus = fallbackResp.status;
+        failureCode = CommentApi.responseCode(fallbackResp);
         CommentLog.warn('api.replies.fallback', 'req=' + String(requestId) + ' from=main to=wbi-main status=' +
           String(fallbackResp.status) + ' code=' + String(CommentApi.responseCode(fallbackResp)) +
           ' data=' + String(data !== null));
       }
       if (data === null) {
         CommentLog.error('api.replies.empty', 'req=' + String(requestId) + ' path=' + path +
+          ' status=' + String(failureStatus) + ' code=' + String(failureCode) +
           ' ms=' + String(CommentLog.elapsed(startedAt)));
-        return new ReplyData();
+        // 所有传输路径都失败不等于“真实零评论”。必须抛错，让页面保留已有数据并
+        // 展示重试态；只有 code=0 且 replies=[] 才由下方 ReplyData.from 表示空评论。
+        throw new Error('评论接口失败：' + path + ' status=' + String(failureStatus) +
+          ' code=' + String(failureCode));
       }
       const result: ReplyData = ReplyData.from(data);
       CommentLog.info('api.replies.done', CommentApi.replyResultDetails(requestId, path, result, startedAt));
@@ -221,15 +228,14 @@ export class CommentApi {
     const resp: HttpResponse = await webGet(Api.userEmotes, params, 'https://www.bilibili.com/');
     if (!resp.ok) {
       // 诊断日志：区分"网络/HTTP 失败"与"业务 code 失败"，此前失败全静默无法排查。
-      hilog.warn(0x0000, 'BiliApi', 'getUserEmotes http failed: business=%{public}s status=%{public}d',
-        business, resp.status);
+      CommentLog.warn('api.emotes.http', 'business=' + business + ' status=' + String(resp.status));
       return [];
     }
     const json: Record<string, Object> = resp.json();
     const code: number = Number(json['code'] ?? -1);
     if (code !== 0) {
-      hilog.warn(0x0000, 'BiliApi', 'getUserEmotes biz failed: business=%{public}s code=%{public}d message=%{public}s',
-        business, code, String(json['message'] ?? ''));
+      CommentLog.warn('api.emotes.biz', 'business=' + business + ' code=' + String(code) +
+        ' message=' + String(json['message'] ?? ''));
       return [];
     }
     const data: Record<string, Object> = asObject(json['data']);
@@ -244,9 +250,8 @@ export class CommentApi {
         droppedEmpty++;
       }
     }
-    hilog.info(0x0000, 'BiliApi',
-      'getUserEmotes ok: business=%{public}s packages=%{public}d kept=%{public}d droppedEmpty=%{public}d',
-      business, packages.length, result.length, droppedEmpty);
+    CommentLog.info('api.emotes.done', 'business=' + business + ' packages=' + String(packages.length) +
+      ' kept=' + String(result.length) + ' droppedEmpty=' + String(droppedEmpty));
     return result;
   }
 
@@ -275,9 +280,9 @@ export class CommentApi {
       CommentLog.error('api.thread.empty', 'req=' + String(requestId) + ' oid=' + String(oid) +
         ' root=' + String(root) + ' page=' + String(pageNumber) + ' status=' + String(resp.status) +
         ' code=' + String(CommentApi.responseCode(resp)) + ' ms=' + String(CommentLog.elapsed(startedAt)));
-      const empty: ReplyData = new ReplyData();
-      empty.hasMore = false;
-      return empty;
+      // 保留调用页已有的预览回复与 hasMore；传输失败不能伪装成“回复到底”。
+      throw new Error('回复接口失败：status=' + String(resp.status) +
+        ' code=' + String(CommentApi.responseCode(resp)));
     }
     const result: ReplyData = ReplyData.fromLegacy(data, pageNumber);
     const valid: Array<ReplyItem> = [];

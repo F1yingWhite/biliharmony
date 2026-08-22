@@ -120,13 +120,26 @@
 
 ### 命令行（macOS，已配置 DevEco Studio）
 
-    bash tool/build.sh          # 或 bash tool/build.sh clean
+    bash tool/build.sh                    # debug
+    bash tool/build.sh clean release      # release
 
 脚本内置全部环境变量（hvigor/npm 缓存收进工程 `.home/`），产物：
 
     entry/build/default/outputs/default/entry-default-unsigned.hap
 
 > 首次构建需要网络（hvigor 会安装 pnpm）。签名请用 DevEco Studio 的自动签名；命令行产物为未签名 HAP。
+
+### GitHub Actions 自动构建
+
+`.github/workflows/release-hap.yml` 会在每次 push 后构建 release HAP，并将 HAP 和 SHA-256 校验文件保存为 30 天的 Actions Artifact；也可以在 Actions 页面手动触发。
+
+HarmonyOS API 26 工具链需要使用安装了 DevEco Studio 的 macOS ARM64 自托管 Runner。注册 Runner 时添加自定义标签 `biliharmony`，并确保 DevEco Studio 位于 `/Applications/DevEco-Studio.app`。
+
+默认会上传未签名 release HAP。若要同时生成可安装的签名 HAP，请确保签名文件在 Runner 上可访问，然后把本机 DevEco 自动签名生成的 `build-profile.json5` 加密保存为仓库 Secret：
+
+    /usr/bin/base64 < build-profile.json5 | tr -d '\n' | gh secret set HARMONY_BUILD_PROFILE_B64
+
+Workflow 只在构建期间恢复该配置，构建结束后会清除；签名配置与密码不会进入 Git 仓库。
 
 ## 移植对照（PiliPlus → BiliHaromny）
 

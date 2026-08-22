@@ -19,6 +19,7 @@ import { PlayerPlaySettingsPage } from './PlayerPlaySettingsPage';
 import { common } from '@kit.AbilityKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { DEBUG } from 'BuildProfile';
 import { displaySync } from '@kit.ArkGraphics2D';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, SponsorSegment, VideoChapter, VideoShotData } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
@@ -365,8 +366,9 @@ export struct PlayerView {
           if (this.gestureSeekPreview >= 0 && value === -1) {
             const preview: number = this.gestureSeekPreview;
             Haptic.seek();
-            // 交互拖动优先关键帧定位；精确解码留给续播/章节等低频场景。
-            this.seekTo(preview, false);
+            // 拖动过程的缩略图仍按关键帧预览；松手后的唯一一次正式 seek 必须精确落点，
+            // 否则 SEEK_PREV_SYNC 会把 22s 主动吸附到前一个关键帧（例如 20s）。
+            this.seekTo(preview, true);
             this.gestureSeekPreview = -1;
             this.closeSeekPreview();
           }
@@ -439,7 +441,7 @@ if (this.runtimeSources.length === 0) {
         if (this.playing) this.togglePlay();
       },
       (timeMs: number): void => {
-        this.seekTo(timeMs / 1000, false);
+        this.seekTo(timeMs / 1000, true);
       },
       this.avSessionMetadata(),
       this.avSessionPlaybackState(),
@@ -509,10 +511,14 @@ if (this.runtimeSources.length === 0) {
       this.pauseDmLoop();
       Immersive.setKeepScreenOn(false);
       this.updateAVSessionPlaybackState();
-      hilog.info(0x0000, 'BiliPlayback', 'background.audioOnly.enter position=%{public}d', audio.currentTime);
+      if (DEBUG) {
+        hilog.info(0x0000, 'BiliPlayback', 'background.audioOnly.enter position=%{public}d', audio.currentTime);
+      }
     } catch (e) {
       this.backgroundAudioOnly = false;
-      hilog.error(0x0000, 'BiliPlayback', 'background.audioOnly.enter.error %{public}s', String(e));
+      if (DEBUG) {
+        hilog.error(0x0000, 'BiliPlayback', 'background.audioOnly.enter.error %{public}s', String(e));
+      }
     }
   }
 
@@ -538,8 +544,10 @@ if (this.runtimeSources.length === 0) {
     this.playing = false;
     this.seekCtl?.request(targetMs, true, resume);
     if (!resume) this.updateAVSessionPlaybackState();
-    hilog.info(0x0000, 'BiliPlayback',
-      'background.audioOnly.leave position=%{public}d resume=%{public}s', targetMs, String(resume));
+    if (DEBUG) {
+      hilog.info(0x0000, 'BiliPlayback',
+        'background.audioOnly.leave position=%{public}d resume=%{public}s', targetMs, String(resume));
+    }
   }
 
 
@@ -821,7 +829,7 @@ if (this.runtimeSources.length === 0) {
 
   onExternalSeekRequested(): void {
     const seconds: number = AppStorage.get<number>('videoSeekRequestSeconds') ?? -1;
-    if (seconds >= 0) this.seekTo(seconds, false);
+    if (seconds >= 0) this.seekTo(seconds, true);
   }
 
   onPlaybackStopRequested(): void {
@@ -887,8 +895,10 @@ if (this.runtimeSources.length === 0) {
     this.seekRecoveryActive = resumePlaying;
     this.seekRecoveryCoverVisible = false;
     if (resumePlaying) this.muteImmediately();
-    hilog.info(0x0000, 'BiliPlayback',
-      'seek.dispatch target=%{public}d resume=%{public}s', targetMs, String(resumePlaying));
+    if (DEBUG) {
+      hilog.info(0x0000, 'BiliPlayback',
+        'seek.dispatch target=%{public}d resume=%{public}s', targetMs, String(resumePlaying));
+    }
   }
 
   /** 起播/恢复播放前调用：双轨静音并等目标附近的首个 timeUpdate，超时后安全恢复。 */
@@ -1430,7 +1440,7 @@ if (this.runtimeSources.length === 0) {
           this.audioGateTimer = -1;
           if (this.audioPlayer === audio && this.audioGateSeekPending &&
             this.audioGateSeekTargetMs === targetMs) {
-            hilog.warn(0x0000, 'BiliPlayback', 'audioGate.timeout target=%{public}d', targetMs);
+            if (DEBUG) hilog.warn(0x0000, 'BiliPlayback', 'audioGate.timeout target=%{public}d', targetMs);
             this.finishGatedAudioStart(audio);
           }
         }, 1500);
@@ -1557,8 +1567,10 @@ if (this.runtimeSources.length === 0) {
         videoApplied = true;
       }
     } catch (e) {
-      hilog.error(0x0000, 'BiliPlayback',
-        'holdSpeed.video.failed rate=%{public}s', String(rate));
+      if (DEBUG) {
+        hilog.error(0x0000, 'BiliPlayback',
+          'holdSpeed.video.failed rate=%{public}s', String(rate));
+      }
     }
     try {
       if (this.audioPlayer !== null && this.audioPrepared) {
@@ -1566,12 +1578,16 @@ if (this.runtimeSources.length === 0) {
         audioApplied = true;
       }
     } catch (e) {
-      hilog.error(0x0000, 'BiliPlayback',
-        'holdSpeed.audio.failed rate=%{public}s', String(rate));
+      if (DEBUG) {
+        hilog.error(0x0000, 'BiliPlayback',
+          'holdSpeed.audio.failed rate=%{public}s', String(rate));
+      }
     }
-    hilog.info(0x0000, 'BiliPlayback',
-      'holdSpeed.apply rate=%{public}s video=%{public}s audio=%{public}s',
-      String(rate), videoApplied ? 'true' : 'false', audioApplied ? 'true' : 'false');
+    if (DEBUG) {
+      hilog.info(0x0000, 'BiliPlayback',
+        'holdSpeed.apply rate=%{public}s video=%{public}s audio=%{public}s',
+        String(rate), videoApplied ? 'true' : 'false', audioApplied ? 'true' : 'false');
+    }
   }
 
   private beginHoldSpeed(): void {
@@ -1724,9 +1740,11 @@ if (this.runtimeSources.length === 0) {
         oldFrame.release().catch(() => {
         });
       }
-      hilog.info(0x0000, 'BiliPlayback', 'seekPreview.frame time=%{public}d', Math.round(target * 1000));
+      if (DEBUG) {
+        hilog.info(0x0000, 'BiliPlayback', 'seekPreview.frame time=%{public}d', Math.round(target * 1000));
+      }
     } catch (e) {
-      hilog.warn(0x0000, 'BiliPlayback', 'seekPreview.error %{public}s', String(e));
+      if (DEBUG) hilog.warn(0x0000, 'BiliPlayback', 'seekPreview.error %{public}s', String(e));
     } finally {
       this.seekPreviewFetching = false;
       if (generation === this.seekPreviewGeneration && this.isSeekPreviewActive() &&
@@ -2031,7 +2049,8 @@ if (this.runtimeSources.length === 0) {
     // "自然播完"而触发自动连播切到下一视频；真正自然播完仍走 completed → onEnded 连线。
     const clamped: number = this.duration > 0 && clampedRaw >= this.duration ?
       Math.max(0, this.duration - 0.5) : clampedRaw;
-    const targetMs: number = Math.floor(clamped * 1000);
+    // Slider 会产生小数秒，四舍五入到最近毫秒，避免最终落点被额外向前截断。
+    const targetMs: number = Math.round(clamped * 1000);
     this.resetDanmakuAt(clamped);
     this.playheadSec = clamped;
     this.curTime = clamped;
@@ -3481,7 +3500,8 @@ if (this.runtimeSources.length === 0) {
       this.finishProgressPreviewInteraction();
       if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
         Haptic.seek();
-        this.seekTo(value, false);
+        // Moving 阶段只更新预览；End/Click 仅提交一次精确 seek，避免落到前一关键帧。
+        this.seekTo(value, true);
       }
     }
   }

@@ -6,6 +6,7 @@ import { promptAction } from '@kit.ArkUI';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { DEBUG } from 'BuildProfile';
 import { AppNavStack, NAV_FAVORITES, NAV_HISTORY, NAV_LOGIN, NAV_RELATION_LIST, NAV_USER_SPACE, NAV_WATCH_LATER,
   NAV_BANGUMI_LIST, NAV_BANGUMI_INDEX, NAV_BLACK_LIST,
   RelationListParam, UserSpaceParam } from '../common/AppRouter';
@@ -604,7 +605,7 @@ export struct MineView {
       return;
     }
     const size: number = this.dirSize(dir);
-    hilog.info(0x0000, 'BiliCache', 'cache size on demand: %{public}d bytes', size);
+    if (DEBUG) hilog.info(0x0000, 'BiliCache', 'cache size on demand: %{public}d bytes', size);
     promptAction.showDialog({
       title: '清空缓存',
       message: `将删除 ${this.formatBytes(size)} 的图片/弹幕等临时文件，不影响登录态。`,
@@ -628,7 +629,9 @@ export struct MineView {
     }
     try {
       const freed: number = this.clearDir(dir);
-      hilog.info(0x0000, 'BiliCache', 'clearCache done: freed=%{public}d bytes from %{public}s', freed, dir);
+      if (DEBUG) {
+        hilog.info(0x0000, 'BiliCache', 'clearCache done: freed=%{public}d bytes from %{public}s', freed, dir);
+      }
       this.toast(freed > 0 ? `已清空 ${this.formatBytes(freed)}` : '缓存已是空的');
     } catch (e) {
       // 目录清空失败忽略

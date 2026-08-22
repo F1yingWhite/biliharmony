@@ -61,6 +61,30 @@ export interface ReplyReactionHooks {
   clearDislikeOnLike: boolean;
 }
 
+/**
+ * 同一条评论的反应请求必须串行执行。
+ *
+ * ReplyCard 会立即展示下一状态；若上一请求尚未返回，过去直接丢弃第二次点击，
+ * 会造成“界面已取消、服务端仍是点赞”的分叉。这里等待上一请求结束后再读取
+ * 数据源当前真身，确保“点赞 -> 取消”以及“赞 -> 踩”都按用户点击顺序提交。
+ */
+async function acquireReplyReaction(rpid: number, busy: Set<number>, hooks: ReplyReactionHooks): Promise<boolean> {
+  let queued: boolean = false;
+  while (busy.has(rpid)) {
+    if (!queued) {
+      queued = true;
+      CommentLog.info('reaction.queue', 'rpid=' + String(rpid));
+    }
+    if (hooks.isDestroyed()) return false;
+    await new Promise<void>((resolve: () => void) => setTimeout(resolve, 24));
+  }
+  if (hooks.isDestroyed()) return false;
+  // 必须在本函数返回前同步占锁。若由调用方在 await 之后再 add，快速双击的两个
+  // 调用都可能先看到 busy=false，随后并发提交点赞与取消，服务端最终态不可预测。
+  busy.add(rpid);
+  return true;
+}
+
 /** 评论点赞：乐观更新主题色与计数，接口拒绝或网络异常时精确回滚。 */
 export async function runReplyLike(item: ReplyItem, busy: Set<number>, mutateItem: ReplyItemMutator,
   hooks: ReplyReactionHooks): Promise<void> {
@@ -68,11 +92,7 @@ export async function runReplyLike(item: ReplyItem, busy: Set<number>, mutateIte
     CommentLog.warn('reaction.like.skip', 'reason=login rpid=' + String(item.rpid));
     return;
   }
-  if (busy.has(item.rpid)) {
-    CommentLog.warn('reaction.like.skip', 'reason=busy rpid=' + String(item.rpid));
-    return;
-  }
-  busy.add(item.rpid);
+  if (!await acquireReplyReaction(item.rpid, busy, hooks)) return;
   let initialized: boolean = false;
   let previousLiked: boolean = false;
   let previousDisliked: boolean = false;
@@ -141,11 +161,7 @@ export async function runReplyDislike(item: ReplyItem, busy: Set<number>, mutate
     CommentLog.warn('reaction.dislike.skip', 'reason=login rpid=' + String(item.rpid));
     return;
   }
-  if (busy.has(item.rpid)) {
-    CommentLog.warn('reaction.dislike.skip', 'reason=busy rpid=' + String(item.rpid));
-    return;
-  }
-  busy.add(item.rpid);
+  if (!await acquireReplyReaction(item.rpid, busy, hooks)) return;
   let initialized: boolean = false;
   let previousDisliked: boolean = false;
   let previousLiked: boolean = false;

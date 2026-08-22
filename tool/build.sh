@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # BiliHaromny 命令行构建脚本（macOS + DevEco Studio）
-# 用法: bash tool/build.sh [clean]
+# 用法: bash tool/build.sh [clean] [release]
 set -e
 cd "$(dirname "$0")/.."
 
@@ -20,10 +20,17 @@ unset npm_execpath npm_config_node_gyp npm_config_init_module npm_config_npm_ver
 mkdir -p "$HOME/.npm" "$HOME/.npm-global"
 
 ohpm install --all
-if [ "$1" = "clean" ]; then
-  hvigorw clean assembleHap --mode module -p product=default
+BUILD_MODE="debug"
+CLEAN_BUILD="false"
+for ARG in "$@"; do
+  if [ "$ARG" = "release" ]; then BUILD_MODE="release"; fi
+  if [ "$ARG" = "clean" ]; then CLEAN_BUILD="true"; fi
+done
+if [ "$CLEAN_BUILD" = "true" ]; then
+  hvigorw clean assembleHap --mode module -p product=default -p buildMode="$BUILD_MODE"
 else
-  hvigorw assembleHap --mode module -p product=default
+  hvigorw assembleHap --mode module -p product=default -p buildMode="$BUILD_MODE"
 fi
 echo
+echo "构建模式: $BUILD_MODE"
 echo "产物: entry/build/default/outputs/default/entry-default-unsigned.hap"

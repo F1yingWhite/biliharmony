@@ -6,11 +6,13 @@ import { Haptic } from '../common/Haptic';
 
 @Component
 export struct ReplyActionBar {
-  @Prop mirrorLiked: boolean = false;
-  @Prop mirrorDisliked: boolean = false;
-  @Prop mirrorLike: number = 0;
-  @Prop likeScale: number = 1;
-  @Prop dislikeScale: number = 1;
+  // 操作态必须与 ReplyCard 的 @State 建立真实链接。这里使用 @Prop 时，稳定列表 key
+  // 下部分更新链只保留了子组件的旧快照，表现为接口成功但颜色/计数不动。
+  @Link mirrorLiked: boolean;
+  @Link mirrorDisliked: boolean;
+  @Link mirrorLike: number;
+  @Link likeScale: number;
+  @Link dislikeScale: number;
   @Prop threadDepth: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';

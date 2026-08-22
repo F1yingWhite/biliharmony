@@ -5,6 +5,7 @@ import { common, WantAgent, wantAgent } from '@kit.AbilityKit';
 import { avSession } from '@kit.AVSessionKit';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { DEBUG } from 'BuildProfile';
 
 export class PlayerAvSessionHelper {
   private static readonly DOMAIN: number = 0x0000;
@@ -52,14 +53,18 @@ export class PlayerAvSessionHelper {
       await session.setBackgroundPlayMode(avSession.BackgroundPlayMode.ENABLE_BACKGROUND_PLAY);
       this.session = session;
       this.active = true;
-      hilog.info(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
-        'avsession.active type=audio background=true');
+      if (DEBUG) {
+        hilog.info(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
+          'avsession.active type=audio background=true');
+      }
       if (this.latestMetadata !== null) this.setMetadata(this.latestMetadata);
       if (this.latestState !== null) this.setPlaybackState(this.latestState);
     } catch (e) {
       this.session = null;
-      hilog.error(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
-        'avsession.ensure.error %{public}s', String(e));
+      if (DEBUG) {
+        hilog.error(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
+          'avsession.ensure.error %{public}s', String(e));
+      }
     } finally {
       this.busy = false;
     }
@@ -134,21 +139,27 @@ export class PlayerAvSessionHelper {
           [backgroundTaskManager.BackgroundTaskSubmode.SUBMODE_AVSESSION_AUDIO_PLAYBACK];
         request.wantAgent = agent;
         const supported: boolean = request.isModeSupported();
-        hilog.info(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
-          'background.mode.supported=%{public}s', String(supported));
+        if (DEBUG) {
+          hilog.info(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
+            'background.mode.supported=%{public}s', String(supported));
+        }
         if (!supported) throw new Error('AVSession audio playback background mode is unsupported');
         const result: backgroundTaskManager.ContinuousTaskNotification =
           await backgroundTaskManager.startBackgroundRunning(this.context, request);
         this.backgroundTaskId = result.continuousTaskId ?? -1;
         this.backgroundRequested = true;
-        hilog.info(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
-          'background.start task=%{public}d', this.backgroundTaskId);
+        if (DEBUG) {
+          hilog.info(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
+            'background.start task=%{public}d', this.backgroundTaskId);
+        }
       }
       if (!this.backgroundDesired && this.backgroundRequested) await this.stopBackgroundTask();
     } catch (e) {
       failed = true;
-      hilog.error(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
-        'background.sync.error %{public}s', String(e));
+      if (DEBUG) {
+        hilog.error(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
+          'background.sync.error %{public}s', String(e));
+      }
     } finally {
       this.backgroundBusy = false;
       if (!failed && this.backgroundDesired !== this.backgroundRequested) {
@@ -166,11 +177,15 @@ export class PlayerAvSessionHelper {
     try {
       if (taskId >= 0) await backgroundTaskManager.stopBackgroundRunning(this.context, taskId);
       else await backgroundTaskManager.stopBackgroundRunning(this.context);
-      hilog.info(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
-        'background.stop task=%{public}d', taskId);
+      if (DEBUG) {
+        hilog.info(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
+          'background.stop task=%{public}d', taskId);
+      }
     } catch (e) {
-      hilog.error(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
-        'background.stop.error %{public}s', String(e));
+      if (DEBUG) {
+        hilog.error(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
+          'background.stop.error %{public}s', String(e));
+      }
     }
   }
 

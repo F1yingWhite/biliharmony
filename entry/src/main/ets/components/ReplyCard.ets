@@ -41,7 +41,7 @@ export struct ReplyCard {
   @Prop threadGuides: Array<boolean> = [];
   @Prop threadHasChildren: boolean = false;
   @Prop threadCollapsed: boolean = false;
-  @Prop @Watch('onVersionChanged') version: number = 0;
+  @Prop version: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   /** 所属稿件/动态的 UP 主 mid；评论或回复作者是本人时名字旁标注"UP主"。 */
@@ -67,6 +67,9 @@ export struct ReplyCard {
   @State nameplateLocal: string = '';
   private destroyed: boolean = false;
   private likeTimers: Set<number> = new Set<number>();
+  /** 卡片已应用的模型修订号；稳定 key 的列表闭包可能再次传回旧快照，不能倒灌 UI。 */
+  private mirrorRpid: number = -1;
+  private mirrorRev: number = -1;
 
   private toast(message: string): void {
     try {
@@ -86,15 +89,22 @@ export struct ReplyCard {
     this.mirrorLiked = this.item.liked;
     this.mirrorDisliked = this.item.disliked;
     this.mirrorLike = this.item.like;
+    this.mirrorRpid = this.item.rpid;
+    this.mirrorRev = this.item.rev;
   }
 
   private onItemChanged(): void {
-    this.syncMirrorFromItem();
-    this.primeNameplate();
+    // LazyForEach 使用稳定 rpid key 时，其 builder 闭包可能在父级 version 更新后再次
+    // 传回最初的 rev=0 快照。只接受新评论，或严格更新的修订号，防止旧点赞态倒灌。
+    if (this.item.rpid !== this.mirrorRpid || this.item.rev > this.mirrorRev) {
+      this.syncMirrorFromItem();
+      this.primeNameplate();
+    }
   }
 
-  private onVersionChanged(): void {
-    this.syncMirrorFromItem();
+  private advanceLocalReactionRevision(): void {
+    this.mirrorRev = Math.max(this.mirrorRev + 1, this.item.rev + 1);
+    this.item.rev = this.mirrorRev;
   }
 
   private primeNameplate(): void {
@@ -257,11 +267,11 @@ export struct ReplyCard {
   @Builder
   ActionBar() {
     ReplyActionBar({
-      mirrorLiked: this.mirrorLiked,
-      mirrorDisliked: this.mirrorDisliked,
-      mirrorLike: this.mirrorLike,
-      likeScale: this.likeScale,
-      dislikeScale: this.dislikeScale,
+      mirrorLiked: $mirrorLiked,
+      mirrorDisliked: $mirrorDisliked,
+      mirrorLike: $mirrorLike,
+      likeScale: $likeScale,
+      dislikeScale: $dislikeScale,
       threadDepth: this.threadDepth,
       onLike: (): void => {
         this.playLikeAnimation();
@@ -273,6 +283,12 @@ export struct ReplyCard {
           this.mirrorLike++;
           this.mirrorDisliked = false;
         }
+        // @Prop item 是本卡片的深拷贝快照。同步写入即时视觉态，避免父级 version
+        // 比新 item 更早到达时，onVersionChanged 又把第二次点击恢复成旧状态。
+        this.item.liked = this.mirrorLiked;
+        this.item.disliked = this.mirrorDisliked;
+        this.item.like = this.mirrorLike;
+        this.advanceLocalReactionRevision();
         this.onLike(this.item);
       },
       onDislike: (): void => {
@@ -286,6 +302,10 @@ export struct ReplyCard {
             this.mirrorLike = Math.max(0, this.mirrorLike - 1);
           }
         }
+        this.item.liked = this.mirrorLiked;
+        this.item.disliked = this.mirrorDisliked;
+        this.item.like = this.mirrorLike;
+        this.advanceLocalReactionRevision();
         this.onDislike(this.item);
       },
       onShare: (): void => {

@@ -2,6 +2,7 @@
  * 私信与消息通知 API。
  */
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { DEBUG } from 'BuildProfile';
 import { HttpClient, HttpResponse } from '../common/HttpClient';
 import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
@@ -26,11 +27,17 @@ export class MessageApi {
       // 失败原因透出到 UI（区分网络错误与业务错误），同时留 hilog 便于定位风控/签名问题。
       const json: Record<string, Object> = resp.json();
       result.error = failureText(resp, '接口异常');
-      hilog.warn(0x0000, 'BiliApi', 'getMessageSessions failed: status=%{public}d code=%{public}d body=%{public}s',
-        resp.status, asNumber(json['code'], -999), resp.body.substring(0, 200));
+      if (DEBUG) {
+        hilog.warn(0x0000, 'BiliApi',
+          'getMessageSessions failed: status=%{public}d code=%{public}d body=%{public}s',
+          resp.status, asNumber(json['code'], -999), resp.body.substring(0, 200));
+      }
       return result;
     }
-    hilog.info(0x0000, 'BiliApi', 'getMessageSessions ok: sessions=%{public}d', asArray(data['session_list']).length);
+    if (DEBUG) {
+      hilog.info(0x0000, 'BiliApi', 'getMessageSessions ok: sessions=%{public}d',
+        asArray(data['session_list']).length);
+    }
     const list: Array<Object> = asArray(data['session_list']);
     const accountIds: Array<string> = [];
     for (let i: number = 0; i < list.length; i++) {
@@ -122,8 +129,11 @@ export class MessageApi {
       const json: Record<string, Object> = resp.json();
       const code: number = asNumber(json['code'], -999);
       result.error = failureText(resp, '私信接口异常');
-      hilog.warn(0x0000, 'BiliApi', 'getPrivateMessages failed: talker=%{public}d status=%{public}d code=%{public}d body=%{public}s',
-        talkerId, resp.status, code, resp.body.substring(0, 200));
+      if (DEBUG) {
+        hilog.warn(0x0000, 'BiliApi',
+          'getPrivateMessages failed: talker=%{public}d status=%{public}d code=%{public}d body=%{public}s',
+          talkerId, resp.status, code, resp.body.substring(0, 200));
+      }
       return result;
     }
     const list: Array<Object> = asArray(data['messages']);
@@ -200,8 +210,11 @@ export class MessageApi {
     if (data === null) {
       const json: Record<string, Object> = resp.json();
       result.error = failureText(resp, '接口异常');
-      hilog.warn(0x0000, 'BiliApi', 'getMsgFeedNotify failed: kind=%{public}s status=%{public}d code=%{public}d',
-        kind, resp.status, asNumber(json['code'], -999));
+      if (DEBUG) {
+        hilog.warn(0x0000, 'BiliApi',
+          'getMsgFeedNotify failed: kind=%{public}s status=%{public}d code=%{public}d',
+          kind, resp.status, asNumber(json['code'], -999));
+      }
       return result;
     }
     // 「收到的赞」首屏同时返回 latest（最新）与 total（累计），合并后按 id 去重展示。
@@ -250,8 +263,10 @@ export class MessageApi {
     const json: Record<string, Object> = resp.json();
     if (!resp.ok || asNumber(json['code'], -1) !== 0) {
       result.error = failureText(resp, '接口异常');
-      hilog.warn(0x0000, 'BiliApi', 'getSysNotifications failed: status=%{public}d code=%{public}d',
-        resp.status, asNumber(json['code'], -999));
+      if (DEBUG) {
+        hilog.warn(0x0000, 'BiliApi', 'getSysNotifications failed: status=%{public}d code=%{public}d',
+          resp.status, asNumber(json['code'], -999));
+      }
       return result;
     }
     const list: Array<Object> = asArray(json['data']);
