@@ -7,16 +7,17 @@ import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
 import { AppNavStack, BangumiDetailParam, NAV_BANGUMI_DETAIL, NAV_LOGIN, NAV_VIDEO_DETAIL, VideoDetailParam } from '../common/AppRouter';
 import { BangumiEpisode, BangumiSeason, ReplyData, ReplyItem } from '../model/Models';
-import { ActionResult, BiliApi } from '../api/BiliApi';
+import { ActionResult } from '../api/BiliApi';
+import { BangumiApi } from '../api/BangumiApi';
 import { Immersive } from '../common/Immersive';
 import { LoadingView } from '../components/LoadingView';
 import { BackButton, BackButtonVariant } from '../components/BackButton';
-import { ReplyCard } from '../components/ReplyCard';
-import { ReplyComposer } from '../components/ReplyComposer';
-import { ReplyThreadPanel } from '../components/ReplyThreadPanel';
+import { ReplyCard } from '../components/reply/ReplyCard';
+import { ReplyComposer } from '../components/reply/ReplyComposer';
+import { ReplyThreadPanel } from '../components/reply/ReplyThreadPanel';
 import { ReplyShareCard, makeReplyQr, makeReplyShareSnapshot,
-  sharePixelMapAsImage } from '../components/ReplyShareCard';
-import { ReplySortChips } from '../components/ReplySortChips';
+  sharePixelMapAsImage } from '../components/reply/ReplyShareCard';
+import { ReplySortChips } from '../components/reply/ReplySortChips';
 import { UserStore } from '../common/UserStore';
 import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
 import { asNumber, asObject, colorWithAlpha, formatCount, formatDuration } from '../common/Utils';
@@ -89,7 +90,7 @@ export struct BangumiDetailPage {
     this.loading = true;
     this.errorText = '';
     try {
-      const season: BangumiSeason | null = await BiliApi.getBangumiSeason(this.param.seasonId, this.param.epId);
+      const season: BangumiSeason | null = await BangumiApi.getSeason(this.param.seasonId, this.param.epId);
       if (this.destroyed) return;
       if (season === null) {
         this.errorText = '番剧信息加载失败，请检查网络后重试';
@@ -174,7 +175,7 @@ export struct BangumiDetailPage {
     if (this.followBusy || this.season.seasonId <= 0) return;
     this.followBusy = true;
     try {
-      const result: ActionResult = await BiliApi.followBangumi(this.season.seasonId, !this.followed);
+      const result: ActionResult = await BangumiApi.setFollowed(this.season.seasonId, !this.followed);
       if (this.destroyed) return;
       this.toast(result.message);
       if (result.ok) {

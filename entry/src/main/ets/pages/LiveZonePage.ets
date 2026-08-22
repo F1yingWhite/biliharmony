@@ -8,7 +8,7 @@ import { BiliApi } from '../api/BiliApi';
 import { LiveRoomItem, LiveZone } from '../model/LiveModels';
 import { LoadingView } from '../components/LoadingView';
 import { PageHeader } from '../components/PageHeader';
-import { LiveRoomCard } from '../components/LiveRoomCard';
+import { LiveRoomCard } from '../components/live/LiveRoomCard';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { colorWithAlpha } from '../common/Utils';

@@ -3,7 +3,7 @@
  */
 import { VideoItem } from '../model/Models';
 import { BiliApi } from '../api/BiliApi';
-import { VideoCard } from '../components/VideoCard';
+import { VideoCard } from '../components/video/VideoCard';
 import { LoadingView } from '../components/LoadingView';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { Immersive } from '../common/Immersive';
@@ -11,7 +11,7 @@ import { AppTheme } from '../common/AppTheme';
 import { UserStore } from '../common/UserStore';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { LiveRoomItem } from '../model/LiveModels';
-import { LiveRoomCard } from '../components/LiveRoomCard';
+import { LiveRoomCard } from '../components/live/LiveRoomCard';
 import { NavEntryRow } from '../components/NavEntryRow';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { AppNavStack, NAV_RANK, NAV_ZONE, NAV_BANGUMI_INDEX, NAV_LIVE_ZONE } from '../common/AppRouter';
@@ -518,7 +518,7 @@ export struct HomeView {
     .constraintSize({ maxWidth: LayoutTokens.feedMaxWidth })
     .alignSelf(ItemAlign.Center)
     .scrollBar(BarState.Off)
-    .onScroll((offset: number) => {
+    .onDidScroll((offset: number) => {
       AppTheme.updateHeaderFade(offset);
     })
     .onReachEnd(() => {
@@ -570,7 +570,7 @@ export struct HomeView {
     .constraintSize({ maxWidth: LayoutTokens.feedMaxWidth })
     .alignSelf(ItemAlign.Center)
     .scrollBar(BarState.Off)
-    .onScroll((offset: number) => AppTheme.updateHeaderFade(offset))
+    .onDidScroll((offset: number) => AppTheme.updateHeaderFade(offset))
     .onReachEnd(() => this.onReachEnd(2))
   }
 

@@ -13,7 +13,7 @@ import { FavoriteApi } from '../api/FavoriteApi';
 
 @Component
 export struct FavoriteFolderSortPage {
-  /** LibraryPages 传入的自建文件夹列表（已去除默认收藏夹）。 */
+  /** FavoritesPage 传入的自建文件夹列表（已去除默认收藏夹）。 */
   param: FavSortParam = { folders: [] };
   @State sort: Array<FavoriteFolderItem> = [];
   @State saving: boolean = false;

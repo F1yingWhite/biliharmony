@@ -7,8 +7,8 @@ import { appSign } from '../common/AppSign';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber, asString, str, toHttps } from '../common/Utils';
 import { RelationUserItem, RelationUserPageData, SpaceArcData, UserInfo, UserSpaceHeaderItem, UserSpaceInfo,
-  UserStat, VideoItem } from '../model/Models';
-import { getData, webGet } from './internal/ApiCommon';
+  UserStat, VideoItem, FollowTagItem } from '../model/Models';
+import { ActionResult, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
 
 class SpaceDecorationInfo {
   light: string = '';
@@ -197,5 +197,91 @@ export class UserApi {
       result.videos.push(VideoItem.fromSpaceItem(vlist[i]));
     }
     return result;
+  }
+
+  static async getRelation(mid: number): Promise<number | null> {
+    if (mid <= 0) return null;
+    const resp: HttpResponse = await webGet(Api.userRelation, { 'fid': String(mid) });
+    const data: Record<string, Object> | null = getData(resp);
+    return data === null ? null : asNumber(data['attribute'], 0);
+  }
+
+  static async setFollowed(mid: number, followed: boolean): Promise<ActionResult> {
+    if (mid <= 0) return new ActionResult(false, 'UP 主信息无效');
+    return postVideoAction(Api.modifyUserRelation, {
+      'fid': String(mid), 'act': followed ? '1' : '2', 're_src': '11', 'gaia_source': 'web_main',
+    });
+  }
+
+  static async getBlackList(page: number): Promise<RelationUserPageData> {
+    const result: RelationUserPageData = new RelationUserPageData();
+    const data: Record<string, Object> | null = getData(await webGet(Api.blackList, {
+      'pn': String(Math.max(1, page)), 'ps': '30',
+    }));
+    if (data === null) return result;
+    result.total = asNumber(data['total'], 0);
+    const users: Array<Object> = asArray(data['list']);
+    for (let i: number = 0; i < users.length; i++) {
+      const item: RelationUserItem = RelationUserItem.from(users[i]);
+      if (item.mid > 0) result.users.push(item);
+    }
+    return result;
+  }
+
+  static async setBlocked(mid: number, blocked: boolean): Promise<ActionResult> {
+    if (mid <= 0) return new ActionResult(false, '用户信息无效');
+    return postVideoAction(Api.modifyUserRelation, {
+      'fid': String(mid), 'act': blocked ? '5' : '6', 're_src': '11', 'gaia_source': 'web_main',
+    });
+  }
+
+  static async getFollowTags(): Promise<Array<FollowTagItem>> {
+    const data: Record<string, Object> | null = getData(
+      await webGet(Api.followTags, undefined, 'https://space.bilibili.com/'));
+    const result: Array<FollowTagItem> = [];
+    if (data === null) return result;
+    const tags: Array<Object> = asArray(data['data']);
+    for (let i: number = 0; i < tags.length; i++) {
+      const raw: Record<string, Object> = asObject(tags[i]);
+      const tag: FollowTagItem = new FollowTagItem();
+      tag.tagid = asNumber(raw['tagid'], 0);
+      tag.name = str(raw, 'name', '');
+      tag.count = asNumber(raw['count'], 0);
+      if (tag.tagid > 0) result.push(tag);
+    }
+    return result;
+  }
+
+  static async createFollowTag(tagName: string): Promise<number> {
+    if (tagName.length === 0) return 0;
+    const csrf: string = HttpClient.getCookie('bili_jct');
+    if (csrf.length === 0) return 0;
+    const resp: HttpResponse = await webPost(Api.followTagCreate, { 'tag': tagName, 'csrf': csrf },
+      'https://space.bilibili.com/');
+    const json: Record<string, Object> = resp.json();
+    if (asNumber(json['code'], -1) !== 0) return 0;
+    return asNumber(asObject(json['data'])['tagid'], 0);
+  }
+
+  static async addToFollowTags(mid: number, tagIds: Array<number>): Promise<ActionResult> {
+    return postVideoAction(Api.followTagsAddUsers, {
+      'fids': String(mid), 'tagids': tagIds.map((id: number) => String(id)).join(','),
+    });
+  }
+
+  static async reportMember(mid: number, reason: string): Promise<ActionResult> {
+    if (mid <= 0) return new ActionResult(false, '用户信息无效');
+    if (HttpClient.getCookie('SESSDATA').length === 0) {
+      return new ActionResult(false, '登录状态已失效，请重新登录', -101);
+    }
+    const csrf: string = HttpClient.getCookie('bili_jct');
+    if (csrf.length === 0) return new ActionResult(false, '登录状态缺少 CSRF，请重新登录', -111);
+    const resp: HttpResponse = await webPost(Api.reportMember, {
+      'mid': String(mid), 'reason': reason, 'reason_v2': '5', 'csrf': csrf,
+    }, undefined, { 'Origin': 'https://space.bilibili.com' });
+    if (!resp.ok) return new ActionResult(false, '网络请求失败 (' + String(resp.status) + ')', resp.status);
+    const json: Record<string, Object> = resp.json();
+    const ok: boolean = json['status'] === true || Number(json['status'] ?? 0) === 1;
+    return new ActionResult(ok, ok ? '已提交举报，感谢反馈' : String(json['data'] ?? '举报失败'), ok ? 0 : -1);
   }
 }

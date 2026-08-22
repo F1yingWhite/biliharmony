@@ -20,7 +20,9 @@ import { AppNavStack, APP_ROOT_SNAPSHOT_ID, NAV_SEARCH, NAV_VIDEO_DETAIL, NAV_LO
 import { SearchPage } from './Search';
 import { FavSortParam } from '../common/AppRouter';
 import { MessagesPage } from './Messages';
-import { FavoritesPage, HistoryPage, WatchLaterPage } from './LibraryPages';
+import { HistoryPage } from './library/HistoryPage';
+import { WatchLaterPage } from './library/WatchLaterPage';
+import { FavoritesPage } from './library/FavoritesPage';
 import { BangumiListPage } from './BangumiListPage';
 import { BangumiIndexPage } from './BangumiIndexPage';
 import { BangumiTimelinePage } from './BangumiTimelinePage';

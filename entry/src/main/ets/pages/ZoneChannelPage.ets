@@ -8,7 +8,7 @@ import { VIDEO_ZONE_OPTIONS, SearchNumOption, VideoItem } from '../model/Models'
 import { BiliApi } from '../api/BiliApi';
 import { LoadingView } from '../components/LoadingView';
 import { PageHeader } from '../components/PageHeader';
-import { VideoRowCard } from '../components/VideoRowCard';
+import { VideoRowCard } from '../components/video/VideoRowCard';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { colorWithAlpha, formatCount } from '../common/Utils';
