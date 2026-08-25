@@ -17,92 +17,101 @@ export struct RelatedVideoRow {
 
   build() {
     Row({ space: 10 }) {
-      Stack({ alignContent: Alignment.BottomEnd }) {
-        Image(this.item.cover)
-          .width(120)
-          .height(68)
-          .objectFit(ImageFit.Cover)
-          .borderRadius(6)
-        // 高互动角标（对齐官方）：投币优先，其次分享
-        if (this.item.coin >= 10000 || this.item.share >= 10000) {
-          Row({ space: 0 }) {
-            Blank()
-            Text(this.item.coin >= 10000 ? formatCount(this.item.coin) + ' 投币' : formatCount(this.item.share) + ' 分享')
+      Row({ space: 10 }) {
+        Stack({ alignContent: Alignment.BottomStart }) {
+          Image(this.item.cover)
+            .width(120)
+            .height(68)
+            .objectFit(ImageFit.Cover)
+            .borderRadius(6)
+          Row({ space: 4 }) {
+            // 高互动角标固定在左下角，时长固定在右下角，二者共享一行不会重叠。
+            if (this.item.coin >= 10000 || this.item.share >= 10000) {
+              Text(this.item.coin >= 10000 ? formatCount(this.item.coin) + ' 投币' :
+                formatCount(this.item.share) + ' 分享')
               .fontSize(9)
               .fontColor('#FFFFFF')
               .backgroundColor(this.accent)
               .borderRadius(3)
               .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-              .margin({ left: 4, bottom: 4 })
-          }
-          .width('100%')
-          .alignItems(VerticalAlign.Bottom)
-          .hitTestBehavior(HitTestMode.None)
-        }
-        Text(formatDuration(this.item.duration))
-          .fontSize(10)
-          .fontColor('#FFFFFF')
-          .backgroundColor('#88000000')
-          .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-          .borderRadius(3)
-          .margin({ right: 4, bottom: 4 })
-      }
-      .width(120)
-      .clip(true)
-      .onClick(() => this.onOpen(this.item))
-      // 文字列高度与封面一致：标题贴顶，UP/数据组沉底对齐卡片下缘（官方排布，去掉中间空档）
-      Column({ space: 5 }) {
-        Text(this.item.title)
-          .fontSize(13)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .lineHeight(17)
-          .onClick(() => this.onOpen(this.item))
-        Column({ space: 5 }) {
-          Row({ space: 4 }) {
-            Text('UP')
-              .fontSize(8)
-              .fontColor('#9499A0')
-              .border({ width: 0.6, color: '#8E9399', radius: 2 })
-              .padding({ left: 2, right: 2 })
-            Text(this.item.upName)
-              .fontSize(11)
-              .fontColor('#9499A0')
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .layoutWeight(1)
+              .constraintSize({ maxWidth: 62 })
+            }
+            Blank()
+            if (this.item.duration > 0) {
+              Text(formatDuration(this.item.duration))
+                .fontSize(10)
+                .fontColor('#FFFFFF')
+                .backgroundColor('#88000000')
+                .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+                .borderRadius(3)
+                .maxLines(1)
+            }
           }
           .width('100%')
+          .padding({ left: 4, right: 4, bottom: 4 })
           .alignItems(VerticalAlign.Center)
-          Row({ space: 3 }) {
-            Image($r('app.media.ic_play'))
-              .width(11).height(11)
-              .renderMode(ImageRenderMode.Template)
-              .fillColor('#9499A0')
-            Text(this.item.playText)
-              .fontSize(10).fontColor('#9499A0')
+          .hitTestBehavior(HitTestMode.None)
+        }
+        .width(120)
+        .height(68)
+        .clip(true)
+        // 文字列高度与封面一致：标题贴顶，UP/数据组沉底对齐卡片下缘。
+        Column({ space: 5 }) {
+          Text(this.item.title)
+            .fontSize(13)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .lineHeight(17)
+          Column({ space: 5 }) {
+            Row({ space: 4 }) {
+              Text('UP')
+                .fontSize(8)
+                .fontColor('#9499A0')
+                .border({ width: 0.6, color: '#8E9399', radius: 2 })
+                .padding({ left: 2, right: 2 })
+              Text(this.item.upName)
+                .fontSize(11)
+                .fontColor('#9499A0')
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .layoutWeight(1)
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Center)
             Row({ space: 3 }) {
-              Image($r('app.media.ic_comment'))
+              Image($r('app.media.ic_play'))
                 .width(11).height(11)
                 .renderMode(ImageRenderMode.Template)
                 .fillColor('#9499A0')
-              Text(formatCount(this.item.reply))
+              Text(this.item.playText)
                 .fontSize(10).fontColor('#9499A0')
+              Row({ space: 3 }) {
+                Image($r('app.media.ic_comment'))
+                  .width(11).height(11)
+                  .renderMode(ImageRenderMode.Template)
+                  .fillColor('#9499A0')
+                Text(formatCount(this.item.reply))
+                  .fontSize(10).fontColor('#9499A0')
+              }
+              .margin({ left: 8 })
             }
-            .margin({ left: 8 })
+            .alignItems(VerticalAlign.Center)
           }
-          .alignItems(VerticalAlign.Center)
+          .alignItems(HorizontalAlign.Start)
         }
+        .layoutWeight(1)
+        .height(68)
+        .justifyContent(FlexAlign.SpaceBetween)
         .alignItems(HorizontalAlign.Start)
-        .onClick(() => this.onOpen(this.item))
       }
-      .width('100%')
-      .height(68)
-      .justifyContent(FlexAlign.SpaceBetween)
-      .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
+      .height(68)
+      .alignItems(VerticalAlign.Top)
+      .onClick(() => this.onOpen(this.item))
       // 最右竖三点：举报/不想看（每行独立弹窗状态，气泡朝上贴按钮），与卡片底部对齐
       RelatedMoreDot({
         onReport: () => this.onReport(this.item),
@@ -113,6 +122,7 @@ export struct RelatedVideoRow {
     // 标题/UP 与封面上端对齐（Row 默认垂直居中会让文字偏下）
     .alignItems(VerticalAlign.Top)
     .padding({ top: 8, bottom: 8 })
+    .border({ width: { bottom: 0.5 }, color: this.isDark ? '#303238' : '#E7E9EC' })
   }
 }
 @Component

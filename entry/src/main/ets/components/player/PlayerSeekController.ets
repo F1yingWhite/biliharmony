@@ -6,6 +6,7 @@ import { media } from '@kit.MediaKit';
 
 export class PlayerSeekController {
   pendingSeekMs: number = -1;
+  pendingSeekPrecise: boolean = true;
   activeSeekMs: number = -1;
   activeAudioSeekMs: number = -1;
   seekInFlight: boolean = false;
@@ -50,8 +51,9 @@ export class PlayerSeekController {
   }
 
   /** 外部收到一次 seek 请求，先合并到 pending；若已有 seek 在途则等待完成后再调度。 */
-  request(targetMs: number, _precise: boolean, resumePlaying: boolean): void {
+  request(targetMs: number, precise: boolean, resumePlaying: boolean): void {
     this.pendingSeekMs = targetMs;
+    this.pendingSeekPrecise = precise;
     this.seekResumePlaying = this.seekResumePlaying || resumePlaying;
     if (this.seekInFlight) return;
     if (this.dispatchTimer >= 0) clearTimeout(this.dispatchTimer);
@@ -68,6 +70,7 @@ export class PlayerSeekController {
     this.clearWatchdog();
     this.clearAudioSettleTimer();
     this.pendingSeekMs = -1;
+    this.pendingSeekPrecise = true;
     this.seekInFlight = false;
     this.activeSeekMs = -1;
     this.activeAudioSeekMs = -1;
@@ -82,6 +85,7 @@ export class PlayerSeekController {
     const video: media.AVPlayer | null = this.getVideo();
     if (video === null || !this.isPrepared() || this.pendingSeekMs < 0) return;
     const targetMs: number = this.pendingSeekMs;
+    const precise: boolean = this.pendingSeekPrecise;
     this.pendingSeekMs = -1;
     this.activeSeekMs = targetMs;
     this.activeAudioSeekMs = -1;
@@ -91,10 +95,9 @@ export class PlayerSeekController {
     this.activeAudio = audio;
     this.audioSeekDone = audio === null || !this.isAudioPrepared();
     this.seekInFlight = true;
-    // 网络片源的 SEEK_CLOSEST 会从关键帧继续精确解码；4K DASH 大跨度定位时部分设备不回 seekDone。
-    // API 26 对快进/快退分别推荐前/后关键帧模式，网络开销稳定且不会阻塞播放器状态机。
-    const mode: media.SeekMode = targetMs < video.currentTime ? media.SeekMode.SEEK_NEXT_SYNC :
-      media.SeekMode.SEEK_PREV_SYNC;
+    // 用户快进/后退和拖动必须落到请求位置；仅 seek 超时重建后的恢复请求使用关键帧模式兜底。
+    const mode: media.SeekMode = precise ? media.SeekMode.SEEK_CLOSEST :
+      (targetMs < video.currentTime ? media.SeekMode.SEEK_NEXT_SYNC : media.SeekMode.SEEK_PREV_SYNC);
     this.onBeforeDispatch(targetMs, this.seekResumePlaying);
     // 播放中先暂停两条轨，再做一次成对定位。这样旧位置的音频不会在视频重新取帧时继续输出，
     // Surface 也能保留最后一帧，而不是让解码和 seek 同时争抢状态机。

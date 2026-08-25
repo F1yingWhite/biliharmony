@@ -26,6 +26,7 @@ export struct ReplyThreadPanel {
   @Prop showEmoteButton: boolean = false;
   @Prop emoteOpen: boolean = false;
   @Prop emotePackages: Array<BiliEmotePackage> = [];
+  scroller: Scroller = new Scroller();
   onClose: () => void = () => {};
   onLike: (item: ReplyItem) => void = () => {};
   onDislike: (item: ReplyItem) => void = () => {};
@@ -39,6 +40,8 @@ export struct ReplyThreadPanel {
   onRequestKeyboard: () => void = () => {};
   onFocusChange: (focused: boolean) => void = () => {};
   onNavigate: (action: () => void) => void = (action: () => void) => action();
+  onScrollFrame: (offset: number, scroller: Scroller, state: ScrollState) => number =
+    (offset: number) => offset;
   @BuilderParam emotePanel: () => void = this.EmptyPanel;
   @State visibleReplies: Array<ReplyItem> = [];
   @State treeVersion: number = 0;
@@ -117,7 +120,7 @@ export struct ReplyThreadPanel {
       .padding({ left: 12, right: 16 })
       .onClick(() => this.onClose())
 
-      List() {
+      List({ scroller: this.scroller }) {
         ListItem() {
           ReplyCard({
             item: this.root,
@@ -192,6 +195,9 @@ export struct ReplyThreadPanel {
       .maintainVisibleContentPosition(true)
       .cachedCount(3)
       .scrollBar(BarState.Off)
+      .onScrollFrameBegin((offset: number, state: ScrollState) => {
+        return { offsetRemain: this.onScrollFrame(offset, this.scroller, state) };
+      })
       .onReachEnd(() => {
         if (!this.loading && this.hasMore) this.onLoadMore();
       })

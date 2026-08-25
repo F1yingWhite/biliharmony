@@ -12,6 +12,7 @@ export struct PlayerSettingsPanel {
   @Prop accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @Prop dmOpacity: number = 0.85;
+  @Prop dmFrameRate: number = 60;
   @Prop dmSpeed: number = 1;
   @Prop dmFontScale: number = 1.0;
   @Prop dmDensity: number = 22;
@@ -34,6 +35,7 @@ export struct PlayerSettingsPanel {
   onBlockAdvancedToggle: (next: boolean) => void = () => {};
   onResetDanmaku: () => void = () => {};
   onDmOpacityChange: (value: number) => void = () => {};
+  onDmFrameRateChange: (value: number) => void = () => {};
   onDmSpeedChange: (value: number) => void = () => {};
   onDmFontScaleChange: (value: number) => void = () => {};
   onDmDensityChange: (value: number) => void = () => {};
@@ -135,6 +137,27 @@ export struct PlayerSettingsPanel {
   }
 
   @Builder
+  DmFrameRateRow(getValue: () => number, onChange: (value: number) => void) {
+    Row({ space: 10 }) {
+      Text('弹幕帧率').width(52).fontSize(13).fontColor(this.sectionTitleColor())
+      Slider({ value: getValue(), min: 24, max: 120, step: 1, style: SliderStyle.InSet })
+        .layoutWeight(1)
+        .height(22)
+        .blockColor('#FFFFFF')
+        .selectedColor(this.accent)
+        .trackColor(this.trackColor())
+        .onChange((next: number) => onChange(Math.round(next)))
+      Text(Math.round(getValue()) + ' FPS')
+        .width(52)
+        .textAlign(TextAlign.End)
+        .fontSize(12)
+        .fontColor(this.subColor())
+    }
+    .width('100%')
+    .padding({ left: 14, right: 14, top: 7, bottom: 7 })
+  }
+
+  @Builder
   DensityChip(label: string, value: number) {
     Text(label)
       .fontSize(13)
@@ -227,6 +250,8 @@ export struct PlayerSettingsPanel {
           this.DmSliderRow('字体大小', () => this.dmFontScale, 0.7, 1.8, (value: number) => this.onDmFontScaleChange(value))
           this.DmDivider()
           this.DmSpeedRow(() => this.dmSpeed, (value: number) => this.onDmSpeedChange(value))
+          this.DmDivider()
+          this.DmFrameRateRow(() => this.dmFrameRate, (value: number) => this.onDmFrameRateChange(value))
         }
         .width('100%')
         .borderRadius(14)

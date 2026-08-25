@@ -225,6 +225,7 @@ struct Index {
         // 出栈回根页时没有页面级回调，提前恢复根页系统栏图标
         this.syncBarColors();
       })
+      .backgroundColor(this.isDark ? '#18191C' : '#F6F7F8')
     } else if (name === NAV_MESSAGES) {
       NavDestination() {
         MessagesPage()
