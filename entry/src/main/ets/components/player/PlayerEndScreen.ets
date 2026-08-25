@@ -83,14 +83,17 @@ export struct PlayerEndScreen {
     Column() {
       Text('推荐视频').fontSize(13).fontColor('#8E9399').width('100%').margin({ bottom: 8 })
       Row({ space: 10 }) {
-        Stack({ alignContent: Alignment.Center }) {
+        Stack({ alignContent: Alignment.BottomEnd }) {
           Image(this.cover).width(96).height(54).objectFit(ImageFit.Cover)
-          Image($r('app.media.ic_play')).width(22).height(22)
-            .renderMode(ImageRenderMode.Template).fillColor('#E6FFFFFF')
+          Stack({ alignContent: Alignment.Center }) {
+            Image($r('app.media.ic_play')).width(22).height(22)
+              .renderMode(ImageRenderMode.Template).fillColor('#E6FFFFFF')
+          }
+          .width('100%').height('100%')
           if (this.duration > 0) {
             Text(formatDuration(this.duration)).fontSize(10).fontColor('#FFFFFF')
               .backgroundColor('#88000000').padding({ left: 4, right: 4, top: 1, bottom: 1 })
-              .borderRadius(3).align(Alignment.BottomEnd).margin({ right: 5, bottom: 5 })
+              .borderRadius(3).margin({ right: 5, bottom: 5 })
           }
         }
         .width(96).height(54).clip(true).borderRadius(6).onClick(this.onPlayNow)

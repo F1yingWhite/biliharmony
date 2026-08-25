@@ -10,6 +10,14 @@ import { ActionResult, getData, postVideoAction, webGet, webPost } from './inter
 import { CommentLog } from '../common/CommentLog';
 
 export class CommentApi {
+  private static isTransientFailure(status: number, code: number): boolean {
+    return status < 0 || status === 408 || status === 425 || status === 429 || status >= 500 || code === -500;
+  }
+
+  private static waitBeforeRetry(): Promise<void> {
+    return new Promise<void>((resolve: () => void) => setTimeout(resolve, 300));
+  }
+
   private static responseCode(resp: HttpResponse): number {
     if (!resp.ok) return resp.status;
     try {
@@ -86,6 +94,7 @@ export class CommentApi {
       let path: string = 'main';
       let failureStatus: number = resp.status;
       let failureCode: number = CommentApi.responseCode(resp);
+      let transientFailure: boolean = CommentApi.isTransientFailure(failureStatus, failureCode);
       CommentLog.info('api.replies.transport', 'req=' + String(requestId) + ' path=main status=' +
         String(resp.status) + ' code=' + String(CommentApi.responseCode(resp)) + ' data=' + String(data !== null));
       if (data === null) {
@@ -100,9 +109,26 @@ export class CommentApi {
         path = 'wbi-main';
         failureStatus = fallbackResp.status;
         failureCode = CommentApi.responseCode(fallbackResp);
+        transientFailure = transientFailure || CommentApi.isTransientFailure(failureStatus, failureCode);
         CommentLog.warn('api.replies.fallback', 'req=' + String(requestId) + ' from=main to=wbi-main status=' +
           String(fallbackResp.status) + ' code=' + String(CommentApi.responseCode(fallbackResp)) +
           ' data=' + String(data !== null));
+      }
+      if (data === null && transientFailure) {
+        await CommentApi.waitBeforeRetry();
+        const retryParams: Record<string, string> = {
+          'oid': String(oid), 'type': String(type), 'mode': String(mode),
+          'pagination_str': JSON.stringify({ 'offset': cursor }), 'web_location': '1315875',
+        };
+        await WbiSign.encWbi(retryParams);
+        const retryResp: HttpResponse = await webGet(Api.replyList + '/wbi/main', retryParams,
+          'https://www.bilibili.com/');
+        data = getData(retryResp);
+        path = 'wbi-main-retry';
+        failureStatus = retryResp.status;
+        failureCode = CommentApi.responseCode(retryResp);
+        CommentLog.warn('api.replies.retry', 'req=' + String(requestId) + ' status=' +
+          String(retryResp.status) + ' code=' + String(failureCode) + ' data=' + String(data !== null));
       }
       if (data === null) {
         CommentLog.error('api.replies.empty', 'req=' + String(requestId) + ' path=' + path +

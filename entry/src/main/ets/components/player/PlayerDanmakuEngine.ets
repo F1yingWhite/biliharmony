@@ -31,6 +31,8 @@ export class PlayerDanmakuEngine {
   /** 最近一次播放头时间（秒），用于识别跳变/回退。 */
   lastPlayerTime: number = 0;
   opacity: number = 0.85;
+  /** 视频播放倍速，仅参与滚动位移；固定/高级弹幕直接使用播放头时间。 */
+  playbackRate: number = 1.0;
   speed: number = 1.0;
   fontScale: number = 1.0;
   density: number = 22;
@@ -297,7 +299,7 @@ export class PlayerDanmakuEngine {
         // 逆向滚动弹幕（mode 6）：从左向右过屏，与正向分轨（避免对向相撞）。
         const textWm: number = textW;
         const spawnX: number = -textWm - Math.max(10, sizePx * 0.3);
-        const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / Math.max(0.5, this.speed);
+        const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / this.scrollSpeedFactor();
         const speed: number = (this.width - spawnX) / travelSeconds;
         const lane: number = this.allocReverseLane(spawnX + textWm, speed);
         if (lane < 0) continue;
@@ -309,7 +311,7 @@ export class PlayerDanmakuEngine {
       } else {
         // 所有弹幕保持近似相同的过屏时间；长文本虽然速度更快，但分轨时会预判追尾。
         const spawnX: number = this.width + Math.max(10, sizePx * 0.3);
-        const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / Math.max(0.5, this.speed);
+        const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / this.scrollSpeedFactor();
         const speed: number = (spawnX + textW) / travelSeconds;
         const lane: number = this.allocLane(spawnX, speed);
         if (lane < 0) continue;
@@ -451,11 +453,24 @@ export class PlayerDanmakuEngine {
 
   setSpeed(value: number): void {
     this.speed = value;
+    this.refreshScrollSpeeds();
+  }
+
+  setPlaybackRate(value: number): void {
+    this.playbackRate = value;
+    this.refreshScrollSpeeds();
+  }
+
+  private scrollSpeedFactor(): number {
+    return Math.max(0.5, this.speed) * Math.max(0.1, this.playbackRate);
+  }
+
+  private refreshScrollSpeeds(): void {
     for (let i: number = 0; i < this.active.length; i++) {
       const dm: ActiveDm = this.active[i];
       if (!dm.isFixed && dm.special === null) {
         const spawnInset: number = Math.max(10, this.fontSize() * 0.3);
-        const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / Math.max(0.5, value);
+        const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / this.scrollSpeedFactor();
         dm.speed = (this.width + spawnInset + dm.textWidth) / travelSeconds;
       }
     }
@@ -475,7 +490,7 @@ export class PlayerDanmakuEngine {
       dm.textWidth = this.measure(dm.renderText, dm.fontSizePx);
       if (!dm.isFixed && dm.special === null) {
         const spawnInset: number = Math.max(10, this.fontSize() * 0.3);
-        const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / Math.max(0.5, this.speed);
+        const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / this.scrollSpeedFactor();
         dm.speed = (this.width + spawnInset + dm.textWidth) / travelSeconds;
       }
     }

@@ -179,6 +179,7 @@ export struct PlayerView {
   @State qualityLoading: boolean = false;
   @State playbackRate: number = 1.0;
   @State dmOpacity: number = 0.85;
+  @State dmFrameRate: number = 60;
   @State dmSpeed: number = 1.0;
   // 默认 1.0：1.3 时行高过大、同屏轨道只有 4 条左右，密度明显低于 B 站；设置面板可在 0.7~1.8 间调节。
   @State dmFontScale: number = 1.0;
@@ -213,7 +214,7 @@ export struct PlayerView {
   private dmInteraction: PlayerDanmakuInteractionController = new PlayerDanmakuInteractionController(this.dmEngine);
   private dmLoopRunning: boolean = false;
   private dmDisplaySync: displaySync.DisplaySync | null = null;
-  /** 高负载时自适应到约 30/20fps；位移仍按真实 DisplaySync 时间推进，不会变慢或漂移。 */
+  /** 上次实际绘制时间；按用户设置的目标帧率节流，位移始终使用真实 DisplaySync 时间差。 */
   private dmLastFrameMs: number = 0;
   /** 极少数 DisplaySync 初始化失败设备的兼容回退，不参与正常路径。 */
   private dmFallbackTick: number = -1;
@@ -320,6 +321,12 @@ export struct PlayerView {
   aboutToAppear(): void {
     // 被其他 NavDestination 覆盖时 aboutToDisappear 已置位；返回同一实例时恢复。
     this.destroyed = false;
+    this.fullscreen = false;
+    this.fullscreenPortrait = false;
+    this.fullscreenExitPending = false;
+    this.fullscreenExitAnimationStarted = false;
+    this.dmEngine.fullscreen = false;
+    Immersive.setFullscreen(false);
     this.sponsorCategories = SponsorBlockStore.categories();
     this.restoreDanmakuSettings();
     this.onDanmakuEngineReady(this.dmEngine);
@@ -391,7 +398,7 @@ export struct PlayerView {
           if (this.gestureSeekPreview >= 0 && value === -1) {
             const preview: number = this.gestureSeekPreview;
             Haptic.seek();
-            // 网络视频按 SDK 推荐的关键帧模式定位，避免 4K 精确解码长期阻塞。
+            // 横滑快进/后退按预览值精确落点，不能退回约 5 秒一档的关键帧。
             this.seekTo(preview);
             this.gestureSeekPreview = -1;
             this.closeSeekPreview();
@@ -1740,7 +1747,7 @@ if (this.runtimeSources.length === 0) {
       if (this.seekCtl !== null) this.seekCtl.seekResumePlaying = resumePlaying;
       // 重建/切清晰度后也走同一串行 seek，不能在 seekDone 前让两条轨道各自起播。
       // seek 超时重建后的这一次定位必须保留重试计数，否则会重新进入无限重建循环。
-      this.seekTo(resumeAt, true, !recoveringSeek);
+      this.seekTo(resumeAt, !recoveringSeek, !recoveringSeek);
       return;
     }
     this.resumeAfterPrepare = -1;
@@ -1883,6 +1890,7 @@ if (this.runtimeSources.length === 0) {
 
   setPlaybackSpeed(rate: number): void {
     this.playbackRate = rate;
+    this.dmEngine.setPlaybackRate(rate);
     this.closeSettingPanels();
     const p: media.AVPlayer | null = this.player;
     if (p !== null && this.prepared) {
@@ -1891,6 +1899,7 @@ if (this.runtimeSources.length === 0) {
         if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.setPlaybackRate(rate);
       } catch (e) {
         this.playbackRate = 1.0;
+        this.dmEngine.setPlaybackRate(1.0);
         p.setPlaybackRate(1.0);
         if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.setPlaybackRate(1.0);
       }
@@ -1927,6 +1936,8 @@ if (this.runtimeSources.length === 0) {
         'holdSpeed.apply rate=%{public}s video=%{public}s audio=%{public}s',
         String(rate), videoApplied ? 'true' : 'false', audioApplied ? 'true' : 'false');
     }
+    // 弹幕设置速度保持不变，仅让滚动位移跟随视频当前实际倍速。
+    if (videoApplied) this.dmEngine.setPlaybackRate(rate);
   }
 
   private beginHoldSpeed(): void {
@@ -2265,7 +2276,7 @@ if (this.runtimeSources.length === 0) {
     this.showControls = true;
   }
 
-  seekTo(positionSec: number, precise: boolean = false, resetRecoveryAttempts: boolean = true): void {
+  seekTo(positionSec: number, precise: boolean = true, resetRecoveryAttempts: boolean = true): void {
     const p: media.AVPlayer | null = this.player;
     if (p === null || !this.prepared) return;
     const clampedRaw: number = Math.max(0, Math.min(this.duration > 0 ? this.duration : positionSec, positionSec));
@@ -2640,7 +2651,7 @@ if (this.runtimeSources.length === 0) {
     try {
       if (this.dmDisplaySync === null) {
         const sync: displaySync.DisplaySync = displaySync.create();
-        sync.setExpectedFrameRateRange({ min: 30, max: 60, expected: 60 });
+        sync.setExpectedFrameRateRange(this.dmExpectedFrameRateRange());
         sync.on('frame', (info: displaySync.IntervalInfo): void => {
           if (this.dmLoopRunning && this.playing && this.danmakuOn && this.dmEngine.active.length > 0) {
             const frameTimeMs: number = info.timestamp / 1_000_000;
@@ -2695,21 +2706,27 @@ if (this.runtimeSources.length === 0) {
   }
 
   private shouldRenderDmFrame(frameTimeMs: number): boolean {
-    // 少量弹幕保持 60fps；大量/极端弹幕量自适应到约 30/20fps，控制文字绘制与整层合成成本。
-    // 运动增量使用两次实际绘制的时间差，所以隔帧不会改变速度或音画同步。
-    // 全屏 4K 视频自身已经占用较高合成预算，约 32 条同屏弹幕后优先控制文字层成本；
-    // 竖屏画布更小，保留到 40 条再降频，普通密度仍维持 60fps。
-    const activeCount: number = this.dmEngine.active.length;
-    const denseThreshold: number = this.fullscreen ? 32 : 40;
-    const extremeThreshold: number = this.fullscreen ? 56 : 52;
-    // 不减少弹幕数量和轨道，仅降低繁忙画布的重绘频率：普通 60fps、较密 30fps、极密 20fps。
-    const minIntervalMs: number = activeCount >= extremeThreshold ? 45 :
-      (activeCount >= denseThreshold ? 30 : 0);
-    if (minIntervalMs > 0 && this.dmLastFrameMs > 0 && frameTimeMs - this.dmLastFrameMs < minIntervalMs) {
+    // 不再因弹幕密度或长按倍速暗中降到 30/20fps；用户选择的帧率是唯一上限。
+    // 实际位移仍按两次绘制的真实时间差推进，设备刷新率不足时不会慢放或失去音画同步。
+    const minIntervalMs: number = 1000 / Math.max(24, this.dmFrameRate);
+    if (this.dmLastFrameMs <= 0) {
+      this.dmLastFrameMs = frameTimeMs;
+      return true;
+    }
+    const nextFrameMs: number = this.dmLastFrameMs + minIntervalMs;
+    if (frameTimeMs + 0.5 < nextFrameMs) {
       return false;
     }
-    this.dmLastFrameMs = frameTimeMs;
+    // 按目标时间线累积而不是重置为实际回调时间：120Hz 上选择 90fps 时会以 2/1/1 帧
+    // 的节奏逼近 90，而不是每次都从当前帧重算后退化成固定 60fps。
+    const overdueMs: number = Math.max(0, frameTimeMs - nextFrameMs);
+    this.dmLastFrameMs = nextFrameMs + Math.floor(overdueMs / minIntervalMs) * minIntervalMs;
     return true;
+  }
+
+  private dmExpectedFrameRateRange(): ExpectedFrameRateRange {
+    const target: number = Math.max(24, Math.min(120, Math.round(this.dmFrameRate)));
+    return { min: Math.min(30, target), max: target, expected: target };
   }
 
   private releaseDmClock(): void {
@@ -2760,6 +2777,7 @@ if (this.runtimeSources.length === 0) {
    *  引擎在首次绘制前尚为空白，直接赋字段即可，不走 setter 避免触发落盘。 */
   private restoreDanmakuSettings(): void {
     const s: DanmakuSettings = AppTheme.loadDanmakuSettings();
+    this.dmFrameRate = s.frameRate;
     this.dmOpacity = s.opacity;
     this.dmSpeed = s.speed;
     this.dmFontScale = s.fontScale;
@@ -2784,6 +2802,7 @@ if (this.runtimeSources.length === 0) {
   private persistDanmaku(): void {
     const s: DanmakuSettings = new DanmakuSettings();
     s.enabled = this.danmakuOn;
+    s.frameRate = this.dmFrameRate;
     s.opacity = this.dmOpacity;
     s.speed = this.dmSpeed;
     s.fontScale = this.dmFontScale;
@@ -2799,6 +2818,19 @@ if (this.runtimeSources.length === 0) {
   setDmOpacity(value: number): void {
     this.dmOpacity = value;
     this.dmEngine.opacity = value;
+    this.persistDanmaku();
+  }
+
+  setDmFrameRate(value: number): void {
+    this.dmFrameRate = Math.max(24, Math.min(120, Math.round(value)));
+    this.dmLastFrameMs = 0;
+    if (this.dmDisplaySync !== null) {
+      try {
+        this.dmDisplaySync.setExpectedFrameRateRange(this.dmExpectedFrameRateRange());
+      } catch (e) {
+        // 系统不接受高于屏幕刷新率的目标值时，DisplaySync 会继续使用设备可用帧率。
+      }
+    }
     this.persistDanmaku();
   }
 
@@ -2841,6 +2873,7 @@ if (this.runtimeSources.length === 0) {
   private resetDanmakuSettings(): void {
     const defaults: DanmakuSettings = new DanmakuSettings();
     this.setDmOpacity(defaults.opacity);
+    this.setDmFrameRate(defaults.frameRate);
     this.setDmSpeed(defaults.speed);
     this.setDmFontScale(defaults.fontScale);
     this.setDmDensity(defaults.density);
@@ -3364,6 +3397,7 @@ if (this.runtimeSources.length === 0) {
       qualityOptions: this.runtimeQualityOptions,
       activeQuality: this.activeQuality,
       dmOpacity: this.dmOpacity,
+      dmFrameRate: this.dmFrameRate,
       dmSpeed: this.dmSpeed,
       dmFontScale: this.dmFontScale,
       dmDensity: this.dmDensity,
@@ -3396,6 +3430,7 @@ if (this.runtimeSources.length === 0) {
       onSubtitleChange: (index: number) => this.changeSubtitle(index),
       onResetDanmaku: () => this.resetDanmakuSettings(),
       onDmOpacityChange: (value: number) => this.setDmOpacity(value),
+      onDmFrameRateChange: (value: number) => this.setDmFrameRate(value),
       onDmSpeedChange: (value: number) => this.setDmSpeed(value),
       onDmFontScaleChange: (value: number) => this.setDmFontScale(value),
       onDmDensityChange: (value: number) => this.setDmDensity(value),

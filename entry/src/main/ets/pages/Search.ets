@@ -1246,13 +1246,13 @@ export struct SearchPage {
   AllVideoRow(section: SearchAllSection, index: number) {
     Row() {
       Column() {
-        VideoCard({ video: section.videos[index], idPrefix: 'search-' })
+        VideoCard({ video: section.videos[index], idPrefix: 'search-', wholeCardTransition: true })
       }
       .width('48.5%')
       Blank()
       if (index + 1 < section.videos.length) {
         Column() {
-          VideoCard({ video: section.videos[index + 1], idPrefix: 'search-' })
+          VideoCard({ video: section.videos[index + 1], idPrefix: 'search-', wholeCardTransition: true })
         }
         .width('48.5%')
       } else {
@@ -1262,6 +1262,7 @@ export struct SearchPage {
     }
     .width('100%')
     .padding({ left: 12, right: 12 })
+    .margin({ bottom: 10 })
   }
 
   // ===== 结果态：综合 Tab 内容（番剧/影视分区 + 用户横滑行 + 视频双列流） =====
@@ -1288,11 +1289,19 @@ export struct SearchPage {
                 ListItem() {
                   this.AllUserRow(section)
                 }
+                .margin({ left: 12, right: 12, bottom: 8 })
+                .borderRadius(7)
+                .backgroundColor(this.isDark ? '#24262B' : '#FFFFFF')
+                .clip(true)
               } else if (section.type === SearchTypes.mediaBangumi || section.type === SearchTypes.mediaFt) {
                 ForEach(section.pgc, (item: PgcSearchItem) => {
                   ListItem() {
                     this.PgcRow(item)
                   }
+                  .margin({ left: 12, right: 12, bottom: 8 })
+                  .borderRadius(7)
+                  .backgroundColor(this.isDark ? '#24262B' : '#FFFFFF')
+                  .clip(true)
                 }, (item: PgcSearchItem) => String(item.seasonId))
               } else if (section.type === SearchTypes.video) {
                 ForEach(section.videos, (item: VideoItem, index: number) => {
@@ -1304,6 +1313,7 @@ export struct SearchPage {
                 }, (item: VideoItem) => item.bvid + String(item.aid))
               }
             }
+            .margin({ bottom: 8 })
           // 综合翻页只扩充 video 分区；把条目数纳入该分区 key，确保 ForEach 重新发现新增行。
           }, (section: SearchAllSection) => section.type === SearchTypes.video ?
             section.type + '-' + String(section.videos.length) : section.type)

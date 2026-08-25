@@ -43,6 +43,7 @@ export struct PlayerSettingsContent {
   @Prop qualityOptions: Array<VideoQualityOption> = [];
   @Prop activeQuality: number = 0;
   @Prop dmOpacity: number = 0.85;
+  @Prop dmFrameRate: number = 60;
   @Prop dmSpeed: number = 1;
   @Prop dmFontScale: number = 1;
   @Prop dmDensity: number = 22;
@@ -72,6 +73,7 @@ export struct PlayerSettingsContent {
   onSubtitleChange: (index: number) => void = () => {};
   onResetDanmaku: () => void = () => {};
   onDmOpacityChange: (value: number) => void = () => {};
+  onDmFrameRateChange: (value: number) => void = () => {};
   onDmSpeedChange: (value: number) => void = () => {};
   onDmFontScaleChange: (value: number) => void = () => {};
   onDmDensityChange: (value: number) => void = () => {};
@@ -114,6 +116,7 @@ export struct PlayerSettingsContent {
       forceDark: this.fullscreen,
       accent: this.accent,
       dmOpacity: this.dmOpacity,
+      dmFrameRate: this.dmFrameRate,
       dmSpeed: this.dmSpeed,
       dmFontScale: this.dmFontScale,
       dmDensity: this.dmDensity,
@@ -134,6 +137,7 @@ export struct PlayerSettingsContent {
       onSubtitleChange: (index: number) => this.onSubtitleChange(index),
       onResetDanmaku: () => this.onResetDanmaku(),
       onDmOpacityChange: (value: number) => this.onDmOpacityChange(value),
+      onDmFrameRateChange: (value: number) => this.onDmFrameRateChange(value),
       onDmSpeedChange: (value: number) => this.onDmSpeedChange(value),
       onDmFontScaleChange: (value: number) => this.onDmFontScaleChange(value),
       onDmDensityChange: (value: number) => this.onDmDensityChange(value),

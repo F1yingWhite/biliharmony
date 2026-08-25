@@ -37,6 +37,8 @@ export struct ReplyRichText {
   @StorageProp('isDarkMode') isDark: boolean = false;
   onOpenPart: (part: ReplyRenderPart) => void = (part: ReplyRenderPart) => {
   };
+  onLongPress: () => void = () => {
+  };
   /** 正文宽度（vp）：onAreaChange 提供，布局模拟与点击命中都需要。 */
   private contentWidth: number = 0;
   private hits: PartHit[] = [];
@@ -46,6 +48,8 @@ export struct ReplyRichText {
   private tapDownX: number = 0;
   private tapDownY: number = 0;
   private tapDownValid: boolean = false;
+  /** 长按已处理后吞掉同一触点的 Up，避免顺带打开 @/时间点/BV 链接。 */
+  private longPressHandled: boolean = false;
 
   aboutToAppear(): void {
     this.primeEmotes();
@@ -221,6 +225,12 @@ export struct ReplyRichText {
     return parts.length === 1 ? parts[0].text : '';
   }
 
+  private handleLongPress(): void {
+    this.longPressHandled = true;
+    this.tapDownValid = false;
+    this.onLongPress();
+  }
+
   /** 纯表情 Text 没有文字基线时，部分真机会把整行测成零高度。 */
   private isImageOnlyContent(): boolean {
     const parts: Array<ReplyRenderPart> = parseReplyContent(this.reply);
@@ -272,6 +282,10 @@ export struct ReplyRichText {
         .onAreaChange((_o: Area, n: Area): void => {
           this.measurePlainHeight(Number(n.width));
         })
+        .gesture(
+          LongPressGesture({ fingers: 1, repeat: false, duration: 450 })
+            .onAction((): void => this.handleLongPress())
+        )
     } else {
       Text() {
         if (this.isImageOnlyContent()) {
@@ -313,6 +327,17 @@ export struct ReplyRichText {
           this.tapDownX = d.x;
           this.tapDownY = d.y;
           this.tapDownValid = true;
+          this.longPressHandled = false;
+          return;
+        }
+        if (ev.type === TouchType.Cancel) {
+          this.tapDownValid = false;
+          this.longPressHandled = false;
+          return;
+        }
+        if (ev.type === TouchType.Up && this.longPressHandled) {
+          this.tapDownValid = false;
+          this.longPressHandled = false;
           return;
         }
         if (ev.type !== TouchType.Up || !this.tapDownValid) {
@@ -329,6 +354,10 @@ export struct ReplyRichText {
           this.onOpenPart(part);
         }
       })
+      .gesture(
+        LongPressGesture({ fingers: 1, repeat: false, duration: 450 })
+          .onAction((): void => this.handleLongPress())
+      )
     }
   }
 }

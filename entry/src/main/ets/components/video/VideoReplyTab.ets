@@ -29,6 +29,7 @@ export struct VideoReplyTab {
   @Prop loading: boolean = false;
   @Prop hasMore: boolean = false;
   @Prop errorText: string = '';
+  @Prop itemCount: number = 0;
   @Prop version: number = 0;
   @Prop draft: string = '';
   @Prop sending: boolean = false;
@@ -64,7 +65,7 @@ export struct VideoReplyTab {
   build() {
     Column() {
       this.sortBar()
-      if (this.source.isEmpty()) {
+      if (this.itemCount === 0) {
         Column() {
           LoadingView({
             loading: this.loading,

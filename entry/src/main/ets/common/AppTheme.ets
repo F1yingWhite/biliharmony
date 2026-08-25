@@ -12,6 +12,7 @@ import { deviceInfo } from '@kit.BasicServicesKit';
 /** 弹幕设置全量快照：规范默认值即播放器初始态，首开/恢复默认/持久化读取兜底都以此为准。 */
 export class DanmakuSettings {
   enabled: boolean = true;
+  frameRate: number = 60;
   opacity: number = 0.85;
   speed: number = 1.0;
   fontScale: number = 1.0;
@@ -43,6 +44,7 @@ export class AppTheme {
   static readonly KEY_AUTO_DARK_START: string = 'autoDarkStart';
   static readonly KEY_AUTO_DARK_END: string = 'autoDarkEnd';
   private static readonly KEY_DM_ENABLED: string = 'danmakuEnabled';
+  private static readonly KEY_DM_FRAME_RATE: string = 'danmakuFrameRate';
   private static readonly KEY_DM_OPACITY: string = 'danmakuOpacity';
   private static readonly KEY_DM_SPEED: string = 'danmakuSpeed';
   private static readonly KEY_DM_FONT_SCALE: string = 'danmakuFontScale';
@@ -196,6 +198,8 @@ export class AppTheme {
     try {
       const on: string = store.getSync(AppTheme.KEY_DM_ENABLED, '') as string;
       if (on.length > 0) out.enabled = on === 'true';
+      out.frameRate = Math.max(24, Math.min(120,
+        Math.round(AppTheme.readNumberPref(store, AppTheme.KEY_DM_FRAME_RATE, out.frameRate))));
       out.opacity = AppTheme.readNumberPref(store, AppTheme.KEY_DM_OPACITY, out.opacity);
       out.speed = AppTheme.readNumberPref(store, AppTheme.KEY_DM_SPEED, out.speed);
       out.fontScale = AppTheme.readNumberPref(store, AppTheme.KEY_DM_FONT_SCALE, out.fontScale);
@@ -217,6 +221,7 @@ export class AppTheme {
     if (store === null) return;
     try {
       store.putSync(AppTheme.KEY_DM_ENABLED, s.enabled ? 'true' : 'false');
+      store.putSync(AppTheme.KEY_DM_FRAME_RATE, String(s.frameRate));
       store.putSync(AppTheme.KEY_DM_OPACITY, String(s.opacity));
       store.putSync(AppTheme.KEY_DM_SPEED, String(s.speed));
       store.putSync(AppTheme.KEY_DM_FONT_SCALE, String(s.fontScale));

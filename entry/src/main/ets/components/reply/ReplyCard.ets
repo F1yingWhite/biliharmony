@@ -365,10 +365,15 @@ export struct ReplyCard {
 
   /** 复制评论全文到剪贴板。 */
   private copyComment(): void {
+    const content: string = this.item.content.trim();
+    if (content.length === 0) {
+      this.toast('这条评论没有可复制的文字');
+      return;
+    }
     try {
-      const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN,
-        this.item.content.trim().length > 0 ? this.item.content : '');
+      const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.item.content);
       pasteboard.getSystemPasteboard().setData(data).then(() => {
+        Haptic.tap();
         this.toast('评论已复制');
       }).catch(() => {
         this.toast('复制失败');
@@ -552,6 +557,7 @@ export struct ReplyCard {
           onOpenPart: (part: ReplyRenderPart): void => {
             this.openPart(part);
           },
+          onLongPress: (): void => this.copyComment(),
         })
         if (this.item.pictures.length > 0) {
           Flex({ wrap: FlexWrap.Wrap }) {

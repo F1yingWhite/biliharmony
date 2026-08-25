@@ -73,6 +73,7 @@ export struct VideoDetailPage {
   @State playUrl: string = '';
   @State playUrls: Array<string> = [];
   @State playAudioUrls: Array<string> = [];
+  @State playbackAddressFailed: boolean = false;
   @State qualityOptions: Array<VideoQualityOption> = [];
   @State subtitleTracks: Array<SubtitleTrack> = [];
   @State currentQuality: number = 0;
@@ -105,6 +106,7 @@ export struct VideoDetailPage {
   @State replyHasMore: boolean = true;
   @State replyLoading: boolean = false;
   @State replyLoadError: string = '';
+  @State replyItemCount: number = 0;
   @State replyPrefetchCount: number = 0;
   // 回复详情是视频页内的二级导航状态；放入 AppStorage 供 NavDestination
   // 的系统返回/侧滑回调优先关闭，避免直接把整个视频页弹出。
@@ -199,6 +201,9 @@ export struct VideoDetailPage {
   private wholeCardSnapshotHeight: number = 0;
   /** 卡片封面已在源矩形就位，等待下一次 VSync 开始。 */
   private entranceArmed: boolean = false;
+  /** 横屏结束页点推荐时，等系统真正旋回竖屏后再创建下一视频页。 */
+  private pendingVideoNavigation: VideoDetailParam | null = null;
+  private pendingVideoReplace: boolean = false;
   private initStarted: boolean = false;
   private closing: boolean = false;
   /** 系统返回/侧滑经 Index NavDestination 拦截后置位，页面内执行收合动画。 */
@@ -212,6 +217,7 @@ export struct VideoDetailPage {
   private tabsController: TabsController = new TabsController();
   private introScroller: Scroller = new Scroller();
   private replyScroller: Scroller = new Scroller();
+  private threadScroller: Scroller = new Scroller();
   private videoProgressSeconds: number = 0;
   private lastHeartbeatSeconds: number = -1;
   private pageSwitchRequest: number = 0;
@@ -453,6 +459,7 @@ export struct VideoDetailPage {
     this.playerFullscreenExitVisual = false;
     this.playerFullscreenExitHeight = 0;
     this.playerFullscreenExitTop = 0;
+    this.flushPendingVideoNavigation();
   }
 
   /** ⋮ 面板高度 = “默认评论区”（播放区以下信息区）高度，顶边与播放区底边齐平。 */
@@ -588,9 +595,17 @@ export struct VideoDetailPage {
 
   aboutToAppear(): void {
     this.destroyed = false;
+    // NavDestination 返回时组件实例会复用；离场前的全屏状态不能污染竖屏布局。
+    this.playerFullscreen = false;
+    this.playerFullscreenExitVisual = false;
+    this.playerFullscreenExitHeight = 0;
+    this.playerFullscreenExitTop = 0;
+    this.pendingVideoNavigation = null;
+    this.pendingVideoReplace = false;
     // 上次离页时未完成的请求会因 destroyed 跳过 finally 写状态；返回页面时统一解锁。
     this.replyLoading = false;
     this.replyLoadError = '';
+    this.replyItemCount = this.replySource.totalCount();
     this.threadLoading = false;
     this.replySending = false;
     this.emoteLoading = false;
@@ -923,7 +938,7 @@ export struct VideoDetailPage {
   }
 
   /** 首次播放地址：先用默认 cid 请求，若服务端返回 last_play_cid 指向其他分 P，则改拉该分 P 并续播。 */
-  private async loadInitialPlayback(detail: VideoDetail): Promise<void> {
+  private async loadInitialPlayback(detail: VideoDetail): Promise<boolean> {
     const initialCid: number = detail.cid > 0 ? detail.cid : (detail.pages.length > 0 ? detail.pages[0].cid : 0);
     let targetCid: number = initialCid;
     this.resetPlaybackSize();
@@ -940,7 +955,7 @@ export struct VideoDetailPage {
     const qualityPref: number = AppStorage.get<number>('videoQualityPref') ?? 0;
     const initialQuality: number = qualityPref === 3 ? 64 : (qualityPref === 0 ? 80 : 127);
     let info: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, initialCid, initialQuality);
-    if (info === null || info.urls.length === 0 || this.destroyed) return;
+    if (info === null || info.urls.length === 0 || this.destroyed) return false;
     // 多 P 视频上次停在其他分 P：直接切到该分 P 的地址，让续播位置与画面匹配。
     if (info.lastPlayCid > 0 && info.lastPlayCid !== initialCid && detail.pages.length > 1) {
       for (let i: number = 0; i < detail.pages.length; i++) {
@@ -956,8 +971,7 @@ export struct VideoDetailPage {
         }
       }
     }
-    if (this.destroyed) return;
-    if (this.destroyed) return;
+    if (this.destroyed) return false;
     // 最终线路与画质确定后一次性提交，避免 XComponent 在首帧前被两组地址连续驱动。
     this.currentCid = targetCid;
     this.playUrl = info.url;
@@ -969,6 +983,7 @@ export struct VideoDetailPage {
     // last_play_time 为毫秒；续播位置 = 上次进度。
     this.initialSeekSeconds = Math.max(0, Math.floor(info.lastPlayTime / 1000));
     this.lastHeartbeatSeconds = -1;
+    return true;
   }
 
   private async loadInitialRelated(aid: number, bvid: string): Promise<void> {
@@ -1013,6 +1028,7 @@ export struct VideoDetailPage {
   async init(): Promise<void> {
     this.loading = true;
     this.errorText = '';
+    this.playbackAddressFailed = false;
     this.descExpanded = false;
     this.descNeedsExpand = false;
     this.related = [];
@@ -1043,8 +1059,10 @@ export struct VideoDetailPage {
       });
 
       // 并行加载相关 / 评论；播放地址单独走续播定位逻辑。
-      this.loadInitialPlayback(detail).catch(() => {
-        // 播放地址失败由占位封面的「获取播放地址失败」文案呈现。
+      this.loadInitialPlayback(detail).then((loaded: boolean) => {
+        if (!this.destroyed && !loaded) this.playbackAddressFailed = true;
+      }).catch(() => {
+        if (!this.destroyed) this.playbackAddressFailed = true;
       });
       this.loadInitialRelated(detail.aid, detail.bvid).catch(() => {
         // 方法内部已经维护错误态；这里仅防止未处理的异步异常。
@@ -1515,14 +1533,39 @@ export struct VideoDetailPage {
     if (ep.cid === this.currentCid && (ep.bvid === this.detail.bvid ||
       (ep.bvid.length === 0 && ep.aid === this.detail.aid))) return;
     const param: VideoDetailParam = { bvid: ep.bvid, aid: ep.aid, title: ep.title };
-    PlayerCommandBus.stop();
-    AppNavStack.replacePathByName(NAV_VIDEO_DETAIL, param);
+    this.navigateVideoDetail(param, true);
   }
 
-  /** 保留视频详情导航栈时，必须在新页面创建前暂停当前播放器。 */
-  private pushVideoDetail(param: VideoDetailParam): void {
+  private performVideoNavigation(param: VideoDetailParam, replace: boolean): void {
     PlayerCommandBus.stop();
-    AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+    if (replace) AppNavStack.replacePathByName(NAV_VIDEO_DETAIL, param);
+    else AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+  }
+
+  /** 全屏结束页必须先完成竖屏旋转，再让新页面读取窗口尺寸。 */
+  private navigateVideoDetail(param: VideoDetailParam, replace: boolean): void {
+    PlayerCommandBus.stop();
+    if (this.playerFullscreen) {
+      this.pendingVideoNavigation = param;
+      this.pendingVideoReplace = replace;
+      PlayerCommandBus.exitFullscreen();
+      return;
+    }
+    this.performVideoNavigation(param, replace);
+  }
+
+  private flushPendingVideoNavigation(): void {
+    const param: VideoDetailParam | null = this.pendingVideoNavigation;
+    if (param === null || this.destroyed) return;
+    const replace: boolean = this.pendingVideoReplace;
+    this.pendingVideoNavigation = null;
+    this.pendingVideoReplace = false;
+    this.performVideoNavigation(param, replace);
+  }
+
+  /** 保留视频详情导航栈，返回时回到当前视频。 */
+  private pushVideoDetail(param: VideoDetailParam): void {
+    this.navigateVideoDetail(param, false);
   }
 
   private onPlayerEnded(): void {
@@ -1731,6 +1774,7 @@ export struct VideoDetailPage {
       } else {
         this.appendUniqueReplies(this.replySource, data.replies);
       }
+      this.replyItemCount = this.replySource.totalCount();
       this.replyCursor = data.cursor;
       this.replyHasMore = data.hasMore;
       loaded = true;
@@ -1772,6 +1816,7 @@ export struct VideoDetailPage {
     this.replyCursor = '';
     this.replyHasMore = true;
     this.replySource.clear();
+    this.replyItemCount = 0;
     this.replyThreadOpen = false;
     this.loadReplies(true);
   }
@@ -1979,6 +2024,7 @@ export struct VideoDetailPage {
       showEmoteButton: true,
       emoteOpen: this.emotePanelOpen,
       emotePackages: this.emotePackages,
+      scroller: this.threadScroller,
       emotePanel: (): void => {
         this.VideoThreadEmotePanel()
       },
@@ -2007,6 +2053,9 @@ export struct VideoDetailPage {
       onToggleEmote: () => this.openEmotePanel(),
       onRequestKeyboard: () => this.requestReplyKeyboard(),
       onFocusChange: (focused: boolean) => this.onReplyComposerFocusChanged(focused, true),
+      onScrollFrame: (offset: number, scroller: Scroller, state: ScrollState): number => {
+        return this.onContentScrollFrame(offset, scroller, state);
+      },
       onNavigate: (action: () => void) => this.navigateFromReplyThread(action),
     })
   }
@@ -2142,6 +2191,7 @@ export struct VideoDetailPage {
           this.localSentReplies = [sent].concat(this.localSentReplies.filter((item: ReplyItem) =>
             item.rpid !== sent.rpid));
           this.replySource.prepend([sent]);
+          this.replyItemCount = this.replySource.totalCount();
           this.detail.reply++;
           this.scheduleTimeout(() => {
             try {
@@ -2188,6 +2238,28 @@ export struct VideoDetailPage {
     } finally {
       if (!this.destroyed) this.danmakuSending = false;
     }
+  }
+
+  private danmakuComposerWidth(): number {
+    return Math.min(154, Math.max(126, this.screenWidthVp * 0.36));
+  }
+
+  private toggleToolbarDanmaku(): void {
+    const enabled: boolean = !this.danmakuOn;
+    if (!enabled) {
+      try {
+        inputMethod.getController().hideTextInput().catch(() => {});
+      } catch (e) {
+      }
+      try {
+        this.getUIContext().getFocusController().clearFocus();
+      } catch (e) {
+      }
+    }
+    Haptic.tap();
+    this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseInOut }, () => {
+      this.danmakuOn = enabled;
+    });
   }
 
   /**
@@ -2496,7 +2568,7 @@ export struct VideoDetailPage {
         .scale({ x: this.visualTab === index ? 1 : 0.35, y: 1 })
         .animation({ duration: 140, curve: Curve.EaseOut })
     }
-    .height(44)
+    .height(40)
     .padding({ left: 9, right: 9 })
     .justifyContent(FlexAlign.Center)
     .onClick(() => {
@@ -2511,56 +2583,53 @@ export struct VideoDetailPage {
       this.CompactDetailTab('简介', 0)
       this.CompactDetailTab('评论 ' + formatCount(this.detail.reply), 1)
       Blank()
-      Row() {
-        TextInput({ text: this.danmakuDraft,
-          placeholder: this.danmakuSending ? '发送中…' : '点我发弹幕' })
-          .layoutWeight(1)
-          .height(36)
-          .fontSize(13)
-          .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-          .placeholderColor(this.isDark ? '#8E9198' : '#9A9EA5')
-          .backgroundColor('#00000000')
-          .padding({ left: 12, right: 6 })
-          .enterKeyType(EnterKeyType.Send)
-          .onChange((value: string) => {
-            this.danmakuDraft = value;
-          })
-          .onSubmit(() => this.sendVideoDanmaku())
-        Stack({ alignContent: Alignment.Center }) {
-          Text('弹')
-            .width(27)
-            .height(27)
-            .fontSize(16)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.isDark ? '#C1C4CA' : '#676B72')
-            .textAlign(TextAlign.Center)
-            .border({ width: 1.5, color: this.isDark ? '#8D9199' : '#7B7F86' })
-            .borderRadius(7)
-          if (this.danmakuOn) {
-            Text('✓')
-              .fontSize(11)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(this.accent)
-              .width(14)
-              .height(14)
-              .textAlign(TextAlign.Center)
-              .backgroundColor(this.isDark ? '#292B30' : '#F5F6F7')
-              .position({ x: 27, y: 22 })
-          }
+      Stack({ alignContent: Alignment.End }) {
+        Row() {
+          TextInput({ text: this.danmakuDraft,
+            placeholder: this.danmakuSending ? '发送中…' : '点我发弹幕' })
+            .width(this.danmakuOn ? this.danmakuComposerWidth() - 34 : 0)
+            .height(32)
+            .fontSize(12)
+            .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+            .placeholderColor(this.isDark ? '#8E9198' : '#9A9EA5')
+            .backgroundColor('#00000000')
+            .padding({ left: 10, right: 4 })
+            .opacity(this.danmakuOn ? 1 : 0)
+            .translate({ x: this.danmakuOn ? 0 : 8 })
+            .enabled(this.danmakuOn)
+            .enterKeyType(EnterKeyType.Send)
+            .onChange((value: string) => {
+              this.danmakuDraft = value;
+            })
+            .onSubmit(() => this.sendVideoDanmaku())
+          Row()
+            .width(34)
+            .height(32)
+            .border({ width: { left: this.danmakuOn ? 0.5 : 0 },
+              color: this.isDark ? '#42444A' : '#E1E3E7' })
         }
-        .width(44)
-        .height(36)
-        .border({ width: { left: 0.5 }, color: this.isDark ? '#42444A' : '#E1E3E7' })
-        .onClick(() => this.danmakuOn = !this.danmakuOn)
+        .width(this.danmakuOn ? this.danmakuComposerWidth() : 34)
+        .height(32)
+        .borderRadius(16)
+        .border({ width: 0.5, color: this.isDark ? '#42444A' : '#E1E3E7' })
+        .backgroundColor(this.isDark ? '#292B30' : '#F5F6F7')
+        .clip(true)
+
+        Stack({ alignContent: Alignment.Center }) {
+          Image(this.danmakuOn ? $r('app.media.ic_danmaku_on') : $r('app.media.ic_danmaku_off'))
+            .width(22)
+            .height(22)
+            .renderMode(ImageRenderMode.Template)
+            .fillColor(this.danmakuOn ? this.accent : (this.isDark ? '#A4A8B0' : '#70747B'))
+        }
+        .width(34)
+        .height(32)
+        .onClick(() => this.toggleToolbarDanmaku())
       }
-      .width(Math.min(168, Math.max(132, this.screenWidthVp * 0.39)))
-      .height(36)
-      .borderRadius(18)
-      .border({ width: 0.5, color: this.isDark ? '#42444A' : '#E1E3E7' })
-      .backgroundColor(this.isDark ? '#292B30' : '#F5F6F7')
-      .clip(true)
+      .width(this.danmakuComposerWidth())
+      .height(32)
     }
-    .width('100%').height(56)
+    .width('100%').height(48)
     .padding({ left: 6, right: 10 })
     .alignItems(VerticalAlign.Center)
     .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
@@ -2583,6 +2652,7 @@ export struct VideoDetailPage {
           loading: this.replyLoading,
           hasMore: this.replyHasMore,
           errorText: this.replyLoadError,
+          itemCount: this.replyItemCount,
           version: this.replyLikeVersion,
           draft: this.replyDraft,
           sending: this.replySending,
@@ -2611,6 +2681,7 @@ export struct VideoDetailPage {
           onDeleted: (item: ReplyItem) => {
             this.localSentReplies = this.localSentReplies.filter((x: ReplyItem) => x.rpid !== item.rpid);
             this.replySource.reset(this.replySource.getAll().filter((x: ReplyItem) => x.rpid !== item.rpid));
+            this.replyItemCount = this.replySource.totalCount();
             this.detail.reply = Math.max(0, this.detail.reply - 1);
           },
           onDraftChange: (value: string) => {
@@ -2810,15 +2881,15 @@ export struct VideoDetailPage {
               .hitTestBehavior(HitTestMode.None)
           }
 
-          if (this.playUrl.length === 0) {
-            // 加载提示只压暗稳定封面，不再创建另一张会在 PlayerView 挂载时被销毁的 Image。
+          if (this.playUrl.length === 0 && this.playbackAddressFailed) {
+            // 请求期间保持纯封面；仅当播放地址完整请求流程最终失败后才提示。
             Column()
               .width('100%')
               .height('100%')
               .backgroundColor('#52000000')
               .hitTestBehavior(HitTestMode.None)
             Column() {
-              Text(!this.loading ? '获取播放地址失败' : '加载播放地址中...')
+              Text('获取播放地址失败')
                 .fontSize(12)
                 .fontColor('#FFFFFF')
             }
