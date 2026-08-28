@@ -66,6 +66,7 @@ export class AppTheme {
     PersistentStorage.persistProp<string>(AppTheme.KEY_ACCENT, Constants.brandPink);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_DARK, false);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_GLASS_ENABLED, true);
+    PersistentStorage.persistProp<number>('videoQualityPref', 0);
     AppTheme.ensureString(AppTheme.KEY_THEME_MODE, AppTheme.MODE_SYSTEM);
     AppTheme.ensureString(AppTheme.KEY_ACCENT, Constants.brandPink);
     AppTheme.ensureBool(AppTheme.KEY_DARK, false);
@@ -74,6 +75,7 @@ export class AppTheme {
     AppTheme.ensureBool(AppTheme.KEY_GLASS_ENABLED, true);
     AppTheme.ensureBool('autoContinuePlay', true);
     AppTheme.ensureBool('sponsorSkipEnabled', true);
+    AppTheme.ensureNumber('videoQualityPref', 0);
     // 定时深色：默认关闭；时段默认 19:00 - 07:00（跨午夜）。
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_AUTO_DARK, false);
     PersistentStorage.persistProp<string>(AppTheme.KEY_AUTO_DARK_START, '19:00');

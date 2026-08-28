@@ -5,7 +5,7 @@
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, NAV_BANGUMI_DETAIL, BangumiDetailParam } from '../common/AppRouter';
 import { PageHeader } from '../components/PageHeader';
-import { BiliApi } from '../api/BiliApi';
+import { BangumiApi } from '../api/BangumiApi';
 import { TimeLineEpisode, TimeLineDay } from '../model/Models';
 import { LoadingView } from '../components/LoadingView';
 import { biliImageThumbnail } from '../common/ImageUrl';
@@ -28,8 +28,8 @@ export struct BangumiTimelinePage {
     this.errorText = '';
     try {
       // types=1 番剧 + types=4 国创 分别获取后按日期合并。
-      const bangumi: Array<TimeLineDay> = await BiliApi.getPgcTimeline(1, 0, 7);
-      const guochuang: Array<TimeLineDay> = await BiliApi.getPgcTimeline(4, 0, 7);
+      const bangumi: Array<TimeLineDay> = await BangumiApi.getTimeline(1, 0, 7);
+      const guochuang: Array<TimeLineDay> = await BangumiApi.getTimeline(4, 0, 7);
       this.days = this.mergeDays(bangumi, guochuang);
     } catch (e) {
       this.errorText = '时间表加载失败，请检查网络后重试';

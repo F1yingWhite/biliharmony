@@ -8,7 +8,7 @@ import { BiliApi } from '../api/BiliApi';
 import { PopularSeriesData, PopularSeriesItem, VideoItem } from '../model/Models';
 import { LoadingView } from '../components/LoadingView';
 import { PageHeader } from '../components/PageHeader';
-import { VideoRowCard } from '../components/VideoRowCard';
+import { VideoRowCard } from '../components/video/VideoRowCard';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { SearchApi } from '../api/SearchApi';

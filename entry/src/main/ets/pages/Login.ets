@@ -5,7 +5,7 @@
 import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
 import { AppNavStack } from '../common/AppRouter';
-import { BiliApi, CookiePair, LoginResult, SmsSendResult, TVCodeResult } from '../api/BiliApi';
+import { AuthApi, CookiePair, LoginResult, SmsSendResult, TVCodeResult } from '../api/AuthApi';
 import { UserStore } from '../common/UserStore';
 import { BackButton } from '../components/BackButton';
 import { safeToast } from '../common/Toast';
@@ -84,7 +84,7 @@ export struct LoginPage {
     this.statusColor = '#9499A0';
     let result: TVCodeResult | null = null;
     try {
-      result = await BiliApi.getTVCode();
+      result = await AuthApi.getTVCode();
     } catch (e) {
       // 与 null 走同一失败态。
     }
@@ -136,7 +136,7 @@ export struct LoginPage {
     }
     this.pollInflight = true;
     try {
-      const result = await BiliApi.pollTVCode(this.authCode);
+      const result = await AuthApi.pollTVCode(this.authCode);
       if (this.destroyed) return;
       if (result.code === 0) {
         // 登录成功
@@ -178,7 +178,7 @@ export struct LoginPage {
     }
     this.pwdLoading = true;
     try {
-      const result: LoginResult = await BiliApi.loginByPassword(name, this.password);
+      const result: LoginResult = await AuthApi.loginByPassword(name, this.password);
       if (this.destroyed) return;
       if (result.code === 0 && result.cookies.length > 0) {
         await this.finishLogin(result.cookies, result.accessToken);
@@ -212,7 +212,7 @@ export struct LoginPage {
     }
     this.smsSending = true;
     try {
-      const result: SmsSendResult = await BiliApi.sendSmsCode(tel);
+      const result: SmsSendResult = await AuthApi.sendSmsCode(tel);
       if (this.destroyed) return;
       if (result.code === 0 && result.captchaKey.length > 0) {
         this.captchaKey = result.captchaKey;
@@ -270,7 +270,7 @@ export struct LoginPage {
     }
     this.smsLoading = true;
     try {
-      const result: LoginResult = await BiliApi.loginBySms(tel, code, this.captchaKey);
+      const result: LoginResult = await AuthApi.loginBySms(tel, code, this.captchaKey);
       if (this.destroyed) return;
       if (result.code === 0 && result.cookies.length > 0) {
         await this.finishLogin(result.cookies, result.accessToken);

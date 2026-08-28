@@ -7,8 +7,8 @@ import { Immersive } from '../common/Immersive';
 import { AppNavStack, ImageViewerParam, LiveRoomParam, NAV_IMAGE_VIEWER, NAV_LIVE_ROOM, NAV_LOGIN,
   NAV_RELATION_LIST, NAV_SEARCH, RelationListParam, UserSpaceParam } from '../common/AppRouter';
 import { VideoItem, UserSpaceHeaderItem, UserSpaceInfo, UserStat, SpaceArcData, FollowTagItem } from '../model/Models';
-import { ActionResult, BiliApi } from '../api/BiliApi';
-import { VideoCard } from '../components/VideoCard';
+import { ActionResult } from '../api/BiliApi';
+import { VideoCard } from '../components/video/VideoCard';
 import { safeToast } from '../common/Toast';
 import { LoadingView } from '../components/LoadingView';
 import { BackButton, BackButtonVariant } from '../components/BackButton';
@@ -135,7 +135,7 @@ export struct UserSpacePage {
     const generation: number = this.lifecycleGeneration;
     this.followLoading = true;
     try {
-      const attribute: number | null = await BiliApi.getUserRelation(this.param.mid);
+      const attribute: number | null = await UserApi.getRelation(this.param.mid);
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
       if (attribute !== null) this.following = attribute === 2 || attribute === 6;
     } finally {
@@ -163,7 +163,7 @@ export struct UserSpacePage {
     this.followLoading = true;
     const generation: number = this.lifecycleGeneration;
     try {
-      const result: ActionResult = await BiliApi.modifyUserRelation(this.param.mid, this.following);
+      const result: ActionResult = await UserApi.setFollowed(this.param.mid, this.following);
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
       if (!result.ok) {
         this.following = previous;
@@ -696,7 +696,7 @@ export struct UserSpacePage {
   }
 
   private blockUser(): void {
-    BiliApi.blockUser(this.param.mid, true).then((r: ActionResult) => {
+    UserApi.setBlocked(this.param.mid, true).then((r: ActionResult) => {
       this.toast(r.ok ? '已加入黑名单' : r.message);
     }).catch(() => {
       this.toast('操作失败，请稍后重试');
@@ -712,7 +712,7 @@ export struct UserSpacePage {
     this.groupSheetOpen = true;
     this.groupChecked = [];
     this.groupLoading = true;
-    BiliApi.getFollowTags().then((tags: Array<FollowTagItem>) => {
+    UserApi.getFollowTags().then((tags: Array<FollowTagItem>) => {
       this.groupList = tags;
       this.groupLoading = false;
     }).catch(() => {
@@ -731,7 +731,7 @@ export struct UserSpacePage {
       this.toast('分组名称最多 15 个字');
       return;
     }
-    const tagid: number = await BiliApi.createFollowTag(name);
+    const tagid: number = await UserApi.createFollowTag(name);
     if (tagid <= 0) {
       this.toast('创建分组失败，请检查登录状态后重试');
       return;
@@ -742,7 +742,7 @@ export struct UserSpacePage {
   }
 
   private async saveGroupChecked(): Promise<void> {
-    await BiliApi.addUserToTags(this.param.mid, this.groupChecked);
+    await UserApi.addToFollowTags(this.param.mid, this.groupChecked);
     this.groupSheetOpen = false;
     this.toast('分组已保存');
   }
@@ -762,7 +762,7 @@ export struct UserSpacePage {
         const pick: number = Number(dialogResult.index);
         const reasons: Array<string> = ['', '1', '3', '4'];
         if (pick <= 0 || pick >= reasons.length) return;
-        BiliApi.reportMember(this.param.mid, reasons[pick]).then((r: ActionResult) => {
+        UserApi.reportMember(this.param.mid, reasons[pick]).then((r: ActionResult) => {
           this.toast(r.ok ? '已提交举报，感谢反馈' : r.message);
         }).catch(() => {
           this.toast('举报失败，请稍后重试');

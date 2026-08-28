@@ -2,7 +2,7 @@
  * 全局用户状态（登录态缓存）
  */
 import { UserInfo, UserSpaceInfo } from '../model/Models';
-import { BiliApi, CookiePair } from '../api/BiliApi';
+import { CookiePair } from '../api/AuthApi';
 import { HttpClient } from './HttpClient';
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';

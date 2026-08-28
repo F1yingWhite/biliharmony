@@ -11,12 +11,12 @@ import { display, FrameCallback, UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { safeToast } from '../common/Toast';
 import { image } from '@kit.ImageKit';
-import { ReplyCard } from '../components/ReplyCard';
-import { ReplyComposer } from '../components/ReplyComposer';
-import { ReplyThreadPanel } from '../components/ReplyThreadPanel';
+import { ReplyCard } from '../components/reply/ReplyCard';
+import { ReplyComposer } from '../components/reply/ReplyComposer';
+import { ReplyThreadPanel } from '../components/reply/ReplyThreadPanel';
 import { ReplyShareCard, makeReplyQr, makeReplyShareSnapshot,
-  sharePixelMapAsImage } from '../components/ReplyShareCard';
-import { ReplySortChips } from '../components/ReplySortChips';
+  sharePixelMapAsImage } from '../components/reply/ReplyShareCard';
+import { ReplySortChips } from '../components/reply/ReplySortChips';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { CommentApi } from '../api/CommentApi';
 import { DynamicApi } from '../api/DynamicApi';

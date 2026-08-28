@@ -16,9 +16,9 @@ import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO
 import { VideoDetail, VideoItem, ReplyItem, PlayUrlInfo, VideoPage, VideoQualityOption, VideoRelationState,
   BiliEmote, BiliEmotePackage, FavoriteFolderItem, UserStat, SpaceArcData, SubtitleTrack, UgcSeasonEpisode } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
-import { PlayerView } from '../components/PlayerView';
+import { PlayerView } from '../components/player/PlayerView';
 import { AppTheme } from '../common/AppTheme';
-import { PlayerDanmakuEngine } from '../components/PlayerDanmakuEngine';
+import { PlayerDanmakuEngine } from '../components/player/PlayerDanmakuEngine';
 import { LoadingView } from '../components/LoadingView';
 import { ImageColor, ImagePalette } from '../common/ImageColor';
 import { UserStore } from '../common/UserStore';
@@ -26,15 +26,15 @@ import { asNumber, asObject, colorWithAlpha, formatCount, formatDate } from '../
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
-import { ReplyEmotePanel } from '../components/ReplyEmotePanel';
-import { ReplyThreadPanel } from '../components/ReplyThreadPanel';
-import { RelatedVideoRow } from '../components/VideoRelatedRow';
-import { VideoReplyTab } from '../components/VideoReplyTab';
-import { CoinSheetView } from '../components/CoinSheetView';
-import { FavPickSheetView } from '../components/FavPickSheetView';
-import { VideoActionItem } from '../components/VideoActionItem';
+import { ReplyEmotePanel } from '../components/reply/ReplyEmotePanel';
+import { ReplyThreadPanel } from '../components/reply/ReplyThreadPanel';
+import { RelatedVideoRow } from '../components/video/VideoRelatedRow';
+import { VideoReplyTab } from '../components/video/VideoReplyTab';
+import { CoinSheetView } from '../components/video/CoinSheetView';
+import { FavPickSheetView } from '../components/video/FavPickSheetView';
+import { VideoActionItem } from '../components/video/VideoActionItem';
 import { ReplyShareCard, makeReplyQr, makeReplyShareSnapshot,
-  sharePixelMapAsImage } from '../components/ReplyShareCard';
+  sharePixelMapAsImage } from '../components/reply/ReplyShareCard';
 import { safeToast } from '../common/Toast';
 import { CommentApi } from '../api/CommentApi';
 import { FavoriteApi } from '../api/FavoriteApi';
@@ -43,6 +43,7 @@ import { HistoryApi } from '../api/HistoryApi';
 import { UserApi } from '../api/UserApi';
 import { CommentLog } from '../common/CommentLog';
 import { VideoDetailGeometry } from '../common/VideoDetailGeometry';
+import { VideoIntroSection } from '../components/video/VideoIntroSection';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -941,13 +942,18 @@ export struct VideoDetailPage {
         break;
       }
     }
-    let info: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, initialCid);
+    // 当前没有自适应码率切换能力，“自动”若直接请求 127 会固定选中 4K。
+    // 手机上默认封顶 1080P；高码率类偏好才请求最高画质，智能省流固定 720P。
+    const qualityPref: number = AppStorage.get<number>('videoQualityPref') ?? 0;
+    const initialQuality: number = qualityPref === 3 ? 64 : (qualityPref === 0 ? 80 : 127);
+    let info: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, initialCid, initialQuality);
     if (info === null || info.urls.length === 0 || this.destroyed) return;
     // 多 P 视频上次停在其他分 P：直接切到该分 P 的地址，让续播位置与画面匹配。
     if (info.lastPlayCid > 0 && info.lastPlayCid !== initialCid && detail.pages.length > 1) {
       for (let i: number = 0; i < detail.pages.length; i++) {
         if (detail.pages[i].cid === info.lastPlayCid) {
-          const lastInfo: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, info.lastPlayCid);
+          const lastInfo: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, info.lastPlayCid,
+            initialQuality);
           if (lastInfo !== null && lastInfo.urls.length > 0 && this.destroyed === false) {
             info = lastInfo;
             targetCid = info.lastPlayCid;
@@ -958,15 +964,6 @@ export struct VideoDetailPage {
       }
     }
     if (this.destroyed) return;
-    // 画质偏好「智能省流」：片源有高清晰可选时改起 720P，省流由用户偏好驱动（高码率/高清高码暂与自动一致）。
-    const qualityPref: number = AppStorage.get<number>('videoQualityPref') ?? 0;
-    if (qualityPref === 3 && info.quality > 64 &&
-      info.qualities.some((q: VideoQualityOption): boolean => q.qn === 64 && q.available)) {
-      const savedInfo: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, targetCid, 64);
-      if (savedInfo !== null && savedInfo.urls.length > 0 && !this.destroyed) {
-        info = savedInfo;
-      }
-    }
     if (this.destroyed) return;
     // 最终线路与画质确定后一次性提交，避免 XComponent 在首帧前被两组地址连续驱动。
     this.currentCid = targetCid;
@@ -1155,7 +1152,7 @@ export struct VideoDetailPage {
     }
     this.followLoading = true;
     try {
-      const attribute: number | null = await BiliApi.getUserRelation(this.detail.upMid);
+      const attribute: number | null = await UserApi.getRelation(this.detail.upMid);
       if (this.destroyed) return;
       if (attribute !== null) {
         // 2 为已关注，6 为互相关注；128 是拉黑，不能误显示为已关注。
@@ -1179,7 +1176,7 @@ export struct VideoDetailPage {
     this.following = next;
     this.followLoading = true;
     try {
-      const result: ActionResult = await BiliApi.modifyUserRelation(this.detail.upMid, next);
+      const result: ActionResult = await UserApi.setFollowed(this.detail.upMid, next);
       if (this.destroyed) return;
       if (!result.ok) {
         this.following = previous;
@@ -2353,341 +2350,69 @@ export struct VideoDetailPage {
 
   @Builder
   IntroTab() {
-    Scroll(this.introScroller) {
-      Column({ space: 12 }) {
-        // UP 主信息置于标题之前，副信息展示可量化的粉丝数与投稿数。
-        Row({ space: 10 }) {
-          Row({ space: 10 }) {
-            Stack({ alignContent: Alignment.Center }) {
-              Circle()
-                .width(42)
-                .height(42)
-                .fill(this.accent)
-              Image(this.detail.upFace)
-                .width(42)
-                .height(42)
-                .borderRadius(21)
-                .objectFit(ImageFit.Cover)
-                .clip(true)
-            }
-            .width(42)
-            .height(42)
-            Column({ space: 3 }) {
-              Text(this.detail.upName)
-                .fontSize(15)
-                .fontWeight(FontWeight.Medium)
-                .fontColor(this.accent)
-              Text(this.upStatsText())
-                .fontSize(11)
-                .fontColor('#9499A0')
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-            }
-            .alignItems(HorizontalAlign.Start)
-            .layoutWeight(1)
-          }
-          .layoutWeight(1)
-          .onClick(() => {
-            if (this.detail.upMid > 0) {
-              PlayerCommandBus.stop();
-              const param: UserSpaceParam = { mid: this.detail.upMid };
-              AppNavStack.pushPathByName(NAV_USER_SPACE, param);
-            }
-          })
-          Text(this.followLoading ? '处理中…' : (this.following ? '已关注' : '+ 关注'))
-            .fontSize(13)
-            .fontColor(this.following ? (this.isDark ? '#D0D0D4' : '#61666D') : '#FFFFFF')
-            .backgroundColor(this.following ? (this.isDark ? '#333438' : '#EEF0F2') : this.accent)
-            .padding({ left: 14, right: 14, top: 6, bottom: 6 })
-            .borderRadius(15)
-            .enabled(!this.followLoading)
-            .onClick(() => {
-              Haptic.tap();
-              this.actionFollow();
-            })
+    VideoIntroSection({
+      detail: this.detail,
+      accent: this.accent,
+      isDark: this.isDark,
+      upStats: this.upStatsText(),
+      followLoading: this.followLoading,
+      following: this.following,
+      playerOnlineTotal: this.playerOnlineTotal,
+      likeCount: this.likeCount,
+      coinCount: this.coinCount,
+      favoriteCount: this.favoriteCount,
+      liked: this.liked,
+      disliked: this.disliked,
+      coinCountByMe: this.coinCountByMe,
+      favorited: this.favorited,
+      actionBusy: this.actionBusy,
+      descExpanded: this.descExpanded,
+      descNeedsExpand: this.descNeedsExpand,
+      currentCid: this.currentCid,
+      pageSwitchingCid: this.pageSwitchingCid,
+      ugcPanelOpen: this.ugcPanelOpen,
+      ugcCount: this.ugcCount,
+      related: this.related,
+      relatedLoading: this.relatedLoading,
+      relatedLoadError: this.relatedLoadError,
+      scroller: this.introScroller,
+      ugcSource: this.ugcSource,
+      onOpenUp: () => {
+        if (this.detail.upMid > 0) {
+          PlayerCommandBus.stop();
+          const param: UserSpaceParam = { mid: this.detail.upMid };
+          AppNavStack.pushPathByName(NAV_USER_SPACE, param);
         }
-        .width('100%')
-
-        // 标题
-        Text(this.detail.title)
-          .fontSize(17)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-          .width('100%')
-          .lineHeight(24)
-        // 数据行（对齐官方）：▶播放 / 💬弹幕 / 🕓日期 / 👥在线，图标+数值成组、组间距拉开
-        Row() {
-          Image($r('app.media.ic_play'))
-            .width(13)
-            .height(13)
-            .renderMode(ImageRenderMode.Template)
-            .fillColor('#9499A0')
-          Text(formatCount(this.detail.view))
-            .fontSize(12)
-            .fontColor('#9499A0')
-            .margin({ left: 4 })
-          Image($r('app.media.ic_comment'))
-            .width(13)
-            .height(13)
-            .renderMode(ImageRenderMode.Template)
-            .fillColor('#9499A0')
-            .margin({ left: 12 })
-          Text(formatCount(this.detail.danmaku))
-            .fontSize(12)
-            .fontColor('#9499A0')
-            .margin({ left: 4 })
-          Image($r('app.media.ic_history'))
-            .width(13)
-            .height(13)
-            .renderMode(ImageRenderMode.Template)
-            .fillColor('#9499A0')
-            .margin({ left: 12 })
-          Text(formatDate(this.detail.pubdate))
-            .fontSize(12)
-            .fontColor('#9499A0')
-            .margin({ left: 4 })
-          if (this.playerOnlineTotal.length > 0) {
-            Image($r('app.media.ic_group'))
-              .width(14)
-              .height(14)
-              .renderMode(ImageRenderMode.Template)
-              .fillColor('#9499A0')
-              .margin({ left: 12 })
-            Text(this.playerOnlineTotal + '人正在看')
-              .fontSize(12)
-              .fontColor('#9499A0')
-              .margin({ left: 4 })
-          }
-          if (this.detail.tname.length > 0) {
-            Text(this.detail.tname)
-              .fontSize(12)
-              .fontColor('#9499A0')
-              .margin({ left: 12, right: 10 })
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .layoutWeight(1)
-          }
-        }
-        .width('100%')
-        .alignItems(VerticalAlign.Center)
-
-        // 操作行：B 站风格素材 + 真实点赞/投币/分享状态。
-        // 注意必须直接在 build 里创建组件：经按值传参的 @Builder 中转后参数不跟踪状态，按钮会永远停在初始颜色。
-        Row() {
-          VideoActionItem({ icon: $r('app.media.bilix_icon_like'), value: formatCount(this.likeCount),
-            active: this.liked, busy: this.actionBusy, onTap: () => this.actionLike(),
-            onLongPress: () => this.actionTriple() })
-          // 点踩走 App 端协议（dislikeVideo 需 access_key）；未 App 授权时点按会提示重新登录。
-          // 官方风格：始终实心下按手（bilix，与点赞/投币/收藏一致），踩后主题色高亮。
-          VideoActionItem({ icon: $r('app.media.bilix_icon_dislike'), value: '不喜欢',
-            active: this.disliked, busy: this.actionBusy, onTap: () => this.actionDislike() })
-          VideoActionItem({ icon: $r('app.media.bilix_icon_coin'), value: formatCount(this.coinCount),
-            active: this.coinCountByMe > 0, busy: this.actionBusy, onTap: () => this.openCoinSheet() })
-          VideoActionItem({ icon: $r('app.media.bilix_icon_fav'), value: formatCount(this.favoriteCount),
-            active: this.favorited, busy: this.actionBusy, onTap: () => this.actionFavorite(),
-            onLongPress: () => this.actionFavoritePick() })
-          VideoActionItem({ icon: $r('app.media.bilix_icon_share'), value: formatCount(this.detail.share),
-            active: false, busy: this.actionBusy, onTap: () => this.actionShare() })
-        }
-        .width('100%')
-        .border({ width: { top: 0.5, bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
-
-        // 简介
-        Column({ space: 8 }) {
-          Row() {
-            Text('简介')
-              .fontSize(14)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-          }
-          .width('100%')
-          Text(this.detail.desc.length > 0 ? this.detail.desc : 'UP主没有填写简介')
-            .fontSize(13)
-            .fontColor(this.isDark ? '#B0B0B0' : '#5A5F66')
-            .width('100%')
-            .lineHeight(20)
-            .maxLines(this.descExpanded ? 10000 : 8)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .onAreaChange((oldValue: Area, newValue: Area) => {
-              this.updateDescOverflow(newValue.width);
-            })
-          if (this.descNeedsExpand) {
-            Row() {
-              Blank()
-              Text(this.descExpanded ? '收起' : '展开全文')
-                .fontSize(12)
-                .fontWeight(FontWeight.Medium)
-                .fontColor(this.accent)
-                .padding({ left: 8, right: 2, top: 4, bottom: 4 })
-            }
-            .width('100%')
-            .onClick(() => {
-              this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseOut }, () => {
-                this.descExpanded = !this.descExpanded;
-              });
-            })
-          }
-          // 分P
-          if (this.detail.pages.length > 1) {
-            Column() {
-              ForEach(this.detail.pages, (page: VideoPage, index: number) => {
-                Row() {
-                  Text('P' + page.page + ' ' + page.part)
-                    .fontSize(13)
-                    .fontColor(this.isDark ? '#D0D0D0' : '#222222')
-                    .maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    .layoutWeight(1)
-                  Text(page.cid === this.pageSwitchingCid ? '切换中…' : (page.cid === this.currentCid ? '播放中' : ''))
-                    .fontSize(11)
-                    .fontColor(this.accent)
-                }
-                .width('100%')
-                .padding({ top: 8, bottom: 8 })
-                .backgroundColor(page.cid === this.currentCid ? colorWithAlpha(this.accent, '14') : '#00000000')
-                .borderRadius(6)
-                .onClick(() => {
-                  this.switchVideoPage(page, index);
-                })
-              }, (page: VideoPage) => String(page.cid))
-            }
-            .width('100%')
-            .padding({ left: 10, right: 10 })
-            .borderRadius(8)
-            .backgroundColor(this.isDark ? '#2A2C31' : '#F6F7F8')
-          }
-          // UGC 合集选集：展示在当前简介流中，点击/连播均替换为对应稿件详情。
-          if (this.detail.ugcSeason !== null && this.detail.ugcSeason.sections.length > 0) {
-            Column() {
-              Row() {
-                Text('合集 · ' + this.detail.ugcSeason.title)
-                  .fontSize(13)
-                  .fontColor(this.isDark ? '#D0D0D0' : '#222222')
-                  .maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  .layoutWeight(1)
-                Text(this.ugcPanelOpen ? '收起' : '展开')
-                  .fontSize(11)
-                  .fontColor(this.accent)
-              }
-              .width('100%')
-              .padding({ top: 8, bottom: 8 })
-              .onClick(() => {
-                this.ugcPanelOpen = this.ugcPanelOpen ? false : true;
-                if (this.ugcPanelOpen) this.rebuildUgcSource();
-              })
-              if (this.ugcPanelOpen && this.ugcCount > 0) {
-                List({ space: 4 }) {
-                  LazyForEach(this.ugcSource, (ep: UgcSeasonEpisode) => {
-                    ListItem() {
-                      Row({ space: 8 }) {
-                        if (ep.cover.length > 0) {
-                          Image(ep.cover).width(72).height(42).objectFit(ImageFit.Cover).borderRadius(5)
-                        }
-                        Column({ space: 3 }) {
-                          Text(ep.sectionTitle.length > 0 ? ep.sectionTitle + ' · ' + ep.title : ep.title)
-                            .fontSize(12)
-                            .fontColor(this.isDark ? '#D0D0D0' : '#222222')
-                            .maxLines(2)
-                            .textOverflow({ overflow: TextOverflow.Ellipsis })
-                          Text(ep.cid === this.currentCid ? '播放中' : '')
-                            .fontSize(10)
-                            .fontColor(this.accent)
-                        }
-                        .alignItems(HorizontalAlign.Start)
-                        .layoutWeight(1)
-                      }
-                      .width('100%')
-                      .padding({ top: 6, bottom: 6 })
-                      .borderRadius(6)
-                      .backgroundColor(ep.cid === this.currentCid ? colorWithAlpha(this.accent, '14') : '#00000000')
-                      .onClick(() => {
-                        this.openUgcEpisode(ep);
-                      })
-                    }
-                  }, (ep: UgcSeasonEpisode) => String(ep.id) + '_' + ep.bvid + '_' + String(ep.cid))
-                }
-                .width('100%')
-                .height(240)
-                .scrollBar(BarState.Off)
-              }
-            }
-            .width('100%')
-            .padding({ left: 10, right: 10 })
-            .borderRadius(8)
-            .backgroundColor(this.isDark ? '#2A2C31' : '#F6F7F8')
-          }
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-
-        // 相关推荐跟随简介向下滚动，不再占用独立标签页。
-        Column({ space: 4 }) {
-          Text('相关推荐')
-            .fontSize(15)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-            .width('100%')
-            .padding({ top: 6, bottom: 4 })
-          if (this.related.length === 0) {
-            Text(this.relatedLoading ? '相关推荐加载中…' : this.relatedLoadError)
-              .fontSize(12)
-              .fontColor(this.relatedLoadError.length > 0 ? this.accent : '#9499A0')
-              .width('100%')
-              .padding({ top: 12, bottom: 12 })
-              .onClick(() => {
-                if (!this.relatedLoading) this.loadMoreRelated();
-              })
-          } else {
-            ForEach(this.related, (item: VideoItem) => {
-              RelatedVideoRow({
-                item: item,
-                onOpen: (i: VideoItem) => {
-                  this.openRelatedVideo(i);
-                },
-                onReport: (i: VideoItem) => {
-                  this.reportRelated(i);
-                },
-                onHide: (i: VideoItem) => {
-                  this.hideRelated(i);
-                },
-              })
-            }, (item: VideoItem) => item.bvid + String(item.aid))
-            if (this.relatedLoading) {
-              Text('正在刷新更多推荐…')
-                .fontSize(12)
-                .fontColor('#9499A0')
-                .width('100%')
-                .textAlign(TextAlign.Center)
-                .padding({ top: 12, bottom: 12 })
-            } else if (this.relatedLoadError.length > 0) {
-              Text(this.relatedLoadError)
-                .fontSize(12)
-                .fontColor(this.accent)
-                .width('100%')
-                .textAlign(TextAlign.Center)
-                .padding({ top: 12, bottom: 12 })
-                .onClick(() => {
-                  this.loadMoreRelated();
-                })
-            }
-          }
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-      }
-      .width('100%')
-      .padding(14)
-    }
-    .width('100%')
-    .height('100%')
-    .scrollBar(BarState.Off)
-    .align(Alignment.Top)
-    .onScrollFrameBegin((offset: number, state: ScrollState) => {
-      return { offsetRemain: this.onContentScrollFrame(offset, this.introScroller, state) };
-    })
-    .onReachEnd(() => {
-      this.loadMoreRelated();
+      },
+      onFollow: () => {
+        Haptic.tap();
+        this.actionFollow();
+      },
+      onLike: () => this.actionLike(),
+      onTriple: () => this.actionTriple(),
+      onDislike: () => this.actionDislike(),
+      onCoin: () => this.openCoinSheet(),
+      onFavorite: () => this.actionFavorite(),
+      onFavoritePick: () => this.actionFavoritePick(),
+      onShare: () => this.actionShare(),
+      onDescAreaChange: (width: Length) => this.updateDescOverflow(width),
+      onToggleDescription: () => {
+        this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseOut }, () => {
+          this.descExpanded = !this.descExpanded;
+        });
+      },
+      onSwitchPage: (page: VideoPage, index: number) => this.switchVideoPage(page, index),
+      onToggleUgc: () => {
+        this.ugcPanelOpen = !this.ugcPanelOpen;
+        if (this.ugcPanelOpen) this.rebuildUgcSource();
+      },
+      onOpenUgc: (episode: UgcSeasonEpisode) => this.openUgcEpisode(episode),
+      onOpenRelated: (item: VideoItem) => this.openRelatedVideo(item),
+      onReportRelated: (item: VideoItem) => this.reportRelated(item),
+      onHideRelated: (item: VideoItem) => this.hideRelated(item),
+      onLoadMoreRelated: () => this.loadMoreRelated(),
+      onScrollFrame: (offset: number, scroller: Scroller, state: ScrollState): number =>
+        this.onContentScrollFrame(offset, scroller, state),
     })
   }
 

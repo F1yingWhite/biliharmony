@@ -83,20 +83,20 @@
     │   ├── DynamicDetail.ets           # 动态详情
     │   ├── ImageViewer.ets             # 全屏看图
     │   ├── RelationList.ets            # 关注/粉丝列表
-    │   └── LibraryPages.ets            # 观看历史 / 我的收藏
+    │   └── library/                    # 历史 / 稍后再看 / 收藏路由页
     ├── views/                          # 主 Tab 视图
     │   ├── HomeView.ets                # 推荐 / 热门 / 直播
     │   ├── DynamicView.ets             # 动态（可内嵌用户空间页）
     │   └── MineView.ets                # 我的（用户区/历史/收藏/外观设置）
     ├── components/
-    │   ├── PlayerView.ets              # 播放器主体（AVPlayer + 弹幕引擎）
-    │   ├── Player*.ets                 # 播放器子件：底栏/进度条/手势/设置/全屏头栏/弹幕支撑
-    │   ├── LivePlayerView.ets          # 直播播放器
-    │   ├── Reply*.ets                  # 评论：卡片/发送栏/表情面板/楼中楼/分享卡片
-    │   ├── VideoCard.ets / LiveRoomCard.ets / FeedCardParts.ets  # 信息流卡片（@Reusable）
+    │   ├── player/                     # 点播播放器、弹幕、手势与设置组件
+    │   ├── live/                       # 直播播放器、弹幕与房间卡片
+    │   ├── reply/                      # 评论卡片、编辑器、楼中楼与分享卡片
+    │   ├── video/                      # 视频卡片与投币/收藏操作面板
     │   └── GlassHeaderBar / PageHeader / LoadingView 等通用 UI 件
-    ├── api/BiliApi.ets                 # B 站接口层（按功能分组，见下）
-    ├── model/Models.ets / LiveModels.ets
+    ├── api/                            # 按视频/番剧/认证/用户等领域拆分的接口层
+    ├── model/                          # Models.ets 稳定导出入口 + 按领域拆分的模型
+    ├── services/media/                 # API 26 用户确认式媒体保存
     └── common/
         ├── AppRouter.ets               # 全局 NavPathStack + 路由表 + 参数守卫
         ├── WbiSign.ets / AppSign.ets / Md5.ets   # WBI / App 签名（纯 ArkTS MD5）
@@ -115,7 +115,7 @@
 
 ### DevEco Studio
 
-1. 打开工程根目录（本目录），SDK 需含 **HarmonyOS API 26**（工具 → SDK Manager）。
+1. 打开工程根目录（本目录），SDK 需含 **HarmonyOS API 26**（工具 → SDK Manager）；本项目不兼容 API 24。
 2. File → Sync 后直接 Run（自动签名），或 Build → Build Hap(s)。
 
 ### 命令行（macOS，已配置 DevEco Studio）
@@ -151,13 +151,13 @@ Workflow 只在构建期间恢复该配置，构建结束后会清除；签名�
 | lib/http/video.dart | BiliApi.getRecommendApp / getHot / getPlayUrl |
 | lib/http/reply.dart | BiliApi.getReplies / addReply + ReplyTree.ets |
 | lib/http/search.dart | BiliApi.search / searchByType / searchSuggest / getHotSearch |
-| lib/http/login.dart（扫码/密码/短信） | BiliApi.getTVCode / loginByPassword / loginBySms + RsaUtil.ets |
+| lib/http/login.dart（扫码/密码/短信） | AuthApi.getTVCode / loginByPassword / loginBySms + RsaUtil.ets |
 | lib/http/live.dart + 弹幕 socket | BiliApi.getLive* + common/LiveDanmakuClient.ets |
 | lib/http/msg.dart | BiliApi.getMessageSessions / sendPrivateMessage |
 | lib/http/fav.dart / history | BiliApi.getFavorite* / getHistory |
 | lib/utils/theme_utils.dart（Material You） | common/ColorUtil.ets + AppTheme.ets |
 | mpv/media_kit 播放 | 系统 AVPlayer + 自研 Canvas 弹幕引擎 |
-| lib/models/* | model/Models.ets / LiveModels.ets |
+| lib/models/* | model/Models.ets 导出入口 + model/* 领域模型 |
 
 原始 PiliPlus 工程保留在 `docs/ref/PiliPlus/` 目录作为对照参考；它是本地忽略的上游源码仓库，
 不会随 BiliHaromny 一起提交或打包。
@@ -170,6 +170,7 @@ Workflow 只在构建期间恢复该配置，构建结束后会清除；签名�
 - `docs/ref/README.md` — 设计参考截图索引（BewlyCat / B 站官方 App）
 - `docs/ref/` — 参考截图素材
 - `docs/AUDIT_API_MODEL_REPORT.md` — API 层与模型层审计报告
+- `docs/API26_REFACTOR_REPORT.md` — API 26 规范审计与本轮重构结果
 - `docs/api/` — B 站 Web API 调研清单、发现快照与复现脚本
 
 ## 待完善（Roadmap）

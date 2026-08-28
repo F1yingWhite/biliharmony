@@ -18,7 +18,7 @@ function toHex(data: Uint8Array): string {
 export async function md5Hex(input: string): Promise<string> {
   const md: cryptoFramework.Md = cryptoFramework.createMd('MD5');
   const encoder: util.TextEncoder = new util.TextEncoder();
-  const bytes: Uint8Array = encoder.encode(input);
+  const bytes: Uint8Array = encoder.encodeInto(input);
   const dataBlob: cryptoFramework.DataBlob = { data: bytes };
   await md.update(dataBlob);
   const output: cryptoFramework.DataBlob = await md.digest();
