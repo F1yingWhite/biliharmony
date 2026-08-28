@@ -15,6 +15,8 @@ export struct PlayerMoreSheet {
   @Prop chaptersCount: number = 0;
   @Prop sponsorOn: boolean = false;
   @Prop subtitleOn: boolean = false;
+  @Prop downloadBusy: boolean = false;
+  @Prop downloadProgress: number = -1;
   onSpeedChange: (rate: number) => void = () => {};
   onPlayModeChange: (mode: number) => void = () => {};
   onTimerChange: (minutes: number) => void = () => {};
@@ -27,6 +29,7 @@ export struct PlayerMoreSheet {
   onSponsorSettings: () => void = () => {};
   onShare: () => void = () => {};
   onCopyLink: () => void = () => {};
+  onDownload: () => void = () => {};
   onStub: (message: string) => void = () => {};
   @State timerExpanded: boolean = false;
 
@@ -68,6 +71,11 @@ export struct PlayerMoreSheet {
 
   private speedLabel(rate: number): string {
     return rate === 1 ? '1' : String(rate);
+  }
+
+  private downloadLabel(): string {
+    if (!this.downloadBusy) return '下载';
+    return this.downloadProgress >= 0 ? '下载 ' + String(this.downloadProgress) + '%' : '准备中';
   }
 
   // plain=true 时图标为 currentColor 线稿：套 Template 渲染并跟随主题色；
@@ -216,7 +224,9 @@ export struct PlayerMoreSheet {
             .justifyContent(FlexAlign.SpaceBetween)
             Row() {
               this.ShareSquare($r('app.media.ic_watch_later'), '稍后再看', (): void => this.onStub('功能暂未开放'))
-              this.ShareSquare($r('app.media.ic_share_cache'), '缓存', (): void => this.onStub('功能暂未开放'))
+              this.ShareSquare($r('app.media.ic_share_cache'), this.downloadLabel(), (): void => {
+                if (!this.downloadBusy) this.onDownload();
+              })
               this.ShareSquare($r('app.media.ic_share_pip'), '小窗播放', (): void => this.onStub('功能暂未开放'))
               this.ShareSquare($r('app.media.ic_share_cast'), '投屏', (): void => this.onStub('功能暂未开放'))
             }

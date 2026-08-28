@@ -216,6 +216,18 @@ export class HttpClient {
     return result;
   }
 
+  /** 系统 DownloadTask 不经过本类请求管线，需要显式带上播放 CDN 所需的 UA/Referer/Cookie。 */
+  static getDownloadHeaders(referer: string): Record<string, string> {
+    const headers: Record<string, string> = {
+      'User-Agent': Constants.browserUa,
+      'Referer': referer.length > 0 ? referer : 'https://www.bilibili.com/',
+      'Origin': 'https://www.bilibili.com',
+    };
+    const cookie: string = HttpClient.buildCookieHeader();
+    if (cookie.length > 0) headers['Cookie'] = cookie;
+    return headers;
+  }
+
   private static mergeHeaders(extra?: Record<string, string>, includeCookie: boolean = true): Record<string, string> {
     const merged: Record<string, string> = {};
     // 默认 web 头
