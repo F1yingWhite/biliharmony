@@ -20,6 +20,9 @@ export struct PlayerSettingsContent {
   @Prop qualityLabel: string = '';
   @Prop qualityLoading: boolean = false;
   @Prop qualityPref: number = 0;
+  @Prop downloadQualityLabel: string = '';
+  @Prop downloadBusy: boolean = false;
+  @Prop downloadProgress: number = -1;
   @Prop mirrorOn: boolean = false;
   @Prop timerMinutes: number = 0;
   @Prop sponsorOn: boolean = false;
@@ -70,6 +73,8 @@ export struct PlayerSettingsContent {
   onFilterAdd: () => void = () => {};
   onFilterDelete: (id: number) => void = () => {};
   onQualityPrefChange: (pref: number) => void = () => {};
+  onDownloadQuality: () => void = () => {};
+  onDownload: () => void = () => {};
   onSubtitleChange: (index: number) => void = () => {};
   onResetDanmaku: () => void = () => {};
   onDmOpacityChange: (value: number) => void = () => {};
@@ -204,8 +209,12 @@ export struct PlayerSettingsContent {
                     PlayerPlaySettingsPage({
                       forceDark: this.fullscreen,
                       qualityPref: this.qualityPref,
-                      downloadQualityLabel: this.qualityLabel,
+                      downloadQualityLabel: this.downloadQualityLabel,
+                      downloadBusy: this.downloadBusy,
+                      downloadProgress: this.downloadProgress,
                       onQualityPrefChange: (pref: number) => this.onQualityPrefChange(pref),
+                      onDownloadQuality: () => this.onDownloadQuality(),
+                      onDownload: () => this.onDownload(),
                       onStub: (message: string) => this.onStub(message),
                     })
                   } else if (this.page === 'speed') {
@@ -277,6 +286,8 @@ export struct PlayerSettingsContent {
           chaptersCount: this.chapters.length,
           sponsorOn: this.sponsorOn,
           subtitleOn: this.subtitleOn,
+          downloadBusy: this.downloadBusy,
+          downloadProgress: this.downloadProgress,
           onSpeedChange: (rate: number) => this.onSpeedChange(rate),
           onPlayModeChange: (mode: number) => this.onPlayModeChange(mode),
           onTimerChange: (minutes: number) => this.onTimerChange(minutes),
@@ -289,6 +300,7 @@ export struct PlayerSettingsContent {
           onSponsorSettings: () => this.onOpenPage('sponsor'),
           onShare: () => this.onShare(),
           onCopyLink: () => this.onCopyLink(),
+          onDownload: () => this.onDownload(),
           onStub: (message: string) => this.onStub(message),
         })
         .transition(TransitionEffect.move(TransitionEdge.START).combine(TransitionEffect.opacity(0.5)))

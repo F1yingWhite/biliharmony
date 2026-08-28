@@ -14,6 +14,7 @@ import { playerPanelTitle } from './PlayerSheetTheme';
 import { PlayerSideSettingsDrawer } from './PlayerSideSettingsDrawer';
 import { common } from '@kit.AbilityKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
+import { picker } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { DEBUG } from 'BuildProfile';
 import { displaySync } from '@kit.ArkGraphics2D';
@@ -42,6 +43,8 @@ import { PlayerDanmakuAction } from './PlayerDanmakuAction';
 import { SponsorBlockCategory, SponsorBlockMode, SponsorBlockSegment, SponsorBlockStore,
   sponsorBlockActionLabel, sponsorBlockCategory, sponsorBlockSupportedActions } from '../../common/SponsorBlock';
 import { SponsorBlockNotice } from './SponsorBlockNotice';
+import { HttpClient } from '../../common/HttpClient';
+import { VideoDownloadService } from '../../common/VideoDownloadService';
 
 /** showDialog 按钮的声明类型（promptAction 的 Button 命名空间类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -65,6 +68,7 @@ export struct PlayerView {
   /** 视频时长（秒，业务页详情数据）：弹幕分段数预估用；0 表示未知，由播放器 durationUpdate 兜底。 */
   @Prop videoDuration: number = 0;
   @Prop videoTitle: string = '';
+  @Prop videoPartTitle: string = '';
   @Prop videoCover: string = '';
   @Prop ownerName: string = '';
   @Prop ownerFace: string = '';
@@ -177,6 +181,9 @@ export struct PlayerView {
   @State chapters: Array<VideoChapter> = [];
   @State activeQuality: number = 0;
   @State qualityLoading: boolean = false;
+  @State downloadBusy: boolean = false;
+  @State downloadProgress: number = -1;
+  @State downloadQuality: number = 0;
   @State playbackRate: number = 1.0;
   @State dmOpacity: number = 0.85;
   @State dmFrameRate: number = 60;
@@ -328,6 +335,8 @@ export struct PlayerView {
     this.dmEngine.fullscreen = false;
     Immersive.setFullscreen(false);
     this.sponsorCategories = SponsorBlockStore.categories();
+    this.downloadBusy = VideoDownloadService.isActive();
+    this.downloadProgress = VideoDownloadService.currentProgress();
     this.restoreDanmakuSettings();
     this.onDanmakuEngineReady(this.dmEngine);
     this.showControls = false;
@@ -2566,6 +2575,182 @@ if (this.runtimeSources.length === 0) {
     });
   }
 
+  /** 下载只选择音画一体的 MP4 档位；1080P+ 依赖 DASH 混流，不能伪装成可直接播放的单文件。 */
+  private downloadQualityOptions(): Array<VideoQualityOption> {
+    const result: Array<VideoQualityOption> = [];
+    for (let i: number = 0; i < this.runtimeQualityOptions.length; i++) {
+      const option: VideoQualityOption = this.runtimeQualityOptions[i];
+      if (option.available && option.qn > 0 && option.qn <= 80 &&
+        result.findIndex((item: VideoQualityOption): boolean => item.qn === option.qn) < 0) {
+        result.push(option);
+      }
+    }
+    return result;
+  }
+
+  private downloadQualityValue(): number {
+    const options: Array<VideoQualityOption> = this.downloadQualityOptions();
+    if (this.downloadQuality > 0 &&
+      options.some((option: VideoQualityOption): boolean => option.qn === this.downloadQuality)) {
+      return this.downloadQuality;
+    }
+    if (this.activeQuality > 0 && this.activeQuality <= 80 &&
+      options.some((option: VideoQualityOption): boolean => option.qn === this.activeQuality)) {
+      return this.activeQuality;
+    }
+    return options.length > 0 ? options[0].qn : 64;
+  }
+
+  private downloadQualityText(): string {
+    const qn: number = this.downloadQualityValue();
+    const options: Array<VideoQualityOption> = this.downloadQualityOptions();
+    for (let i: number = 0; i < options.length; i++) {
+      if (options[i].qn === qn) return options[i].label;
+    }
+    return qn === 80 ? '1080P' : (qn === 64 ? '720P' : String(qn));
+  }
+
+  private chooseDownloadQuality(): void {
+    if (this.downloadBusy || VideoDownloadService.isActive()) {
+      this.toast('已有下载任务正在进行');
+      return;
+    }
+    const options: Array<VideoQualityOption> = this.downloadQualityOptions();
+    if (options.length === 0) {
+      this.toast('当前视频暂无可下载的 MP4 画质');
+      return;
+    }
+    const buttons: [ReportButtonItem, ReportButtonItem?, ReportButtonItem?, ReportButtonItem?,
+      ReportButtonItem?, ReportButtonItem?] = [
+      { text: options[0].label, color: this.isDark ? '#E6E6E6' : '#18191C' },
+    ];
+    for (let i: number = 1; i < options.length && i < 6; i++) {
+      buttons.push({ text: options[i].label, color: this.isDark ? '#E6E6E6' : '#18191C' });
+    }
+    try {
+      this.getUIContext().getPromptAction().showActionMenu({
+        title: '下载画质（最高 1080P MP4）',
+        buttons: buttons,
+      }).then((result) => {
+        const index: number = Number(result.index);
+        if (index >= 0 && index < options.length) this.downloadQuality = options[index].qn;
+      });
+    } catch (e) {
+      this.toast('无法打开画质选择');
+    }
+  }
+
+  private safeDownloadName(value: string): string {
+    const invalid: string = "\\/:*?\"'`<>|{}[]";
+    let result: string = '';
+    for (let i: number = 0; i < value.length; i++) {
+      const ch: string = value.charAt(i);
+      result += invalid.indexOf(ch) >= 0 ? '_' : ch;
+    }
+    const trimmed: string = result.trim();
+    const safe: string = trimmed.length > 0 ? trimmed : 'BiliHarmony视频';
+    return safe.substring(0, Math.min(96, safe.length));
+  }
+
+  private promptDownloadType(): void {
+    if (this.downloadBusy || VideoDownloadService.isActive()) {
+      this.toast('已有下载任务正在进行');
+      return;
+    }
+    try {
+      this.getUIContext().getPromptAction().showActionMenu({
+        title: '选择下载格式',
+        buttons: [
+          { text: '下载视频（MP4）', color: this.isDark ? '#E6E6E6' : '#18191C' },
+          { text: '只下载音频（M4A）', color: this.isDark ? '#E6E6E6' : '#18191C' },
+        ],
+      }).then((result) => {
+        const index: number = Number(result.index);
+        if (index === 0 || index === 1) {
+          this.startMediaDownload(index === 1).catch(() => {
+          });
+        }
+      });
+    } catch (e) {
+      this.toast('无法打开下载格式选择');
+    }
+  }
+
+  private async startMediaDownload(audioOnly: boolean): Promise<void> {
+    if (this.downloadBusy || VideoDownloadService.isActive()) {
+      this.toast('已有下载任务正在进行');
+      return;
+    }
+    const context: common.UIAbilityContext | undefined =
+      this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+    if (context === undefined || this.cid <= 0 || (this.aid <= 0 && this.bvid.length === 0)) {
+      this.toast('当前视频信息不完整，无法下载');
+      return;
+    }
+    this.downloadBusy = true;
+    this.downloadProgress = -1;
+    try {
+      const requestedQuality: number = this.downloadQualityValue();
+      const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(this.aid, this.bvid, this.cid, requestedQuality);
+      if (info === null) throw new Error('暂时无法获取下载地址');
+      const sourceUrls: Array<string> = audioOnly ? info.downloadAudioUrls : info.urls;
+      if (audioOnly && sourceUrls.length === 0) {
+        throw new Error('当前视频没有可下载的独立音轨');
+      }
+      if (!audioOnly && (sourceUrls.length === 0 || info.isDash)) {
+        throw new Error('该画质只有 DASH 分离流，暂时无法直接保存为单个 MP4');
+      }
+      if (!audioOnly) {
+        const mp4Source: boolean = info.format.startsWith('mp4') ||
+          sourceUrls.some((url: string): boolean => url.split('?')[0].toLowerCase().endsWith('.mp4'));
+        if (!mp4Source) throw new Error('该视频仅提供旧版分段格式，暂时无法保存为单个 MP4');
+      }
+      this.downloadQuality = info.quality;
+      let baseName: string = this.videoTitle;
+      if (this.videoPartTitle.trim().length > 0 && this.videoPartTitle.trim() !== this.videoTitle.trim()) {
+        baseName += ' - ' + this.videoPartTitle.trim();
+      }
+      const identity: string = this.bvid.length > 0 ? this.bvid : 'av' + String(this.aid);
+      const extension: string = audioOnly ? '.m4a' : '.mp4';
+      const formatTag: string = audioOnly ? '音频' : this.downloadQualityText();
+      const fileName: string = this.safeDownloadName(baseName + ' [' + identity + '] [' + formatTag + ']') + extension;
+      this.showMoreMenu = false;
+      this.showSideDrawer = false;
+      const documentPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
+      const options: picker.DocumentSaveOptions = new picker.DocumentSaveOptions();
+      options.newFileNames = [fileName];
+      options.fileSuffixChoices = [audioOnly ? '音频文件|.m4a' : '视频文件|.mp4'];
+      const targets: Array<string> = await documentPicker.save(options);
+      if (targets.length === 0) return;
+      this.downloadBusy = true;
+      this.downloadProgress = -1;
+      this.toast(audioOnly ? '音频已开始下载，可在通知栏查看进度' : '视频已开始下载，可在通知栏查看进度');
+      const refererId: string = this.bvid.length > 0 ? this.bvid : 'av' + String(this.aid);
+      await VideoDownloadService.downloadToUri(context, sourceUrls, targets[0], fileName,
+        HttpClient.getDownloadHeaders('https://www.bilibili.com/video/' + refererId),
+        (received: number, total: number): void => {
+          if (!this.destroyed) {
+            this.downloadBusy = true;
+            this.downloadProgress = total > 0 ? Math.max(0, Math.min(100,
+              Math.floor(received * 100 / total))) : -1;
+          }
+        });
+      if (!this.destroyed) this.toast(audioOnly ? '音频已保存到所选位置' : '视频已保存到所选位置');
+    } catch (e) {
+      const error: BusinessError = e as BusinessError;
+      // 文件选择器取消属于正常操作，不显示成网络失败。
+      if (!this.destroyed && error.code !== 13900042) {
+        const message: string = error.message ?? String(e);
+        this.toast(message.length > 0 ? message : '下载失败，请稍后重试');
+      }
+    } finally {
+      if (!this.destroyed) {
+        this.downloadBusy = VideoDownloadService.isActive();
+        this.downloadProgress = VideoDownloadService.currentProgress();
+      }
+    }
+  }
+
   private scheduleControlsHide(): void {
     if (this.hideTimer >= 0) clearTimeout(this.hideTimer);
     this.hideTimer = setTimeout(() => {
@@ -3374,6 +3559,9 @@ if (this.runtimeSources.length === 0) {
       qualityLabel: this.qualityLabel(),
       qualityLoading: this.qualityLoading,
       qualityPref: this.qualityPref,
+      downloadQualityLabel: this.downloadQualityText(),
+      downloadBusy: this.downloadBusy,
+      downloadProgress: this.downloadProgress,
       mirrorOn: this.mirrorOn,
       timerMinutes: this.timerMinutes,
       sponsorOn: this.sponsorSkipEnabled,
@@ -3427,6 +3615,8 @@ if (this.runtimeSources.length === 0) {
       onFilterAdd: () => this.submitDmFilterRule().catch(() => {}),
       onFilterDelete: (id: number) => this.deleteDmFilterRule(id).catch(() => {}),
       onQualityPrefChange: (pref: number) => this.qualityPref = pref,
+      onDownloadQuality: () => this.chooseDownloadQuality(),
+      onDownload: () => this.promptDownloadType(),
       onSubtitleChange: (index: number) => this.changeSubtitle(index),
       onResetDanmaku: () => this.resetDanmakuSettings(),
       onDmOpacityChange: (value: number) => this.setDmOpacity(value),

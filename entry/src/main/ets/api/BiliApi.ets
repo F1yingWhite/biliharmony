@@ -197,6 +197,8 @@ export class BiliApi {
           const mp4: PlayUrlInfo = PlayUrlInfo.fromPlayUrl(mp4Data, info.quality);
           if (mp4.url.length > 0) {
             info.isDash = false;
+            // 服务端可能按账号权限回落画质，文件名/播放器状态必须使用 MP4 响应的真实 qn。
+            info.quality = mp4.quality;
             info.format = mp4.format;
             info.urls = mp4.urls;
             info.url = mp4.url;
