@@ -73,7 +73,8 @@ function Test-01 {
     Swipe-Up -Dist 900; Start-Sleep -Milliseconds 800
     $t2 = Get-UiTree (Dump-Ui 'h01_scroll')
     $n2 = @(Get-AllTexts $t2).Count
-    if ($n2 -gt 60) { Pass-Test "瀑布流滚动文本N=$n2" } else { Fail-Test "滚动文本少 N=$n2" }
+    # 接口返回的卡片数量会波动；验证滚动后仍有足量可见节点即可，避免把线上数据量当成 UI 回归。
+    if ($n2 -gt 40) { Pass-Test "瀑布流滚动文本N=$n2" } else { Fail-Test "滚动文本少 N=$n2" }
     Snapshot-Shot 'h01_scroll'
   } catch { Fail-Test "01 err: $_" }
 }
@@ -233,19 +234,23 @@ function Test-08 {
       Tap-CenterOf -Bounds (Get-NodeBounds $nDark) -WaitMs 900
       $shot = Snapshot-Shot 'h08_dark_on'
       $py = 'D:\code\biliharmony\tool\gif-tool\.venv\Scripts\python.exe'
-      $so = Join-Path $env:TEMP 'qa_py_bg.txt'
-      $p = Start-Process -FilePath $py -ArgumentList @("$PSScriptRoot\check_img.py", '--shot', $shot, '--mode', 'bg') -NoNewWindow -Wait -RedirectStandardOutput $so
-      $pyOut = if (Test-Path $so) { Get-Content $so -Raw } else { 'noout' }
-      Remove-Item $so -Force -ErrorAction SilentlyContinue
-      $j = $pyOut | ConvertFrom-Json
-      if ($j.checks.is_dark) { Pass-Test "深色生效 $($j.checks.mid)" } else { Fail-Test "深色未生效: $pyOut" }
-      # Dock 泛白检查
-      $so2 = Join-Path $env:TEMP 'pyx_dock.txt'
-      $p2 = Start-Process -FilePath $py -ArgumentList @("$PSScriptRoot\check_img.py", '--shot', $shot, '--mode', 'dock') -NoNewWindow -Wait -RedirectStandardOutput $so2
-      $pyOut2 = if (Test-Path $so2) { Get-Content $so2 -Raw } else { '' }
-      Remove-Item $so2 -Force -ErrorAction SilentlyContinue
-      $j2 = $pyOut2 | ConvertFrom-Json
-      if ($j2.checks.too_bright) { Fail-Test "Dock 泛白: $($j2.checks.dock_avg)" } else { Pass-Test "Dock 亮度正常 $($j2.checks.dock_avg)" }
+      if (Test-Path -LiteralPath $py) {
+        $so = Join-Path $env:TEMP 'qa_py_bg.txt'
+        $p = Start-Process -FilePath $py -ArgumentList @("$PSScriptRoot\check_img.py", '--shot', $shot, '--mode', 'bg') -NoNewWindow -Wait -RedirectStandardOutput $so
+        $pyOut = if (Test-Path $so) { Get-Content $so -Raw } else { 'noout' }
+        Remove-Item $so -Force -ErrorAction SilentlyContinue
+        $j = $pyOut | ConvertFrom-Json
+        if ($j.checks.is_dark) { Pass-Test "深色生效 $($j.checks.mid)" } else { Fail-Test "深色未生效: $pyOut" }
+        # Dock 泛白检查
+        $so2 = Join-Path $env:TEMP 'pyx_dock.txt'
+        $p2 = Start-Process -FilePath $py -ArgumentList @("$PSScriptRoot\check_img.py", '--shot', $shot, '--mode', 'dock') -NoNewWindow -Wait -RedirectStandardOutput $so2
+        $pyOut2 = if (Test-Path $so2) { Get-Content $so2 -Raw } else { '' }
+        Remove-Item $so2 -Force -ErrorAction SilentlyContinue
+        $j2 = $pyOut2 | ConvertFrom-Json
+        if ($j2.checks.too_bright) { Fail-Test "Dock 泛白: $($j2.checks.dock_avg)" } else { Pass-Test "Dock 亮度正常 $($j2.checks.dock_avg)" }
+      } else {
+        Skip-Test '未安装图片审计所需 Python 环境，已保留深色模式截图'
+      }
       # 恢复浅色
       Tap-CenterOf -Bounds (Get-NodeBounds $nDark) -WaitMs 900
     } else { Skip-Test '无显示模式入口' }

@@ -6,7 +6,7 @@ import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asBool, str, randomString } from '../common/Utils';
 import { DynamicItem, DynamicPageData } from '../model/Models';
-import { ActionResult, actionWithCsrf, getData, webGet, webPost } from './internal/ApiCommon';
+import { ActionResult, actionWithCsrf, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
 
 export class DynamicApi {
   static async getDynamicDetail(id: string): Promise<DynamicItem | null> {
@@ -96,6 +96,22 @@ export class DynamicApi {
         return HttpClient.post(Api.createDynamic + '?' + HttpClient.buildQuery(query),
           HttpClient.buildQuery(params), Constants.webHeaders);
       });
+  }
+
+  static async publish(content: string): Promise<ActionResult> {
+    const text: string = content.trim();
+    if (text.length === 0) return new ActionResult(false, '动态内容不能为空');
+    if (text.length > 2000) return new ActionResult(false, '动态内容过长（最多 2000 字）');
+    return postVideoAction(Api.createDynamic, {
+      'dynamic': text, 'type': '4', 'at_uids': '', 'topic_id': '',
+    });
+  }
+
+  static async report(dynId: string, reason: string): Promise<ActionResult> {
+    if (dynId.length === 0) return new ActionResult(false, '动态信息不完整');
+    return postVideoAction(Api.dynamicReport, {
+      'dyn_id': dynId, 'reason': reason, 'content': '',
+    });
   }
 
   // ===== 用户空间动态（公开数据，WBI 签名） =====

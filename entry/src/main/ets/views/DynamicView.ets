@@ -10,7 +10,7 @@ import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO
   NAV_VIDEO_DETAIL,
   NAV_USER_SPACE, DynamicDetailParam, ImageViewerParam, ImageViewerSrcRect, LiveRoomParam, VideoDetailParam,
     UserSpaceParam, NAV_BANGUMI_DETAIL, BangumiDetailParam } from '../common/AppRouter';
-import { ActionResult, BiliApi } from '../api/BiliApi';
+import { ActionResult } from '../api/BiliApi';
 import { UserStore } from '../common/UserStore';
 import { LoadingView } from '../components/LoadingView';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
@@ -972,7 +972,7 @@ export struct DynCard {
           return;
         }
         const reasonValues: Array<string> = ['1', '2', '6', '5', '14', '99'];
-        BiliApi.reportDynamic(this.item.dynId, reasonValues[pick])
+        DynamicApi.report(this.item.dynId, reasonValues[pick])
           .then((r: ActionResult) => {
             this.toast(r.ok ? '已提交举报，感谢反馈' : r.message);
           })
@@ -1449,7 +1449,7 @@ export struct DynamicView {
           scrollForward: this.embedded ? NestedScrollMode.PARENT_FIRST : NestedScrollMode.SELF_ONLY,
           scrollBackward: this.embedded ? NestedScrollMode.SELF_FIRST : NestedScrollMode.SELF_ONLY,
         })
-        .onScroll((offset: number) => {
+        .onDidScroll((offset: number) => {
           if (!this.embedded) AppTheme.updateHeaderFade(offset);
         })
         .onReachEnd(() => {
@@ -1508,7 +1508,7 @@ export struct DynamicView {
     if (this.composing) return;
     this.composing = true;
     try {
-      const result: ActionResult = await BiliApi.publishDynamic(this.composerText);
+      const result: ActionResult = await DynamicApi.publish(this.composerText);
       if (result.ok) {
         this.showComposer = false;
         this.composerText = '';

@@ -4,12 +4,12 @@ import { ActionResult, BiliApi } from '../api/BiliApi';
 import { AppNavStack, LiveRoomParam, NAV_LOGIN } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { LiveDanmakuClient } from '../common/LiveDanmakuClient';
-import { LivePlayerView } from '../components/LivePlayerView';
+import { LivePlayerView } from '../components/live/LivePlayerView';
 import { BackButton, BackButtonVariant } from '../components/BackButton';
 import { LiveChatMessage, LiveEmoteItem, LiveEmotePackage, LivePlayInfo, LiveRoomInfo } from '../model/LiveModels';
 import { UserStore } from '../common/UserStore';
 import { LiveApi } from '../api/LiveApi';
-import { colorHex } from '../components/PlayerDanmakuSupport';
+import { colorHex } from '../components/player/PlayerDanmakuSupport';
 
 @Component
 export struct LiveRoomPage {

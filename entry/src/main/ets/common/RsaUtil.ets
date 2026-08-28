@@ -28,12 +28,12 @@ export class RsaUtil {
       keyPair = await generator.convertKey({ data: der }, null);
     } catch (e) {
       const keyEncoder: util.TextEncoder = new util.TextEncoder();
-      keyPair = await generator.convertKey({ data: keyEncoder.encode(body) }, null);
+      keyPair = await generator.convertKey({ data: keyEncoder.encodeInto(body) }, null);
     }
     const cipher: cryptoFramework.Cipher = cryptoFramework.createCipher(alg + '|PKCS1');
     await cipher.init(cryptoFramework.CryptoMode.ENCRYPT_MODE, keyPair.pubKey, null);
     const textEncoder: util.TextEncoder = new util.TextEncoder();
-    const input: cryptoFramework.DataBlob = { data: textEncoder.encode(plaintext) };
+    const input: cryptoFramework.DataBlob = { data: textEncoder.encodeInto(plaintext) };
     const output: cryptoFramework.DataBlob = await cipher.doFinal(input);
     return base64.encodeToStringSync(output.data);
   }

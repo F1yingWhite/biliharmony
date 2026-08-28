@@ -1,7 +1,5 @@
 import { common } from '@kit.AbilityKit';
 import { http } from '@kit.NetworkKit';
-import { fileIo as fs } from '@kit.CoreFileKit';
-import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { systemShare } from '@kit.ShareKit';
 import { display, FrameCallback } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
@@ -10,6 +8,8 @@ import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATI
 import { Immersive } from '../common/Immersive';
 import { BackButton } from '../components/BackButton';
 import { biliImageThumbnail } from '../common/ImageUrl';
+import { safeToast } from '../common/Toast';
+import { PhotoLibrarySaver } from '../services/media/PhotoLibrarySaver';
 
 /** 返回分三段：hero 落位、与来源缩略图交叉淡化、最后完成 Navigation pop。 */
 const IMAGE_HERO_ENTER_DURATION: number = 280;
@@ -791,19 +791,12 @@ export struct ImageViewerPage {
         throw new Error('HTTP ' + response.responseCode);
       }
       const context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      const helper: photoAccessHelper.PhotoAccessHelper = photoAccessHelper.getPhotoAccessHelper(context);
       const extension: string = this.imageExtension(url);
-      const uri: string = await helper.createAsset(photoAccessHelper.PhotoType.IMAGE, extension,
-        { title: 'BiliHarmony_' + Date.now() });
-      const file: fs.File = await fs.open(uri, fs.OpenMode.READ_WRITE);
-      try {
-        await fs.write(file.fd, response.result as ArrayBuffer);
-      } finally {
-        fs.closeSync(file);
-      }
-      this.getUIContext().getPromptAction().showToast({ message: '已保存到图库' });
+      const saved: boolean = await PhotoLibrarySaver.saveImage(context, response.result as ArrayBuffer, extension,
+        'BiliHarmony_' + Date.now());
+      if (saved) safeToast(this.getUIContext(), '已保存到图库');
     } catch (e) {
-      this.getUIContext().getPromptAction().showToast({ message: '保存失败，请稍后重试' });
+      safeToast(this.getUIContext(), '保存失败，请稍后重试');
     } finally {
       request.destroy();
       this.saving = false;
