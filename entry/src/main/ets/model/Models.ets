@@ -402,6 +402,8 @@ export class PlayUrlInfo {
   urls: Array<string> = [];
   audioUrl: string = '';
   audioUrls: Array<string> = [];
+  /** 下载专用的最高码率标准 DASH 音轨；播放切换为单文件 MP4 时仍保留。 */
+  downloadAudioUrls: Array<string> = [];
   isDash: boolean = false;
   quality: number = 0;
   format: string = '';
@@ -510,6 +512,7 @@ export class PlayUrlInfo {
       }
       info.audioUrls = dashItemUrls(selectedAudio);
       info.audioUrl = info.audioUrls.length > 0 ? info.audioUrls[0] : '';
+      info.downloadAudioUrls = info.audioUrls.slice();
     }
 
     if (info.qualities.length === 0) {

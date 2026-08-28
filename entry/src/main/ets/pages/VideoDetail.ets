@@ -414,6 +414,13 @@ export struct VideoDetailPage {
     return VideoDetailGeometry.pageDuration(this.detail, this.currentCid);
   }
 
+  private currentPageTitle(): string {
+    for (let i: number = 0; i < this.detail.pages.length; i++) {
+      if (this.detail.pages[i].cid === this.currentCid) return this.detail.pages[i].part;
+    }
+    return '';
+  }
+
   /** 播放中仅长屏/竖向画幅收缩；暂停后任何画幅都可收成继续播放横幅。 */
   private shouldCollapsePlayer(): boolean {
     return VideoDetailGeometry.shouldCollapse(this.playerPlaying, this.detail, this.currentCid,
@@ -2968,6 +2975,7 @@ export struct VideoDetailPage {
               cid: this.currentCid,
               videoDuration: this.currentPageDuration(),
               videoTitle: this.detail.title,
+              videoPartTitle: this.currentPageTitle(),
               // 卡片原封面持续垫在 Surface 上，直到 PlayerView 同时收到 playing 与官方首帧事件。
               videoCover: this.entryCoverUrl(),
               ownerName: this.detail.upName,
