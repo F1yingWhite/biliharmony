@@ -13,6 +13,8 @@ export const HERO_BG_SNAPSHOT_KEY: string = 'heroBgSnapshot';
 /** 使用 Navigation 官方自定义内容转场保活来源页，供独立 hero 在两页之上完成飞行。 */
 export const HERO_NAV_TRANSITION_ACTIVE_KEY: string = 'heroNavTransitionActive';
 export const HERO_NAV_TRANSITION_DURATION_KEY: string = 'heroNavTransitionDuration';
+/** 页面内 hero 动画完成后递增，通知 Navigation 立即提交本次自定义转场。 */
+export const HERO_NAV_TRANSITION_FINISH_REQUEST_KEY: string = 'heroNavTransitionFinishRequest';
 
 /** 视频详情页跳转参数 */
 export interface VideoDetailParam {

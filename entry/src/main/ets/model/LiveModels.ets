@@ -139,6 +139,9 @@ export class LiveEmoteItem {
   width: number = 0;
   height: number = 0;
   unique: string = '';
+  /** 允许在播放器区域突出显示；不能单独作为表情尺寸分类。 */
+  bulgeDisplay: number = 0;
+  inPlayerArea: number = 0;
 
   static from(o: Object): LiveEmoteItem {
     const j: Record<string, Object> = asObject(o);
@@ -148,6 +151,8 @@ export class LiveEmoteItem {
     item.width = asNumber(j['width'], 0);
     item.height = asNumber(j['height'], item.width);
     item.unique = str(j, 'emoticon_unique', '');
+    item.bulgeDisplay = asNumber(j['bulge_display'], 0);
+    item.inPlayerArea = asNumber(j['in_player_area'], 0);
     return item;
   }
 }

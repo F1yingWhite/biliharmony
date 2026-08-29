@@ -12,7 +12,8 @@ import { pasteboard } from '@kit.BasicServicesKit';
 import { Immersive } from '../common/Immersive';
 import { Haptic } from '../common/Haptic';
 import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
-  ImageViewerSrcRect, NAV_LOGIN, NAV_VIDEO_DETAIL, NAV_USER_SPACE, VideoDetailParam, UserSpaceParam } from '../common/AppRouter';
+  HERO_NAV_TRANSITION_FINISH_REQUEST_KEY, ImageViewerSrcRect, NAV_LOGIN, NAV_VIDEO_DETAIL, NAV_USER_SPACE,
+  VideoDetailParam, UserSpaceParam } from '../common/AppRouter';
 import { VideoDetail, VideoItem, ReplyItem, PlayUrlInfo, VideoPage, VideoQualityOption, VideoRelationState,
   BiliEmote, BiliEmotePackage, FavoriteFolderItem, UserStat, SpaceArcData, SubtitleTrack, UgcSeasonEpisode } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
@@ -162,7 +163,7 @@ export struct VideoDetailPage {
   @State playerPlaying: boolean = false;
   /** 播放器上报的在线观看人数（"X人正在看"），展示在播放量信息行的时间后面。 */
   @State playerOnlineTotal: string = '';
-  @State @Watch('onPlayerGeomChanged') playerCollapse: number = 0;
+  @State playerCollapse: number = 0;
   /** AVPlayer 解码后回传的真实视频尺寸；未拿到前先用接口 dimension 兜底。 */
   @State realVideoWidth: number = 0;
   @State realVideoHeight: number = 0;
@@ -239,7 +240,7 @@ export struct VideoDetailPage {
   /** 进入全屏前的竖屏播放区高度，旋转退出时的稳定落点。 */
   private playerFullscreenRestoreHeight: number = 0;
   private dmEngineRef: PlayerDanmakuEngine | null = null;
-  // playerCollapse 的未量化原值；@State 只按阈值量化写入，降低滚动期整页重排频率。
+  // playerCollapse 的精确手势累计值；视觉态仅过滤不足半个 vp 的亚像素抖动。
   private playerCollapseRaw: number = 0;
   private replySource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();
   /** 已发布但评论列表接口尚未索引到的本地楼层；刷新/切排序时仍保留。 */
@@ -501,7 +502,7 @@ export struct VideoDetailPage {
     if (!this.playerPlaying && engine.active.length > 0) engine.drawFrame(false);
   }
 
-  /** 播放器几何相关 @State（收起量/全屏）变化时同步弹幕视口。 */
+  /** 全屏状态变化时同步弹幕视口；竖屏收缩只裁剪画布，不改变画布自身尺寸。 */
   private onPlayerGeomChanged(): void {
     this.syncDanmakuViewport();
   }
@@ -565,18 +566,24 @@ export struct VideoDetailPage {
   }
 
   /**
-   * 收放量的量化写入：raw 始终精确跟踪，@State 只在跨过约 2% 行程或
-   * 0/最大边界时更新，避免滚动每帧的亚像素变化驱动整页重渲染。
+   * 收放量跟随手势逐帧写入；只过滤不足 0.5vp 的亚像素抖动。
+   * 旧的 2% 行程量化在高视频区域会形成 6～10vp 台阶，视觉上只有约 15～30fps。
    */
   private setPlayerCollapse(raw: number): void {
     const maxCollapse: number = Math.max(0, this.playerHeight() - this.minPlayerHeight());
     const clamped: number = Math.max(0, Math.min(maxCollapse, raw));
     this.playerCollapseRaw = clamped;
-    const threshold: number = Math.max(1, maxCollapse * 0.02);
-    if (Math.abs(clamped - this.playerCollapse) >= threshold ||
+    // 轻量阻尼曲线：收起开始响应更积极，接近终点逐渐减速；反向展开自然呈现先缓后快。
+    // 曲线始终单调且端点准确，不使用补间动画，因此不会产生手指拖动延迟。
+    const progress: number = maxCollapse > 0 ? clamped / maxCollapse : 0;
+    let curved: number = maxCollapse * (progress + 0.12 * Math.sin(Math.PI * progress));
+    if (clamped === 0) curved = 0;
+    else if (clamped === maxCollapse) curved = maxCollapse;
+    const threshold: number = 0.5;
+    if (Math.abs(curved - this.playerCollapse) >= threshold ||
       (clamped === 0 && this.playerCollapse !== 0) ||
       (clamped === maxCollapse && this.playerCollapse !== maxCollapse)) {
-      this.playerCollapse = clamped;
+      this.playerCollapse = curved;
     }
   }
 
@@ -780,6 +787,11 @@ export struct VideoDetailPage {
     AppNavStack.pop();
   }
 
+  private finishHeroNavPop(): void {
+    const request: number = AppStorage.get<number>(HERO_NAV_TRANSITION_FINISH_REQUEST_KEY) ?? 0;
+    AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_FINISH_REQUEST_KEY, request + 1);
+  }
+
   /** 镜面退出：当前播放区封面收回源封面，详情正文独立淡出。 */
   goBack(): void {
     if (this.closing) return;
@@ -799,7 +811,9 @@ export struct VideoDetailPage {
       this.wholeCardAnimating = true;
       this.getUIContext().postFrameCallback(new VideoHeroFrameCallback(() => {
         this.beginHeroNavPop();
-        this.getUIContext().animateTo({ duration: 350, curve: Curve.EaseInOut }, () => {
+        this.getUIContext().animateTo({ duration: 350, curve: Curve.EaseInOut, onFinish: () => {
+          this.finishHeroNavPop();
+        } }, () => {
           this.wholeCardScale = scale;
           this.wholeCardTranslateX = rect.x - (this.screenWidthVp - rect.w) / 2;
           this.wholeCardTranslateY = rect.y - (clipHeight - rect.h) / 2;
@@ -832,7 +846,9 @@ export struct VideoDetailPage {
           this.getUIContext().animateTo({ duration: 170, curve: Curve.EaseOut }, () => {
             this.entryContentOpacity = 0;
           });
-          this.getUIContext().animateTo({ duration: 320, curve: Curve.EaseOut }, () => {
+          this.getUIContext().animateTo({ duration: 320, curve: Curve.EaseOut, onFinish: () => {
+            this.finishHeroNavPop();
+          } }, () => {
             this.heroX = rect.x;
             this.heroY = rect.y;
             this.heroWidth = rect.w;

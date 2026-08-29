@@ -274,7 +274,10 @@ export class AppTheme {
 
   /** 根据滚动增量更新头部淡出程度（0..1）：正反方向都连续过渡，避免反向滚动时头栏瞬间跳回。 */
   static updateHeaderFade(offset: number): void {
-    AppTheme.scrollAccum = Math.min(70, Math.max(0, AppTheme.scrollAccum + offset));
+    // 收起仍保留 70vp 的完整行程；反向下拉时用更短的恢复行程，避免搜索栏刚出现却仍只有
+    // 一两成不透明度。这里改变的是交互进度，不额外套动画，因此不会产生跟手延迟。
+    const responsiveOffset: number = offset < 0 ? offset * 3 : offset;
+    AppTheme.scrollAccum = Math.min(70, Math.max(0, AppTheme.scrollAccum + responsiveOffset));
     const f: number = Math.min(1, Math.max(0, AppTheme.scrollAccum / 70));
     const cur: number | undefined = AppStorage.get<number>(AppTheme.KEY_HEADER_FADE);
     if (cur === undefined || Math.abs(cur - f) > 0.015 || f === 0 || f === 1) {
@@ -450,7 +453,7 @@ export class AppTheme {
     return isDarkColor(AppTheme.getAccent());
   }
 
-  // ===== 模糊材质（设计规范 §3.2：可开关，强度跟随系统标准档） =====
+  // ===== 模糊材质（设计规范 §3.2：可开关，效果跟随系统沉浸光感设置） =====
 
   static isGlassEnabled(): boolean {
     const v: boolean | undefined = AppStorage.get<boolean>(AppTheme.KEY_GLASS_ENABLED);
@@ -503,7 +506,7 @@ export class AppTheme {
       return undefined;
     }
     return new uiMaterial.ImmersiveMaterial({
-      style: uiMaterial.ImmersiveStyle.THIN,
+      // 不指定 style/materialColor：使用 SDK 默认 REGULAR 基材，最终强弱由系统沉浸光感设置调节。
       interactive: true,
       lightEffect: { color: Color.White },
     });

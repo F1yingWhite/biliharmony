@@ -6,7 +6,6 @@ import { Immersive } from '../common/Immersive';
 import { AppNavStack, NAV_LOGIN, NAV_MESSAGES, NAV_SEARCH } from '../common/AppRouter';
 import { UserStore } from '../common/UserStore';
 import { AppTheme } from '../common/AppTheme';
-import { colorWithAlpha } from '../common/Utils';
 import { HotSearchStore } from '../common/HotSearchStore';
 import { Haptic } from '../common/Haptic';
 import { MsgUnreadStore } from '../common/MsgUnreadStore';
@@ -68,10 +67,14 @@ export struct GlassHeaderBar {
     return $r('app.media.placeholder_avatar_noface');
   }
 
+  private headerContentOpacity(): number {
+    return Math.min(1, Math.max(0, (1 - this.fade) * 5));
+  }
+
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
-      // 顶部短模糊向搜索栏下方继续衰减；不再叠加一块等高的矩形材质，
-      // 避免材质在搜索栏底边突然截止，看起来像一条分割线。
+      // 顶部沉浸光感：状态栏处最强，向内容区连续衰减。只保留这一层纵向光感，
+      // 不叠加主题色光晕、搜索栏边框或额外阴影。
       Column()
         .width('100%')
         .height(Immersive.statusBarHeight() + 68)
@@ -85,20 +88,6 @@ export struct GlassHeaderBar {
           fractionStops: [[1.0, 0.0], [0.5, 0.5], [0.0, 1.0]],
           direction: GradientDirection.Bottom,
         })
-        // 展开和折叠状态都保持顶部浓、底部透明的纵向衰减。
-        .opacity(1)
-        .hitTestBehavior(HitTestMode.None)
-
-      // L1 主题色低透明光晕，让浅色空白背景下也能看出光感层次。
-      Column()
-        .width('100%')
-        .height(Immersive.statusBarHeight() + 68)
-        .radialGradient({
-          center: ['16%', '0%'],
-          radius: '100%',
-          colors: [[colorWithAlpha(this.accent, '38'), 0.0], ['#00000000', 1.0]],
-        })
-        .opacity(0.75 - 0.5 * this.fade)
         .hitTestBehavior(HitTestMode.None)
 
       // 可折叠的搜索/消息头栏。左侧留出头像位，头像本身由下方独立渲染。
@@ -107,23 +96,24 @@ export struct GlassHeaderBar {
           .width(32)
           .height(32)
 
-        Row({ space: 6 }) {
-          Image($r('app.media.ic_search'))
-            .width(16)
-            .height(16)
-            .fillColor(this.accent)
-          Text(this.hotSearch.length > 0 ? this.hotSearch : '搜索你感兴趣的内容')
-            .fontSize(13)
-            .fontColor(this.isDark ? '#C8C8CC' : '#8A8A8E')
-        }
+        Search({
+          value: '',
+          placeholder: this.hotSearch.length > 0 ? this.hotSearch : '搜索你感兴趣的内容',
+        })
         .height(32)
         .layoutWeight(1)
         .borderRadius(16)
-        .backgroundColor(this.glassOn ? '#00000000' : (this.isDark ? '#3DFFFFFF' : '#66FFFFFF'))
-        .systemMaterial(AppTheme.floatMaterial(this.glassOn))
-        .border({ width: 0.5, color: this.isDark ? '#2EFFFFFF' : '#33FFFFFF' })
-        .justifyContent(FlexAlign.Center)
-        // Block 在当前系统版本会截断子 Text/Image 到父 Row 的点击冒泡。
+        .searchIcon({ size: 16, color: this.accent, src: $r('app.media.ic_search') })
+        .cancelButton({ style: CancelButtonStyle.INVISIBLE })
+        .placeholderColor(this.isDark ? '#D6D6DA' : '#62666D')
+        .textFont({ size: 13 })
+        .textAlign(TextAlign.Center)
+        .enableKeyboardOnFocus(false)
+        .focusable(false)
+        .focusOnTouch(false)
+        // 使用原生 Search 进入系统搜索控件的材质路径；不叠背景、边框、阴影或模糊。
+        .systemMaterial(this.fade < 0.98 ? AppTheme.floatMaterial(this.glassOn) : undefined)
+        .opacity(this.headerContentOpacity())
         .hitTestBehavior(HitTestMode.Default)
         .onClick(() => {
           Haptic.light();
@@ -147,6 +137,7 @@ export struct GlassHeaderBar {
         // 图形保持 22vp，实际触发区扩大为 40vp，避免只能点到图标笔画才生效。
         .width(40)
         .height(40)
+        .opacity(this.headerContentOpacity())
         .onClick(() => {
           Haptic.light();
           if (UserStore.isLogin) {
@@ -164,8 +155,7 @@ export struct GlassHeaderBar {
         top: Immersive.statusBarHeight() + 4,
         bottom: 8,
       })
-      .opacity(1 - this.fade)
-      .hitTestBehavior(this.fade > 0.9 ? HitTestMode.None : HitTestMode.Default)
+      .hitTestBehavior(this.fade > 0.98 ? HitTestMode.None : HitTestMode.Default)
 
       // 头像不跟随头栏淡出：列表下滑到顶部后仍然可见、可点击。
       DecoratedAvatar({

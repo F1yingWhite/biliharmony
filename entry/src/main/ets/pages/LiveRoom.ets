@@ -5,6 +5,7 @@ import { AppNavStack, LiveRoomParam, NAV_LOGIN } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { LiveDanmakuClient } from '../common/LiveDanmakuClient';
 import { LivePlayerView } from '../components/live/LivePlayerView';
+import { StaticLiveImage } from '../components/live/StaticLiveImage';
 import { BackButton, BackButtonVariant } from '../components/BackButton';
 import { LiveChatMessage, LiveEmoteItem, LiveEmotePackage, LivePlayInfo, LiveRoomInfo } from '../model/LiveModels';
 import { UserStore } from '../common/UserStore';
@@ -36,6 +37,7 @@ export struct LiveRoomPage {
   @State chatTab: number = 0;
   @State errorText: string = '';
   @State playerHeight: number = 247.5;
+  @State roomHeaderHeight: number = 69;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   private client: LiveDanmakuClient = new LiveDanmakuClient();
@@ -101,7 +103,7 @@ export struct LiveRoomPage {
       this.messages = history;
       this.chatList = history.slice(-200);
       this.chatAtBottom = true;
-      this.scrollChatToEnd();
+      this.scrollChatToEnd(true);
       this.lastLiveMessageAt = Date.now();
       // 先建立首屏历史基线再挂播放器，避免把历史消息一次性灌入画面轨道。
       this.playInfo = play;
@@ -231,11 +233,17 @@ export struct LiveRoomPage {
     if (this.chatAtBottom) this.scrollChatToEnd();
   }
 
-  /** 列表贴底（等一帧让新内容完成布局再滚）。 */
-  private scrollChatToEnd(): void {
-    setTimeout(() => {
-      if (!this.destroyed) this.chatScroller.scrollEdge(Edge.End);
-    }, 60);
+  /** 列表贴底；首屏需跨过视频/顶栏和历史消息的多轮布局。 */
+  private scrollChatToEnd(settleLayout: boolean = false): void {
+    const delays: Array<number> = settleLayout ? [80, 220, 500] : [40, 140];
+    for (let i: number = 0; i < delays.length; i++) {
+      setTimeout(() => {
+        if (this.destroyed || this.chatList.length === 0) return;
+        this.chatAtBottom = true;
+        this.chatScroller.scrollToIndex(this.chatList.length - 1, false, ScrollAlign.END);
+        this.chatScroller.scrollEdge(Edge.End);
+      }, delays[i]);
+    }
   }
 
   @Builder
@@ -293,20 +301,14 @@ export struct LiveRoomPage {
       if (emote.unique.length > 0) text = text.split(emote.unique).join('');
       if (emote.emoji.length > 0 && emote.emoji !== emote.unique) text = text.split(emote.emoji).join('');
     }
+    text = text.replace(/\[[^\[\]]{1,40}\]/g, '');
     return text.trim();
   }
 
-  /** 官方样式弹幕行：UL 等级牌 + 粉丝团牌子 + 蓝色「名字:」+ 白色内容（表情消息内联图片）。 */
+  /** 官方样式弹幕行：粉丝团牌子 + 蓝色「名字:」+ 白色内容（表情消息内联图片）。 */
   @Builder
   ChatBadgeRow(msg: LiveChatMessage) {
     Row({ space: 6 }) {
-      if (msg.ulLevel > 0) {
-        Text('⌄ ' + String(msg.ulLevel))
-          .fontSize(9).fontColor('#C9CDD4')
-          .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-          .backgroundColor('#3A3D44')
-          .borderRadius(4)
-      }
       if (msg.medalName.length > 0) {
         Text(msg.medalName + ' ' + String(msg.medalLevel))
           .fontSize(9).fontColor('#FFFFFF')
@@ -323,10 +325,11 @@ export struct LiveRoomPage {
               .fontSize(13).fontColor(this.isDark ? '#F1F2F3' : '#303236').maxLines(3)
           }
           ForEach(msg.emotes, (emote: LiveEmoteItem) => {
-            Image(emote.url)
-              .width(emote.unique.startsWith('official_') ? 18 : 22)
-              .height(emote.unique.startsWith('official_') ? 18 : 22)
-              .objectFit(ImageFit.Contain)
+            StaticLiveImage({
+              url: emote.url,
+              imageWidth: emote.unique.startsWith('official_') ? 18 : 22,
+              imageHeight: emote.unique.startsWith('official_') ? 18 : 22,
+            })
           }, (emote: LiveEmoteItem) => emote.unique + emote.url)
         }
         .layoutWeight(1)
@@ -374,7 +377,7 @@ export struct LiveRoomPage {
           ForEach(this.emotePackages[this.emotePackageIndex].emotes, (emote: LiveEmoteItem) => {
             GridItem() {
               Column({ space: 2 }) {
-                Image(emote.url).width(42).height(42).objectFit(ImageFit.Contain)
+                StaticLiveImage({ url: emote.url, imageWidth: 42, imageHeight: 42 })
                 if (emote.emoji.length > 0) {
                   Text(emote.emoji.replace(/^\[|\]$/g, '')).fontSize(9).fontColor('#9499A0').maxLines(1)
                 }
@@ -391,7 +394,9 @@ export struct LiveRoomPage {
           Row({ space: 4 }) {
             ForEach(this.emotePackages, (pkg: LiveEmotePackage, index: number) => {
               Row() {
-                if (pkg.icon.length > 0) Image(pkg.icon).width(28).height(28).objectFit(ImageFit.Contain)
+                if (pkg.icon.length > 0) {
+                  StaticLiveImage({ url: pkg.icon, imageWidth: 28, imageHeight: 28 })
+                }
                 else Text(String(index + 1)).fontSize(11).fontColor('#9499A0')
               }
               .height(36).padding({ left: 9, right: 9 }).borderRadius(8)
@@ -481,6 +486,8 @@ export struct LiveRoomPage {
       Column() {
         Column()
           .width('100%').height(Immersive.statusBarHeight()).backgroundColor('#000000')
+        this.RoomHeader()
+        Divider().strokeWidth(0.5).color(this.isDark ? '#24252A' : '#ECEEF0')
         Stack({ alignContent: Alignment.Center }) {
           if (this.playInfo.url.length === 0) {
             if (this.roomInfo.cover.length > 0) {
@@ -498,8 +505,6 @@ export struct LiveRoomPage {
           const height: number = Number(newValue.height);
           if (height > 0) this.playerHeight = height;
         })
-        this.RoomHeader()
-        Divider().strokeWidth(0.5).color(this.isDark ? '#24252A' : '#ECEEF0')
         this.ChatTabs()
         if (this.chatTab === 0) {
           this.DanmakuList()
@@ -520,12 +525,12 @@ export struct LiveRoomPage {
         })
         .width('100%')
         .height(this.fullscreen ? '100%' : this.playerHeight)
-        .margin({ top: this.fullscreen ? 0 : Immersive.statusBarHeight() })
+        .margin({ top: this.fullscreen ? 0 : Immersive.statusBarHeight() + this.roomHeaderHeight + 0.5 })
         .zIndex(this.fullscreen ? 10 : 2)
       }
       if (!this.fullscreen) {
         BackButton({ variant: BackButtonVariant.DARK })
-          .margin({ left: 10, top: Immersive.statusBarHeight() + 8 })
+          .margin({ left: 10, top: Immersive.statusBarHeight() + this.roomHeaderHeight + 8 })
       }
       if (this.qualityLoading) {
         Row({ space: 7 }) {

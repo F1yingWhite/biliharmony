@@ -285,6 +285,7 @@ export struct PlayerView {
   @State sliderDragging: boolean = false;
   @State sliderDragValue: number = 0;
   @State seekPreviewFrame: image.PixelMap | null = null;
+  private seekPreviewSeconds: number = -1;
   @State seekPreviewSprite: string = '';
   @State seekPreviewSpriteCell: number = -1;
   @State seekPreviewSpriteXLen: number = 10;
@@ -940,6 +941,10 @@ if (this.runtimeSources.length === 0) {
     this.audioStartPending = false;
     this.seekRecoveryActive = resumePlaying;
     this.seekRecoveryCoverVisible = false;
+    // 快进按钮通常没有目标预览帧；旧拖动残留帧不能被拿来遮住本次 seek。
+    if (this.seekPreviewSeconds < 0 || Math.abs(this.seekPreviewSeconds * 1000 - targetMs) > 1500) {
+      this.seekPreviewFrame = null;
+    }
     if (resumePlaying) this.muteImmediately();
     if (DEBUG) {
       hilog.info(0x0000, 'BiliPlayback',
@@ -2036,6 +2041,7 @@ if (this.runtimeSources.length === 0) {
   /** 连续拖动只解码最新位置，避免网络取帧任务排队拖慢播放器。 */
   private requestSeekPreview(seconds: number): void {
     if (seconds < 0 || this.destroyed) return;
+    this.seekPreviewSeconds = seconds;
     this.seekPreviewCtl.request(seconds, this.aid, this.bvid, this.cid, this.currentSourceUrl(),
       this.playbackHeaders(),
       (url: string, cell: number, xLen: number, yLen: number): void => {
@@ -2067,6 +2073,7 @@ if (this.runtimeSources.length === 0) {
   private releaseSeekPreview(): void {
     this.sliderDragging = false;
     this.gestureSeekPreview = -1;
+    this.seekPreviewSeconds = -1;
     this.seekPreviewCtl.release();
   }
 
@@ -3114,10 +3121,10 @@ if (this.runtimeSources.length === 0) {
           .animation({ duration: 200, curve: Curve.EaseOut })
       }
 
-      // seek 超过 180ms 才启用遮罩：优先复用拖动时已解出的目标预览帧，否则用封面兜底。
-      // 快速 seek 不增加任何转场；慢 seek 则不暴露 Surface 重取关键帧期间的黑屏。
-      if (this.seekRecoveryCoverVisible && (this.seekPreviewFrame !== null || this.videoCover.length > 0)) {
-        Image(this.seekPreviewFrame !== null ? this.seekPreviewFrame : this.videoCover)
+      // seek 超过 180ms 时，仅复用本次拖动已经解出的目标预览帧；没有预览则保留
+      // Surface 的上一帧并显示加载环，不能跳回与当前时间无关的视频封面。
+      if (this.seekRecoveryCoverVisible && this.seekPreviewFrame !== null) {
+        Image(this.seekPreviewFrame)
           .width('100%')
           .height('100%')
           .objectFit(ImageFit.Cover)

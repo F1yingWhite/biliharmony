@@ -84,7 +84,8 @@ export struct ReplyThreadPanel {
   }
 
   private parentName(item: ReplyItem): string {
-    if (item.parentRpid === this.root.rpid) return this.root.uname;
+    // 一级回复已经处于当前根评论的详情中，不再重复显示“回复 @根评论作者”。
+    if (item.parentRpid === this.root.rpid) return '';
     const value: string | undefined = this.nameMap.get(item.parentRpid);
     return value !== undefined ? value : '';
   }

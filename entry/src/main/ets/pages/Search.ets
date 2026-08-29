@@ -22,7 +22,7 @@ import { SearchResultList } from '../components/SearchResultList';
 import { VideoRowCard } from '../components/video/VideoRowCard';
 import { VideoCard } from '../components/video/VideoCard';
 import { LiveRoomCard } from '../components/live/LiveRoomCard';
-import { formatCount } from '../common/Utils';
+import { formatCount, formatDuration, formatRelativeTime } from '../common/Utils';
 import { AppTheme } from '../common/AppTheme';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { HotSearchStore } from '../common/HotSearchStore';
@@ -821,6 +821,11 @@ export struct SearchPage {
     AppNavStack.pushPathByName(NAV_LIVE_ROOM, param);
   }
 
+  private openVideo(item: VideoItem): void {
+    const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
+    AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
+  }
+
   @Builder
   UserRow(item: UserSearchItem) {
     Row({ space: 10 }) {
@@ -1209,35 +1214,145 @@ export struct SearchPage {
       .padding({ left: 14, right: 14, top: 10, bottom: 4 })
   }
 
-  // ===== 结果态：综合 Tab 用户分区（横滑行，跳用户空间） =====
+  // ===== 结果态：综合 Tab 用户分区（资料 + 近期投稿） =====
   @Builder
-  AllUserRow(section: SearchAllSection) {
-    Scroll() {
-      Row({ space: 16 }) {
-        ForEach(section.users, (user: UserSearchItem) => {
-          Column({ space: 6 }) {
-            Image(user.face.length > 0 ? user.face : $r('app.media.placeholder_avatar_noface'))
-              .width(52)
-              .height(52)
-              .borderRadius(26)
-              .objectFit(ImageFit.Cover)
+  AllUserRecentVideo(item: VideoItem) {
+    Column({ space: 5 }) {
+      Stack({ alignContent: Alignment.Bottom }) {
+        Image(item.cover)
+          .width('100%')
+          .aspectRatio(1.6)
+          .objectFit(ImageFit.Cover)
+        Row({ space: 4 }) {
+          if (item.play > 0) {
+            Image($r('app.media.ic_play'))
+              .width(11).height(11)
+              .renderMode(ImageRenderMode.Template)
+              .fillColor('#FFFFFF')
+            Text(formatCount(item.play))
+              .fontSize(10).fontColor('#FFFFFF').maxLines(1)
+          }
+          Blank()
+          if (item.duration > 0) {
+            Text(formatDuration(item.duration))
+              .fontSize(10).fontColor('#FFFFFF').maxLines(1)
+          }
+        }
+        .width('100%')
+        .height(28)
+        .padding({ left: 6, right: 6 })
+        .alignItems(VerticalAlign.Center)
+        .backgroundColor('#66000000')
+      }
+      .width('100%')
+      .aspectRatio(1.6)
+      .clip(true)
+      .borderRadius(5)
+      Text(item.title)
+        .width('100%')
+        .fontSize(12)
+        .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+        .maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      Text(formatRelativeTime(item.pubdate))
+        .width('100%')
+        .fontSize(10)
+        .fontColor('#9499A0')
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .width('31.5%')
+    .alignItems(HorizontalAlign.Start)
+    .onClick(() => this.openVideo(item))
+  }
+
+  @Builder
+  AllUserCard(user: UserSearchItem) {
+    Column() {
+      Row({ space: 10 }) {
+        Stack({ alignContent: Alignment.Bottom }) {
+          Image(user.face.length > 0 ? user.face : $r('app.media.placeholder_avatar_noface'))
+            .width(58)
+            .height(58)
+            .borderRadius(29)
+            .objectFit(ImageFit.Cover)
+          if (user.liveStatus === 1 && user.liveRoomId > 0) {
+            Text('直播')
+              .width(40).height(18).textAlign(TextAlign.Center)
+              .fontSize(10).fontWeight(FontWeight.Medium).fontColor('#FFFFFF')
+              .backgroundColor(this.accent).borderRadius(9)
+          }
+        }
+        .width(62).height(62)
+        .onClick(() => this.openUserLive(user))
+        Column({ space: 4 }) {
+          Row({ space: 5 }) {
             Text(user.uname)
-              .fontSize(12)
-              .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.accent)
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .constraintSize({ maxWidth: 72 })
+            if (user.level > 0) {
+              Text('LV' + user.level)
+                .fontSize(9).fontWeight(FontWeight.Bold).fontColor('#FFFFFF')
+                .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+                .backgroundColor(this.accent).borderRadius(2)
+            }
           }
-          .width(72)
-          .onClick(() => {
-            this.openUserSpace(user);
-          })
-        }, (user: UserSearchItem) => String(user.mid))
+          Text(formatCount(user.fans) + '粉丝 · ' + String(user.videos) + '个视频')
+            .fontSize(11).fontColor('#9499A0')
+          Text(user.verifyDesc.length > 0 ? user.verifyDesc : user.usign)
+            .fontSize(11).fontColor('#9499A0').maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        .onClick(() => this.openUserSpace(user))
+        Text('查看主页 ›')
+          .fontSize(11)
+          .fontColor(this.isDark ? '#B8B8BE' : '#61666D')
+          .padding({ left: 8, right: 2, top: 10, bottom: 10 })
+          .onClick(() => this.openUserSpace(user))
       }
-      .padding({ left: 14, right: 14, top: 4, bottom: 10 })
+      .width('100%')
+      .padding({ left: 14, right: 14, top: 12, bottom: 10 })
+      if (user.recentVideos.length > 0) {
+        Row() {
+          ForEach(user.recentVideos.slice(0, 3), (video: VideoItem) => {
+            this.AllUserRecentVideo(video)
+          }, (video: VideoItem) => video.bvid + String(video.aid))
+        }
+        .width('100%')
+        .justifyContent(FlexAlign.SpaceBetween)
+        .alignItems(VerticalAlign.Top)
+        .padding({ left: 14, right: 14, bottom: 10 })
+        Row() {
+          Text('查看全部' + String(user.videos) + '个视频')
+            .fontSize(12)
+            .fontColor(this.isDark ? '#D6D7DB' : '#3A3B3F')
+          Text('›').fontSize(17).fontColor('#9499A0')
+        }
+        .width('100%')
+        .height(36)
+        .justifyContent(FlexAlign.Center)
+        .border({ width: { top: 0.5 }, color: this.isDark ? '#34363B' : '#E3E5E7' })
+        .onClick(() => this.openUserSpace(user))
+      }
     }
-    .scrollable(ScrollDirection.Horizontal)
-    .scrollBar(BarState.Off)
+    .width('100%')
+  }
+
+  @Builder
+  AllUserRow(section: SearchAllSection) {
+    Column() {
+      ForEach(section.users.slice(0, 2), (user: UserSearchItem, index: number) => {
+        this.AllUserCard(user)
+        if (index + 1 < Math.min(section.users.length, 2)) {
+          Divider().color(this.isDark ? '#34363B' : '#E3E5E7')
+        }
+      }, (user: UserSearchItem) => String(user.mid))
+    }
     .width('100%')
   }
 
