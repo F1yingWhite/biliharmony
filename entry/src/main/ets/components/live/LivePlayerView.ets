@@ -5,6 +5,8 @@ import { Immersive } from '../../common/Immersive';
 import { Constants } from '../../common/Constants';
 import { LiveChatMessage, LivePlayInfo, LiveQualityOption } from '../../model/LiveModels';
 import { LiveDanmakuRenderer } from './LiveDanmakuRenderer';
+import { PlayerSettingsPanel } from '../player/PlayerSettingsPanel';
+import { AppTheme, DanmakuSettings } from '../../common/AppTheme';
 
 
 @Component
@@ -24,9 +26,10 @@ export struct LivePlayerView {
   @State showDmSettings: boolean = false;
   // 弹幕设置（对齐视频播放页）：透明度/速度/字号/密度，直接作用于渲染器。
   @State dmOpacity: number = 0.88;
+  @State dmFrameRate: number = 60;
   @State dmSpeed: number = 1;
   @State dmFontScale: number = 1;
-  @State dmDensity: number = 28;
+  @State dmDensity: number = 22;
   @State fullscreen: boolean = false;
   @State errorText: string = '';
   @StorageProp('livePlayerExitRequest') @Watch('onExitRequested') exitRequest: number = 0;
@@ -47,6 +50,7 @@ export struct LivePlayerView {
     this.destroyed = false;
     AppStorage.setOrCreate<boolean>('livePlayerFullscreen', false);
     AppStorage.setOrCreate<number>('livePlayerExitRequest', 0);
+    this.restoreDanmakuSettings();
     this.dmRenderer.setBaseline(this.messages);
   }
 
@@ -251,8 +255,52 @@ export struct LivePlayerView {
   private toggleDanmaku(): void {
     this.danmakuOn = !this.danmakuOn;
     this.dmRenderer.toggle(this.danmakuOn);
+    this.persistDanmakuSettings();
   }
 
+  private restoreDanmakuSettings(): void {
+    const settings: DanmakuSettings = AppTheme.loadDanmakuSettings();
+    this.danmakuOn = settings.enabled;
+    this.dmOpacity = settings.opacity;
+    this.dmFrameRate = settings.frameRate;
+    this.dmSpeed = settings.speed;
+    this.dmFontScale = settings.fontScale;
+    this.dmDensity = settings.density;
+    this.dmRenderer.enabled = settings.enabled;
+    this.dmRenderer.opacity = settings.opacity;
+    this.dmRenderer.setFrameRate(settings.frameRate);
+    this.dmRenderer.speedScale = settings.speed;
+    this.dmRenderer.fontScale = settings.fontScale;
+    this.dmRenderer.maxActive = settings.density;
+  }
+
+  private persistDanmakuSettings(): void {
+    const settings: DanmakuSettings = AppTheme.loadDanmakuSettings();
+    settings.enabled = this.danmakuOn;
+    settings.opacity = this.dmOpacity;
+    settings.frameRate = this.dmFrameRate;
+    settings.speed = this.dmSpeed;
+    settings.fontScale = this.dmFontScale;
+    settings.density = this.dmDensity;
+    AppTheme.persistDanmakuSettings(settings);
+  }
+
+  private resetDanmakuSettings(): void {
+    const defaults: DanmakuSettings = new DanmakuSettings();
+    this.danmakuOn = defaults.enabled;
+    this.dmOpacity = defaults.opacity;
+    this.dmFrameRate = defaults.frameRate;
+    this.dmSpeed = defaults.speed;
+    this.dmFontScale = defaults.fontScale;
+    this.dmDensity = defaults.density;
+    this.dmRenderer.toggle(defaults.enabled);
+    this.dmRenderer.opacity = defaults.opacity;
+    this.dmRenderer.setFrameRate(defaults.frameRate);
+    this.dmRenderer.speedScale = defaults.speed;
+    this.dmRenderer.fontScale = defaults.fontScale;
+    this.dmRenderer.maxActive = defaults.density;
+    AppTheme.persistDanmakuSettings(defaults);
+  }
 
   /** 弹幕设置滑杆行：标签 + Slider + 当前值（保留一位小数/整数）。 */
   @Builder
@@ -280,6 +328,54 @@ export struct LivePlayerView {
     .alignItems(VerticalAlign.Center)
   }
 
+  @Builder
+  LiveDanmakuSettingsSheet() {
+    Scroll() {
+      PlayerSettingsPanel({
+        which: 0,
+        embedded: true,
+        basicDanmakuOnly: true,
+        forceDark: true,
+        accent: this.accent,
+        dmOpacity: this.dmOpacity,
+        dmFrameRate: this.dmFrameRate,
+        dmSpeed: this.dmSpeed,
+        dmFontScale: this.dmFontScale,
+        dmDensity: this.dmDensity,
+        onDmOpacityChange: (value: number): void => {
+          this.dmOpacity = value;
+          this.dmRenderer.opacity = value;
+          this.persistDanmakuSettings();
+        },
+        onDmFrameRateChange: (value: number): void => {
+          this.dmFrameRate = value;
+          this.dmRenderer.setFrameRate(value);
+          this.persistDanmakuSettings();
+        },
+        onDmSpeedChange: (value: number): void => {
+          this.dmSpeed = value;
+          this.dmRenderer.speedScale = value;
+          this.persistDanmakuSettings();
+        },
+        onDmFontScaleChange: (value: number): void => {
+          this.dmFontScale = value;
+          this.dmRenderer.fontScale = value;
+          this.persistDanmakuSettings();
+        },
+        onDmDensityChange: (value: number): void => {
+          this.dmDensity = value;
+          this.dmRenderer.maxActive = value;
+          this.persistDanmakuSettings();
+        },
+        onResetDanmaku: (): void => this.resetDanmakuSettings(),
+      })
+    }
+    .width('100%')
+    .height('100%')
+    .scrollBar(BarState.Off)
+    .padding({ left: 16, right: 16, top: 10, bottom: 24 })
+  }
+
   build() {
     Stack({ alignContent: Alignment.Center }) {
       XComponent({ id: 'livePlayerSurface', type: XComponentType.SURFACE, controller: this.controller })
@@ -298,7 +394,7 @@ export struct LivePlayerView {
 
       Canvas(this.dmContext)
         .width('100%').height('100%')
-        .visibility(this.danmakuOn ? Visibility.Visible : Visibility.Hidden)
+        .visibility(this.danmakuOn && this.fullscreen ? Visibility.Visible : Visibility.Hidden)
         .hitTestBehavior(HitTestMode.None)
         .onAreaChange((oldValue: Area, newValue: Area) => {
           const width: number = Number(newValue.width);
@@ -403,37 +499,15 @@ export struct LivePlayerView {
         .align(Alignment.Bottom)
       }
 
-      // 弹幕设置面板：与视频播放页同一组滑杆（透明度/速度/字号/密度）。
-      if (this.controls && this.showDmSettings) {
-        Column({ space: 14 }) {
-          Text('弹幕设置')
-            .width('100%').fontSize(14).fontWeight(FontWeight.Bold).fontColor('#FFFFFF')
-          this.DmSettingSlider('透明度', this.dmOpacity, 0.2, 1, (value: number) => {
-            this.dmOpacity = value;
-            this.dmRenderer.opacity = value;
-          })
-          this.DmSettingSlider('速度', this.dmSpeed, 0.5, 2, (value: number) => {
-            this.dmSpeed = value;
-            this.dmRenderer.speedScale = value;
-          })
-          this.DmSettingSlider('字号', this.dmFontScale, 0.7, 1.8, (value: number) => {
-            this.dmFontScale = value;
-            this.dmRenderer.fontScale = value;
-          })
-          this.DmSettingSlider('密度', this.dmDensity, 6, 40, (value: number) => {
-            this.dmDensity = Math.round(value);
-            this.dmRenderer.maxActive = Math.round(value);
-          })
-        }
-        .width(this.fullscreen ? 360 : '100%')
-        .padding({ left: 16, right: 16, top: 12, bottom: 58 })
-        .borderRadius({ topLeft: 16, topRight: 16 })
-        .backgroundColor('#E81A1A1E')
-        .backdropBlur(20)
-        .align(Alignment.Bottom)
-      }
     }
     .width('100%').height('100%')
     .backgroundColor('#000000')
+    .bindSheet($$this.showDmSettings, this.LiveDanmakuSettingsSheet(), {
+      height: 510,
+      dragBar: true,
+      showClose: false,
+      radius: { topLeft: 18, topRight: 18 },
+      backgroundColor: '#18191C',
+    })
   }
 }

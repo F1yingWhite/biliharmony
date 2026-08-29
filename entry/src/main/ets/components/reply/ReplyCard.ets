@@ -238,11 +238,12 @@ export struct ReplyCard {
   }
 
   private visualDepth(): number {
-    return Math.min(3, Math.max(0, this.threadDepth));
+    // 回复根评论的一级楼层保持扁平；只有楼中楼之间的回复才产生树状缩进。
+    return Math.min(3, Math.max(0, this.threadDepth - 1));
   }
 
   private threadIndent(): number {
-    return this.visualDepth() * 16;
+    return this.visualDepth() * 14;
   }
 
   /** 回复头像容器顶部为 5vp、高 38vp；所有树枝统一对齐头像中心。 */
@@ -542,12 +543,10 @@ export struct ReplyCard {
         .width('100%')
         .height(this.decorationHeight())
         if (this.shouldShowParentLabel()) {
-          Text('回复 @' + this.parentLabel)
-            .fontSize(11)
+          Text('回复 @' + this.parentLabel + '：')
+            .fontSize(12)
             .fontColor('#008AC5')
-            .padding({ left: 7, right: 7, top: 2, bottom: 2 })
-            .borderRadius(8)
-            .backgroundColor(this.isDark ? '#26343C' : '#EAF5FA')
+            .padding({ top: 1 })
         }
         ReplyRichText({
           reply: this.item,
@@ -592,8 +591,8 @@ export struct ReplyCard {
       }
       .width('100%')
       .alignItems(VerticalAlign.Top)
-      .padding({ left: this.threadIndent(), top: this.threadDepth > 0 ? 5 : 0,
-        bottom: this.threadDepth > 0 ? 5 : 0 })
+      .padding({ left: this.threadIndent(), top: this.threadDepth === 1 ? 9 : (this.threadDepth > 1 ? 5 : 0),
+        bottom: this.threadDepth === 1 ? 9 : (this.threadDepth > 1 ? 5 : 0) })
       .onAreaChange((oldValue: Area, newValue: Area) => {
         if (this.threadDepth <= 0) return;
         const height: number = Number.parseFloat(String(newValue.height));
@@ -601,23 +600,19 @@ export struct ReplyCard {
           this.measuredThreadHeight = height;
         }
       })
-      // 连接线和折叠节点最后绘制，避免被整行评论覆盖而无法点击。
-      if (this.threadDepth > 0) {
+      // 连接线最后绘制，但覆盖层只占左侧缩进区，不拦截评论操作。
+      if (this.threadDepth > 1) {
         ReplyThreadGuides({
           threadDepth: this.threadDepth,
           threadGuides: this.threadGuides,
-          threadHasChildren: this.threadHasChildren,
-          threadCollapsed: this.threadCollapsed,
           measuredHeight: this.measuredThreadHeight,
-          onToggle: (): void => {
-            this.onToggleThread(this.item);
-          },
         })
       }
     }
     .width('100%')
     .padding({ top: this.threadDepth > 0 ? 0 : 12, bottom: this.threadDepth > 0 ? 0 : 12 })
-    .border({ width: { bottom: this.threadDepth > 0 ? 0 : 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
+    .border({ width: { bottom: this.threadDepth > 1 ? 0 : 0.5 },
+      color: this.isDark ? '#2A2C30' : '#ECEEF1' })
     // 刻意不给整卡 onClick：打开楼中楼/回复只由「共 N 条回复 ›」预览条与底部 ActionBar
     // 上的回复按钮触发，避免点击评论任意区域就误入回复详情（用户反馈触发面积太大）。
   }

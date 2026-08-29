@@ -1,10 +1,13 @@
 /**
  * 直播弹幕 Canvas 渲染器：把 LivePlayerView 里内联的滚动弹幕引擎抽成独立类。
  * 职责与 PlayerDanmakuEngine 对齐：车道分配、双缓冲推进、定时器与绘制；组件层只保留视图/开关同步。
- * socket 批量到达的弹幕先入待喷队列，按固定节奏逐条释放，避免一批一批同时上屏。
+ * socket 批量到达的弹幕先入短时待喷队列，拥挤时优先保证新消息的实时性。
  */
-import { LiveChatMessage } from '../../model/LiveModels';
+import { LiveChatMessage, LiveEmoteItem } from '../../model/LiveModels';
 import { colorHex } from '../player/PlayerDanmakuSupport';
+import { image } from '@kit.ImageKit';
+import { HttpClient } from '../../common/HttpClient';
+import { Constants } from '../../common/Constants';
 
 class ActiveLiveDanmaku {
   message: LiveChatMessage;
@@ -13,6 +16,10 @@ class ActiveLiveDanmaku {
   speed: number;
   width: number;
   text: string;
+  textWidth: number = 0;
+  emote: image.PixelMap | null = null;
+  emoteWidth: number = 0;
+  emoteHeight: number = 0;
 
   constructor(message: LiveChatMessage, x: number, lane: number, speed: number, width: number, text: string) {
     this.message = message;
@@ -38,14 +45,18 @@ export class LiveDanmakuRenderer {
 
   private ctx: CanvasRenderingContext2D;
   private active: Array<ActiveLiveDanmaku> = [];
-  /** 待喷出队列：socket 批量到达的弹幕先入队，按固定节奏逐条释放，避免一批一批同时上屏。 */
+  /** 待喷出队列：只保留短时间内的新消息，避免高流量房间持续补播旧弹幕。 */
   private pending: Array<LiveChatMessage> = [];
+  private readonly pendingTtlMs: number = 3000;
   private lastReleaseMs: number = 0;
   private tick: number = -1;
   private lastDrawMs: number = 0;
   private nextLane: number = 0;
   private seenMessageIds: Set<string> = new Set<string>();
   private messageBaselineReady: boolean = false;
+  private emoteCache: Map<string, image.PixelMap> = new Map<string, image.PixelMap>();
+  private emoteLoading: Set<string> = new Set<string>();
+  private emoteFailed: Set<string> = new Set<string>();
 
   constructor(ctx: CanvasRenderingContext2D) {
     this.ctx = ctx;
@@ -67,38 +78,55 @@ export class LiveDanmakuRenderer {
       if (this.seenMessageIds.has(message.id)) continue;
       this.seenMessageIds.add(message.id);
       fresh.push(message);
+      if (this.fullscreen) this.prefetchEmote(message);
     }
     if (this.seenMessageIds.size > 600) {
       this.seenMessageIds.clear();
       for (let i = 0; i < messages.length; i++) this.seenMessageIds.add(messages[i].id);
     }
-    // 一次涌入 ≥6 条视为历史/重放（重连快照、低频补拉、高热度房间 WS 整帧）：
-    // 只喷最新 2 条，其余标记已见直接跳过，避免一批一批糊上屏。
-    const spray: Array<LiveChatMessage> = fresh.length >= 6 ? fresh.slice(fresh.length - 2) : fresh;
-    for (let i = 0; i < spray.length; i++) {
-      this.pending.push(spray[i]);
+    // 竖屏只保留下方聊天列表，画面弹幕引擎不排队、不下载表情。
+    if (!this.fullscreen) return;
+    for (let i = 0; i < fresh.length; i++) {
+      this.pending.push(fresh[i]);
     }
-    if (spray.length > 0 && this.playing && this.enabled) this.startLoop();
+    this.trimPending(Date.now());
+    if (fresh.length > 0 && this.playing && this.enabled) this.startLoop();
+  }
+
+  private trimPending(now: number): void {
+    while (this.pending.length > 0 && now - this.pending[0].timestamp * 1000 > this.pendingTtlMs) {
+      this.pending.shift();
+    }
+    const capacity: number = Math.max(12, Math.min(48, this.laneCount() * 3));
+    if (this.pending.length > capacity) {
+      this.pending.splice(0, this.pending.length - capacity);
+    }
   }
 
   /**
-   * 按节奏从队列释放弹幕：每 ~130ms 放一条（积压 >8 时放两条）；
-   * 积压超过 30 条丢弃最旧，保证直播弹幕的时效性（与 B 站客户端丢弃策略一致）。
+   * 按绘制帧从队列释放弹幕。一次最多填满现有空轨道；轨道不足时保留队首，
+   * 避免高流量房间因为批量到达或短暂拥堵直接少掉大部分弹幕。
    */
   private drainQueue(): void {
     if (this.pending.length === 0) return;
     const now: number = Date.now();
-    if (now - this.lastReleaseMs < 130) return;
-    // 积压超过 14 条丢弃最旧：直播弹幕讲时效，放旧的不如放新的。
-    if (this.pending.length > 14) {
-      this.pending.splice(0, this.pending.length - 14);
-    }
-    const burst: number = this.pending.length > 8 ? 2 : 1;
+    this.trimPending(now);
+    if (this.pending.length === 0) return;
+    if (now - this.lastReleaseMs < 32) return;
+    const burst: number = Math.min(this.laneCount(), 6);
     let released: boolean = false;
-    for (let i: number = 0; i < burst && this.pending.length > 0; i++) {
+    let attempts: number = 0;
+    for (let i: number = 0; i < burst && this.pending.length > 0 && attempts < this.pending.length; i++) {
       if (this.active.length >= this.maxActive) break;
-      const message: LiveChatMessage = this.pending.shift() as LiveChatMessage;
-      this.spawnMessage(message);
+      const message: LiveChatMessage = this.pending[0];
+      if (!this.emoteReady(message)) {
+        this.pending.push(this.pending.shift() as LiveChatMessage);
+        attempts++;
+        i--;
+        continue;
+      }
+      if (!this.spawnMessage(message)) break;
+      this.pending.shift();
       released = true;
     }
     if (released) this.lastReleaseMs = now;
@@ -110,6 +138,12 @@ export class LiveDanmakuRenderer {
     this.stopLoop(true);
     this.seenMessageIds.clear();
     this.messageBaselineReady = false;
+    this.emoteCache.forEach((pixelMap: image.PixelMap) => {
+      try { pixelMap.release(); } catch (e) {}
+    });
+    this.emoteCache.clear();
+    this.emoteLoading.clear();
+    this.emoteFailed.clear();
   }
 
   toggle(on: boolean): void {
@@ -124,21 +158,33 @@ export class LiveDanmakuRenderer {
   setPlayback(playing: boolean, fullscreen: boolean): void {
     this.playing = playing;
     this.fullscreen = fullscreen;
+    if (!fullscreen) {
+      this.pending = [];
+      this.stopLoop(true);
+      return;
+    }
     if (playing && this.enabled && (this.active.length > 0 || this.pending.length > 0)) this.startLoop();
   }
 
   private fontSize(): number {
-    return (this.fullscreen ? 28 : 18) * this.fontScale;
+    // 与视频播放器使用同一默认视觉字号，避免直播弹幕只有视频弹幕约一半大小。
+    return (this.fullscreen ? 48 : 38) * this.fontScale;
   }
 
   private lineHeight(): number {
-    return this.fontSize() + 5;
+    // 字号增大后保持紧凑轨道：沿用视频弹幕的次线性行高策略。
+    const base: number = this.fullscreen ? 44 : 34;
+    const extra: number = this.fontSize() - base;
+    const normalHeight: number = base + 2 + (extra > 0 ? extra * 0.5 : extra);
+    const densityFactor: number = this.maxActive >= 30 ? 0.68 : (this.maxActive >= 27 ? 0.82 : 0.90);
+    return Math.max(this.fontSize() * 0.68, normalHeight * densityFactor);
   }
 
   private laneCount(): number {
-    const topInset: number = this.fullscreen ? 54 : 6;
-    const usable: number = Math.max(this.lineHeight(), this.height * 0.78 - topInset);
-    return Math.max(1, Math.floor(usable / this.lineHeight()));
+    const topInset: number = 6;
+    const bottomInset: number = 8;
+    const usableForLaneSteps: number = Math.max(0, this.height - topInset - bottomInset - this.fontSize());
+    return Math.max(1, Math.floor(usableForLaneSteps / this.lineHeight()) + 1);
   }
 
   private laneAvailable(lane: number, spawnX: number): boolean {
@@ -162,21 +208,106 @@ export class LiveDanmakuRenderer {
     return -1;
   }
 
-  private spawnMessage(message: LiveChatMessage): void {
-    if (!this.enabled || this.width <= 1 || message.text.length === 0 || this.active.length >= this.maxActive) return;
-    // 对齐官方浮层样式：普通弹幕渲染为「名字: 内容」；SC 保留金额前缀。
-    const body: string = message.type === 'sc' ? 'SC ¥' + String(message.price) + '  ' + message.text :
-      (message.emotes.length > 0 && message.text === message.emotes[0].unique ? '[直播表情]' : message.text);
-    const text: string = message.type === 'sc' || message.uname.length === 0 ? body : message.uname + ': ' + body;
+  private firstEmoteUrl(message: LiveChatMessage): string {
+    return message.emotes.length > 0 ? message.emotes[0].url : '';
+  }
+
+  private emoteReady(message: LiveChatMessage): boolean {
+    const url: string = this.firstEmoteUrl(message);
+    return url.length === 0 || this.emoteCache.has(url) || this.emoteFailed.has(url);
+  }
+
+  private prefetchEmote(message: LiveChatMessage): void {
+    const url: string = this.firstEmoteUrl(message);
+    if (url.length === 0 || this.emoteCache.has(url) || this.emoteLoading.has(url) || this.emoteFailed.has(url)) return;
+    this.emoteLoading.add(url);
+    this.loadEmote(url).then((pixelMap: image.PixelMap | null): void => {
+      this.emoteLoading.delete(url);
+      if (pixelMap === null) this.emoteFailed.add(url);
+      else this.emoteCache.set(url, pixelMap);
+      if (this.playing && this.enabled && this.pending.length > 0) this.startLoop();
+    }).catch((): void => {
+      this.emoteLoading.delete(url);
+      this.emoteFailed.add(url);
+    });
+  }
+
+  private async loadEmote(url: string): Promise<image.PixelMap | null> {
+    let source: image.ImageSource | null = null;
+    try {
+      const bytes: ArrayBuffer = await HttpClient.getBytes(url, {
+        'User-Agent': Constants.browserUa,
+        'Referer': 'https://live.bilibili.com/',
+      });
+      if (bytes.byteLength === 0) return null;
+      source = image.createImageSource(bytes);
+      return await source.createPixelMap({ desiredSize: { width: 96, height: 96 } });
+    } catch (e) {
+      return null;
+    } finally {
+      if (source !== null) {
+        try { source.release(); } catch (e) {}
+      }
+    }
+  }
+
+  private cleanEmoteText(message: LiveChatMessage): string {
+    let text: string = message.text;
+    for (let i: number = 0; i < message.emotes.length; i++) {
+      const unique: string = message.emotes[i].unique;
+      const emoji: string = message.emotes[i].emoji;
+      if (unique.length > 0) text = text.split(unique).join('');
+      if (emoji.length > 0 && emoji !== unique) text = text.split(emoji).join('');
+    }
+    text = text.replace(/\[[^\[\]]{1,40}\]/g, '');
+    return text.trim();
+  }
+
+  private isBulgedEmote(item: LiveEmoteItem | null): boolean {
+    if (item === null) return false;
+    // bulge_display 表示“可突出显示”。只有播放器内的房间大表情才按膨胀尺寸绘制；
+    // emoji_/official_ 及 20px 内联表情仍是普通的一行内表情。
+    return item.bulgeDisplay > 0 && item.inPlayerArea > 0 && item.unique.startsWith('room_') &&
+      item.width >= 100 && item.height >= 100;
+  }
+
+  private spawnMessage(message: LiveChatMessage): boolean {
+    if (!this.enabled || this.width <= 1 || message.text.length === 0 ||
+      this.active.length >= this.maxActive) return false;
+    // 视频画面浮层只显示正文；用户名属于右侧/下方聊天列表，不参与滚动弹幕。
+    const emoteUrl: string = this.firstEmoteUrl(message);
+    const emote: image.PixelMap | null = emoteUrl.length > 0 ? (this.emoteCache.get(emoteUrl) ?? null) : null;
+    let body: string = message.emotes.length > 0 ? this.cleanEmoteText(message) : message.text;
+    if (message.type === 'sc') body = 'SC ¥' + String(message.price) + '  ' + body;
+    if (body.length === 0 && emote === null) {
+      body = message.emotes.length > 0 && message.emotes[0].emoji.length > 0 ? message.emotes[0].emoji : '[表情]';
+    }
+    const text: string = body;
     this.ctx.font = '600 ' + String(this.fontSize()) + 'px sans-serif';
-    const width: number = Math.max(24, this.ctx.measureText(text).width);
+    const textWidth: number = text.length > 0 ? this.ctx.measureText(text).width : 0;
+    const emoteItem = message.emotes.length > 0 ? message.emotes[0] : null;
+    // 普通表情为 0.8 行高，只有协议明确的房间大表情使用 1.2 行高。
+    const emoteHeight: number = emote !== null ? this.lineHeight() *
+      (this.isBulgedEmote(emoteItem) ? 1.2 : 0.8) : 0;
+    const rawRatio: number = emoteItem !== null && emoteItem.width > 0 && emoteItem.height > 0 ?
+      emoteItem.width / emoteItem.height : 1;
+    const emoteRatio: number = Math.max(0.5, Math.min(2.5, rawRatio));
+    const emoteWidth: number = emoteHeight * emoteRatio;
+    const width: number = Math.max(24, textWidth + (textWidth > 0 && emoteWidth > 0 ? 6 : 0) + emoteWidth);
     const spawnX: number = this.width + 10;
     const lane: number = this.allocateLane(spawnX);
-    if (lane < 0) return;
-    const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / Math.max(0.5, this.speedScale);
-    this.active.push(new ActiveLiveDanmaku(message, spawnX, lane,
-      (spawnX + width) / travelSeconds, width, text));
+    if (lane < 0) return false;
+    // 相同设置下所有正文保持一致的像素速度；不再让长文本为了固定穿屏时长而异常加速。
+    const baseSpeed: number = Math.max(this.fullscreen ? 105 : 90, this.width / 8);
+    const active: ActiveLiveDanmaku = new ActiveLiveDanmaku(message, spawnX, lane, baseSpeed *
+      Math.max(0.5, this.speedScale), width, text);
+    active.textWidth = textWidth;
+    active.emote = emote;
+    active.emoteWidth = emoteWidth;
+    active.emoteHeight = emoteHeight;
+    this.active.push(active);
     if (this.playing) this.startLoop();
+    return true;
   }
 
   private drawFrame(): void {
@@ -185,7 +316,7 @@ export class LiveDanmakuRenderer {
     const delta: number = this.lastDrawMs > 0 ? Math.min(0.12, Math.max(0.012, (now - this.lastDrawMs) / 1000)) : 0.033;
     this.lastDrawMs = now;
     const fontSize: number = this.fontSize();
-    const topInset: number = this.fullscreen ? 54 : 6;
+    const topInset: number = 6;
     this.ctx.font = '600 ' + String(fontSize) + 'px sans-serif';
     this.ctx.lineWidth = this.fullscreen ? 2.5 : 2;
     this.ctx.strokeStyle = '#B3000000';
@@ -197,8 +328,14 @@ export class LiveDanmakuRenderer {
       if (dm.x + dm.width < -10) continue;
       this.ctx.fillStyle = dm.message.type === 'sc' ? '#FFD45A' : colorHex(dm.message.color);
       const y: number = topInset + dm.lane * this.lineHeight() + fontSize;
-      this.ctx.strokeText(dm.text, dm.x, y);
-      this.ctx.fillText(dm.text, dm.x, y);
+      if (dm.text.length > 0) {
+        this.ctx.strokeText(dm.text, dm.x, y);
+        this.ctx.fillText(dm.text, dm.x, y);
+      }
+      if (dm.emote !== null && dm.emoteWidth > 0 && dm.emoteHeight > 0) {
+        const imageX: number = dm.x + dm.textWidth + (dm.textWidth > 0 ? 6 : 0);
+        this.ctx.drawImage(dm.emote, imageX, y - dm.emoteHeight * 0.82, dm.emoteWidth, dm.emoteHeight);
+      }
       keep.push(dm);
     }
     this.ctx.globalAlpha = 1;
@@ -215,7 +352,18 @@ export class LiveDanmakuRenderer {
         this.drainQueue();
         this.drawFrame();
       }
-    }, this.fullscreen ? 25 : 33);
+    }, Math.max(8, Math.round(1000 / Math.max(24, Math.min(120, this.frameRate)))));
+  }
+
+  frameRate: number = 60;
+
+  setFrameRate(value: number): void {
+    this.frameRate = Math.max(24, Math.min(120, Math.round(value)));
+    if (this.tick >= 0) {
+      clearInterval(this.tick);
+      this.tick = -1;
+      this.startLoop();
+    }
   }
 
   private stopLoop(clear: boolean): void {

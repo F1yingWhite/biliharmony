@@ -16,7 +16,7 @@ import { AppNavStack, APP_ROOT_SNAPSHOT_ID, NAV_SEARCH, NAV_VIDEO_DETAIL, NAV_LO
   ImageViewerParam, DynamicDetailParam, NAV_RELATION_LIST, RelationListParam, NAV_BANGUMI_DETAIL,
   BangumiDetailParam, NAV_RANK, NAV_ARTICLE, ArticlePageParam, NAV_BANGUMI_LIST, NAV_BANGUMI_INDEX, NAV_ZONE,
   NAV_BLACK_LIST, NAV_LIVE_ZONE, NAV_FAV_SORT, NAV_BANGUMI_TIMELINE, HERO_NAV_TRANSITION_ACTIVE_KEY,
-  HERO_NAV_TRANSITION_DURATION_KEY } from '../common/AppRouter';
+  HERO_NAV_TRANSITION_DURATION_KEY, HERO_NAV_TRANSITION_FINISH_REQUEST_KEY } from '../common/AppRouter';
 import { SearchPage } from './Search';
 import { FavSortParam } from '../common/AppRouter';
 import { MessagesPage } from './Messages';
@@ -66,6 +66,11 @@ struct Index {
   @StorageProp('glassEnabled') glassOn: boolean = true;
   @StorageProp('headerFade') fade: number = 0;
   @State heroTransitionInputLocked: boolean = false;
+  @State heroTransitionClock: number = 0;
+  @StorageProp(HERO_NAV_TRANSITION_FINISH_REQUEST_KEY) @Watch('onHeroTransitionFinishRequested')
+  heroTransitionFinishRequest: number = 0;
+  private heroTransitionProxy: NavigationTransitionProxy | null = null;
+  private heroTransitionToken: number = 0;
 
   aboutToAppear(): void {
     this.reapplyBarColors();
@@ -117,6 +122,25 @@ struct Index {
    * 官方 Navigation 自定义内容转场：hero 期间同时保留 from/to 两页，由页面内的独立图片层负责移动。
    * 这取代“截一张首页图垫底”的办法，避免 push/pop 边界在真机上出现白帧或旧截图闪一下。
    */
+  private finishHeroNavTransition(token?: number): void {
+    if (token !== undefined && token !== this.heroTransitionToken) return;
+    const proxy: NavigationTransitionProxy | null = this.heroTransitionProxy;
+    if (proxy === null) return;
+    this.heroTransitionProxy = null;
+    AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, false);
+    this.heroTransitionInputLocked = false;
+    this.heroTransitionClock = 0;
+    try {
+      proxy.finishTransition();
+    } catch (e) {
+      // 系统超时已经提交转场时，重复完成会抛错；状态清理仍需保留。
+    }
+  }
+
+  private onHeroTransitionFinishRequested(): void {
+    this.finishHeroNavTransition();
+  }
+
   private heroNavTransition(_from: NavContentInfo, _to: NavContentInfo,
     operation: NavigationOperation): NavigationAnimatedTransition | undefined {
     if (AppStorage.get<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY) !== true) return undefined;
@@ -124,13 +148,28 @@ struct Index {
     // push 后目标页本身会阻断输入；pop 开始时来源页立即重新获得手势，必须额外冻结。
     this.heroTransitionInputLocked = operation === NavigationOperation.POP;
     return {
-      timeout: duration + 120,
+      timeout: duration + 240,
+      onTransitionEnd: (_success: boolean): void => {
+        this.heroTransitionProxy = null;
+        this.heroTransitionToken++;
+        AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, false);
+        this.heroTransitionInputLocked = false;
+        this.heroTransitionClock = 0;
+      },
       transition: (proxy: NavigationTransitionProxy): void => {
+        this.heroTransitionProxy = proxy;
+        const token: number = ++this.heroTransitionToken;
+        this.heroTransitionClock = 0;
+        // POP 时透明阻断层实际参与这段 UI 动画。即使页面自己的 onFinish 丢失，
+        // UI 动画时钟仍会提交转场，不依赖单一 JS 定时器。
+        this.getUIContext().animateTo({ duration: duration + 80, curve: Curve.Linear, onFinish: () => {
+          this.finishHeroNavTransition(token);
+        } }, () => {
+          this.heroTransitionClock = 1;
+        });
         setTimeout(() => {
-          AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, false);
-          this.heroTransitionInputLocked = false;
-          proxy.finishTransition();
-        }, duration);
+          this.finishHeroNavTransition(token);
+        }, duration + 120);
       },
     };
   }
@@ -564,6 +603,14 @@ struct Index {
     Row() {
       Blank()
       Stack({ alignContent: Alignment.Center }) {
+        if (!this.glassOn) {
+          Column()
+            .width('100%')
+            .height('100%')
+            .borderRadius(20)
+            .backgroundColor(AppTheme.floatBg(this.isDark, false))
+            .hitTestBehavior(HitTestMode.None)
+        }
         Image($r('app.media.ic_search'))
           .width(18)
           .height(18)
@@ -572,11 +619,12 @@ struct Index {
       .width(40)
       .height(40)
       .borderRadius(20)
-      .backgroundColor(this.glassOn ? '#00000000' : AppTheme.floatBg(this.isDark, false))
       .systemMaterial(AppTheme.floatMaterial(this.glassOn))
-      .shadow({ radius: 8, color: this.isDark ? '#59000000' : '#1A000000', offsetX: 0, offsetY: 2 })
-      .opacity(this.fade)
-      .scale({ x: 0.6 + 0.4 * this.fade, y: 0.6 + 0.4 * this.fade })
+      .opacity(Math.min(1, Math.max(0, (this.fade - 0.8) * 5)))
+      .scale({
+        x: 0.6 + 0.4 * Math.min(1, Math.max(0, (this.fade - 0.8) * 5)),
+        y: 0.6 + 0.4 * Math.min(1, Math.max(0, (this.fade - 0.8) * 5)),
+      })
       .onClick(() => {
         AppNavStack.pushPathByName(NAV_SEARCH, null);
       })
@@ -604,8 +652,11 @@ struct Index {
       .borderRadius(20)
       .backgroundColor(AppTheme.floatBg(this.isDark, this.glassOn))
       .shadow({ radius: 8, color: this.isDark ? '#59000000' : '#1A000000', offsetX: 0, offsetY: 2 })
-      .opacity(this.fade)
-      .scale({ x: 0.6 + 0.4 * this.fade, y: 0.6 + 0.4 * this.fade })
+      .opacity(Math.min(1, Math.max(0, (this.fade - 0.8) * 5)))
+      .scale({
+        x: 0.6 + 0.4 * Math.min(1, Math.max(0, (this.fade - 0.8) * 5)),
+        y: 0.6 + 0.4 * Math.min(1, Math.max(0, (this.fade - 0.8) * 5)),
+      })
       .onClick(() => {
         AppNavStack.pushPathByName(NAV_SEARCH, null);
       })
@@ -639,7 +690,7 @@ struct Index {
 
         // 头栏收起后的悬浮搜索球（右上角，对齐华为设置的折叠形态：头栏淡出 → 搜索球淡入）
         // 只有真正开始显示时才创建节点；透明度为 0 的可点击节点会抢走消息按钮的事件。
-        if (this.fade > 0.05) {
+        if (this.fade > 0.8) {
           if (AppTheme.isImmersiveUiSupported()) {
             this.SearchFloat()
           } else {
@@ -669,6 +720,7 @@ struct Index {
         Column()
           .width('100%')
           .height('100%')
+          .opacity(1 - this.heroTransitionClock * 0.001)
           .hitTestBehavior(HitTestMode.Block)
           .zIndex(1000)
       }

@@ -197,6 +197,8 @@ export class UserSearchItem {
   verifyDesc: string = '';
   liveStatus: number = 0;
   liveRoomId: number = 0;
+  /** 综合搜索用户卡片自带的近期投稿（all/v2 的 res 字段）。 */
+  recentVideos: Array<VideoItem> = [];
 
   static from(o: Object): UserSearchItem {
     const j: Record<string, Object> = asObject(o);
@@ -215,6 +217,14 @@ export class UserSearchItem {
     u.verifyDesc = str(verify, 'desc', '');
     u.liveStatus = asNumber(j['is_live'], asNumber(j['live_status'], 0));
     u.liveRoomId = asNumber(j['room_id'], asNumber(j['roomid'], 0));
+    const recent: Array<Object> = asArray(j['res']);
+    for (let i: number = 0; i < recent.length; i++) {
+      const video: VideoItem = VideoItem.fromSearchItem(recent[i]);
+      if (video.aid <= 0 && video.bvid.length === 0) continue;
+      if (video.upName.length === 0) video.upName = u.uname;
+      if (video.upMid <= 0) video.upMid = u.mid;
+      u.recentVideos.push(video);
+    }
     return u;
   }
 }

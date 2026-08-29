@@ -8,6 +8,8 @@ export struct PlayerSettingsPanel {
   @Prop which: number = 0;
   @Prop fullscreen: boolean = false;
   @Prop embedded: boolean = false;
+  /** 直播播放器复用时只展示通用的密度、透明度、字号、速度和帧率。 */
+  @Prop basicDanmakuOnly: boolean = false;
   @Prop forceDark: boolean = false;
   @Prop accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
@@ -258,61 +260,64 @@ export struct PlayerSettingsPanel {
         .backgroundColor(this.cardBg())
         .margin({ bottom: 14 })
 
-        Text('画面防挡')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.sectionTitleColor())
-          .width('100%')
-          .margin({ bottom: 8 })
-        Column() {
-          Text('按弹幕类型屏蔽')
-            .fontSize(14)
+        if (!this.basicDanmakuOnly) {
+          Text('画面防挡')
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
             .fontColor(this.sectionTitleColor())
             .width('100%')
-            .padding({ left: 14, right: 14, top: 13, bottom: 10 })
-          Row() {
-            this.DmTypeIcon($r('app.media.ic_dm_fixed'), '固定', this.blockTopDm, () => this.onToggleDmBlock('top'))
-            this.DmTypeIcon($r('app.media.ic_dm_scroll'), '滚动', this.blockScrollDm, () => this.onToggleDmBlock('scroll'))
-            this.DmTypeIcon($r('app.media.ic_dm_color'), '彩色', this.blockColorDm, () => this.onToggleDmBlock('color'))
-            this.DmTypeIcon($r('app.media.ic_dm_advanced'), '高级', this.dmBlockLevel > 0, () => this.onBlockAdvancedToggle(this.dmBlockLevel <= 0))
-            this.DmTypeIcon($r('app.media.ic_dm_count'), '计数', false, () => this.stubToast('功能暂未开放'))
+            .margin({ bottom: 8 })
+          Column() {
+            Text('按弹幕类型屏蔽')
+              .fontSize(14)
+              .fontColor(this.sectionTitleColor())
+              .width('100%')
+              .padding({ left: 14, right: 14, top: 13, bottom: 10 })
+            Row() {
+              this.DmTypeIcon($r('app.media.ic_dm_fixed'), '固定', this.blockTopDm, () => this.onToggleDmBlock('top'))
+              this.DmTypeIcon($r('app.media.ic_dm_scroll'), '滚动', this.blockScrollDm, () => this.onToggleDmBlock('scroll'))
+              this.DmTypeIcon($r('app.media.ic_dm_color'), '彩色', this.blockColorDm, () => this.onToggleDmBlock('color'))
+              this.DmTypeIcon($r('app.media.ic_dm_advanced'), '高级', this.dmBlockLevel > 0,
+                () => this.onBlockAdvancedToggle(this.dmBlockLevel <= 0))
+              this.DmTypeIcon($r('app.media.ic_dm_count'), '计数', false, () => this.stubToast('功能暂未开放'))
+            }
+            .width('100%')
+            .padding({ left: 10, right: 10, bottom: 14 })
+            this.DmDivider()
+            this.DmSwitchRow('重复弹幕隐藏', '大量内容相同的弹幕会被隐藏', false, (next: boolean): void => {
+              if (next) this.stubToast('功能暂未开放');
+            })
+            this.DmDivider()
+            this.DmSwitchRow('字幕防挡', '底部弹幕会被隐藏', this.blockBottomDm, (): void => {
+              this.onToggleDmBlock('bottom');
+            })
+            this.DmDivider()
+            this.DmSwitchRow('人像防挡', '人像不会被弹幕遮挡', false, (next: boolean): void => {
+              if (next) this.stubToast('功能暂未开放');
+            })
           }
           .width('100%')
-          .padding({ left: 10, right: 10, bottom: 14 })
-          this.DmDivider()
-          this.DmSwitchRow('重复弹幕隐藏', '大量内容相同的弹幕会被隐藏', false, (next: boolean): void => {
-            if (next) this.stubToast('功能暂未开放');
-          })
-          this.DmDivider()
-          this.DmSwitchRow('字幕防挡', '底部弹幕会被隐藏', this.blockBottomDm, (): void => {
-            this.onToggleDmBlock('bottom');
-          })
-          this.DmDivider()
-          this.DmSwitchRow('人像防挡', '人像不会被弹幕遮挡', false, (next: boolean): void => {
-            if (next) this.stubToast('功能暂未开放');
-          })
-        }
-        .width('100%')
-        .borderRadius(14)
-        .backgroundColor(this.cardBg())
-        .padding({ left: 14, right: 14 })
-        .margin({ bottom: 14 })
+          .borderRadius(14)
+          .backgroundColor(this.cardBg())
+          .padding({ left: 14, right: 14 })
+          .margin({ bottom: 14 })
 
-        Text('更多工具')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.sectionTitleColor())
+          Text('更多工具')
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(this.sectionTitleColor())
+            .width('100%')
+            .margin({ bottom: 8 })
+          Column() {
+            this.DmSwitchRow('弹幕观看屏蔽词', '仅对我不展示特定弹幕', this.dmFilterRulesCount > 0, (): void => {
+              this.onDmFilterTap();
+            })
+          }
           .width('100%')
-          .margin({ bottom: 8 })
-        Column() {
-          this.DmSwitchRow('弹幕观看屏蔽词', '仅对我不展示特定弹幕', this.dmFilterRulesCount > 0, (): void => {
-            this.onDmFilterTap();
-          })
+          .borderRadius(14)
+          .backgroundColor(this.cardBg())
+          .padding({ left: 14, right: 14 })
         }
-        .width('100%')
-        .borderRadius(14)
-        .backgroundColor(this.cardBg())
-        .padding({ left: 14, right: 14 })
 
         Row() {
           Image($r('app.media.ic_refresh'))

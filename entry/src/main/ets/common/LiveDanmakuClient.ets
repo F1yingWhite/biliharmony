@@ -1,10 +1,10 @@
 /**
  * B 站直播弹幕 WebSocket 客户端。只订阅消息，不发送弹幕、礼物或任何消费请求。
- * 使用 protover=0 请求未压缩 JSON，避免在 UI 进程中做 Brotli 解压造成发热。
+ * 使用 protover=2 接收 zlib 批量包，保证高流量房间的消息完整性。
  */
 import { webSocket } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, zlib } from '@kit.BasicServicesKit';
 import { BiliApi } from '../api/BiliApi';
 import { HttpClient } from './HttpClient';
 import { LiveChatMessage, LiveDanmakuInfo, LiveDanmakuServer } from '../model/LiveModels';
@@ -18,6 +18,8 @@ export class LiveDanmakuClient {
   private retryTimer: number = -1;
   private closed: boolean = true;
   private messageSeq: number = 0;
+  /** 压缩包必须按 WebSocket 到达顺序解码，避免异步解压导致消息乱序。 */
+  private decodeQueue: Promise<void> = Promise.resolve();
   onMessage: (message: LiveChatMessage) => void = () => {};
   onConnected: (connected: boolean) => void = () => {};
 
@@ -40,7 +42,7 @@ export class LiveDanmakuClient {
         const body: string = JSON.stringify({
           'uid': uid,
           'roomid': this.roomId,
-          'protover': 0,
+          'protover': 2,
           'platform': 'web',
           'type': 2,
           'buvid': HttpClient.getCookie('buvid3'),
@@ -53,7 +55,12 @@ export class LiveDanmakuClient {
         if (typeof value === 'string') {
           this.parseJson(value as string);
         } else {
-          this.parsePackets(value as ArrayBuffer);
+          const packet: ArrayBuffer = value as ArrayBuffer;
+          this.decodeQueue = this.decodeQueue.then(async (): Promise<void> => {
+            if (this.socket === ws && !this.closed) await this.parsePackets(packet);
+          }).catch((): void => {
+            // 单个损坏包不应中断后续消息解码。
+          });
         }
       });
       ws.on('close', () => {
@@ -149,7 +156,7 @@ export class LiveDanmakuClient {
     return buffer;
   }
 
-  private parsePackets(buffer: ArrayBuffer): void {
+  private async parsePackets(buffer: ArrayBuffer): Promise<void> {
     const view: DataView = new DataView(buffer);
     let offset: number = 0;
     while (offset + 16 <= buffer.byteLength) {
@@ -166,9 +173,37 @@ export class LiveDanmakuClient {
         const bytes: Uint8Array = new Uint8Array(buffer, offset + headerLength, packetLength - headerLength);
         const text: string = util.TextDecoder.create('utf-8').decodeToString(bytes);
         this.parseJson(text);
+      } else if (operation === 5 && protocol === 2) {
+        // zlib 包的正文仍是若干个带 16 字节头的直播协议包，需要递归解包。
+        const compressedView: Uint8Array = new Uint8Array(buffer, offset + headerLength,
+          packetLength - headerLength);
+        const compressed: ArrayBuffer = new ArrayBuffer(compressedView.byteLength);
+        new Uint8Array(compressed).set(compressedView);
+        const inflated: ArrayBuffer | null = await this.inflateZlib(compressed);
+        if (inflated !== null) await this.parsePackets(inflated);
       }
       offset += packetLength;
     }
+  }
+
+  /** 解压直播 zlib 消息；输出未知时逐级扩容，最高 8 MiB，防止异常包无限占用内存。 */
+  private async inflateZlib(source: ArrayBuffer): Promise<ArrayBuffer | null> {
+    const zip: zlib.Zip = await zlib.createZip();
+    let capacity: number = Math.max(64 * 1024, source.byteLength * 8);
+    const maxCapacity: number = 8 * 1024 * 1024;
+    while (capacity <= maxCapacity) {
+      const output: ArrayBuffer = new ArrayBuffer(capacity);
+      try {
+        const result: zlib.ZipOutputInfo = await zip.uncompress(output, source, source.byteLength);
+        if (result.status === zlib.ReturnStatus.OK || result.status === zlib.ReturnStatus.STREAM_END) {
+          return output.slice(0, result.destLen);
+        }
+      } catch (e) {
+        // 输出空间不足也可能以 BusinessError 返回，扩容后重试。
+      }
+      capacity *= 2;
+    }
+    return null;
   }
 
   private parseJson(text: string): void {

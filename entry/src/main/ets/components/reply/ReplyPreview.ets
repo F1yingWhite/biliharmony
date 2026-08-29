@@ -13,6 +13,16 @@ export struct ReplyPreview {
   @StorageProp('accentColor') accent: string = '#FB7299';
   onOpenThread: () => void = () => {};
 
+  private showCountEntry(): boolean {
+    // 1～2 条回复已全部随主评论返回时，内容本身已经完整表达数量，无需重复占一行。
+    return this.reply.count > 2 || this.reply.replies.length < this.reply.count;
+  }
+
+  private countEntryText(): string {
+    return this.reply.replies.length === 0 ? '查看 ' + this.reply.count + ' 条回复  ›' :
+      '共 ' + this.reply.count + ' 条回复  ›';
+  }
+
   build() {
     Column({ space: 5 }) {
       ForEach(this.reply.replies.slice(0, 2), (reply: ReplyItem) => {
@@ -41,10 +51,12 @@ export struct ReplyPreview {
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .width('100%')
       }, (reply: ReplyItem) => String(reply.rpid))
-      Text('共 ' + this.reply.count + ' 条回复  ›')
-        .fontSize(12)
-        .fontColor('#008AC5')
-        .padding({ top: 2, bottom: 2 })
+      if (this.showCountEntry()) {
+        Text(this.countEntryText())
+          .fontSize(12)
+          .fontColor('#008AC5')
+          .padding({ top: 2, bottom: 2 })
+      }
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
