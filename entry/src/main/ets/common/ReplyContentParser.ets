@@ -6,6 +6,9 @@ const BVID_REGEX: RegExp = /BV[0-9A-Za-z]{10}/;
 // 整条视频链接（含协议与域名前缀）作为一个片段：拆成“白字前缀+蓝 BV”两半时，
 // Flex/Text 会在两片之间换行，出现上半行白下半行蓝的断裂感。
 const VIDEO_URL_REGEX: RegExp = /https?:\/\/(?:www\.)?bilibili\.com\/video\/(?:BV[0-9A-Za-z]{10}|av\d{1,18})\/?/i;
+/** 普通网页链接；末尾常见中英文标点在命中后剥离，避免把句号带进浏览器。 */
+const WEB_URL_REGEX: RegExp = /https?:\/\/[^\s<>"'，。！？；、（）【】《》\[\]{}]+/i;
+const URL_TRAILING_PUNCTUATION_REGEX: RegExp = /[.,;!?，。！？；：、]+$/;
 const AID_REGEX: RegExp = /(?:^|[^A-Za-z])av(\d{1,18})/i;
 const ACTION_REGEX: RegExp = /(BV[0-9A-Za-z]{10}|(?:^|\s|[（(【\[])(?:\d{1,2}:)?[0-5]?\d:[0-5]\d|(?:^|[^A-Za-z])av\d{1,18})/i;
 const LEADING_BRACKET_REGEX: RegExp = /^[（(【\[]/;
@@ -88,6 +91,8 @@ export class ReplyRenderPart {
   seekSeconds: number = -1;
   bvid: string = '';
   aid: number = 0;
+  /** 非视频网页跳转地址；B 站视频链接也保留原地址，但点击时优先走应用内视频页。 */
+  url: string = '';
   mentionMid: number = 0;
   key: string = '';
 }
@@ -114,6 +119,14 @@ function aidFrom(value: string): number {
   return match === null ? 0 : Number(match[1]);
 }
 
+function normalizedWebUrl(value: string): string {
+  return value.replace(URL_TRAILING_PUNCTUATION_REGEX, '');
+}
+
+function isWebUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
 function pushText(result: Array<ReplyRenderPart>, item: ReplyItem, text: string, index: number): void {
   if (text.length === 0) return;
   const part: ReplyRenderPart = new ReplyRenderPart();
@@ -138,7 +151,13 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
   for (let i: number = 0; i < item.emotes.length; i++) {
     emoteSignature += '|' + item.emotes[i].text;
   }
-  const cacheKey: string = String(item.rpid) + '\n' + item.content + mentionSignature + emoteSignature;
+  // jump_url 在主列表精简响应里可能缺失、详情响应才补全；必须进入缓存键，
+  // 否则同 rpid 的精简解析会让后续完整数据仍无法点击链接。
+  let jumpSignature: string = '';
+  for (let i: number = 0; i < item.jumps.length; i++) {
+    jumpSignature += '|' + item.jumps[i].label + ':' + item.jumps[i].url;
+  }
+  const cacheKey: string = String(item.rpid) + '\n' + item.content + mentionSignature + emoteSignature + jumpSignature;
   const cached: Array<ReplyRenderPart> | undefined = parseCache.get(cacheKey);
   if (cached !== undefined) {
     return cached.slice();
@@ -173,7 +192,7 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
     for (let i: number = 0; i < item.jumps.length; i++) {
       const videoId: string = bvidFrom(item.jumps[i].url);
       const aid: number = aidFrom(item.jumps[i].url);
-      if (videoId.length === 0 && aid <= 0) continue;
+      if (videoId.length === 0 && aid <= 0 && !isWebUrl(item.jumps[i].url)) continue;
       const at: number = rest.indexOf(item.jumps[i].label);
       if (at >= 0 && at < foundAt) {
         foundAt = at;
@@ -203,6 +222,18 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
       foundJump = null;
       foundMention = null;
       foundToken = urlMatch[0];
+    }
+    const webUrlMatch: RegExpExecArray | null = WEB_URL_REGEX.exec(rest);
+    if (webUrlMatch !== null && webUrlMatch.index < foundAt) {
+      const normalized: string = normalizedWebUrl(webUrlMatch[0]);
+      if (normalized.length > 0) {
+        foundAt = webUrlMatch.index;
+        foundLength = normalized.length;
+        foundEmote = null;
+        foundJump = null;
+        foundMention = null;
+        foundToken = normalized;
+      }
     }
     const actionMatch: RegExpExecArray | null = ACTION_REGEX.exec(rest);
     if (actionMatch !== null) {
@@ -247,7 +278,10 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
       const target: string = foundJump !== null ? foundJump.url : foundToken;
       part.bvid = bvidFrom(target);
       part.aid = aidFrom(target);
-      if (part.bvid.length === 0 && part.aid <= 0) part.seekSeconds = parseClock(foundToken);
+      if (isWebUrl(target)) part.url = target;
+      if (part.bvid.length === 0 && part.aid <= 0 && part.url.length === 0) {
+        part.seekSeconds = parseClock(foundToken);
+      }
     }
     result.push(part);
     rest = rest.substring(foundAt + foundLength);

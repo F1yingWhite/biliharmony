@@ -553,6 +553,9 @@ export struct DynCard {
       title: item.title,
       // 与卡片实际显示的缩略图保持同一 URL，hero 可直接复用已解码纹理。
       cover: biliImageThumbnail(item.cover, entryCoverWidth),
+      // 动态流位于根 Tabs 的懒加载列表中，视频页覆盖期间来源卡可能被回收。
+      // 保留入场放大，返回使用普通出栈，避免详情页缩回后因目标节点缺失而悬停。
+      mirrorHeroReturn: false,
     };
     try {
       const cardArea = this.getUIContext().getComponentUtils().getRectangleById(this.videoCardId(item));

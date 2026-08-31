@@ -13,6 +13,7 @@ import { AppTheme, DanmakuSettings } from '../../common/AppTheme';
 export struct LivePlayerView {
   @Prop @Watch('onPlayInfoChanged') playInfo: LivePlayInfo = new LivePlayInfo();
   @Prop @Watch('onMessagesChanged') messages: Array<LiveChatMessage> = [];
+  @Prop @Watch('onSyncVersionChanged') syncVersion: number = 0;
   @Prop title: string = '';
   @Prop uname: string = '';
   onQualityChange: (qn: number) => void = () => {};
@@ -250,6 +251,10 @@ export struct LivePlayerView {
 
   onMessagesChanged(): void {
     this.dmRenderer.onMessagesChanged(this.messages);
+  }
+
+  onSyncVersionChanged(): void {
+    this.dmRenderer.resetBaseline(this.messages);
   }
 
   private toggleDanmaku(): void {

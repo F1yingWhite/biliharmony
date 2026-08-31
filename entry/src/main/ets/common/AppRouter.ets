@@ -27,6 +27,8 @@ export interface VideoDetailParam {
   srcRect?: ImageViewerSrcRect;
   /** 首页整卡一镜到底的窗口矩形（vp）；快照通过 HERO_BG_SNAPSHOT_KEY 单独传递。 */
   cardRect?: ImageViewerSrcRect;
+  /** 是否在返回时镜面收回来源卡。Tabs 懒加载列表的来源节点不稳定，应设为 false 走普通出栈。 */
+  mirrorHeroReturn?: boolean;
 }
 
 /** 用户空间页跳转参数 */
