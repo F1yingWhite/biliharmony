@@ -26,6 +26,8 @@ export struct LiveRoomPage {
   @State superChats: Array<LiveChatMessage> = [];
   @State loading: boolean = true;
   @State qualityLoading: boolean = false;
+  @State refreshing: boolean = false;
+  @State liveSyncVersion: number = 0;
   @State draft: string = '';
   @State sending: boolean = false;
   @State emotePanelOpen: boolean = false;
@@ -53,6 +55,7 @@ export struct LiveRoomPage {
   aboutToAppear(): void {
     this.destroyed = false;
     this.lifecycleGeneration++;
+    Immersive.setKeepScreenOn(true);
     this.roomInfo.roomId = this.param.roomId;
     this.roomInfo.uid = this.param.uid;
     this.roomInfo.title = this.param.title;
@@ -70,6 +73,7 @@ export struct LiveRoomPage {
   aboutToDisappear(): void {
     this.destroyed = true;
     this.lifecycleGeneration++;
+    Immersive.setKeepScreenOn(false);
     if (this.flushTimer >= 0) {
       clearTimeout(this.flushTimer);
       this.flushTimer = -1;
@@ -122,7 +126,7 @@ export struct LiveRoomPage {
   }
 
   async changeQuality(qn: number): Promise<void> {
-    if (this.qualityLoading) return;
+    if (this.qualityLoading || this.refreshing) return;
     this.qualityLoading = true;
     const generation: number = this.lifecycleGeneration;
     try {
@@ -132,6 +136,58 @@ export struct LiveRoomPage {
       }
     } finally {
       if (!this.destroyed && generation === this.lifecycleGeneration) this.qualityLoading = false;
+    }
+  }
+
+  /** 同步到直播最新状态：播放源、历史弹幕基线和实时连接从同一刷新边界重新建立。 */
+  async syncLive(): Promise<void> {
+    if (this.refreshing || this.loading || this.destroyed) return;
+    this.refreshing = true;
+    this.qualityLoading = false;
+    const generation: number = ++this.lifecycleGeneration;
+    const qn: number = this.playInfo.currentQn > 0 ? this.playInfo.currentQn : 10000;
+    let synced: boolean = false;
+
+    this.client.close();
+    this.connected = false;
+    this.stopHistoryFallback();
+    this.clearPendingMessages();
+
+    try {
+      // 两个请求同时发出，尽量缩小播放源与弹幕快照之间的时间差。
+      const playTask: Promise<LivePlayInfo | null> = LiveApi.getLivePlayInfo(this.param.roomId, qn);
+      const historyTask: Promise<Array<LiveChatMessage>> = LiveApi.getLiveDanmakuHistory(this.param.roomId);
+      const play: LivePlayInfo | null = await playTask;
+      const history: Array<LiveChatMessage> = await historyTask;
+      if (this.destroyed || generation !== this.lifecycleGeneration) return;
+      if (play === null || play.url.length === 0) throw new Error('empty live url');
+
+      this.knownMessageIds.clear();
+      for (let i: number = 0; i < history.length; i++) this.knownMessageIds.add(history[i].id);
+      this.messages = history;
+      this.chatList = history.slice(-200);
+      this.chatAtBottom = true;
+      this.lastLiveMessageAt = Date.now();
+      this.playInfo = play;
+      this.liveSyncVersion++;
+      this.errorText = '';
+      this.scrollChatToEnd(true);
+      synced = true;
+      this.getUIContext().getPromptAction().showToast({ message: '已同步到直播最新状态' });
+    } catch (e) {
+      if (!this.destroyed && generation === this.lifecycleGeneration) {
+        this.getUIContext().getPromptAction().showToast({ message: '同步失败，请检查网络后重试' });
+      }
+    } finally {
+      if (!this.destroyed && generation === this.lifecycleGeneration) {
+        // 即使刷新失败，也恢复旧播放源对应的实时弹幕连接，避免房间停在离线状态。
+        this.client.connect(this.param.roomId).catch(() => {
+        });
+        this.lastLiveMessageAt = Date.now();
+        this.startHistoryFallback();
+        this.refreshing = false;
+        if (!synced) this.connected = false;
+      }
     }
   }
 
@@ -202,7 +258,7 @@ export struct LiveRoomPage {
   }
 
   private startHistoryFallback(): void {
-    if (this.historyPollTimer >= 0) clearInterval(this.historyPollTimer);
+    this.stopHistoryFallback();
     this.historyPollTimer = setInterval(() => {
       if (this.destroyed || Date.now() - this.lastLiveMessageAt < 8000) return;
       this.pollRecentHistory().catch(() => {
@@ -210,10 +266,26 @@ export struct LiveRoomPage {
     }, 5000);
   }
 
+  private stopHistoryFallback(): void {
+    if (this.historyPollTimer >= 0) {
+      clearInterval(this.historyPollTimer);
+      this.historyPollTimer = -1;
+    }
+  }
+
+  private clearPendingMessages(): void {
+    if (this.flushTimer >= 0) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = -1;
+    }
+    this.pendingMsgs = [];
+  }
+
   /** WebSocket 安静超过 8 秒时低频补拉，只追加未见 ID，不重放进房快照。 */
   private async pollRecentHistory(): Promise<void> {
+    const generation: number = this.lifecycleGeneration;
     const history: Array<LiveChatMessage> = await LiveApi.getLiveDanmakuHistory(this.param.roomId);
-    if (this.destroyed) return;
+    if (this.destroyed || generation !== this.lifecycleGeneration) return;
     for (let i: number = 0; i < history.length; i++) {
       if (!this.knownMessageIds.has(history[i].id)) this.appendMessage(history[i]);
     }
@@ -265,8 +337,24 @@ export struct LiveRoomPage {
           }
         }
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      Text(this.roomInfo.watched)
-        .fontSize(11).fontColor(this.isDark ? '#8A8A8E' : '#9499A0')
+      Row({ space: 8 }) {
+        Text(this.roomInfo.watched)
+          .fontSize(11).fontColor(this.isDark ? '#8A8A8E' : '#9499A0')
+        Stack({ alignContent: Alignment.Center }) {
+          if (this.refreshing) {
+            LoadingProgress().width(17).height(17).color(this.accent)
+          } else {
+            Image($r('app.media.ic_refresh'))
+              .width(18).height(18).fillColor(this.isDark ? '#D5D7DB' : '#61666D')
+              .renderMode(ImageRenderMode.Template)
+          }
+        }
+        .width(34).height(34).borderRadius(17)
+        .backgroundColor(this.isDark ? '#25262B' : '#EEF0F2')
+        .enabled(!this.refreshing && !this.loading)
+        .onClick(() => this.syncLive().catch(() => {
+        }))
+      }.alignItems(VerticalAlign.Center)
     }
     .width('100%').padding({ left: 14, right: 14, top: 12, bottom: 11 })
     .alignItems(VerticalAlign.Center)
@@ -519,6 +607,7 @@ export struct LiveRoomPage {
       if (this.playInfo.url.length > 0) {
         LivePlayerView({
           playInfo: this.playInfo, messages: this.messages,
+          syncVersion: this.liveSyncVersion,
           title: this.roomInfo.title, uname: this.roomInfo.uname,
           onQualityChange: (qn: number) => this.changeQuality(qn),
           onFullscreenChange: (value: boolean) => this.fullscreen = value,

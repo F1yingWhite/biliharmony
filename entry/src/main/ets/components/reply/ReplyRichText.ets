@@ -212,7 +212,8 @@ export struct ReplyRichText {
   }
 
   private isClickable(part: ReplyRenderPart): boolean {
-    return part.mentionMid > 0 || part.seekSeconds >= 0 || part.bvid.length > 0 || part.aid > 0;
+    return part.mentionMid > 0 || part.seekSeconds >= 0 || part.bvid.length > 0 || part.aid > 0 ||
+      part.url.length > 0;
   }
 
   private isPlainContent(): boolean {

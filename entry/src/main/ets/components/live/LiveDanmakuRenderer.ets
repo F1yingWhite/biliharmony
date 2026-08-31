@@ -69,6 +69,14 @@ export class LiveDanmakuRenderer {
     this.messageBaselineReady = true;
   }
 
+  /** 手动同步直播时清空旧画面与待喷队列，再以最新历史快照建立增量基线。 */
+  resetBaseline(messages: Array<LiveChatMessage>): void {
+    this.pending = [];
+    this.stopLoop(true);
+    this.lastReleaseMs = 0;
+    this.setBaseline(messages);
+  }
+
   /** 新消息增量进入：基线之后新增的弹幕先入待喷队列，由渲染循环按节奏逐条释放。 */
   onMessagesChanged(messages: Array<LiveChatMessage>): void {
     if (!this.messageBaselineReady) return;

@@ -21,6 +21,7 @@ import { UserApi } from '../../api/UserApi';
 import { UserStore } from '../../common/UserStore';
 import { CommentApi } from '../../api/CommentApi';
 import { RemoteAssetCache } from '../../common/RemoteAssetCache';
+import { common } from '@kit.AbilityKit';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -175,6 +176,17 @@ export struct ReplyCard {
       PlayerCommandBus.stop();
       const param: VideoDetailParam = { bvid: part.bvid, aid: part.aid, title: part.text };
       this.onNavigate(() => AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param));
+    } else if (part.url.length > 0) {
+      const context: common.UIAbilityContext | undefined =
+        this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+      if (context === undefined) {
+        this.toast('暂时无法打开网页');
+        return;
+      }
+      PlayerCommandBus.stop();
+      this.onNavigate(() => {
+        context.openLink(part.url).catch((): void => this.toast('网页打开失败'));
+      });
     }
   }
 

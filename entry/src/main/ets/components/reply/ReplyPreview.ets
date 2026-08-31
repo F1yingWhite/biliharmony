@@ -40,7 +40,8 @@ export struct ReplyPreview {
                 .verticalAlign(ImageSpanAlignment.BOTTOM)
             } else {
               Span(part.text)
-                .fontColor(part.mentionMid > 0 || part.seekSeconds >= 0 || part.bvid.length > 0 || part.aid > 0 ?
+                .fontColor(part.mentionMid > 0 || part.seekSeconds >= 0 || part.bvid.length > 0 || part.aid > 0 ||
+                  part.url.length > 0 ?
                   '#008AC5' : (this.isDark ? '#F0F0F0' : '#18191C'))
             }
           }, (part: ReplyRenderPart) => part.key)

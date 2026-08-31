@@ -796,6 +796,10 @@ export struct VideoDetailPage {
   goBack(): void {
     if (this.closing) return;
     this.closing = true;
+    if (this.param.mirrorHeroReturn === false) {
+      AppNavStack.pop();
+      return;
+    }
     if (this.entryFromWholeCard && this.param.cardRect !== undefined && this.screenWidthVp > 0) {
       const rect: ImageViewerSrcRect = this.param.cardRect;
       const scale: number = rect.w / this.screenWidthVp;
