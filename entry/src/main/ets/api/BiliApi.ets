@@ -11,6 +11,7 @@ import { PlayUrlInfo, SubtitleCue, SubtitleTrack, VideoDetail, VideoItem,
   VideoRelationState } from '../model/Models';
 import { parseDanmakuSegment, ProtoDanmaku } from '../common/DanmakuProto';
 import { ActionResult, actionWithCsrf, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
+import { CommentLog } from '../common/CommentLog';
 
 // 统一走 internal/ApiCommon 的 ActionResult（唯一类型来源），此处 re-export 保持调用方 import 不变。
 export { ActionResult };
@@ -112,14 +113,31 @@ export class BiliApi {
 
   // ===== 视频详情（aid 与 bvid 二选一） =====
   static async getVideoDetail(aid: number, bvid: string): Promise<VideoDetail | null> {
+    if (aid <= 0 && bvid.length === 0) return null;
     const params: Record<string, string> = bvid.length > 0 ? { 'bvid': bvid } : { 'aid': String(aid) };
     const url: string = Api.videoIntro + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await webGet(url);
-    const data: Record<string, Object> | null = getData(resp);
-    if (data === null) {
-      return null;
+    let lastStatus: number = -1;
+    let lastCode: number = -1;
+    for (let attempt: number = 0; attempt < 2; attempt++) {
+      const resp: HttpResponse = await webGet(url);
+      lastStatus = resp.status;
+      lastCode = resp.ok ? asNumber(resp.json()['code'], -1) : resp.status;
+      const data: Record<string, Object> | null = getData(resp);
+      if (data !== null) {
+        const detail: VideoDetail = VideoDetail.from(data);
+        // code=0 但 data 被网关截断时不能生成一个 aid/cid 全为 0 的假详情。
+        if (detail.aid > 0 && detail.cid > 0) return detail;
+      }
+      // 只有明确的稿件不存在/不可见业务码才返回失效；412、-352、-500、超时及
+      // 畸形成功响应都可能是一次性风控或链路抖动，应在页面显示错误前自动重试。
+      if (resp.ok && (lastCode === -404 || lastCode === 62002 || lastCode === 62004)) return null;
+      if (attempt === 0) {
+        CommentLog.warn('api.detail.retry', 'aid=' + String(aid) + ' bvid=' + bvid +
+          ' status=' + String(lastStatus) + ' code=' + String(lastCode));
+        await new Promise<void>((resolve: () => void) => setTimeout(resolve, 300));
+      }
     }
-    return VideoDetail.from(data);
+    throw new Error('视频详情接口失败：status=' + String(lastStatus) + ' code=' + String(lastCode));
   }
 
   // ===== 播放地址（DASH 分离音视频可提供 1080P+；aid 与 bvid 二选一） =====

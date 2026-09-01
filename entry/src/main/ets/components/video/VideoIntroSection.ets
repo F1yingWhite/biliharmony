@@ -80,7 +80,7 @@ export struct VideoIntroSection {
       Text(formatCount(this.detail.view)).fontSize(12).fontColor('#9499A0').margin({ left: 4 })
       Image($r('app.media.ic_comment')).width(13).height(13)
         .renderMode(ImageRenderMode.Template).fillColor('#9499A0').margin({ left: 12 })
-      Text(formatCount(this.detail.danmaku)).fontSize(12).fontColor('#9499A0').margin({ left: 4 })
+      Text(formatCount(this.detail.reply)).fontSize(12).fontColor('#9499A0').margin({ left: 4 })
       Image($r('app.media.ic_history')).width(13).height(13)
         .renderMode(ImageRenderMode.Template).fillColor('#9499A0').margin({ left: 12 })
       Text(formatDate(this.detail.pubdate)).fontSize(12).fontColor('#9499A0').margin({ left: 4 })

@@ -3,6 +3,7 @@
  * 评论、动态和个人空间共用同一套头像/挂件比例，避免各页面分别调尺寸后互相漂移。
  */
 import { RemoteAssetCache } from '../common/RemoteAssetCache';
+import { biliImageThumbnail } from '../common/ImageUrl';
 
 @Component
 export struct DecoratedAvatar {
@@ -15,47 +16,29 @@ export struct DecoratedAvatar {
   @Prop avatarBorderWidth: number = 0;
   @Prop avatarBorderColor: string = '#00FFFFFF';
   @State avatarLoaded: boolean = false;
-  @State faceLocal: string = '';
   @State pendantLocal: string = '';
-  private faceGeneration: number = 0;
   private pendantGeneration: number = 0;
 
   aboutToAppear(): void {
-    this.primeFace();
     this.primePendant();
   }
 
   aboutToDisappear(): void {
-    this.faceGeneration++;
     this.pendantGeneration++;
   }
 
   private onFaceChanged(): void {
     this.avatarLoaded = false;
-    this.primeFace();
   }
 
   private onPendantChanged(): void {
     this.primePendant();
   }
 
-  private primeFace(): void {
-    const url: string = this.face;
-    const generation: number = ++this.faceGeneration;
-    const cached: string = RemoteAssetCache.cachedAvatar(url);
-    this.faceLocal = cached !== url ? cached : '';
-    if (!url.startsWith('http') || cached !== url) return;
-    RemoteAssetCache.ensureAvatar(url).then((local: string): void => {
-      if (generation === this.faceGeneration && this.face === url && local !== url) {
-        this.avatarLoaded = false;
-        this.faceLocal = local;
-      }
-    }).catch((): void => {
-    });
-  }
-
   private faceSource(): string {
-    return this.faceLocal.length > 0 ? this.faceLocal : this.face;
+    // 不再把评论流中的每个用户头像永久写入应用缓存。统一请求 240px WebP
+    // 缩略图，并交给 ArkUI 自带的有界图片缓存复用。
+    return biliImageThumbnail(this.face, 240);
   }
 
   private primePendant(): void {
