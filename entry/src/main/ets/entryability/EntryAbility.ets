@@ -20,7 +20,7 @@ export default class EntryAbility extends UIAbility {
     SearchHistoryStore.init(this.context);
     // 表情占位符映射表磁盘缓存：冷启动即恢复，不依赖网络。
     EmoteResolver.attach(this.context);
-    // 表情、用户装扮与典藏卡资源的 cacheDir 落盘入口。
+    // 表情、用户装扮与典藏卡资源的 cacheDir 落盘入口，并回收旧版头像及评论分享缓存。
     RemoteAssetCache.attach(this.context);
     AppTheme.init(this.context);
     AppTheme.initThemeStore(this.context).catch(() => {
