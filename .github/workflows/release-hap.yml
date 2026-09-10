@@ -44,6 +44,21 @@ jobs:
           else
             echo "No signing secret configured; the unsigned release HAP will still be uploaded."
           fi
+          # 旧签名 Secret 可能保留 API 24；仅统一 SDK 元数据，保留全部签名字段。
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          profile = Path('build-profile.json5')
+          updated, count = re.subn(r'("compatibleSdkVersion"\s*:\s*)("[^"]*"|\d+)',
+                                   r'\1"26.0.0"', profile.read_text())
+          if count == 0:
+              raise SystemExit('compatibleSdkVersion is missing from build-profile.json5')
+          profile.write_text(updated)
+          PY
+
+      - name: Run service regression tests
+        shell: bash
+        run: /Applications/DevEco-Studio.app/Contents/tools/node/bin/node --test tool/qa/regression.test.cjs
 
       - name: Build release HAP
         shell: bash

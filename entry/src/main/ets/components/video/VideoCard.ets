@@ -3,6 +3,7 @@
  * 首页信息流可开卡片右下 ⋮（举报/不想看浮层）
  * @Reusable：LazyForEach 回收复用，数据通过 @Prop + aboutToReuse 刷新
  */
+import { VideoRowCard } from './VideoRowCard';
 import { display } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { VideoItem } from '../../model/Models';
@@ -10,7 +11,7 @@ import { formatCount, formatDuration } from '../../common/Utils';
 import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   NAV_VIDEO_DETAIL, VideoDetailParam, ImageViewerSrcRect } from '../../common/AppRouter';
 import { Haptic } from '../../common/Haptic';
-import { UserStore } from '../../common/UserStore';
+import { UserStore } from '../../services/auth/UserStore';
 import { FeedCardTitle, FeedCoverImage, FeedGradientMask } from '../FeedCardParts';
 import { biliImageThumbnail } from '../../common/ImageUrl';
 
@@ -25,6 +26,7 @@ export struct VideoCard {
   @Prop video: VideoItem = new VideoItem();
   /** 用户空间等紧凑网格隐藏 UP/分区行，复用同一封面和跳转逻辑。 */
   @Prop compact: boolean = false;
+  @Prop horizontal: boolean = false;
   /**
    * 卡片 id 前缀：同一窗口内可能有多个常驻容器渲染同一视频（首页推荐/热门 Tabs、
    * 搜索页与用户空间叠在首页之上），裸 bvid 会让 getRectangleById 命中离屏卡片，
@@ -44,6 +46,7 @@ export struct VideoCard {
   aboutToReuse(params: Record<string, Object>): void {
     this.video = params.video as VideoItem;
     this.compact = params.compact === true;
+    this.horizontal = params.horizontal === true;
     this.idPrefix = params.idPrefix === undefined ? '' : params.idPrefix as string;
     this.wholeCardTransition = params.wholeCardTransition === true;
     // showMore 现为 @Prop（框架自动同步）；两个回调是普通属性，复用必须按新调用方重置。
@@ -64,6 +67,26 @@ export struct VideoCard {
   }
 
   build() {
+    if (this.horizontal) {
+      VideoRowCard({
+        cover: biliImageThumbnail(this.video.cover, 900),
+        coverId: this.coverId(),
+        title: this.video.title,
+        upName: this.video.upName,
+        overlayText: this.video.duration > 0 ? formatDuration(this.video.duration) : '',
+        extraText: (this.video.playText || formatCount(this.video.play)) + ' 播放 · ' +
+          (this.video.danmakuText || formatCount(this.video.danmaku)) + ' 弹幕',
+        compact: true,
+        onTap: () => this.openDetail(),
+      })
+      .id(this.cardId())
+    } else {
+      this.GridCard()
+    }
+  }
+
+  @Builder
+  GridCard() {
     Column() {
       // 封面：点击区是封面本身（标题/信息区各自挂点击，互不误触）。
       Stack() {
@@ -157,7 +180,8 @@ export struct VideoCard {
         FeedCardTitle({ title: this.video.title, isDark: this.isDark })
       }
       .width('100%')
-      .height(38)
+      // 首页标题预留两行 38vp + 顶部 8vp，避免作者行贴住第二行标题。
+      .height(this.showMore ? 46 : 38)
       .alignItems(VerticalAlign.Top)
       .padding({ left: 10, right: 10, top: 8 })
       .onClick(() => this.openDetail())
@@ -186,13 +210,14 @@ export struct VideoCard {
           }
         }
         .width('100%')
-        .height(30)
+        .height(this.showMore ? 26 : 30)
         .padding({ left: 10, right: 5 })
         .alignItems(VerticalAlign.Center)
       }
     }
     .width('100%')
-    .padding({ bottom: 6 })
+    // 首页底栏整体下移 6vp；收回多余底部留白，保持卡片总高度不变。
+    .padding({ bottom: this.showMore ? 2 : 6 })
     .alignItems(HorizontalAlign.Start)
     // 白色卡片承载边界：封面通顶、文字区内缩，浅色白底/深色深灰底。
     .backgroundColor(this.isDark ? '#2B2D34' : '#FFFFFF')

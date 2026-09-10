@@ -1,7 +1,7 @@
 /**
  * 搜索域 API：热搜 / 综合搜索 / 分类搜索 / 全站排行 / 每周必看 / 入站必刷 / 搜索建议。
  */
-import { HttpClient, HttpResponse } from '../common/HttpClient';
+import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asString, asNumber, str } from '../common/Utils';
@@ -9,7 +9,7 @@ import { ArticleSearchItem, ArticleSearchResult, HotSearchItem, PgcSearchItem, P
   PopularSeriesData, PopularSeriesItem, SearchAllResult, SearchAllSection, SearchTypes, UserSearchItem,
   UserSearchResult, VideoItem, VideoSearchResult } from '../model/Models';
 import { LiveRoomItem, LiveSearchResult } from '../model/LiveModels';
-import { getData, webGet } from './internal/ApiCommon';
+import { failureText, getData, webGet } from './internal/ApiCommon';
 
 /** web 搜索每页条数：B 站搜索接口翻页时必须显式传 page_size，否则 page>1 返回空 result。 */
 const SEARCH_PAGE_SIZE: number = 20;
@@ -75,8 +75,22 @@ export class SearchApi {
   }
 
   // ===== 综合搜索（all/v2）：按 result_type 分区混排；番剧/用户分区只在第一页返回（与 PiliPlus 一致） =====
-  static async searchAll(keyword: string, page: number): Promise<SearchAllResult> {
+  static async searchAll(keyword: string, page: number, order: string = 'totalrank',
+    duration: number = 0, pubtimeBegin: number = 0, tids: number = 0): Promise<SearchAllResult> {
     const result: SearchAllResult = new SearchAllResult();
+    // 排序与筛选针对视频，使用分类搜索接口；默认条件仍保留综合聚合分区。
+    if (order !== 'totalrank' || duration > 0 || pubtimeBegin > 0 || tids > 0) {
+      const videos: VideoSearchResult = await SearchApi.searchVideosByType(keyword, page, order,
+        duration, pubtimeBegin, tids);
+      if (videos.videos.length > 0) {
+        const section: SearchAllSection = new SearchAllSection();
+        section.type = SearchTypes.video;
+        section.videos = videos.videos;
+        result.sections.push(section);
+      }
+      result.totals.set(SearchTypes.video, videos.numResults);
+      return result;
+    }
     const params: Record<string, string> = {
       'keyword': keyword,
       'page': String(page),
@@ -85,9 +99,7 @@ export class SearchApi {
     await WbiSign.encWbi(params);
     const resp: HttpResponse = await webGet(Api.searchAll, params);
     const data: Record<string, Object> | null = getData(resp);
-    if (data === null) {
-      return result;
-    }
+    if (data === null) throw new Error(failureText(resp, '搜索失败，请重试'));
     // pageinfo：各分类结果总数，用于结果页 Tab 徽标
     const pageinfo: Record<string, Object> = asObject(data['pageinfo']);
     const infoKeys: Array<string> = Object.keys(pageinfo);
@@ -116,6 +128,12 @@ export class SearchApi {
           section.videos.push(VideoItem.fromSearchItem(items[j]));
         }
         result.sections.push(section);
+      } else if (rtype === SearchTypes.article && page === 1) {
+        for (let j: number = 0; j < items.length; j++) {
+          const item: ArticleSearchItem = ArticleSearchItem.from(items[j]);
+          if (item.id > 0) section.articles.push(item);
+        }
+        if (section.articles.length > 0) result.sections.push(section);
       } else if (rtype === SearchTypes.biliUser && page === 1) {
         for (let j = 0; j < items.length; j++) {
           section.users.push(UserSearchItem.from(items[j]));
@@ -156,7 +174,9 @@ export class SearchApi {
     }
     await WbiSign.encWbi(params);
     const resp: HttpResponse = await webGet(Api.searchByType, params);
-    return getData(resp);
+    const data: Record<string, Object> | null = getData(resp);
+    if (data === null) throw new Error(failureText(resp, '搜索失败，请重试'));
+    return data;
   }
 
   // ===== 视频搜索（order 排序 + 时长/发布时间/分区筛选） =====

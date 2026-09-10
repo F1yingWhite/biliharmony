@@ -10,6 +10,7 @@
 @Component
 export struct VideoRowCard {
   @Prop cover: string = '';
+  @Prop coverId: string = '';
   @Prop title: string = '';
   @Prop upName: string = '';
   /** 封面右下角徽标文案，空串不显示 */
@@ -37,8 +38,8 @@ export struct VideoRowCard {
     Row({ space: this.compact ? 10 : 11 }) {
       Stack({ alignContent: Alignment.BottomEnd }) {
         Image(this.cover)
-          .width(this.compact ? 130 : 132)
-          .height(74)
+          .width('100%')
+          .aspectRatio(16 / 9)
           .objectFit(ImageFit.Cover)
           .borderRadius(this.compact ? 6 : 7)
           // 历史/收藏/搜索结果等长列表中的封面异步解码（syncLoad=false），滚动不卡。
@@ -53,15 +54,17 @@ export struct VideoRowCard {
             .margin(this.compact ? { right: 4, bottom: 4 } : { left: 4, right: 4, top: 4, bottom: 4 })
         }
       }
+      .width(this.compact ? '43%' : 132)
+      .id(this.coverId)
       .clip(true)
       Column({ space: this.compact ? 5 : this.contentSpace }) {
         if (this.compact) {
           Text(this.title)
-            .fontSize(13)
+            .fontSize(14)
             .fontColor(this.isDark ? this.titleDarkColor : '#18191C')
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .lineHeight(17)
+            .lineHeight(19)
         } else {
           Text(this.title)
             .fontSize(14)

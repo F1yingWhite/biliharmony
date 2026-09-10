@@ -16,6 +16,7 @@ export class DanmakuSettings {
   opacity: number = 0.85;
   speed: number = 1.0;
   fontScale: number = 1.0;
+  spacing: number = 1.0;
   density: number = 22;
   blockLevel: number = 0;
   blockScroll: boolean = false;
@@ -48,6 +49,7 @@ export class AppTheme {
   private static readonly KEY_DM_OPACITY: string = 'danmakuOpacity';
   private static readonly KEY_DM_SPEED: string = 'danmakuSpeed';
   private static readonly KEY_DM_FONT_SCALE: string = 'danmakuFontScale';
+  private static readonly KEY_DM_SPACING: string = 'danmakuSpacing';
   private static readonly KEY_DM_DENSITY: string = 'danmakuDensity';
   private static readonly KEY_DM_BLOCK_LEVEL: string = 'danmakuBlockLevel';
   private static readonly KEY_DM_BLOCK_SCROLL: string = 'danmakuBlockScroll';
@@ -69,6 +71,7 @@ export class AppTheme {
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_DARK, false);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_GLASS_ENABLED, true);
     PersistentStorage.persistProp<number>('videoQualityPref', 0);
+    PersistentStorage.persistProp<number>('videoManualQuality', 0);
     AppTheme.ensureString(AppTheme.KEY_THEME_MODE, AppTheme.MODE_SYSTEM);
     AppTheme.ensureString(AppTheme.KEY_ACCENT, Constants.brandPink);
     AppTheme.ensureBool(AppTheme.KEY_DARK, false);
@@ -76,8 +79,11 @@ export class AppTheme {
     AppTheme.ensureNumber(AppTheme.KEY_HEADER_FADE, 0);
     AppTheme.ensureBool(AppTheme.KEY_GLASS_ENABLED, true);
     AppTheme.ensureBool('autoContinuePlay', true);
+    PersistentStorage.persistProp<boolean>('backgroundPlaybackEnabled', false);
+    AppTheme.ensureBool('backgroundPlaybackEnabled', false);
     AppTheme.ensureBool('sponsorSkipEnabled', true);
     AppTheme.ensureNumber('videoQualityPref', 0);
+    AppTheme.ensureNumber('videoManualQuality', 0);
     // 定时深色：默认关闭；时段默认 19:00 - 07:00（跨午夜）。
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_AUTO_DARK, false);
     PersistentStorage.persistProp<string>(AppTheme.KEY_AUTO_DARK_START, '19:00');
@@ -127,6 +133,8 @@ export class AppTheme {
       if (auto.length > 0) AppStorage.setOrCreate<boolean>('autoContinuePlay', auto === 'true');
       const sponsor: string = AppTheme.themePreferences.getSync('sponsorSkipEnabled', '') as string;
       if (sponsor.length > 0) AppStorage.setOrCreate<boolean>('sponsorSkipEnabled', sponsor === 'true');
+      const background: string = AppTheme.themePreferences.getSync('backgroundPlaybackEnabled', '') as string;
+      if (background.length > 0) AppStorage.setOrCreate<boolean>('backgroundPlaybackEnabled', background === 'true');
       AppTheme.applyCurrentMode();
     } catch (e) {
       // 恢复失败保留默认态，不影响启动。
@@ -148,6 +156,10 @@ export class AppTheme {
   /** 自动连播开关写 Preferences。 */
   static persistAutoContinue(on: boolean): void {
     AppTheme.syncBooleanPref('autoContinuePlay', on);
+  }
+
+  static persistBackgroundPlayback(on: boolean): void {
+    AppTheme.syncBooleanPref('backgroundPlaybackEnabled', on);
   }
 
   /** 广告空降开关写 Preferences。 */
@@ -203,6 +215,7 @@ export class AppTheme {
       out.opacity = AppTheme.readNumberPref(store, AppTheme.KEY_DM_OPACITY, out.opacity);
       out.speed = AppTheme.readNumberPref(store, AppTheme.KEY_DM_SPEED, out.speed);
       out.fontScale = AppTheme.readNumberPref(store, AppTheme.KEY_DM_FONT_SCALE, out.fontScale);
+      out.spacing = Math.max(0.5, Math.min(2, AppTheme.readNumberPref(store, AppTheme.KEY_DM_SPACING, out.spacing)));
       out.density = Math.round(AppTheme.readNumberPref(store, AppTheme.KEY_DM_DENSITY, out.density));
       out.blockLevel = Math.round(AppTheme.readNumberPref(store, AppTheme.KEY_DM_BLOCK_LEVEL, out.blockLevel));
       out.blockScroll = (store.getSync(AppTheme.KEY_DM_BLOCK_SCROLL, '') as string) === 'true';
@@ -225,6 +238,7 @@ export class AppTheme {
       store.putSync(AppTheme.KEY_DM_OPACITY, String(s.opacity));
       store.putSync(AppTheme.KEY_DM_SPEED, String(s.speed));
       store.putSync(AppTheme.KEY_DM_FONT_SCALE, String(s.fontScale));
+      store.putSync(AppTheme.KEY_DM_SPACING, String(s.spacing));
       store.putSync(AppTheme.KEY_DM_DENSITY, String(s.density));
       store.putSync(AppTheme.KEY_DM_BLOCK_LEVEL, String(s.blockLevel));
       store.putSync(AppTheme.KEY_DM_BLOCK_SCROLL, s.blockScroll ? 'true' : 'false');

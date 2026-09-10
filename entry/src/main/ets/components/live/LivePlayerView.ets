@@ -1,4 +1,9 @@
+import { AVVolumePanel } from '@kit.AudioKit';
+import { SystemMediaVolume } from '../player/SystemMediaVolume';
+import { PlayerGestureController } from '../player/PlayerGestureController';
+import { PlayerGestureOverlay } from '../player/PlayerGestureOverlay';
 /** 直播播放器：低延迟 AVPlayer、基础画质与视频同款 Canvas 分轨弹幕。 */
+import { LiveSuperChatShelf } from './LiveSuperChatShelf';
 import { media } from '@kit.MediaKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Immersive } from '../../common/Immersive';
@@ -15,13 +20,21 @@ export struct LivePlayerView {
   @Prop @Watch('onMessagesChanged') messages: Array<LiveChatMessage> = [];
   @Prop @Watch('onSyncVersionChanged') syncVersion: number = 0;
   @Prop title: string = '';
+  @Prop superChats: Array<LiveChatMessage> = [];
+  @State viewportHeight: number = 240;
   @Prop uname: string = '';
   onQualityChange: (qn: number) => void = () => {};
   onFullscreenChange: (fullscreen: boolean) => void = () => {};
   @State playing: boolean = false;
   @State prepared: boolean = false;
   @State buffering: boolean = true;
+  @State systemVolumeLevel: number = 0;
+  @State gestureAdjustKind: string = '';
+  @State gestureAdjustPercent: number = -1;
+  private systemVolume: SystemMediaVolume = new SystemMediaVolume();
+  private gestureCtl: PlayerGestureController | null = null;
   @State controls: boolean = true;
+  @State scExpanded: boolean = false;
   @State danmakuOn: boolean = true;
   @State showQuality: boolean = false;
   @State showDmSettings: boolean = false;
@@ -30,6 +43,7 @@ export struct LivePlayerView {
   @State dmFrameRate: number = 60;
   @State dmSpeed: number = 1;
   @State dmFontScale: number = 1;
+  @State dmSpacing: number = 1;
   @State dmDensity: number = 22;
   @State fullscreen: boolean = false;
   @State errorText: string = '';
@@ -44,11 +58,31 @@ export struct LivePlayerView {
   private destroyed: boolean = false;
   private playerGeneration: number = 0;
   private playerCreating: boolean = false;
+  private playerRestartPending: boolean = false;
   private dmContext: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
   private dmRenderer: LiveDanmakuRenderer = new LiveDanmakuRenderer(this.dmContext);
 
   aboutToAppear(): void {
     this.destroyed = false;
+    try { this.systemVolumeLevel = this.systemVolume.level(); } catch (e) {}
+    this.systemVolume.start((percent: number) => {
+      if (this.destroyed) return;
+      try { this.systemVolumeLevel = this.systemVolume.level(); } catch (e) {}
+      if (!this.destroyed && this.gestureAdjustKind === '音量') this.gestureAdjustPercent = percent;
+    });
+    this.gestureCtl = new PlayerGestureController(
+      (value: number) => {}, (value: number) => {},
+      (kind: string, percent: number) => {
+        this.gestureAdjustKind = kind === 'brightness' ? '亮度' : (kind === 'volume' ? '音量' : '');
+        this.gestureAdjustPercent = kind === 'volume' ? this.systemVolume.percent() : percent;
+      },
+      (value: number) => {},
+      (value: number) => {
+        try { this.systemVolumeLevel = this.systemVolume.levelForPercent(value); } catch (e) {}
+      },
+      (value: number) => { AppTheme.saveLastBrightness(value); },
+      (value: number) => { Immersive.setWindowBrightness(value); },
+    );
     AppStorage.setOrCreate<boolean>('livePlayerFullscreen', false);
     AppStorage.setOrCreate<number>('livePlayerExitRequest', 0);
     this.restoreDanmakuSettings();
@@ -57,6 +91,8 @@ export struct LivePlayerView {
 
   aboutToDisappear(): void {
     this.destroyed = true;
+    this.systemVolume.stop();
+    Immersive.restoreWindowBrightness();
     this.playerGeneration++;
     this.release();
     this.dmRenderer.release();
@@ -82,6 +118,7 @@ export struct LivePlayerView {
     this.sourceIndex = 0;
     this.prepared = false;
     this.playing = false;
+    this.dmRenderer.setPlayback(false, this.fullscreen);
     this.buffering = true;
     this.errorText = '';
     const old: media.AVPlayer | null = this.player;
@@ -89,17 +126,17 @@ export struct LivePlayerView {
     if (old !== null) {
       try { await old.release(); } catch (e) {}
     }
-    // 等待上一个在途创建退场（其 finally 无条件复位 playerCreating），
-    // 否则 initPlayer 被 playerCreating 守卫直接 return，换源后无人补建，黑屏。
-    while (this.playerCreating && !this.destroyed && generation === this.playerGeneration) {
-      await new Promise<void>((resolve: () => void) => setTimeout(resolve, 50));
-    }
     if (!this.destroyed && generation === this.playerGeneration && this.surfaceId.length > 0) await this.initPlayer();
   }
 
   async initPlayer(): Promise<void> {
-    if (this.destroyed || this.player !== null || this.playerCreating || this.surfaceId.length === 0 ||
+    if (this.destroyed || this.player !== null || this.surfaceId.length === 0 ||
       this.playInfo.urls.length === 0) return;
+    if (this.playerCreating) {
+      this.playerRestartPending = true;
+      return;
+    }
+    this.playerRestartPending = false;
     const generation: number = this.playerGeneration;
     this.playerCreating = true;
     let p: media.AVPlayer | null = null;
@@ -128,6 +165,7 @@ export struct LivePlayerView {
           this.scheduleHide();
         } else if (state === 'paused') {
           this.playing = false;
+          this.dmRenderer.setPlayback(false, this.fullscreen);
           this.controls = true;
         }
       });
@@ -149,24 +187,31 @@ export struct LivePlayerView {
         showFirstFrameOnPrepare: true,
       });
     } catch (e) {
-      if (p !== null && this.player !== p) {
-        try { await p.release(); } catch (releaseError) {}
-      }
-      if (!this.destroyed && generation === this.playerGeneration) {
+      if (p !== null && this.player === p) {
+        await this.handleError(p, '媒体源初始化失败');
+      } else if (p === null && !this.destroyed && generation === this.playerGeneration) {
         this.errorText = '直播播放失败';
         this.buffering = false;
       }
     } finally {
-      // 无条件复位：若换源（generation++）发生在创建期间，旧代不再复位会导致
-      // playerCreating 永久 true，后续 initPlayer 全部被入口守卫挡掉，直播黑屏。
       this.playerCreating = false;
+      // error 回调可能发生在 setMediaSource 完成前。创建退场后落实最新换源请求。
+      if (this.playerRestartPending && !this.destroyed) {
+        this.playerRestartPending = false;
+        await this.initPlayer();
+      }
     }
   }
 
   async handleError(failed: media.AVPlayer, message: string): Promise<void> {
     if (this.destroyed || this.player !== failed) return;
+    const generation: number = this.playerGeneration;
     this.player = null;
+    this.prepared = false;
+    this.playing = false;
+    this.dmRenderer.setPlayback(false, this.fullscreen);
     try { await failed.release(); } catch (e) {}
+    if (this.destroyed || generation !== this.playerGeneration) return;
     if (this.sourceIndex + 1 < this.playInfo.urls.length) {
       this.sourceIndex++;
       this.errorText = '正在切换备用线路…';
@@ -184,7 +229,7 @@ export struct LivePlayerView {
     this.fullscreenTimer = -1;
     this.playerGeneration++;
     this.dmRenderer.release();
-    this.playerCreating = false;
+    this.playerRestartPending = false;
     const p: media.AVPlayer | null = this.player;
     this.player = null;
     if (p !== null) {
@@ -209,10 +254,14 @@ export struct LivePlayerView {
     if (this.controls) this.scheduleHide();
   }
 
+  private canAutoHideControls(): boolean {
+    return this.playing && !this.showQuality && !this.showDmSettings && !this.scExpanded;
+  }
+
   scheduleHide(): void {
     if (this.hideTimer >= 0) clearTimeout(this.hideTimer);
     this.hideTimer = setTimeout(() => {
-      if (this.playing && !this.showQuality) this.controls = false;
+      if (this.canAutoHideControls()) this.controls = false;
     }, 4000);
   }
 
@@ -270,13 +319,15 @@ export struct LivePlayerView {
     this.dmFrameRate = settings.frameRate;
     this.dmSpeed = settings.speed;
     this.dmFontScale = settings.fontScale;
+    this.dmSpacing = settings.spacing;
     this.dmDensity = settings.density;
     this.dmRenderer.enabled = settings.enabled;
     this.dmRenderer.opacity = settings.opacity;
     this.dmRenderer.setFrameRate(settings.frameRate);
     this.dmRenderer.speedScale = settings.speed;
     this.dmRenderer.fontScale = settings.fontScale;
-    this.dmRenderer.maxActive = settings.density;
+    this.dmRenderer.spacing = settings.spacing;
+    this.dmRenderer.density = settings.density;
   }
 
   private persistDanmakuSettings(): void {
@@ -286,6 +337,7 @@ export struct LivePlayerView {
     settings.frameRate = this.dmFrameRate;
     settings.speed = this.dmSpeed;
     settings.fontScale = this.dmFontScale;
+    settings.spacing = this.dmSpacing;
     settings.density = this.dmDensity;
     AppTheme.persistDanmakuSettings(settings);
   }
@@ -297,13 +349,15 @@ export struct LivePlayerView {
     this.dmFrameRate = defaults.frameRate;
     this.dmSpeed = defaults.speed;
     this.dmFontScale = defaults.fontScale;
+    this.dmSpacing = defaults.spacing;
     this.dmDensity = defaults.density;
     this.dmRenderer.toggle(defaults.enabled);
     this.dmRenderer.opacity = defaults.opacity;
     this.dmRenderer.setFrameRate(defaults.frameRate);
     this.dmRenderer.speedScale = defaults.speed;
     this.dmRenderer.fontScale = defaults.fontScale;
-    this.dmRenderer.maxActive = defaults.density;
+    this.dmRenderer.spacing = defaults.spacing;
+    this.dmRenderer.density = defaults.density;
     AppTheme.persistDanmakuSettings(defaults);
   }
 
@@ -346,6 +400,7 @@ export struct LivePlayerView {
         dmFrameRate: this.dmFrameRate,
         dmSpeed: this.dmSpeed,
         dmFontScale: this.dmFontScale,
+        dmSpacing: this.dmSpacing,
         dmDensity: this.dmDensity,
         onDmOpacityChange: (value: number): void => {
           this.dmOpacity = value;
@@ -367,9 +422,14 @@ export struct LivePlayerView {
           this.dmRenderer.fontScale = value;
           this.persistDanmakuSettings();
         },
+        onDmSpacingChange: (value: number): void => {
+          this.dmSpacing = Math.max(0.5, Math.min(2, value));
+          this.dmRenderer.setSpacing(this.dmSpacing);
+          this.persistDanmakuSettings();
+        },
         onDmDensityChange: (value: number): void => {
           this.dmDensity = value;
-          this.dmRenderer.maxActive = value;
+          this.dmRenderer.density = value;
           this.persistDanmakuSettings();
         },
         onResetDanmaku: (): void => this.resetDanmakuSettings(),
@@ -381,8 +441,42 @@ export struct LivePlayerView {
     .padding({ left: 16, right: 16, top: 10, bottom: 24 })
   }
 
+  private beginPan(event: GestureEvent): void {
+    if (!this.fullscreen || this.showQuality || this.showDmSettings) return;
+    if (this.hideTimer >= 0) { clearTimeout(this.hideTimer); this.hideTimer = -1; }
+    const volume: number = this.systemVolume.percent();
+    if (this.gestureCtl !== null && volume >= 0) this.gestureCtl.gestureVolume = volume;
+    const x: number = event.fingerList.length > 0 ? event.fingerList[0].localX : this.dmRenderer.width / 2;
+    this.gestureCtl?.beginPan(x, this.dmRenderer.width, 0, 0);
+  }
+
+  private endPan(): void {
+    this.gestureCtl?.endPan();
+    this.gestureAdjustKind = '';
+    this.gestureAdjustPercent = -1;
+    if (this.controls) this.scheduleHide();
+  }
+
+  @Builder
+  GestureArea() {
+    Column()
+      .width('100%').height('100%')
+      .backgroundColor('#00000000')
+      .onClick(() => this.toggleControls())
+      .gesture(PanGesture({ direction: PanDirection.Vertical, distance: 10 })
+        .onActionStart((event: GestureEvent) => this.beginPan(event))
+        .onActionUpdate((event: GestureEvent) => {
+          if (this.fullscreen && !this.showQuality && !this.showDmSettings) {
+            this.gestureCtl?.updatePan(0, event.offsetY, this.dmRenderer.width, 0);
+          }
+        })
+        .onActionEnd(() => this.endPan())
+        .onActionCancel(() => this.endPan()))
+  }
+
   build() {
     Stack({ alignContent: Alignment.Center }) {
+      AVVolumePanel({ volumeLevel: this.systemVolumeLevel })
       XComponent({ id: 'livePlayerSurface', type: XComponentType.SURFACE, controller: this.controller })
         .width('100%')
         .height('100%')
@@ -390,11 +484,7 @@ export struct LivePlayerView {
 
       // 控件隐藏时才铺手势层；控件显示时移除，避免它抢走画质/弹幕/全屏按钮事件。
       if (!this.controls) {
-        Column()
-          .width('100%')
-          .height('100%')
-          .backgroundColor('#00000000')
-          .onClick(() => this.toggleControls())
+        this.GestureArea()
       }
 
       Canvas(this.dmContext)
@@ -405,7 +495,10 @@ export struct LivePlayerView {
           const width: number = Number(newValue.width);
           const height: number = Number(newValue.height);
           if (width > 0) this.dmRenderer.width = width;
-          if (height > 0) this.dmRenderer.height = height;
+          if (height > 0) {
+            this.dmRenderer.height = height;
+            this.viewportHeight = height;
+          }
         })
 
       if (this.buffering) {
@@ -434,7 +527,7 @@ export struct LivePlayerView {
             .padding({ left: 14, right: 18 })
             .onClick(() => this.exitFullscreen())
           }
-          Blank()
+          Stack() { this.GestureArea() }.width('100%').layoutWeight(1)
           Row({ space: 10 }) {
             Image(this.playing ? $r('app.media.ic_pause') : $r('app.media.ic_play'))
               .width(24).height(24).fillColor('#FFFFFF')
@@ -474,6 +567,26 @@ export struct LivePlayerView {
         }
         .width('100%').height('100%')
         .linearGradient({ angle: 180, colors: [['#66000000', 0], ['#00000000', 0.4], ['#99000000', 1]] })
+      }
+
+      PlayerGestureOverlay({
+        fullscreen: this.fullscreen,
+        gestureAdjustKind: this.gestureAdjustKind,
+        gestureAdjustPercent: this.gestureAdjustPercent,
+      })
+
+      if (this.fullscreen && this.controls && this.superChats.length > 0 && !this.showQuality && !this.showDmSettings) {
+        LiveSuperChatShelf({
+          messages: this.superChats,
+          floating: true,
+          onExpandedChange: (expanded: boolean) => {
+            this.scExpanded = expanded;
+            if (!expanded && this.controls && !this.destroyed) this.scheduleHide();
+          },
+          panelHeight: Math.max(80, this.viewportHeight - 220),
+        })
+        .width('34%').constraintSize({ maxWidth: 280 })
+        .position({ top: 60, left: 18 })
       }
 
       if (this.controls && this.showQuality) {

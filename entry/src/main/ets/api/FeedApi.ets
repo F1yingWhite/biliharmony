@@ -2,7 +2,7 @@
  * 首页推荐与热门：Web 个性化推荐 / App 公共推荐流 / 全站热门。
  * 移植自 PiliPlus lib/http/*.dart
  */
-import { HttpClient, HttpResponse } from '../common/HttpClient';
+import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { WbiSign } from '../common/WbiSign';
 import { Api, Constants, RecommendParams } from '../common/Constants';
 import { asObject, asArray, asString, asNumber } from '../common/Utils';

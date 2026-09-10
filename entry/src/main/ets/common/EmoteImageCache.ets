@@ -1,6 +1,6 @@
 /** 表情缓存兼容入口；实际下载、校验与并发去重由通用资源缓存负责。 */
 import { common } from '@kit.AbilityKit';
-import { RemoteAssetCache } from './RemoteAssetCache';
+import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
 
 export class EmoteImageCache {
   static attach(context: common.Context): void {

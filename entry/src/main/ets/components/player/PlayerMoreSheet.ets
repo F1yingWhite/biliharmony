@@ -15,6 +15,7 @@ export struct PlayerMoreSheet {
   @Prop chaptersCount: number = 0;
   @Prop sponsorOn: boolean = false;
   @Prop subtitleOn: boolean = false;
+  @Prop backgroundPlaybackEnabled: boolean = false;
   @Prop downloadBusy: boolean = false;
   @Prop downloadProgress: number = -1;
   onSpeedChange: (rate: number) => void = () => {};
@@ -25,9 +26,11 @@ export struct PlayerMoreSheet {
   onDmSettings: () => void = () => {};
   onChapters: () => void = () => {};
   onSubtitleToggle: (next: boolean) => void = () => {};
+  onBackgroundPlaybackChange: (next: boolean) => void = () => {};
   onSponsorToggle: (next: boolean) => void = () => {};
   onSponsorSettings: () => void = () => {};
   onShare: () => void = () => {};
+  onWatchLater: () => void = () => {};
   onCopyLink: () => void = () => {};
   onDownload: () => void = () => {};
   onStub: (message: string) => void = () => {};
@@ -105,7 +108,7 @@ export struct PlayerMoreSheet {
         .margin({ top: 6 })
         .maxLines(1)
     }
-    .width(54)
+    .width('16.666%')
     .onClick(() => onTap())
   }
 
@@ -129,7 +132,7 @@ export struct PlayerMoreSheet {
         .margin({ top: 6 })
         .maxLines(1)
     }
-    .width(54)
+    .width('16.666%')
     .onClick(() => onTap())
   }
 
@@ -210,8 +213,7 @@ export struct PlayerMoreSheet {
       Scroll() {
         Column({ space: 10 }) {
           Column({ space: 14 }) {
-            // 上行 6 项 + 下行 4 项：固定 384vp 列宽（54 宽项 ×6 + 12 间隙），
-            // 上行铺满、下行左对齐前 4 列，与官方版式列距一致。
+            // 六列随面板宽度伸缩，下行四项与上行对齐。
             Row() {
               this.ShareCircle($r('app.media.ic_share_wechat'), '微信', false, 44, (): void => this.onShare())
               this.ShareCircle($r('app.media.ic_share_pengyouquan'), '朋友圈', false, 44, (): void => this.onShare())
@@ -220,17 +222,17 @@ export struct PlayerMoreSheet {
               this.ShareCircle($r('app.media.ic_share_dynamic'), '动态', false, 44, (): void => this.onShare())
               this.ShareCircle($r('app.media.ic_share_link'), '复制链接', true, 26, (): void => this.onCopyLink())
             }
-            .width(384)
+            .width('100%')
             .justifyContent(FlexAlign.SpaceBetween)
             Row() {
-              this.ShareSquare($r('app.media.ic_watch_later'), '稍后再看', (): void => this.onStub('功能暂未开放'))
+              this.ShareSquare($r('app.media.ic_watch_later'), '稍后再看', (): void => this.onWatchLater())
               this.ShareSquare($r('app.media.ic_share_cache'), this.downloadLabel(), (): void => {
                 if (!this.downloadBusy) this.onDownload();
               })
               this.ShareSquare($r('app.media.ic_share_pip'), '小窗播放', (): void => this.onStub('功能暂未开放'))
               this.ShareSquare($r('app.media.ic_share_cast'), '投屏', (): void => this.onStub('功能暂未开放'))
             }
-            .width(384)
+            .width('100%')
             .justifyContent(FlexAlign.Start)
           }
           .width('100%')
@@ -312,9 +314,8 @@ export struct PlayerMoreSheet {
               this.RowIcon($r('app.media.ic_headphone'))
               this.RowLabel('后台听视频')
               Blank()
-              this.TinySwitch(false, (next: boolean): void => {
-                if (next) this.onStub('暂不支持后台听视频');
-              })
+              this.TinySwitch(this.backgroundPlaybackEnabled,
+                (next: boolean): void => this.onBackgroundPlaybackChange(next))
             }
             .width('100%')
             .padding({ left: 16, right: 16, top: 13, bottom: 13 })

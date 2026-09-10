@@ -2,7 +2,7 @@
  * 视频播放域 API：详情、播放地址、互动、弹幕、章节与预览图。
  * 移植自 PiliPlus lib/http/*.dart
  */
-import { HttpClient, HttpResponse } from '../common/HttpClient';
+import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { WbiSign } from '../common/WbiSign';
 import { appSign } from '../common/AppSign';
 import { Api, Constants } from '../common/Constants';
@@ -213,9 +213,9 @@ export class BiliApi {
         const mp4Data: Record<string, Object> | null = getData(mp4Resp);
         if (mp4Data !== null) {
           const mp4: PlayUrlInfo = PlayUrlInfo.fromPlayUrl(mp4Data, info.quality);
-          if (mp4.url.length > 0) {
+          if (mp4.url.length > 0 && mp4.quality === info.quality) {
             info.isDash = false;
-            // 服务端可能按账号权限回落画质，文件名/播放器状态必须使用 MP4 响应的真实 qn。
+            // 只有同档位单流才能替换；MP4 回落时保留已经拿到的高画质 DASH。
             info.quality = mp4.quality;
             info.format = mp4.format;
             info.urls = mp4.urls;

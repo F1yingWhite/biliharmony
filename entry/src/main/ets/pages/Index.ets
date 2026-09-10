@@ -40,7 +40,7 @@ import { RelationListPage } from './RelationList';
 import { BangumiDetailPage } from './BangumiDetail';
 import { RankPage } from './RankPage';
 import { ArticlePage } from './ArticlePage';
-import { UserStore } from '../common/UserStore';
+import { UserStore } from '../services/auth/UserStore';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
 import { Haptic } from '../common/Haptic';
 import { curves } from '@kit.ArkUI';
@@ -60,6 +60,7 @@ function stdDestination(onShownCb: () => void, onWillDisappearCb: () => void) {
 @Entry
 @Component
 struct Index {
+  @StorageProp('windowStatusBarHeight') statusBarInset: number = 0;
   @State @Watch('onCurrentTabChanged') currentTab: number = 0;
   @StorageProp('accentColor') @Watch('onThemeChanged') accent: string = '#FB7299';
   @StorageProp('isDarkMode') @Watch('onThemeChanged') isDark: boolean = false;
@@ -620,10 +621,11 @@ struct Index {
       .height(40)
       .borderRadius(20)
       .systemMaterial(AppTheme.floatMaterial(this.glassOn))
-      .opacity(Math.min(1, Math.max(0, (this.fade - 0.8) * 5)))
+      .opacity(Math.min(1, Math.max(0, (this.fade - 0.6) / 0.4)))
+      .hitTestBehavior(this.fade > 0.85 ? HitTestMode.Default : HitTestMode.None)
       .scale({
-        x: 0.6 + 0.4 * Math.min(1, Math.max(0, (this.fade - 0.8) * 5)),
-        y: 0.6 + 0.4 * Math.min(1, Math.max(0, (this.fade - 0.8) * 5)),
+        x: 0.9 + 0.1 * Math.min(1, Math.max(0, (this.fade - 0.6) / 0.4)),
+        y: 0.9 + 0.1 * Math.min(1, Math.max(0, (this.fade - 0.6) / 0.4)),
       })
       .onClick(() => {
         AppNavStack.pushPathByName(NAV_SEARCH, null);
@@ -632,7 +634,7 @@ struct Index {
     .width('100%')
     .height(40)
     .padding({ right: 14 })
-    .margin({ top: Immersive.statusBarHeight() + 6 })
+    .margin({ top: this.statusBarInset + 6 })
     .hitTestBehavior(HitTestMode.Transparent)
     .zIndex(4)
   }
@@ -652,10 +654,11 @@ struct Index {
       .borderRadius(20)
       .backgroundColor(AppTheme.floatBg(this.isDark, this.glassOn))
       .shadow({ radius: 8, color: this.isDark ? '#59000000' : '#1A000000', offsetX: 0, offsetY: 2 })
-      .opacity(Math.min(1, Math.max(0, (this.fade - 0.8) * 5)))
+      .opacity(Math.min(1, Math.max(0, (this.fade - 0.6) / 0.4)))
+      .hitTestBehavior(this.fade > 0.85 ? HitTestMode.Default : HitTestMode.None)
       .scale({
-        x: 0.6 + 0.4 * Math.min(1, Math.max(0, (this.fade - 0.8) * 5)),
-        y: 0.6 + 0.4 * Math.min(1, Math.max(0, (this.fade - 0.8) * 5)),
+        x: 0.9 + 0.1 * Math.min(1, Math.max(0, (this.fade - 0.6) / 0.4)),
+        y: 0.9 + 0.1 * Math.min(1, Math.max(0, (this.fade - 0.6) / 0.4)),
       })
       .onClick(() => {
         AppNavStack.pushPathByName(NAV_SEARCH, null);
@@ -664,7 +667,7 @@ struct Index {
     .width('100%')
     .height(40)
     .padding({ right: 14 })
-    .margin({ top: Immersive.statusBarHeight() + 6 })
+    .margin({ top: this.statusBarInset + 6 })
     .hitTestBehavior(HitTestMode.Transparent)
     .zIndex(4)
   }
@@ -690,7 +693,7 @@ struct Index {
 
         // 头栏收起后的悬浮搜索球（右上角，对齐华为设置的折叠形态：头栏淡出 → 搜索球淡入）
         // 只有真正开始显示时才创建节点；透明度为 0 的可点击节点会抢走消息按钮的事件。
-        if (this.fade > 0.8) {
+        if (this.fade > 0.6) {
           if (AppTheme.isImmersiveUiSupported()) {
             this.SearchFloat()
           } else {

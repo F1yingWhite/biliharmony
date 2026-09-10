@@ -14,6 +14,7 @@ export class PlayerAvSessionHelper {
   private session: avSession.AVSession | null = null;
   private active: boolean = false;
   private busy: boolean = false;
+  private released: boolean = false;
   private context: common.UIAbilityContext;
   private latestMetadata: avSession.AVMetadata | null = null;
   private latestState: avSession.AVPlaybackState | null = null;
@@ -34,6 +35,7 @@ export class PlayerAvSessionHelper {
     metadata: avSession.AVMetadata,
     state: avSession.AVPlaybackState,
   ): Promise<void> {
+    if (this.released) return;
     this.latestMetadata = metadata;
     this.latestState = state;
     if (this.active) {
@@ -43,14 +45,19 @@ export class PlayerAvSessionHelper {
     }
     if (this.busy) return;
     this.busy = true;
+    let created: avSession.AVSession | null = null;
     try {
       // 后台只保留 DASH 音轨，向系统声明为音乐会话，由媒体中心/状态栏接管播控。
       const session: avSession.AVSession = await avSession.createAVSession(this.context, 'BiliHarmony', 'audio');
-      session.on('play', () => onPlay());
-      session.on('pause', () => onPause());
-      session.on('seek', (time: number) => onSeek(time));
+      created = session;
+      if (this.released) return;
+      session.on('play', () => { if (this.session === session && this.active) onPlay(); });
+      session.on('pause', () => { if (this.session === session && this.active) onPause(); });
+      session.on('seek', (time: number) => { if (this.session === session && this.active) onSeek(time); });
       await session.activate();
+      if (this.released) return;
       await session.setBackgroundPlayMode(avSession.BackgroundPlayMode.ENABLE_BACKGROUND_PLAY);
+      if (this.released) return;
       this.session = session;
       this.active = true;
       if (DEBUG) {
@@ -61,11 +68,13 @@ export class PlayerAvSessionHelper {
       if (this.latestState !== null) this.setPlaybackState(this.latestState);
     } catch (e) {
       this.session = null;
+      this.active = false;
       if (DEBUG) {
         hilog.error(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
           'avsession.ensure.error %{public}s', String(e));
       }
     } finally {
+      if (created !== null && this.session !== created) await this.destroySession(created);
       this.busy = false;
     }
   }
@@ -93,19 +102,21 @@ export class PlayerAvSessionHelper {
   }
 
   release(): void {
+    this.released = true;
     const session: avSession.AVSession | null = this.session;
-    if (session !== null && this.active) {
-      try {
-        session.deactivate().catch(() => {
-        });
-      } catch (e) {
-      }
-    }
     this.session = null;
     this.active = false;
+    this.latestMetadata = null;
+    this.latestState = null;
+    if (session !== null) this.destroySession(session).catch(() => {});
     this.backgroundDesired = false;
     this.stopBackgroundTask().catch(() => {
     });
+  }
+
+  private async destroySession(session: avSession.AVSession): Promise<void> {
+    try { await session.deactivate(); } catch (e) {}
+    try { await session.destroy(); } catch (e) {}
   }
 
   private async ensureClickAgent(): Promise<WantAgent> {
@@ -131,6 +142,7 @@ export class PlayerAvSessionHelper {
     try {
       if (this.backgroundDesired && !this.backgroundRequested) {
         const agent: WantAgent = await this.ensureClickAgent();
+        if (this.released || !this.backgroundDesired) return;
         const request: backgroundTaskManager.ContinuousTaskRequest =
           new backgroundTaskManager.ContinuousTaskRequest();
         request.backgroundTaskModes =

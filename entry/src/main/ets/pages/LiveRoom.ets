@@ -4,11 +4,12 @@ import { ActionResult, BiliApi } from '../api/BiliApi';
 import { AppNavStack, LiveRoomParam, NAV_LOGIN } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { LiveDanmakuClient } from '../common/LiveDanmakuClient';
+import { LiveSuperChatShelf } from '../components/live/LiveSuperChatShelf';
 import { LivePlayerView } from '../components/live/LivePlayerView';
 import { StaticLiveImage } from '../components/live/StaticLiveImage';
 import { BackButton, BackButtonVariant } from '../components/BackButton';
 import { LiveChatMessage, LiveEmoteItem, LiveEmotePackage, LivePlayInfo, LiveRoomInfo } from '../model/LiveModels';
-import { UserStore } from '../common/UserStore';
+import { UserStore } from '../services/auth/UserStore';
 import { LiveApi } from '../api/LiveApi';
 import { colorHex } from '../components/player/PlayerDanmakuSupport';
 
@@ -49,6 +50,7 @@ export struct LiveRoomPage {
   private destroyed: boolean = false;
   private lifecycleGeneration: number = 0;
   private historyPollTimer: number = -1;
+  private historyPollGeneration: number = -1;
   private lastLiveMessageAt: number = 0;
   private knownMessageIds: Set<string> = new Set<string>();
 
@@ -111,11 +113,10 @@ export struct LiveRoomPage {
       this.lastLiveMessageAt = Date.now();
       // 先建立首屏历史基线再挂播放器，避免把历史消息一次性灌入画面轨道。
       this.playInfo = play;
-      this.superChats = await LiveApi.getLiveSuperChats(this.param.roomId);
-      if (this.destroyed || generation !== this.lifecycleGeneration) return;
-      this.client.connect(this.param.roomId).catch(() => {
-      });
+      // SC 快照是独立补充，不能阻塞实时弹幕连接或把视频判定为加载失败。
+      this.client.connect(this.param.roomId).catch(() => {});
       this.startHistoryFallback();
+      this.refreshSuperChats(generation).catch(() => {});
     } catch (e) {
       if (!this.destroyed && generation === this.lifecycleGeneration) {
         this.errorText = '直播间加载失败，请检查网络后重试';
@@ -123,6 +124,12 @@ export struct LiveRoomPage {
     } finally {
       if (!this.destroyed && generation === this.lifecycleGeneration) this.loading = false;
     }
+  }
+
+  private async refreshSuperChats(generation: number): Promise<void> {
+    const snapshot: Array<LiveChatMessage> = await LiveApi.getLiveSuperChats(this.param.roomId);
+    if (this.destroyed || generation !== this.lifecycleGeneration) return;
+    this.superChats = this.mergeSuperChats(this.superChats, snapshot);
   }
 
   async changeQuality(qn: number): Promise<void> {
@@ -245,8 +252,7 @@ export struct LiveRoomPage {
     this.knownMessageIds.add(message.id);
     this.lastLiveMessageAt = Date.now();
     if (message.type === 'sc') {
-      const nextSc: Array<LiveChatMessage> = [message].concat(this.superChats);
-      this.superChats = nextSc.slice(0, 50);
+      this.superChats = this.mergeSuperChats([message], this.superChats);
     }
     this.pendingMsgs.push(message);
     if (this.flushTimer < 0) {
@@ -255,6 +261,15 @@ export struct LiveRoomPage {
         this.flushMessages();
       }, 220);
     }
+  }
+
+  private mergeSuperChats(first: Array<LiveChatMessage>, second: Array<LiveChatMessage>): Array<LiveChatMessage> {
+    const seen: Set<string> = new Set<string>();
+    return first.concat(second).filter((message: LiveChatMessage): boolean => {
+      if (seen.has(message.id)) return false;
+      seen.add(message.id);
+      return true;
+    }).sort((a: LiveChatMessage, b: LiveChatMessage): number => b.timestamp - a.timestamp).slice(0, 50);
   }
 
   private startHistoryFallback(): void {
@@ -284,10 +299,20 @@ export struct LiveRoomPage {
   /** WebSocket 安静超过 8 秒时低频补拉，只追加未见 ID，不重放进房快照。 */
   private async pollRecentHistory(): Promise<void> {
     const generation: number = this.lifecycleGeneration;
-    const history: Array<LiveChatMessage> = await LiveApi.getLiveDanmakuHistory(this.param.roomId);
-    if (this.destroyed || generation !== this.lifecycleGeneration) return;
-    for (let i: number = 0; i < history.length; i++) {
-      if (!this.knownMessageIds.has(history[i].id)) this.appendMessage(history[i]);
+    if (this.historyPollGeneration === generation) return;
+    this.historyPollGeneration = generation;
+    try {
+      const results: Array<Array<LiveChatMessage>> = await Promise.all([
+        LiveApi.getLiveDanmakuHistory(this.param.roomId).catch(() => new Array<LiveChatMessage>()),
+        LiveApi.getLiveSuperChats(this.param.roomId).catch(() => new Array<LiveChatMessage>()),
+      ]);
+      if (this.destroyed || generation !== this.lifecycleGeneration) return;
+      for (let i: number = 0; i < results[0].length; i++) {
+        if (!this.knownMessageIds.has(results[0][i].id)) this.appendMessage(results[0][i]);
+      }
+      this.superChats = this.mergeSuperChats(this.superChats, results[1]);
+    } finally {
+      if (this.historyPollGeneration === generation) this.historyPollGeneration = -1;
     }
   }
 
@@ -383,14 +408,7 @@ export struct LiveRoomPage {
 
   /** 去掉消息文本里的表情占位符，避免图片和 [xx表情] 文本同时显示。 */
   private cleanEmoteText(msg: LiveChatMessage): string {
-    let text: string = msg.text;
-    for (let i: number = 0; i < msg.emotes.length; i++) {
-      const emote: LiveEmoteItem = msg.emotes[i];
-      if (emote.unique.length > 0) text = text.split(emote.unique).join('');
-      if (emote.emoji.length > 0 && emote.emoji !== emote.unique) text = text.split(emote.emoji).join('');
-    }
-    text = text.replace(/\[[^\[\]]{1,40}\]/g, '');
-    return text.trim();
+    return LiveChatMessage.textWithoutEmotes(msg);
   }
 
   /** 官方样式弹幕行：粉丝团牌子 + 蓝色「名字:」+ 白色内容（表情消息内联图片）。 */
@@ -556,7 +574,7 @@ export struct LiveRoomPage {
                 Text(msg.uname).fontSize(12).fontWeight(FontWeight.Medium).fontColor('#FFFFFF').layoutWeight(1)
                 Text('¥' + String(msg.price)).fontSize(14).fontWeight(FontWeight.Bold).fontColor('#FFFFFF')
               }.width('100%')
-              Text(msg.text).width('100%').fontSize(14).fontColor('#FFFFFF').maxLines(5)
+              Text(msg.text).width('100%').fontSize(14).fontColor('#FFFFFF')
             }
             .width('100%').padding(12).borderRadius(12)
             .backgroundColor(msg.backgroundColor)
@@ -595,6 +613,9 @@ export struct LiveRoomPage {
         })
         this.ChatTabs()
         if (this.chatTab === 0) {
+          if (this.superChats.length > 0) {
+            LiveSuperChatShelf({ messages: this.superChats })
+          }
           this.DanmakuList()
           this.DanmakuComposer()
         } else {
@@ -606,7 +627,7 @@ export struct LiveRoomPage {
 
       if (this.playInfo.url.length > 0) {
         LivePlayerView({
-          playInfo: this.playInfo, messages: this.messages,
+          playInfo: this.playInfo, messages: this.messages, superChats: this.superChats,
           syncVersion: this.liveSyncVersion,
           title: this.roomInfo.title, uname: this.roomInfo.uname,
           onQualityChange: (qn: number) => this.changeQuality(qn),

@@ -96,14 +96,20 @@
     │   └── GlassHeaderBar / PageHeader / LoadingView 等通用 UI 件
     ├── api/                            # 按视频/番剧/认证/用户等领域拆分的接口层
     ├── model/                          # Models.ets 稳定导出入口 + 按领域拆分的模型
-    ├── services/media/                 # API 26 用户确认式媒体保存
+    ├── services/
+    │   ├── network/                   # HTTP、凭证域名策略、明确区分成功/失败的 ApiResult
+    │   ├── auth/                      # 登录持久化与账号会话代际
+    │   ├── message/                   # 按账号隔离的未读消息缓存
+    │   ├── cache/                     # 远程资源缓存、限并发流式临时文件写入
+    │   ├── media/                     # 播放源协调、视频下载与 API 26 媒体保存
+    │   └── library/                   # 历史分页状态与失败重试
     └── common/
         ├── AppRouter.ets               # 全局 NavPathStack + 路由表 + 参数守卫
         ├── WbiSign.ets / AppSign.ets / Md5.ets   # WBI / App 签名（纯 ArkTS MD5）
         ├── RsaUtil.ets                 # 密码登录 RSA 加密（cryptoFramework）
-        ├── HttpClient.ets              # @ohos.net.http 封装 + Cookie 罐
+        ├── RequestEpoch.ets            # 可被更新操作取代的异步请求版本
         ├── LiveDanmakuClient.ets       # 直播弹幕 WebSocket 客户端
-        ├── UserStore.ets / SearchHistoryStore.ets / HotSearchStore.ets  # 登录态/搜索历史/热搜
+        ├── SearchHistoryStore.ets / HotSearchStore.ets  # 搜索历史/热搜
         ├── ImageColor.ets / ColorUtil.ets / AppTheme.ets  # 取色 / 色调板 / 动态主题
         ├── Immersive.ets               # 沉浸式窗口工具
         ├── ReplyContentParser.ets / ReplyTree.ets  # 评论富文本解析 / 楼中楼构树
@@ -147,7 +153,7 @@ Workflow 只在构建期间恢复该配置，构建结束后会清除；签名�
 | --- | --- |
 | lib/utils/wbi_sign.dart | common/WbiSign.ets |
 | lib/utils/app_sign.dart | common/AppSign.ets |
-| lib/http/init.dart + dio | common/HttpClient.ets（@ohos.net.http） |
+| lib/http/init.dart + dio | services/network/HttpClient.ets（@ohos.net.http） |
 | lib/http/video.dart | BiliApi.getRecommendApp / getHot / getPlayUrl |
 | lib/http/reply.dart | BiliApi.getReplies / addReply + ReplyTree.ets |
 | lib/http/search.dart | BiliApi.search / searchByType / searchSuggest / getHotSearch |

@@ -1,3 +1,4 @@
+import { RequestEpoch } from '../common/RequestEpoch';
 /**
  * 番剧/影视（PGC）详情页：封面氛围头部（海报 + 评分 + 追番）+ 选集 + 简介 + 评论。
  * 入口：动态流 PGC 卡片。评论区复用动态详情的组装方式（type=1，oid 为当前集 aid）。
@@ -18,7 +19,7 @@ import { ReplyThreadPanel } from '../components/reply/ReplyThreadPanel';
 import { ReplyShareCard, makeReplyQr, makeReplyShareSnapshot,
   sharePixelMapAsImage } from '../components/reply/ReplyShareCard';
 import { ReplySortChips } from '../components/reply/ReplySortChips';
-import { UserStore } from '../common/UserStore';
+import { UserStore } from '../services/auth/UserStore';
 import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
 import { asNumber, asObject, colorWithAlpha, formatCount, formatDuration } from '../common/Utils';
 import { LayoutTokens } from '../common/LayoutTokens';
@@ -49,6 +50,7 @@ export struct BangumiDetailPage {
   @State threadRoot: ReplyItem = new ReplyItem();
   @State threadReplies: Array<ReplyItem> = [];
   @State threadLoading: boolean = false;
+  private threadEpoch: RequestEpoch = new RequestEpoch();
   @State threadHasMore: boolean = true;
   @State threadDraft: string = '';
   @State threadSending: boolean = false;
@@ -74,6 +76,8 @@ export struct BangumiDetailPage {
   }
 
   aboutToDisappear(): void {
+    this.threadEpoch.invalidate();
+    this.threadLoading = false;
     this.destroyed = true;
   }
 
@@ -286,6 +290,12 @@ export struct BangumiDetailPage {
     };
   }
 
+  private closeReplyThread(): void {
+    this.threadEpoch.invalidate();
+    this.threadLoading = false;
+    this.threadOpen = false;
+  }
+
   private openReplyThread(root: ReplyItem): void {
     let latest: ReplyItem = root;
     for (let i: number = 0; i < this.replies.length; i++) {
@@ -308,12 +318,15 @@ export struct BangumiDetailPage {
 
   private async loadThreadReplies(reset: boolean): Promise<void> {
     const oid: number = this.replyOid();
-    if (this.threadLoading || this.threadRoot.rpid <= 0 || oid <= 0 || (!reset && !this.threadHasMore)) return;
+    if ((!reset && this.threadLoading) || this.threadRoot.rpid <= 0 || oid <= 0 || (!reset && !this.threadHasMore)) return;
+    const epoch: number = this.threadEpoch.next();
     this.threadLoading = true;
+    const root: number = this.threadRoot.rpid;
     const cursor: string = reset ? '' : this.threadCursor;
     try {
-      const result: ReplyData = await CommentApi.getReplyReplies(oid, 1, this.threadRoot.rpid, cursor);
-      if (this.destroyed || !this.threadOpen) return;
+      const result: ReplyData = await CommentApi.getReplyReplies(oid, 1, root, cursor);
+      if (this.destroyed || !this.threadOpen || !this.threadEpoch.isCurrent(epoch) ||
+        this.threadRoot.rpid !== root) return;
       const next: Array<ReplyItem> = reset ?
         (result.replies.length > 0 ? result.replies : this.threadReplies) :
         this.threadReplies.concat(result.replies);
@@ -321,9 +334,10 @@ export struct BangumiDetailPage {
       this.threadCursor = result.cursor;
       this.threadHasMore = result.hasMore;
     } catch (e) {
+      if (!this.threadEpoch.isCurrent(epoch)) return;
       if (!this.destroyed) this.toast('回复加载失败，请稍后重试');
     } finally {
-      if (!this.destroyed) this.threadLoading = false;
+      if (!this.destroyed && this.threadEpoch.isCurrent(epoch)) this.threadLoading = false;
     }
   }
 
@@ -386,7 +400,7 @@ export struct BangumiDetailPage {
   }
 
   private navigateFromThread(action: () => void): void {
-    this.threadOpen = false;
+    this.closeReplyThread();
     setTimeout(() => {
       if (!this.destroyed) action();
     }, 260);
@@ -449,7 +463,7 @@ export struct BangumiDetailPage {
       focusTick: this.threadFocusTick,
       focusId: 'bangumi_thread_reply_composer_editor',
       upMid: 0,
-      onClose: () => this.threadOpen = false,
+      onClose: () => this.closeReplyThread(),
       onLike: (item: ReplyItem) => this.likeReply(item).catch(() => {
       }),
       onDislike: (item: ReplyItem) => this.dislikeReply(item).catch(() => {

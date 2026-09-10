@@ -1,6 +1,6 @@
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { util } from '@kit.ArkTS';
-import { HttpClient, HttpResponse } from '../common/HttpClient';
+import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { SponsorBlockSegment, SponsorBlockStore } from '../common/SponsorBlock';
 import { asArray, asNumber, asObject, str } from '../common/Utils';
 

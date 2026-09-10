@@ -9,6 +9,7 @@ import { LoadMoreFooter } from './LoadMoreFooter';
 export struct SearchResultList {
   @Prop loading: boolean = false;
   @Prop loadingMore: boolean = false;
+  @Prop errorText: string = '';
   @Prop count: number = 0;
   @Prop emptyText: string = '没有找到相关内容';
   /** 列表项间距（直播双列用 10，其余默认 0） */
@@ -29,6 +30,8 @@ export struct SearchResultList {
     Column() {
       if (this.loading) {
         LoadingView({ loading: true })
+      } else if (this.errorText.length > 0) {
+        LoadingView({ loading: false, errorText: this.errorText, onRetry: this.onRetry })
       } else if (this.count === 0) {
         LoadingView({
           loading: false,

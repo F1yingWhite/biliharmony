@@ -4,7 +4,7 @@
  * 参考: https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/misc/sign/wbi.md
  */
 import { md5Hex } from './Md5';
-import { HttpClient, HttpResponse } from './HttpClient';
+import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { Api } from './Constants';
 import { asObject, str } from './Utils';
 

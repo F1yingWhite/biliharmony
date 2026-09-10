@@ -1,6 +1,6 @@
 /** 直播表情静态图：远程 GIF/WebP 只解码首帧，组件销毁时释放像素内存。 */
 import { image } from '@kit.ImageKit';
-import { HttpClient } from '../../common/HttpClient';
+import { HttpClient } from '../../services/network/HttpClient';
 import { Constants } from '../../common/Constants';
 
 @Component
