@@ -15,13 +15,13 @@ import { BackButton, BackButtonVariant } from '../components/BackButton';
 import { FilterChip } from '../components/FilterChip';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { colorWithAlpha, formatCount } from '../common/Utils';
-import { UserStore } from '../common/UserStore';
+import { UserStore } from '../services/auth/UserStore';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { DecoratedAvatar } from '../components/UserDecorations';
 import { DynamicView } from '../views/DynamicView';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { UserApi } from '../api/UserApi';
-import { RemoteAssetCache } from '../common/RemoteAssetCache';
+import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
 
 // 投稿排序（order 参数）
 const ARC_ORDERS: Array<Record<string, string>> = [

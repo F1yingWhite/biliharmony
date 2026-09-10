@@ -6,7 +6,7 @@
 import { LiveChatMessage, LiveEmoteItem } from '../../model/LiveModels';
 import { colorHex } from '../player/PlayerDanmakuSupport';
 import { image } from '@kit.ImageKit';
-import { HttpClient } from '../../common/HttpClient';
+import { HttpClient } from '../../services/network/HttpClient';
 import { Constants } from '../../common/Constants';
 
 class ActiveLiveDanmaku {
@@ -37,11 +37,12 @@ export class LiveDanmakuRenderer {
   playing: boolean = false;
   width: number = 1;
   height: number = 1;
-  /** 弹幕设置（对齐视频播放页）：透明度 0.2-1 / 速度 0.5-2 / 字号 0.7-1.8 / 密度（同屏上限）。 */
+  /** 弹幕设置（对齐视频播放页）：透明度 0.2-1 / 速度 0.5-2 / 字号 0.7-1.8 / 密度档位（按轨道容量计算同屏数量）。 */
   opacity: number = 0.88;
   speedScale: number = 1;
   fontScale: number = 1;
-  maxActive: number = 28;
+  spacing: number = 1;
+  density: number = 28;
 
   private ctx: CanvasRenderingContext2D;
   private active: Array<ActiveLiveDanmaku> = [];
@@ -57,6 +58,7 @@ export class LiveDanmakuRenderer {
   private emoteCache: Map<string, image.PixelMap> = new Map<string, image.PixelMap>();
   private emoteLoading: Set<string> = new Set<string>();
   private emoteFailed: Set<string> = new Set<string>();
+  private resourceGeneration: number = 0;
 
   constructor(ctx: CanvasRenderingContext2D) {
     this.ctx = ctx;
@@ -105,7 +107,7 @@ export class LiveDanmakuRenderer {
     while (this.pending.length > 0 && now - this.pending[0].timestamp * 1000 > this.pendingTtlMs) {
       this.pending.shift();
     }
-    const capacity: number = Math.max(12, Math.min(48, this.laneCount() * 3));
+    const capacity: number = Math.max(100, this.laneCount() * 10);
     if (this.pending.length > capacity) {
       this.pending.splice(0, this.pending.length - capacity);
     }
@@ -121,11 +123,11 @@ export class LiveDanmakuRenderer {
     this.trimPending(now);
     if (this.pending.length === 0) return;
     if (now - this.lastReleaseMs < 32) return;
-    const burst: number = Math.min(this.laneCount(), 6);
+    const burst: number = this.pending.length;
     let released: boolean = false;
     let attempts: number = 0;
     for (let i: number = 0; i < burst && this.pending.length > 0 && attempts < this.pending.length; i++) {
-      if (this.active.length >= this.maxActive) break;
+      if (this.density < 30 && this.active.length >= this.laneCount() * (this.density >= 27 ? 10 : 6)) break;
       const message: LiveChatMessage = this.pending[0];
       if (!this.emoteReady(message)) {
         this.pending.push(this.pending.shift() as LiveChatMessage);
@@ -142,6 +144,8 @@ export class LiveDanmakuRenderer {
 
   /** 清空所有活动弹幕和消息基线（组件销毁/生命周期重入时用）。 */
   release(): void {
+    this.resourceGeneration++;
+    this.playing = false;
     this.pending = [];
     this.stopLoop(true);
     this.seenMessageIds.clear();
@@ -174,18 +178,21 @@ export class LiveDanmakuRenderer {
     if (playing && this.enabled && (this.active.length > 0 || this.pending.length > 0)) this.startLoop();
   }
 
+  setSpacing(value: number): void {
+    this.spacing = Math.max(0.5, Math.min(2, value));
+    const lanes: number = this.laneCount();
+    this.active.forEach((item: ActiveLiveDanmaku) => item.lane = Math.min(item.lane, lanes - 1));
+  }
+
   private fontSize(): number {
     // 与视频播放器使用同一默认视觉字号，避免直播弹幕只有视频弹幕约一半大小。
-    return (this.fullscreen ? 48 : 38) * this.fontScale;
+    return (this.fullscreen ? 14 : 12) * this.fontScale;
   }
 
   private lineHeight(): number {
-    // 字号增大后保持紧凑轨道：沿用视频弹幕的次线性行高策略。
-    const base: number = this.fullscreen ? 44 : 34;
-    const extra: number = this.fontSize() - base;
-    const normalHeight: number = base + 2 + (extra > 0 ? extra * 0.5 : extra);
-    const densityFactor: number = this.maxActive >= 30 ? 0.68 : (this.maxActive >= 27 ? 0.82 : 0.90);
-    return Math.max(this.fontSize() * 0.68, normalHeight * densityFactor);
+    // Canvas 坐标和字体统一为 vp，避免 px 字号被当成 vp 行距后在高密度屏上放大空隙。
+    const factor: number = this.density >= 30 ? 0.95 : (this.density >= 27 ? 1.05 : 1.15);
+    return this.fontSize() * (factor + (this.spacing - 1) * 0.4);
   }
 
   private laneCount(): number {
@@ -196,7 +203,7 @@ export class LiveDanmakuRenderer {
   }
 
   private laneAvailable(lane: number, spawnX: number): boolean {
-    const gap: number = Math.max(20, this.fontSize());
+    const gap: number = Math.max(1, this.fontSize() * (this.density >= 27 ? 0.15 : 0.3) * this.spacing);
     for (let i: number = 0; i < this.active.length; i++) {
       const current: ActiveLiveDanmaku = this.active[i];
       if (current.lane === lane && current.x + current.width + gap > spawnX) return false;
@@ -212,6 +219,11 @@ export class LiveDanmakuRenderer {
         this.nextLane = (lane + 1) % count;
         return lane;
       }
+    }
+    if (this.density >= 30) {
+      const lane: number = this.nextLane % count;
+      this.nextLane = (lane + 1) % count;
+      return lane;
     }
     return -1;
   }
@@ -229,12 +241,18 @@ export class LiveDanmakuRenderer {
     const url: string = this.firstEmoteUrl(message);
     if (url.length === 0 || this.emoteCache.has(url) || this.emoteLoading.has(url) || this.emoteFailed.has(url)) return;
     this.emoteLoading.add(url);
+    const generation: number = this.resourceGeneration;
     this.loadEmote(url).then((pixelMap: image.PixelMap | null): void => {
+      if (generation !== this.resourceGeneration) {
+        if (pixelMap !== null) pixelMap.release().catch(() => {});
+        return;
+      }
       this.emoteLoading.delete(url);
       if (pixelMap === null) this.emoteFailed.add(url);
       else this.emoteCache.set(url, pixelMap);
       if (this.playing && this.enabled && this.pending.length > 0) this.startLoop();
     }).catch((): void => {
+      if (generation !== this.resourceGeneration) return;
       this.emoteLoading.delete(url);
       this.emoteFailed.add(url);
     });
@@ -260,15 +278,7 @@ export class LiveDanmakuRenderer {
   }
 
   private cleanEmoteText(message: LiveChatMessage): string {
-    let text: string = message.text;
-    for (let i: number = 0; i < message.emotes.length; i++) {
-      const unique: string = message.emotes[i].unique;
-      const emoji: string = message.emotes[i].emoji;
-      if (unique.length > 0) text = text.split(unique).join('');
-      if (emoji.length > 0 && emoji !== unique) text = text.split(emoji).join('');
-    }
-    text = text.replace(/\[[^\[\]]{1,40}\]/g, '');
-    return text.trim();
+    return LiveChatMessage.textWithoutEmotes(message);
   }
 
   private isBulgedEmote(item: LiveEmoteItem | null): boolean {
@@ -280,8 +290,7 @@ export class LiveDanmakuRenderer {
   }
 
   private spawnMessage(message: LiveChatMessage): boolean {
-    if (!this.enabled || this.width <= 1 || message.text.length === 0 ||
-      this.active.length >= this.maxActive) return false;
+    if (!this.enabled || this.width <= 1 || message.text.length === 0) return false;
     // 视频画面浮层只显示正文；用户名属于右侧/下方聊天列表，不参与滚动弹幕。
     const emoteUrl: string = this.firstEmoteUrl(message);
     const emote: image.PixelMap | null = emoteUrl.length > 0 ? (this.emoteCache.get(emoteUrl) ?? null) : null;
@@ -291,7 +300,7 @@ export class LiveDanmakuRenderer {
       body = message.emotes.length > 0 && message.emotes[0].emoji.length > 0 ? message.emotes[0].emoji : '[表情]';
     }
     const text: string = body;
-    this.ctx.font = '600 ' + String(this.fontSize()) + 'px sans-serif';
+    this.ctx.font = '600 ' + String(this.fontSize()) + 'vp sans-serif';
     const textWidth: number = text.length > 0 ? this.ctx.measureText(text).width : 0;
     const emoteItem = message.emotes.length > 0 ? message.emotes[0] : null;
     // 普通表情为 0.8 行高，只有协议明确的房间大表情使用 1.2 行高。
@@ -325,8 +334,8 @@ export class LiveDanmakuRenderer {
     this.lastDrawMs = now;
     const fontSize: number = this.fontSize();
     const topInset: number = 6;
-    this.ctx.font = '600 ' + String(fontSize) + 'px sans-serif';
-    this.ctx.lineWidth = this.fullscreen ? 2.5 : 2;
+    this.ctx.font = '600 ' + String(fontSize) + 'vp sans-serif';
+    this.ctx.lineWidth = this.fullscreen ? 0.8 : 0.7;
     this.ctx.strokeStyle = '#B3000000';
     this.ctx.globalAlpha = Math.min(1, Math.max(0.2, this.opacity));
     const keep: Array<ActiveLiveDanmaku> = [];

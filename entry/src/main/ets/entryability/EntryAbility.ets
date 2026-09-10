@@ -4,10 +4,10 @@ import { DEBUG } from 'BuildProfile';
 import { KeyboardAvoidMode, window } from '@kit.ArkUI';
 import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
-import { UserStore } from '../common/UserStore';
+import { UserStore } from '../services/auth/UserStore';
 import { SearchHistoryStore } from '../common/SearchHistoryStore';
 import { EmoteResolver } from '../common/EmoteResolver';
-import { RemoteAssetCache } from '../common/RemoteAssetCache';
+import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
 import { SponsorBlockStore } from '../common/SponsorBlock';
 
 const DOMAIN: number = 0x0000;

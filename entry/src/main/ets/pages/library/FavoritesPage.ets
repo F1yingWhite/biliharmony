@@ -4,7 +4,7 @@ import { Immersive } from '../../common/Immersive';
 import { AppNavStack, NAV_VIDEO_DETAIL, NAV_FAV_SORT, FavSortParam, VideoDetailParam } from '../../common/AppRouter';
 import { BiliApi, ActionResult } from '../../api/BiliApi';
 import { FavoriteFolderItem, FavoriteVideoPageData, HistoryPageData, HistoryVideoItem, VideoItem, WatchLaterItem } from '../../model/Models';
-import { UserStore } from '../../common/UserStore';
+import { UserStore } from '../../services/auth/UserStore';
 import { formatCount, formatDuration, formatRelativeTime } from '../../common/Utils';
 import { LoadingView } from '../../components/LoadingView';
 import { LoadMoreFooter } from '../../components/LoadMoreFooter';

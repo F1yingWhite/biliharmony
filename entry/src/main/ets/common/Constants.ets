@@ -81,6 +81,7 @@ export class Api {
   static readonly hotList: string = HttpString.apiBaseUrl + '/x/web-interface/popular';
 
   // ===== 直播（仅观看，不包含开播、送礼或充值） =====
+  static readonly liveFollowing: string = HttpString.liveBaseUrl + '/xlive/web-ucenter/user/following';
   static readonly liveRoomList: string = HttpString.liveBaseUrl + '/xlive/web-interface/v1/webMain/getList';
   static readonly liveZoneList: string = HttpString.liveBaseUrl + '/room/v1/Area/getList';
   static readonly liveZoneRooms: string = HttpString.liveBaseUrl + '/room/v3/Area/getRoomList';

@@ -6,7 +6,7 @@ import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
 import { AppNavStack } from '../common/AppRouter';
 import { AuthApi, CookiePair, LoginResult, SmsSendResult, TVCodeResult } from '../api/AuthApi';
-import { UserStore } from '../common/UserStore';
+import { UserStore } from '../services/auth/UserStore';
 import { BackButton } from '../components/BackButton';
 import { safeToast } from '../common/Toast';
 
@@ -24,7 +24,7 @@ function loginInput(isDark: boolean) {
 
 @Component
 export struct LoginPage {
-  // ===== 扫码登录（原有逻辑，勿动） =====
+  // ===== 扫码登录 =====
   @State qrUrl: string = '';
   @State authCode: string = '';
   @State statusText: string = '加载二维码中...';
@@ -50,6 +50,7 @@ export struct LoginPage {
   private smsTimer: number = -1;
   private popTimer: number = -1;
   private pollInflight: boolean = false;
+  private qrGeneration: number = 0;
   private loggedIn: boolean = false;
   private destroyed: boolean = false;
 
@@ -76,7 +77,10 @@ export struct LoginPage {
 
   // ===== 扫码登录 =====
   async requestCode(): Promise<void> {
+    if (this.destroyed || this.loggedIn) return;
     this.stopPoll();
+    const generation: number = this.qrGeneration;
+    this.authCode = '';
     this.expired = false;
     this.qrError = false;
     this.qrUrl = '';
@@ -88,7 +92,7 @@ export struct LoginPage {
     } catch (e) {
       // 与 null 走同一失败态。
     }
-    if (this.destroyed) return;
+    if (this.destroyed || generation !== this.qrGeneration || this.loggedIn) return;
     if (result === null) {
       this.qrError = true;
       this.statusText = '获取二维码失败，请检查网络后点击重试';
@@ -111,6 +115,9 @@ export struct LoginPage {
   }
 
   stopPoll(): void {
+    // 定时器停止不代表请求已取消；使旧请求和旧 finally 一并失效。
+    this.qrGeneration++;
+    this.pollInflight = false;
     if (this.pollTimer >= 0) {
       clearInterval(this.pollTimer);
       this.pollTimer = -1;
@@ -131,13 +138,15 @@ export struct LoginPage {
 
   async poll(): Promise<void> {
     // 慢网络下上一轮 poll 未返回时跳过，避免轮询重叠
-    if (this.loggedIn || this.authCode.length === 0 || this.pollInflight) {
+    if (this.destroyed || this.tab !== 0 || this.loggedIn || this.authCode.length === 0 || this.pollInflight) {
       return;
     }
     this.pollInflight = true;
+    const generation: number = this.qrGeneration;
+    const authCode: string = this.authCode;
     try {
-      const result = await AuthApi.pollTVCode(this.authCode);
-      if (this.destroyed) return;
+      const result = await AuthApi.pollTVCode(authCode);
+      if (this.destroyed || this.loggedIn || generation !== this.qrGeneration || authCode !== this.authCode) return;
       if (result.code === 0) {
         // 登录成功
         this.stopPoll();
@@ -162,7 +171,7 @@ export struct LoginPage {
         this.statusText = result.message.length > 0 ? result.message : '登录失败，请重试';
       }
     } finally {
-      this.pollInflight = false;
+      if (generation === this.qrGeneration) this.pollInflight = false;
     }
   }
 
@@ -286,6 +295,7 @@ export struct LoginPage {
 
   // ===== 登录成功统一收尾：写回 cookie 并返回 =====
   async finishLogin(cookies: Array<CookiePair>, accessToken: string): Promise<void> {
+    if (this.destroyed || this.loggedIn) return;
     this.stopPoll();
     this.loggedIn = true;
     await UserStore.applyLoginCookies(cookies, accessToken);
@@ -305,11 +315,14 @@ export struct LoginPage {
       .backgroundColor(this.tab === index ? this.accent : (this.isDark ? '#2F3136' : '#FFFFFF'))
       .animation({ duration: 180, curve: Curve.EaseOut })
       .onClick(() => {
+        if (this.loggedIn || this.tab === index) return;
         this.tab = index;
         // 扫码轮询只在扫码 tab 运行；切回时若二维码仍有效则恢复
         if (index === 0) {
           if (!this.loggedIn && !this.expired && this.authCode.length > 0) {
             this.startPoll();
+          } else if (this.authCode.length === 0) {
+            this.requestCode().catch(() => {});
           }
         } else {
           this.stopPoll();

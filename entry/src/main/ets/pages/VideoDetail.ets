@@ -1,8 +1,11 @@
+import { PlayerQualityPreference } from '../common/PlayerQualityPreference';
 /**
  * 视频详情页：沉浸式播放器 + 封面取色动态主题 + 简介/评论/相关。
  * 大区块已按职责拆到组件：评论 Tab（VideoReplyTab）、相关推荐行（RelatedVideoRow）、
  * 投币弹窗（CoinSheetView）、收藏夹多选（FavPickSheetView）、楼中楼面板（ReplyThreadPanel）。
  */
+import { PlaybackSourceCoordinator, PlaybackSelection } from '../services/media/PlaybackSourceCoordinator';
+import { RequestEpoch } from '../common/RequestEpoch';
 import { display, FrameCallback, UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
@@ -22,7 +25,7 @@ import { AppTheme } from '../common/AppTheme';
 import { PlayerDanmakuEngine } from '../components/player/PlayerDanmakuEngine';
 import { LoadingView } from '../components/LoadingView';
 import { ImageColor, ImagePalette } from '../common/ImageColor';
-import { UserStore } from '../common/UserStore';
+import { UserStore } from '../services/auth/UserStore';
 import { asNumber, asObject, colorWithAlpha, formatCount, formatDate } from '../common/Utils';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
 import { BasicDataSource } from '../common/BasicDataSource';
@@ -119,6 +122,7 @@ export struct VideoDetailPage {
   @State threadCursor: string = '';
   @State threadHasMore: boolean = true;
   @State threadLoading: boolean = false;
+  private threadEpoch: RequestEpoch = new RequestEpoch();
   @State threadPrefetchCount: number = 0;
   /** 当前输入栏回复所属的根评论；为 0 时发布一级评论。与详情面板是否打开相互独立。 */
   @State replyTargetRootRpid: number = 0;
@@ -221,7 +225,8 @@ export struct VideoDetailPage {
   private threadScroller: Scroller = new Scroller();
   private videoProgressSeconds: number = 0;
   private lastHeartbeatSeconds: number = -1;
-  private pageSwitchRequest: number = 0;
+  private playbackSources: PlaybackSourceCoordinator = new PlaybackSourceCoordinator();
+  private initialRequest: RequestEpoch = new RequestEpoch();
   private relatedRecommendIdx: number = 0;
   private destroyed: boolean = false;
   private timers: Set<number> = new Set<number>();
@@ -312,6 +317,8 @@ export struct VideoDetailPage {
   }
 
   closeReplyThread(): void {
+    this.threadEpoch.invalidate();
+    this.threadLoading = false;
     if (!this.replyThreadOpen) return;
     CommentLog.info('ui.thread.close', 'aid=' + String(this.detail.aid) + ' root=' +
       String(this.replyThreadRoot.rpid) + ' rows=' + String(this.threadAllReplies.length));
@@ -867,7 +874,11 @@ export struct VideoDetailPage {
   }
 
   aboutToDisappear(): void {
+    this.threadEpoch.invalidate();
+    this.threadLoading = false;
     this.destroyed = true;
+    this.playbackSources.invalidate();
+    this.initialRequest.invalidate();
     this.reportVideoHeartbeat(this.videoProgressSeconds, true);
     this.timers.forEach((id: number) => {
       clearTimeout(id);
@@ -964,53 +975,42 @@ export struct VideoDetailPage {
     return followers + ' 粉丝  ' + videos + ' 视频';
   }
 
-  /** 首次播放地址：先用默认 cid 请求，若服务端返回 last_play_cid 指向其他分 P，则改拉该分 P 并续播。 */
-  private async loadInitialPlayback(detail: VideoDetail): Promise<boolean> {
-    const initialCid: number = detail.cid > 0 ? detail.cid : (detail.pages.length > 0 ? detail.pages[0].cid : 0);
-    let targetCid: number = initialCid;
+  /** 初次加载与手动分 P 使用同一协调器；过期结果既不换源，也不显示错误。 */
+  private async loadInitialPlayback(detail: VideoDetail): Promise<void> {
+    const request: number = this.playbackSources.next();
     this.resetPlaybackSize();
-    this.currentCid = initialCid;
+    this.currentCid = detail.cid > 0 ? detail.cid : (detail.pages.length > 0 ? detail.pages[0].cid : 0);
     this.currentPageIndex = 0;
-    for (let i: number = 0; i < detail.pages.length; i++) {
-      if (detail.pages[i].cid === initialCid) {
-        this.currentPageIndex = i;
-        break;
+    const initialQuality: number = PlayerQualityPreference.requested();
+    try {
+      const selection: PlaybackSelection | null = await this.playbackSources.initial(detail, initialQuality, request);
+      if (this.destroyed || !this.playbackSources.isCurrent(request)) return;
+      if (selection === null) {
+        this.playbackAddressFailed = true;
+        return;
       }
+      this.applyPlaybackSource(selection.info, selection.cid, selection.pageIndex,
+        Math.max(0, Math.floor(selection.info.lastPlayTime / 1000)));
+    } catch (e) {
+      if (!this.destroyed && this.playbackSources.isCurrent(request)) this.playbackAddressFailed = true;
     }
-    // 当前没有自适应码率切换能力，“自动”若直接请求 127 会固定选中 4K。
-    // 手机上默认封顶 1080P；高码率类偏好才请求最高画质，智能省流固定 720P。
-    const qualityPref: number = AppStorage.get<number>('videoQualityPref') ?? 0;
-    const initialQuality: number = qualityPref === 3 ? 64 : (qualityPref === 0 ? 80 : 127);
-    let info: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, initialCid, initialQuality);
-    if (info === null || info.urls.length === 0 || this.destroyed) return false;
-    // 多 P 视频上次停在其他分 P：直接切到该分 P 的地址，让续播位置与画面匹配。
-    if (info.lastPlayCid > 0 && info.lastPlayCid !== initialCid && detail.pages.length > 1) {
-      for (let i: number = 0; i < detail.pages.length; i++) {
-        if (detail.pages[i].cid === info.lastPlayCid) {
-          const lastInfo: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, info.lastPlayCid,
-            initialQuality);
-          if (lastInfo !== null && lastInfo.urls.length > 0 && this.destroyed === false) {
-            info = lastInfo;
-            targetCid = info.lastPlayCid;
-            this.currentPageIndex = i;
-          }
-          break;
-        }
-      }
-    }
-    if (this.destroyed) return false;
-    // 最终线路与画质确定后一次性提交，避免 XComponent 在首帧前被两组地址连续驱动。
-    this.currentCid = targetCid;
+  }
+
+  private applyPlaybackSource(info: PlayUrlInfo, cid: number, index: number, seekSeconds: number): void {
     this.playUrl = info.url;
     this.playUrls = info.urls;
     this.playAudioUrls = info.audioUrls;
     this.qualityOptions = info.qualities;
     this.subtitleTracks = info.subtitles;
     this.currentQuality = info.quality;
-    // last_play_time 为毫秒；续播位置 = 上次进度。
-    this.initialSeekSeconds = Math.max(0, Math.floor(info.lastPlayTime / 1000));
+    this.initialSeekSeconds = seekSeconds;
     this.lastHeartbeatSeconds = -1;
-    return true;
+    this.resetPlaybackSize();
+    this.currentCid = cid;
+    this.currentPageIndex = index;
+    this.playbackAddressFailed = false;
+    // 最后发布版本，播放器只读取同一次选择的完整属性。
+    this.playerSourceVersion++;
   }
 
   private async loadInitialRelated(aid: number, bvid: string): Promise<void> {
@@ -1053,6 +1053,9 @@ export struct VideoDetailPage {
   }
 
   async init(): Promise<void> {
+    const request: number = this.initialRequest.next();
+    this.playbackSources.invalidate();
+    this.pageSwitchingCid = 0;
     this.loading = true;
     this.errorText = '';
     this.playbackAddressFailed = false;
@@ -1066,7 +1069,7 @@ export struct VideoDetailPage {
     this.upVideoCount = -1;
     try {
       const detail: VideoDetail | null = await BiliApi.getVideoDetail(this.aid, this.bvid);
-      if (this.destroyed) return;
+      if (this.destroyed || !this.initialRequest.isCurrent(request)) return;
       if (detail === null) {
         this.errorText = '视频不存在或已失效';
         return;
@@ -1080,17 +1083,13 @@ export struct VideoDetailPage {
 
       // 封面取色仅用于本页播放区氛围光，不改全局主题色（主题色由用户自选）
       ImageColor.extract(detail.cover).then((palette: ImagePalette) => {
-        if (!this.destroyed) this.pageTint = palette.dominant;
+        if (!this.destroyed && this.initialRequest.isCurrent(request)) this.pageTint = palette.dominant;
       }).catch(() => {
         // 取色失败仅影响氛围光，保留默认主题色。
       });
 
       // 并行加载相关 / 评论；播放地址单独走续播定位逻辑。
-      this.loadInitialPlayback(detail).then((loaded: boolean) => {
-        if (!this.destroyed && !loaded) this.playbackAddressFailed = true;
-      }).catch(() => {
-        if (!this.destroyed) this.playbackAddressFailed = true;
-      });
+      this.loadInitialPlayback(detail);
       this.loadInitialRelated(detail.aid, detail.bvid).catch(() => {
         // 方法内部已经维护错误态；这里仅防止未处理的异步异常。
       });
@@ -1100,7 +1099,7 @@ export struct VideoDetailPage {
         const coinVersion: number = this.coinActionVersion;
         const favoriteVersion: number = this.favoriteActionVersion;
         BiliApi.getVideoRelation(detail.aid, detail.bvid).then((relation: VideoRelationState | null) => {
-          if (relation !== null && !this.destroyed) {
+          if (relation !== null && !this.destroyed && this.initialRequest.isCurrent(request)) {
             // 用户可能在关系请求返回前已经操作过；旧响应不能覆盖较新的本地成功状态。
             if (likeVersion === this.likeActionVersion) {
               this.liked = relation.liked;
@@ -1116,9 +1115,9 @@ export struct VideoDetailPage {
         this.loadEmotes();
       }
     } catch (e) {
-      if (!this.destroyed) this.errorText = '加载失败，请检查网络后重试';
+      if (!this.destroyed && this.initialRequest.isCurrent(request)) this.errorText = '加载失败，请检查网络后重试';
     } finally {
-      if (!this.destroyed) this.loading = false;
+      if (!this.destroyed && this.initialRequest.isCurrent(request)) this.loading = false;
     }
   }
 
@@ -1484,37 +1483,26 @@ export struct VideoDetailPage {
   }
 
   async switchVideoPage(page: VideoPage, index: number): Promise<void> {
-    if (page.cid <= 0 || page.cid === this.currentCid) return;
-    const request: number = ++this.pageSwitchRequest;
+    if (page.cid <= 0) return;
+    if (page.cid === this.currentCid && this.pageSwitchingCid === 0 && this.playUrls.length > 0) return;
+    const request: number = this.playbackSources.next();
     this.pageSwitchingCid = page.cid;
     try {
-      const qn: number = this.currentQuality > 0 ? this.currentQuality : 127;
+      const qn: number = PlayerQualityPreference.requested();
       const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(this.detail.aid, this.detail.bvid, page.cid, qn);
       // 已有更新的分 P 请求在途时，结果与标志复位都归更新的请求处理。
-      if (request !== this.pageSwitchRequest || this.destroyed) return;
+      if (!this.playbackSources.isCurrent(request) || this.destroyed) return;
       this.pageSwitchingCid = 0;
       if (info === null || info.urls.length === 0) {
         this.toast('该分 P 暂时无法播放');
         return;
       }
-      this.playUrl = info.url;
-      this.playUrls = info.urls;
-      this.playAudioUrls = info.audioUrls;
-      this.qualityOptions = info.qualities;
-      this.subtitleTracks = info.subtitles;
-      this.currentQuality = info.quality;
-      this.initialSeekSeconds = 0;
-      this.lastHeartbeatSeconds = -1;
-      this.resetPlaybackSize();
-      this.currentCid = page.cid;
-      this.currentPageIndex = index;
+      this.applyPlaybackSource(info, page.cid, index, 0);
       this.playerCollapseRaw = 0;
       this.playerCollapse = 0;
       this.playerEnded = false;
-      // 所有播放源属性先更新，最后递增版本号，让播放器一次性读取同一分 P 的完整数据。
-      this.playerSourceVersion++;
     } catch (e) {
-      if (request === this.pageSwitchRequest && !this.destroyed) {
+      if (this.playbackSources.isCurrent(request) && !this.destroyed) {
         this.pageSwitchingCid = 0;
         this.toast('网络异常，切换分 P 失败');
       }
@@ -1980,12 +1968,15 @@ export struct VideoDetailPage {
   }
 
   async loadThreadReplies(reset: boolean, allowPrefetch: boolean = true): Promise<void> {
-    if (this.threadLoading || (!reset && !this.threadHasMore)) {
+    if ((!reset && this.threadLoading) || (!reset && !this.threadHasMore)) {
       CommentLog.warn('ui.thread.skip', 'root=' + String(this.replyThreadRoot.rpid) + ' reset=' +
         String(reset) + ' loading=' + String(this.threadLoading) + ' hasMore=' + String(this.threadHasMore));
       return;
     }
+    const epoch: number = this.threadEpoch.next();
     this.threadLoading = true;
+    const root: number = this.replyThreadRoot.rpid;
+    const oid: number = this.detail.aid;
     const cursor: string = reset ? '' : this.threadCursor;
     const startedAt: number = Date.now();
     const before: number = this.threadAllReplies.length;
@@ -1994,8 +1985,9 @@ export struct VideoDetailPage {
       String(cursor.length) + ' before=' + String(before));
     let loaded: boolean = false;
     try {
-      const data = await CommentApi.getReplyReplies(this.detail.aid, 1, this.replyThreadRoot.rpid, cursor);
-      if (this.destroyed) return;
+      const data = await CommentApi.getReplyReplies(oid, 1, root, cursor);
+      if (this.destroyed || !this.threadEpoch.isCurrent(epoch) ||
+        this.replyThreadRoot.rpid !== root || this.detail.aid !== oid) return;
       // 保留 item.replies 里的预览回复：接口偶尔返回空列表时，楼中楼不会变成“有数字但没内容”。
       this.threadAllReplies = this.mergeUniqueReplies(this.threadAllReplies, data.replies);
       this.threadCursor = data.cursor;
@@ -2006,12 +1998,13 @@ export struct VideoDetailPage {
         ' total=' + String(this.threadAllReplies.length) + ' cursorLen=' + String(this.threadCursor.length) +
         ' hasMore=' + String(this.threadHasMore) + ' ms=' + String(CommentLog.elapsed(startedAt)));
     } catch (e) {
+      if (!this.threadEpoch.isCurrent(epoch)) return;
       // 回复加载失败保持现有内容，threadLoading 复位后可点击继续加载重试。
       CommentLog.error('ui.thread.error', 'root=' + String(this.replyThreadRoot.rpid) + ' reset=' +
         String(reset) + ' ms=' + String(CommentLog.elapsed(startedAt)) + ' error=' +
         CommentLog.errorText(e as Object));
     } finally {
-      if (!this.destroyed) this.threadLoading = false;
+      if (!this.destroyed && this.threadEpoch.isCurrent(epoch)) this.threadLoading = false;
     }
     if (!loaded) return;
     const target: number = Math.min(20, Math.max(1, this.replyThreadRoot.count));
@@ -2893,6 +2886,7 @@ export struct VideoDetailPage {
               onShare: () => {
                 this.actionShare();
               },
+              onWatchLater: () => this.actionWatchLater(),
               moreSheetHeight: this.moreSheetHeightValue(),
             })
           }

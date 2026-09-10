@@ -128,7 +128,8 @@ class ProtoReader {
     } else if (wire === WIRE_FIXED64) {
       this.pos = Math.min(this.pos + 8, this.limit);
     } else if (wire === WIRE_LENGTH) {
-      this.pos = Math.min(this.pos + this.readVarint(), this.limit);
+      const length: number = this.readVarint();
+      this.pos = Math.min(this.pos + length, this.limit);
     } else if (wire === WIRE_FIXED32) {
       this.pos = Math.min(this.pos + 4, this.limit);
     } else {

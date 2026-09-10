@@ -3,6 +3,7 @@
  * 结果态：综合 | 视频 | 番剧 | 影视 | 直播 | 专栏 | 用户 二级 Tab
  * （综合走 search/all/v2 分区混排，其余走 search/type；视频带排序 chips + 筛选面板）
  */
+import { RequestEpoch } from '../common/RequestEpoch';
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, ArticlePageParam, LiveRoomParam, NAV_ARTICLE, NAV_BANGUMI_DETAIL, NAV_LIVE_ROOM,
   NAV_VIDEO_DETAIL, NAV_USER_SPACE, BangumiDetailParam, VideoDetailParam, UserSpaceParam } from '../common/AppRouter';
@@ -19,7 +20,6 @@ import { BackButton } from '../components/BackButton';
 import { FilterChip } from '../components/FilterChip';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { SearchResultList } from '../components/SearchResultList';
-import { VideoRowCard } from '../components/video/VideoRowCard';
 import { VideoCard } from '../components/video/VideoCard';
 import { LiveRoomCard } from '../components/live/LiveRoomCard';
 import { formatCount, formatDuration, formatRelativeTime } from '../common/Utils';
@@ -47,6 +47,7 @@ export struct SearchPage {
   @State liveTotal: number = -1;
   @State articleTotal: number = -1;
   @State loading: boolean = false;
+  @State searchError: string = '';
   @State loadingMore: boolean = false;
   @State allPage: number = 1;
   @State videoPage: number = 1;
@@ -85,11 +86,13 @@ export struct SearchPage {
   private suggestSeq: number = 0;
   // 结果请求防重入；destroyed 阻止销毁后异步回调写 @State
   private searchInflight: boolean = false;
-  private pendingResetSearch: boolean = false;
+  private searchRequests: RequestEpoch = new RequestEpoch();
   private destroyed: boolean = false;
 
   async aboutToAppear(): Promise<void> {
     this.destroyed = false;
+    this.loading = false;
+    this.loadingMore = false;
     this.history = await SearchHistoryStore.ensureLoaded();
     this.loadHotSearch().catch(() => {
     });
@@ -105,6 +108,9 @@ export struct SearchPage {
 
   aboutToDisappear(): void {
     this.destroyed = true;
+    this.searchRequests.invalidate();
+    this.searchInflight = false;
+    this.suggestSeq++;
     if (this.suggestTimer >= 0) {
       clearTimeout(this.suggestTimer);
       this.suggestTimer = -1;
@@ -136,6 +142,10 @@ export struct SearchPage {
     if (value.length === 0) {
       // 清空输入回到热搜/历史首页面；searching 若不复位，结果 Tabs 会一直霸屏。
       this.searching = false;
+      this.searchRequests.invalidate();
+      this.searchInflight = false;
+      this.loading = false;
+      this.loadingMore = false;
       this.showSuggest = false;
       this.suggests = [];
       return;
@@ -169,18 +179,14 @@ export struct SearchPage {
     if (kw.length === 0) {
       return;
     }
-    if (this.searchInflight) {
-      // 用户在旧请求中切换关键词/Tab/排序时，保留最后一次首页请求，不让新操作被并发守卫吞掉。
-      if (reset) this.pendingResetSearch = true;
-      return;
-    }
+    if (this.destroyed || (!reset && this.searchInflight)) return;
+    const request: number = this.searchRequests.next();
     this.searchInflight = true;
+    this.searchError = '';
     this.showSuggest = false;
     this.searching = true;
     this.loading = reset;
-    if (!reset) {
-      this.loadingMore = true;
-    }
+    this.loadingMore = !reset;
     try {
       if (this.searchTab === 0) {
         // 综合：聚合分区混排；page>1 只返回视频分区，追加进已有视频分区
@@ -188,8 +194,11 @@ export struct SearchPage {
           this.allPage = 1;
         }
         const page: number = this.allPage;
-        const res: SearchAllResult = await SearchApi.searchAll(kw, page);
-        if (this.destroyed) {
+        const pubtimeBegin: number = this.filterPubtime > 0 ?
+          Math.floor(Date.now() / 1000) - VIDEO_PUBTIME_OPTIONS[this.filterPubtime].value : 0;
+        const res: SearchAllResult = await SearchApi.searchAll(kw, page, this.videoOrder,
+          VIDEO_DURATION_OPTIONS[this.filterDuration].value, pubtimeBegin, this.filterTids);
+        if (this.destroyed || !this.searchRequests.isCurrent(request)) {
           return;
         }
         if (reset) {
@@ -211,7 +220,7 @@ export struct SearchPage {
         }
         const res: VideoSearchResult = await SearchApi.searchVideosByType(kw, page, this.videoOrder,
           VIDEO_DURATION_OPTIONS[this.filterDuration].value, pubtimeBegin, this.filterTids);
-        if (this.destroyed) {
+        if (this.destroyed || !this.searchRequests.isCurrent(request)) {
           return;
         }
         if (reset) {
@@ -240,7 +249,7 @@ export struct SearchPage {
         const page: number = isBangumi ? this.bangumiPage : this.ftPage;
         const res: PgcSearchResult = await SearchApi.searchMedia(kw,
           isBangumi ? SearchTypes.mediaBangumi : SearchTypes.mediaFt, page);
-        if (this.destroyed) {
+        if (this.destroyed || !this.searchRequests.isCurrent(request)) {
           return;
         }
         if (reset) {
@@ -261,7 +270,7 @@ export struct SearchPage {
         }
         const page: number = this.livePage;
         const res: LiveSearchResult = await SearchApi.searchLiveRooms(kw, page, this.liveOrder);
-        if (this.destroyed) {
+        if (this.destroyed || !this.searchRequests.isCurrent(request)) {
           return;
         }
         if (reset) {
@@ -277,7 +286,7 @@ export struct SearchPage {
         }
         const page: number = this.articlePage;
         const res: ArticleSearchResult = await SearchApi.searchArticles(kw, page);
-        if (this.destroyed) {
+        if (this.destroyed || !this.searchRequests.isCurrent(request)) {
           return;
         }
         if (reset) {
@@ -293,7 +302,7 @@ export struct SearchPage {
         }
         const page: number = this.userPage;
         const res: UserSearchResult = await SearchApi.searchUsers(kw, page, this.userOrder, this.userType);
-        if (this.destroyed) {
+        if (this.destroyed || !this.searchRequests.isCurrent(request)) {
           return;
         }
         if (reset) {
@@ -304,14 +313,15 @@ export struct SearchPage {
         this.userTotal = res.numResults;
         this.userPage = page + 1;
       }
+    } catch (e) {
+      if (!this.destroyed && this.searchRequests.isCurrent(request)) {
+        this.searchError = e instanceof Error ? e.message : '搜索失败，请重试';
+      }
     } finally {
-      this.searchInflight = false;
-      this.loading = false;
-      this.loadingMore = false;
-      if (this.pendingResetSearch && !this.destroyed) {
-        this.pendingResetSearch = false;
-        this.doSearch(true).catch(() => {
-        });
+      if (!this.destroyed && this.searchRequests.isCurrent(request)) {
+        this.searchInflight = false;
+        this.loading = false;
+        this.loadingMore = false;
       }
     }
   }
@@ -890,17 +900,7 @@ export struct SearchPage {
   VideoListContent() {
     LazyForEach(this.resultsSource, (item: VideoItem) => {
       ListItem() {
-        VideoRowCard({
-          cover: item.cover,
-          title: item.title,
-          upName: item.upName,
-          overlayText: item.playText + ' · ' + item.danmakuText,
-          compact: true,
-          onTap: () => {
-            const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
-            AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
-          },
-        })
+        this.SearchVideoRow(item, 'search-video-')
       }
     }, (item: VideoItem) => item.bvid + String(item.aid))
   }
@@ -911,6 +911,7 @@ export struct SearchPage {
       this.VideoSortRow()
       SearchResultList({
         loading: this.loading,
+        errorText: this.searchError,
         loadingMore: this.loadingMore,
         count: this.resultsSource.totalCount(),
         emptyText: '没有找到相关视频',
@@ -946,6 +947,7 @@ export struct SearchPage {
       this.UserSortRow()
       SearchResultList({
         loading: this.loading,
+        errorText: this.searchError,
         loadingMore: this.loadingMore,
         count: this.userSource.totalCount(),
         emptyText: '没有找到相关用户',
@@ -1060,6 +1062,7 @@ export struct SearchPage {
     Column() {
       SearchResultList({
         loading: this.loading,
+        errorText: this.searchError,
         loadingMore: this.loadingMore,
         count: this.mediaSource(isBangumi).totalCount(),
         emptyText: emptyText,
@@ -1099,6 +1102,7 @@ export struct SearchPage {
       this.LiveSortRow()
       SearchResultList({
         loading: this.loading,
+        errorText: this.searchError,
         loadingMore: this.loadingMore,
         count: this.liveSource.totalCount(),
         emptyText: '没有找到相关直播间',
@@ -1183,6 +1187,7 @@ export struct SearchPage {
     Column() {
       SearchResultList({
         loading: this.loading,
+        errorText: this.searchError,
         loadingMore: this.loadingMore,
         count: this.articleSource.totalCount(),
         emptyText: '没有找到相关专栏',
@@ -1206,7 +1211,8 @@ export struct SearchPage {
   @Builder
   AllSectionHeader(type: string) {
     Text(type === SearchTypes.video ? '视频' :
-      (type === SearchTypes.biliUser ? '用户' : (type === SearchTypes.mediaBangumi ? '番剧' : '影视')))
+      (type === SearchTypes.biliUser ? '用户' : (type === SearchTypes.mediaBangumi ? '番剧' :
+        (type === SearchTypes.article ? '图文' : '影视'))))
       .fontSize(14)
       .fontWeight(FontWeight.Bold)
       .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
@@ -1356,36 +1362,20 @@ export struct SearchPage {
     .width('100%')
   }
 
-  // ===== 结果态：综合 Tab 视频分区（双列卡片行） =====
+  // 综合与视频分类使用相同的横向结果行，保留整卡入场过渡。
   @Builder
-  AllVideoRow(section: SearchAllSection, index: number) {
-    Row() {
-      Column() {
-        VideoCard({ video: section.videos[index], idPrefix: 'search-', wholeCardTransition: true })
-      }
-      .width('48.5%')
-      Blank()
-      if (index + 1 < section.videos.length) {
-        Column() {
-          VideoCard({ video: section.videos[index + 1], idPrefix: 'search-', wholeCardTransition: true })
-        }
-        .width('48.5%')
-      } else {
-        Column()
-          .width('48.5%')
-      }
-    }
-    .width('100%')
-    .padding({ left: 12, right: 12 })
-    .margin({ bottom: 10 })
+  SearchVideoRow(item: VideoItem, prefix: string) {
+    VideoCard({ video: item, horizontal: true, idPrefix: prefix, wholeCardTransition: true })
   }
 
-  // ===== 结果态：综合 Tab 内容（番剧/影视分区 + 用户横滑行 + 视频双列流） =====
   @Builder
   AllResultTab() {
     Column() {
+      this.VideoSortRow()
       if (this.loading) {
         LoadingView({ loading: true })
+      } else if (this.searchError.length > 0) {
+        LoadingView({ loading: false, errorText: this.searchError, onRetry: () => this.doSearch(true) })
       } else if (this.allSections.length === 0) {
         LoadingView({
           loading: false,
@@ -1418,12 +1408,16 @@ export struct SearchPage {
                   .backgroundColor(this.isDark ? '#24262B' : '#FFFFFF')
                   .clip(true)
                 }, (item: PgcSearchItem) => String(item.seasonId))
+              } else if (section.type === SearchTypes.article) {
+                ForEach(section.articles, (item: ArticleSearchItem) => {
+                  ListItem() {
+                    this.ArticleRow(item)
+                  }
+                }, (item: ArticleSearchItem) => String(item.id))
               } else if (section.type === SearchTypes.video) {
                 ForEach(section.videos, (item: VideoItem, index: number) => {
-                  if (index % 2 === 0) {
-                    ListItem() {
-                      this.AllVideoRow(section, index)
-                    }
+                  ListItem() {
+                    this.SearchVideoRow(item, 'search-all-')
                   }
                 }, (item: VideoItem) => item.bvid + String(item.aid))
               }
@@ -1446,7 +1440,7 @@ export struct SearchPage {
           }
         }
         .width('100%')
-        .height('100%')
+        .layoutWeight(1)
         .cachedCount(5)
         .scrollBar(BarState.Off)
         .onReachEnd(() => {

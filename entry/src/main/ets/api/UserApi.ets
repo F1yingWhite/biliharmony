@@ -1,7 +1,7 @@
 /**
  * 用户域 API：当前登录用户 / 用户统计 / 关系 / 用户空间信息 / 投稿列表。
  */
-import { HttpClient, HttpResponse } from '../common/HttpClient';
+import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { WbiSign } from '../common/WbiSign';
 import { appSign } from '../common/AppSign';
 import { Api, Constants } from '../common/Constants';

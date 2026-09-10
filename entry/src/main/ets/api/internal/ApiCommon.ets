@@ -2,9 +2,34 @@
  * API 层共享基础设施：统一响应解析（code/data）与 CSRF 互动骨架。
  * 仅允许被 api/ 下的域模块与 BiliApi facade 依赖，禁止反向依赖任何域模块。
  */
-import { HttpClient, HttpResponse } from '../../common/HttpClient';
+import { HttpClient, HttpResponse } from '../../services/network/HttpClient';
 import { Constants } from '../../common/Constants';
 import { asNumber, asObject, str } from '../../common/Utils';
+import { ApiResult, ApiErrorKind } from '../../services/network/ApiResult';
+
+/** 保留传输、登录、业务与解析错误，让列表明确区分失败和空结果。 */
+export function parseDataResult(resp: HttpResponse): ApiResult<Record<string, Object>> {
+  if (!resp.ok) {
+    return new ApiResult<Record<string, Object>>(null, '网络请求失败，请重试 (' + String(resp.status) + ')',
+      ApiErrorKind.Network, resp.status);
+  }
+  const json: Record<string, Object> = resp.json();
+  if (typeof json['code'] !== 'number') {
+    return new ApiResult<Record<string, Object>>(null, '响应格式异常，请重试', ApiErrorKind.Parse);
+  }
+  const code: number = asNumber(json['code'], -1);
+  if (code !== 0) {
+    const auth: boolean = code === -101 || code === -111;
+    return new ApiResult<Record<string, Object>>(null,
+      auth ? '登录状态已失效，请重新登录' : failureText(resp, '加载失败'),
+      auth ? ApiErrorKind.Auth : ApiErrorKind.Business, code);
+  }
+  const data: Object = json['data'];
+  if (data === null || data === undefined || typeof data !== 'object' || Array.isArray(data)) {
+    return new ApiResult<Record<string, Object>>(null, '响应数据缺失，请重试', ApiErrorKind.Parse);
+  }
+  return new ApiResult<Record<string, Object>>(asObject(data));
+}
 
 export class ActionResult {
   ok: boolean = false;

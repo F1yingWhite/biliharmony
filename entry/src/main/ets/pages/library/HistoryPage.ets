@@ -1,86 +1,91 @@
 /** 登录用户的观看历史。 */
+import { HistoryPager } from '../../services/library/HistoryPager';
+import { AuthSession } from '../../services/auth/AuthSession';
 import { AppTheme } from '../../common/AppTheme';
 import { Immersive } from '../../common/Immersive';
-import { AppNavStack, NAV_VIDEO_DETAIL, NAV_FAV_SORT, FavSortParam, VideoDetailParam } from '../../common/AppRouter';
+import { AppNavStack, NAV_VIDEO_DETAIL, VideoDetailParam } from '../../common/AppRouter';
 import { ActionResult } from '../../api/BiliApi';
-import { FavoriteFolderItem, FavoriteVideoPageData, HistoryPageData, HistoryVideoItem, VideoItem, WatchLaterItem } from '../../model/Models';
-import { UserStore } from '../../common/UserStore';
-import { formatCount, formatDuration, formatRelativeTime } from '../../common/Utils';
+import { HistoryVideoItem } from '../../model/Models';
+import { UserStore } from '../../services/auth/UserStore';
+import { formatDuration, formatRelativeTime } from '../../common/Utils';
 import { LoadingView } from '../../components/LoadingView';
 import { LoadMoreFooter } from '../../components/LoadMoreFooter';
 import { PageHeader } from '../../components/PageHeader';
 import { VideoRowCard } from '../../components/video/VideoRowCard';
 import { BasicDataSource } from '../../common/BasicDataSource';
-import { FavoriteApi } from '../../api/FavoriteApi';
 import { HistoryApi } from '../../api/HistoryApi';
 
 @Component
 export struct HistoryPage {
   @State loading: boolean = false;
   @State hasMore: boolean = true;
-  @State cursorMax: number = 0;
-  @State cursorViewAt: number = 0;
   @State itemCount: number = 0;
   @State errorText: string = '';
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
-  private itemsSource: BasicDataSource<HistoryVideoItem> = new BasicDataSource<HistoryVideoItem>();
+  @StorageProp('loginVersion') @Watch('onLoginChanged') loginVersion: number = 0;
+  private pager: HistoryPager = new HistoryPager();
+  private itemsSource: BasicDataSource<HistoryVideoItem> = this.pager.source;
+  private destroyed: boolean = false;
 
   aboutToAppear(): void {
+    this.destroyed = false;
+    this.loading = false;
+    this.prepareAndLoad();
+  }
+
+  aboutToDisappear(): void {
+    this.destroyed = true;
+    this.pager.cancel();
+  }
+
+  private onLoginChanged(): void {
+    this.pager.cancel();
+    this.itemsSource.clear();
+    if (this.destroyed) return;
+    this.itemCount = 0;
+    this.loading = false;
     this.prepareAndLoad();
   }
 
   private async prepareAndLoad(): Promise<void> {
+    const session: number = AuthSession.version;
     try {
       await UserStore.ensureLoaded();
+      if (this.destroyed || session !== AuthSession.version) return;
       if (!UserStore.isLogin) {
         this.errorText = '登录后才能加载观看历史';
         return;
       }
       await this.load(true);
     } catch (e) {
-      this.errorText = '历史记录加载失败，请检查网络后重试';
+      if (!this.destroyed && session === AuthSession.version) this.errorText = '历史记录加载失败，请检查网络后重试';
     }
+  }
+
+  private syncPager(): void {
+    this.loading = this.pager.loading;
+    this.hasMore = this.pager.hasMore;
+    this.errorText = this.pager.error;
+    this.itemCount = this.itemsSource.totalCount();
   }
 
   async load(reset: boolean): Promise<void> {
-    if (this.loading || (!reset && !this.hasMore)) return;
-    this.loading = true;
-    this.errorText = '';
-    try {
-      const data: HistoryPageData = await HistoryApi.getHistory(reset ? 0 : this.cursorMax, reset ? 0 : this.cursorViewAt);
-      if (reset) {
-        this.itemsSource.reset(data.items);
-      } else {
-        this.itemsSource.append(this.mergeNew(data.items));
-      }
-      this.cursorMax = data.max;
-      this.cursorViewAt = data.viewAt;
-      this.hasMore = data.hasMore;
-      this.itemCount = this.itemsSource.totalCount();
-    } catch (e) {
-      if (this.itemsSource.isEmpty()) this.errorText = '历史记录加载失败，请检查网络后重试';
-    } finally {
-      this.loading = false;
-    }
+    if (this.destroyed) return;
+    const session: number = AuthSession.version;
+    const task: Promise<void> = this.pager.load(reset);
+    this.syncPager();
+    await task;
+    if (!this.destroyed && session === AuthSession.version) this.syncPager();
   }
 
-  /** 追加前按 bvid+观看时间去重，游标翻页边界可能重复返回同一条记录。 */
-  private mergeNew(incoming: Array<HistoryVideoItem>): Array<HistoryVideoItem> {
-    const keys: Set<string> = new Set<string>();
-    const base: Array<HistoryVideoItem> = this.itemsSource.getAll();
-    for (let i: number = 0; i < base.length; i++) {
-      keys.add(base[i].video.bvid + ':' + String(base[i].viewAt));
-    }
-    const result: Array<HistoryVideoItem> = [];
-    for (let i: number = 0; i < incoming.length; i++) {
-      const key: string = incoming[i].video.bvid + ':' + String(incoming[i].viewAt);
-      if (!keys.has(key)) {
-        keys.add(key);
-        result.push(incoming[i]);
-      }
-    }
-    return result;
+  private async retryLoad(): Promise<void> {
+    if (this.destroyed) return;
+    const session: number = AuthSession.version;
+    const task: Promise<void> = this.pager.retry();
+    this.syncPager();
+    await task;
+    if (!this.destroyed && session === AuthSession.version) this.syncPager();
   }
 
   build() {
@@ -122,15 +127,15 @@ export struct HistoryPage {
           ListItem() {
             LoadMoreFooter({
               loading: this.loading,
-              hasMore: this.hasMore,
-              moreText: '继续加载',
+              hasMore: this.errorText.length > 0 || this.hasMore,
+              moreText: this.errorText.length > 0 ? this.errorText + ' · 点击重试' : '继续加载',
               endText: '—— 到底啦 ——',
               loadingText: '加载中…',
               accentLoadingText: true,
               padTop: 18,
               padBottom: 18,
               onLoadMore: () => {
-                this.load(false).catch(() => {
+                (this.errorText.length > 0 ? this.retryLoad() : this.load(false)).catch(() => {
                 });
               },
             })
@@ -141,6 +146,7 @@ export struct HistoryPage {
         .cachedCount(5)
         .scrollBar(BarState.Off)
         .onReachEnd(() => {
+          if (this.errorText.length > 0) return;
           this.load(false).catch(() => {
           });
         })
@@ -154,6 +160,7 @@ export struct HistoryPage {
 
   /** 长按删除单条历史：二次确认。 */
   private confirmDeleteHistory(item: HistoryVideoItem): void {
+    const session: number = AuthSession.version;
     try {
       this.getUIContext().getPromptAction().showDialog({
         title: '删除历史',
@@ -163,19 +170,20 @@ export struct HistoryPage {
           { text: '删除', color: AppTheme.DANGER },
         ],
       }).then((dialogResult) => {
-        if (Number(dialogResult.index) !== 1) return;
+        if (this.destroyed || session !== AuthSession.version || Number(dialogResult.index) !== 1) return;
         HistoryApi.deleteHistoryItem(item.video.bvid)
           .then((r: ActionResult) => {
+            if (this.destroyed || session !== AuthSession.version) return;
             if (r.ok) {
-              this.itemsSource.reset(
-                this.itemsSource.getAll().filter((x: HistoryVideoItem) => x.video.bvid !== item.video.bvid));
-              this.itemCount = this.itemsSource.totalCount();
+              this.pager.remove(item.video.bvid);
+              this.syncPager();
               this.getUIContext().getPromptAction().showToast({ message: '已删除' });
             } else {
               this.getUIContext().getPromptAction().showToast({ message: r.message });
             }
           })
           .catch(() => {
+            if (this.destroyed || session !== AuthSession.version) return;
             this.getUIContext().getPromptAction().showToast({ message: '删除失败，请稍后重试' });
           });
       });
@@ -198,6 +206,7 @@ export struct HistoryPage {
 
   /** 清空全部历史：二次确认。 */
   private confirmClearHistory(): void {
+    const session: number = AuthSession.version;
     try {
       this.getUIContext().getPromptAction().showDialog({
         title: '清空历史',
@@ -207,19 +216,20 @@ export struct HistoryPage {
           { text: '清空', color: AppTheme.DANGER },
         ],
       }).then((dialogResult) => {
-        if (Number(dialogResult.index) !== 1) return;
+        if (this.destroyed || session !== AuthSession.version || Number(dialogResult.index) !== 1) return;
         HistoryApi.clearHistory()
           .then((r: ActionResult) => {
+            if (this.destroyed || session !== AuthSession.version) return;
             if (r.ok) {
-              this.itemsSource.reset([]);
-              this.itemCount = 0;
-              this.hasMore = false;
+              this.pager.clear();
+              this.syncPager();
               this.getUIContext().getPromptAction().showToast({ message: '历史已清空' });
             } else {
               this.getUIContext().getPromptAction().showToast({ message: r.message });
             }
           })
           .catch(() => {
+            if (this.destroyed || session !== AuthSession.version) return;
             this.getUIContext().getPromptAction().showToast({ message: '清空失败，请稍后重试' });
           });
       });
@@ -228,5 +238,3 @@ export struct HistoryPage {
     }
   }
 }
-
-/** 稍后再看：全量列表（最多 100 条），左滑删除单条，顶部清空。 */

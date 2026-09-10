@@ -1,3 +1,4 @@
+import { RequestEpoch } from '../common/RequestEpoch';
 /** 动态详情：首屏复用 feed 对象，随后从 detail 接口补齐正文、表情和评论 subject。 */
 import { AppNavStack, DynamicDetailParam, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   ImageViewerSrcRect, NAV_LOGIN } from '../common/AppRouter';
@@ -6,7 +7,7 @@ import { ActionResult, BiliApi } from '../api/BiliApi';
 import { Immersive } from '../common/Immersive';
 import { PageHeader } from '../components/PageHeader';
 import { DynCard } from '../views/DynamicView';
-import { UserStore } from '../common/UserStore';
+import { UserStore } from '../services/auth/UserStore';
 import { display, FrameCallback, UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { safeToast } from '../common/Toast';
@@ -57,6 +58,7 @@ export struct DynamicDetailPage {
   @State threadRoot: ReplyItem = new ReplyItem();
   @State threadReplies: Array<ReplyItem> = [];
   @State threadLoading: boolean = false;
+  private threadEpoch: RequestEpoch = new RequestEpoch();
   @State threadHasMore: boolean = true;
   @State threadDraft: string = '';
   @State threadSending: boolean = false;
@@ -217,6 +219,8 @@ export struct DynamicDetailPage {
   }
 
   aboutToDisappear(): void {
+    this.threadEpoch.invalidate();
+    this.threadLoading = false;
     this.destroyed = true;
   }
 
@@ -332,6 +336,12 @@ export struct DynamicDetailPage {
       this.replyReactionHooks(false));
   }
 
+  private closeReplyThread(): void {
+    this.threadEpoch.invalidate();
+    this.threadLoading = false;
+    this.threadOpen = false;
+  }
+
   private openReplyThread(root: ReplyItem): void {
     let latest: ReplyItem = root;
     for (let i: number = 0; i < this.replies.length; i++) {
@@ -353,13 +363,16 @@ export struct DynamicDetailPage {
   }
 
   private async loadThreadReplies(reset: boolean): Promise<void> {
-    if (this.threadLoading || this.threadRoot.rpid <= 0 || (!reset && !this.threadHasMore)) return;
+    if ((!reset && this.threadLoading) || this.threadRoot.rpid <= 0 || (!reset && !this.threadHasMore)) return;
+    const epoch: number = this.threadEpoch.next();
     this.threadLoading = true;
+    const root: number = this.threadRoot.rpid;
     const cursor: string = reset ? '' : this.threadCursor;
     try {
       const result: ReplyData = await CommentApi.getReplyReplies(this.item.commentId, this.item.commentType,
-        this.threadRoot.rpid, cursor);
-      if (this.destroyed || !this.threadOpen) return;
+        root, cursor);
+      if (this.destroyed || !this.threadOpen || !this.threadEpoch.isCurrent(epoch) ||
+        this.threadRoot.rpid !== root) return;
       const next: Array<ReplyItem> = reset ?
         (result.replies.length > 0 ? result.replies : this.threadReplies) :
         this.threadReplies.concat(result.replies);
@@ -367,9 +380,10 @@ export struct DynamicDetailPage {
       this.threadCursor = result.cursor;
       this.threadHasMore = result.hasMore;
     } catch (e) {
+      if (!this.threadEpoch.isCurrent(epoch)) return;
       if (!this.destroyed) this.toast('回复加载失败，请稍后重试');
     } finally {
-      if (!this.destroyed) this.threadLoading = false;
+      if (!this.destroyed && this.threadEpoch.isCurrent(epoch)) this.threadLoading = false;
     }
   }
 
@@ -432,7 +446,7 @@ export struct DynamicDetailPage {
   }
 
   private navigateFromThread(action: () => void): void {
-    this.threadOpen = false;
+    this.closeReplyThread();
     setTimeout(() => {
       if (!this.destroyed) action();
     }, 260);
@@ -488,7 +502,7 @@ export struct DynamicDetailPage {
       focusTick: this.threadFocusTick,
       focusId: 'dynamic_thread_reply_composer_editor',
       upMid: this.item.mid,
-      onClose: () => this.threadOpen = false,
+      onClose: () => this.closeReplyThread(),
       onLike: (item: ReplyItem) => this.likeReply(item).catch(() => {
       }),
       onDislike: (item: ReplyItem) => this.dislikeReply(item).catch(() => {

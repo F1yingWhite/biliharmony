@@ -5,7 +5,7 @@
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, NAV_BANGUMI_DETAIL, BangumiDetailParam } from '../common/AppRouter';
 import { BangumiApi } from '../api/BangumiApi';
-import { UserStore } from '../common/UserStore';
+import { UserStore } from '../services/auth/UserStore';
 import { WatchLaterSeasonItem } from '../model/Models';
 import { LoadingView } from '../components/LoadingView';
 import { PageHeader } from '../components/PageHeader';

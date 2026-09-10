@@ -4,15 +4,16 @@
  */
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, NAV_LOGIN, NAV_MESSAGES, NAV_SEARCH } from '../common/AppRouter';
-import { UserStore } from '../common/UserStore';
+import { UserStore } from '../services/auth/UserStore';
 import { AppTheme } from '../common/AppTheme';
 import { HotSearchStore } from '../common/HotSearchStore';
 import { Haptic } from '../common/Haptic';
-import { MsgUnreadStore } from '../common/MsgUnreadStore';
+import { MsgUnreadStore } from '../services/message/MsgUnreadStore';
 import { DecoratedAvatar } from './UserDecorations';
 
 @Component
 export struct GlassHeaderBar {
+  @StorageProp('windowStatusBarHeight') statusBarInset: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') @Watch('onThemeChanged') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
@@ -24,8 +25,7 @@ export struct GlassHeaderBar {
   @StorageProp('homeHotSearch') hotSearch: string = '';
   // 消息中心未读总数（回复/@/赞/系统），>0 时在消息入口右上角显示红色角标。
   @StorageProp('msgUnreadTotal') msgUnread: number = 0;
-  private hotTimer: number = -1;
-  private hotIndex: number = 0;
+  private destroyed: boolean = false;
   onAvatarTap: () => void = () => {
   };
 
@@ -40,23 +40,19 @@ export struct GlassHeaderBar {
   }
 
   aboutToAppear(): void {
+    this.destroyed = false;
     HotSearchStore.load().then(() => {
-      HotSearchStore.publish(0);
+      if (!this.destroyed) HotSearchStore.publish(0);
     }).catch(() => {
       // 热搜只是头栏占位文案，网络失败不应形成未处理的 Promise rejection。
     });
     // 未登录时 MsgUnreadStore 内部直接清零返回，不会发起请求。
     MsgUnreadStore.refresh().catch(() => {
     });
-    this.hotTimer = setInterval(() => {
-      this.hotIndex++;
-      HotSearchStore.publish(this.hotIndex);
-    }, 6500);
   }
 
   aboutToDisappear(): void {
-    if (this.hotTimer >= 0) clearInterval(this.hotTimer);
-    this.hotTimer = -1;
+    this.destroyed = true;
   }
 
   /** 头像图源：已登录用响应式缓存的 face，未登录用默认 noface。 */
@@ -68,7 +64,7 @@ export struct GlassHeaderBar {
   }
 
   private headerContentOpacity(): number {
-    return Math.min(1, Math.max(0, (1 - this.fade) * 5));
+    return 1 - Math.min(1, Math.max(0, this.fade / 0.85));
   }
 
   build() {
@@ -77,7 +73,7 @@ export struct GlassHeaderBar {
       // 不叠加主题色光晕、搜索栏边框或额外阴影。
       Column()
         .width('100%')
-        .height(Immersive.statusBarHeight() + 68)
+        .height(this.statusBarInset + 68)
         .linearGradient({
           angle: 180,
           colors: this.isDark ?
@@ -91,30 +87,30 @@ export struct GlassHeaderBar {
         .hitTestBehavior(HitTestMode.None)
 
       // 可折叠的搜索/消息头栏。左侧留出头像位，头像本身由下方独立渲染。
-      Row({ space: 12 }) {
+      Row({ space: 8 }) {
         Row()
           .width(32)
           .height(32)
 
-        Search({
-          value: '',
-          placeholder: this.hotSearch.length > 0 ? this.hotSearch : '搜索你感兴趣的内容',
-        })
-        .height(32)
-        .layoutWeight(1)
+        Row({ space: 8 }) {
+          Image($r('app.media.ic_search'))
+            .width(16).height(16).renderMode(ImageRenderMode.Template)
+            .fillColor(this.isDark ? '#B4B6BE' : '#777B85')
+          Text(this.hotSearch.length > 0 ? this.hotSearch : '搜索你感兴趣的内容')
+            .fontSize(13).fontWeight(FontWeight.Normal)
+            .fontColor(this.isDark ? '#B4B6BE' : '#777B85')
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
+        }
+        .height(32).layoutWeight(1).padding({ left: 12, right: 12 })
         .borderRadius(16)
-        .searchIcon({ size: 16, color: this.accent, src: $r('app.media.ic_search') })
-        .cancelButton({ style: CancelButtonStyle.INVISIBLE })
-        .placeholderColor(this.isDark ? '#D6D6DA' : '#62666D')
-        .textFont({ size: 13 })
-        .textAlign(TextAlign.Center)
-        .enableKeyboardOnFocus(false)
-        .focusable(false)
-        .focusOnTouch(false)
-        // 使用原生 Search 进入系统搜索控件的材质路径；不叠背景、边框、阴影或模糊。
-        .systemMaterial(this.fade < 0.98 ? AppTheme.floatMaterial(this.glassOn) : undefined)
+        .backgroundColor(this.glassOn ? (this.isDark ? '#222D3038' : '#55FFFFFF') :
+          (this.isDark ? '#292B32' : '#EDEFF2'))
+        .systemMaterial(AppTheme.floatMaterial(this.glassOn))
         .opacity(this.headerContentOpacity())
-        .hitTestBehavior(HitTestMode.Default)
+        .translate({ y: -8 * this.fade })
+        .accessibilityText('搜索：' + (this.hotSearch || '搜索你感兴趣的内容'))
+        .id('home-search-entry')
         .onClick(() => {
           Haptic.light();
           AppStorage.setOrCreate<string>('searchSuggestedKeyword', this.hotSearch);
@@ -126,7 +122,7 @@ export struct GlassHeaderBar {
             .width(22)
             .height(22)
             .fillColor(this.isDark ? '#E6E6E6' : '#333333')
-            .margin({ top: 9 })
+            .margin({ top: 9, right: 9 })
           if (this.msgUnread > 0) {
             Text(this.msgUnread > 99 ? '99+' : String(this.msgUnread))
               .fontSize(9).fontColor('#FFFFFF').backgroundColor(AppTheme.DANGER)
@@ -138,6 +134,7 @@ export struct GlassHeaderBar {
         .width(40)
         .height(40)
         .opacity(this.headerContentOpacity())
+        .translate({ y: -8 * this.fade })
         .onClick(() => {
           Haptic.light();
           if (UserStore.isLogin) {
@@ -152,10 +149,10 @@ export struct GlassHeaderBar {
       .padding({
         left: 12,
         right: 12,
-        top: Immersive.statusBarHeight() + 4,
+        top: this.statusBarInset + 4,
         bottom: 8,
       })
-      .hitTestBehavior(this.fade > 0.98 ? HitTestMode.None : HitTestMode.Default)
+      .hitTestBehavior(this.fade > 0.85 ? HitTestMode.None : HitTestMode.Default)
 
       // 头像不跟随头栏淡出：列表下滑到顶部后仍然可见、可点击。
       DecoratedAvatar({
@@ -165,14 +162,14 @@ export struct GlassHeaderBar {
         containerSize: 42,
         pendantScale: 1.38,
       })
-        .margin({ left: 7, top: Immersive.statusBarHeight() - 1 })
+        .margin({ left: 7, top: this.statusBarInset - 1 })
         .onClick(() => {
           Haptic.light();
           this.onAvatarTap();
         })
     }
     .width('100%')
-    .height(Immersive.statusBarHeight() + 44)
+    .height(this.statusBarInset + 44)
     .clip(false)
   }
 }

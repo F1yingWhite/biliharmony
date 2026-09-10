@@ -1,7 +1,7 @@
 /**
  * 评论域 API：主评论列表 / 发布 / 点赞 / 点踩 / 表情包 / 楼中楼。
  */
-import { HttpClient, HttpResponse } from '../common/HttpClient';
+import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
 import { asArray, asObject } from '../common/Utils';

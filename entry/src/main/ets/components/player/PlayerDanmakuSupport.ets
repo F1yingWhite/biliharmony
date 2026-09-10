@@ -29,7 +29,7 @@ export class ActiveDm {
   /** 高级弹幕（mode 7）运动轨道；非 null 时 x/lane/speed 不参与绘制。 */
   special: SpecialTrack | null = null;
   /** 本条实际绘制字号（逐条字号：18/25/36 档 × 用户缩放）。 */
-  fontSizePx: number = 0;
+  fontSizeVp: number = 0;
 
   constructor(item: DanmakuItem, x: number, lane: number, speed: number, fixedUntil: number, isFixed: boolean,
     born: number, textWidth: number, renderText: string, renderColor: string) {

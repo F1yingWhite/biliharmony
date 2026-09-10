@@ -11,6 +11,22 @@
 
 ## 快速开始
 
+无需设备的服务回归：
+
+```bash
+/Applications/DevEco-Studio.app/Contents/tools/node/bin/node --test --test-timeout=10000 tool/qa/regression.test.cjs tool/qa/lifecycle.test.cjs tool/qa/danmaku.test.cjs tool/qa/parity.test.cjs
+```
+
+测试直接转译并执行 ArkTS 服务源码，平台网络/文件接口使用可控替身；覆盖凭证隔离、账号切换、
+播放与搜索乱序响应、历史分页失败、缓存流式写入与并发限制。播放器/搜索测试提取生产方法，
+UI DSL 的合法性仍由完整 `CompileArkTS` 构建验证。这些测试不能替代真机播放与 UI 验收。
+生命周期用例还覆盖二维码刷新、评论切根、动态分类、稍后再看读写竞争、直播换源、AVSession 和 PixelMap 释放、下载取消。
+这些用例由审查复现转为正确行为断言；通过表示这些边界没有回归。
+弹幕用例覆盖同屏数量、固定轨道、混合模式、时间与屏蔽规则，以及 protobuf 未知字段的解析。
+对齐用例覆盖综合搜索排序/筛选和图文混排、失败与空结果的区别、后台播放开关、SC 合并和选中状态。
+
+其他环境可用 `node --test`，并将 `ARKTS_TEST_TYPESCRIPT` 指向已安装的 TypeScript 模块。
+
 ```bash
 # 1. 检测 hdc/hvigor（也可通过环境变量指定）
 export QA_HDC=/path/to/hdc

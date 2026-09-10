@@ -1,7 +1,7 @@
 /**
  * 动态域 API：单条详情 / 关注动态 feed / 点赞 / 转发 / 用户空间动态。
  */
-import { HttpClient, HttpResponse } from '../common/HttpClient';
+import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asBool, str, randomString } from '../common/Utils';

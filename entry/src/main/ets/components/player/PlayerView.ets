@@ -1,6 +1,12 @@
+import { PlayerQualityPreference } from '../../common/PlayerQualityPreference';
+import { AVVolumePanel } from '@kit.AudioKit';
+import { SystemMediaVolume } from './SystemMediaVolume';
+import { PlayerChapterBar } from './PlayerChapterBar';
+import { chapterTitleAt } from './PlayerChapterSupport';
 /**
  * 播放器组件：AVPlayer + XComponent 渲染 + Canvas 弹幕引擎 + 手势控制
  */
+import { RequestEpoch } from '../../common/RequestEpoch';
 import { media } from '@kit.MediaKit';
 import { image } from '@kit.ImageKit';
 import { avSession } from '@kit.AVSessionKit';
@@ -20,7 +26,7 @@ import { DEBUG } from 'BuildProfile';
 import { displaySync } from '@kit.ArkGraphics2D';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, VideoChapter } from '../../api/BiliApi';
 import { SponsorBlockApi, SponsorBlockResult, SponsorBlockUserInfo } from '../../api/SponsorBlockApi';
-import { UserStore } from '../../common/UserStore';
+import { UserStore } from '../../services/auth/UserStore';
 import { AppTheme, DanmakuSettings } from '../../common/AppTheme';
 import { Haptic } from '../../common/Haptic';
 import { Immersive } from '../../common/Immersive';
@@ -43,8 +49,8 @@ import { PlayerDanmakuAction } from './PlayerDanmakuAction';
 import { SponsorBlockCategory, SponsorBlockMode, SponsorBlockSegment, SponsorBlockStore,
   sponsorBlockActionLabel, sponsorBlockCategory, sponsorBlockSupportedActions } from '../../common/SponsorBlock';
 import { SponsorBlockNotice } from './SponsorBlockNotice';
-import { HttpClient } from '../../common/HttpClient';
-import { VideoDownloadService } from '../../common/VideoDownloadService';
+import { HttpClient } from '../../services/network/HttpClient';
+import { VideoDownloadService } from '../../services/media/VideoDownloadService';
 
 /** showDialog 按钮的声明类型（promptAction 的 Button 命名空间类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -114,6 +120,7 @@ export struct PlayerView {
   onCoin: () => void = () => {};
   onFavorite: () => void = () => {};
   onShare: () => void = () => {};
+  onWatchLater: () => void = () => {};
   /** 播完后「立即播放」下一段（由业务页替换为推荐视频/下一集）。 */
   onEndPlayNow: () => void = () => {};
   // 播完推荐卡数据（推荐列表第一条的排布）
@@ -190,6 +197,7 @@ export struct PlayerView {
   @State dmSpeed: number = 1.0;
   // 默认 1.0：1.3 时行高过大、同屏轨道只有 4 条左右，密度明显低于 B 站；设置面板可在 0.7~1.8 间调节。
   @State dmFontScale: number = 1.0;
+  @State dmSpacing: number = 1.0;
   @State dmDensity: number = 22;
   /** 智能云屏蔽等级 0-10（weight 低于等级的不喷出，0 关闭）。 */
   @State dmBlockLevel: number = 0;
@@ -199,6 +207,8 @@ export struct PlayerView {
   @State blockColorDm: boolean = false;
   @State holdSpeedActive: boolean = false;
   @State gestureSeekPreview: number = -1;
+  @State systemVolumeLevel: number = 0;
+  private systemVolume: SystemMediaVolume = new SystemMediaVolume();
   @State gestureAdjustKind: string = '';
   @State gestureAdjustPercent: number = -1;
   @State resumeTransitionActive: boolean = false;
@@ -208,6 +218,7 @@ export struct PlayerView {
   @StorageProp('videoFullscreenExitRequest') @Watch('onFullscreenExitRequested') fullscreenExitRequest: number = 0;
   @StorageProp('videoSeekRequestToken') @Watch('onExternalSeekRequested') seekRequestToken: number = 0;
   @StorageProp('videoPlaybackStopRequest') @Watch('onPlaybackStopRequested') stopRequest: number = 0;
+  @StorageProp('backgroundPlaybackEnabled') backgroundPlaybackEnabled: boolean = false;
   @StorageProp('appInBackground') @Watch('onAppBackgroundChanged') appInBackground: boolean = false;
   @StorageLink('sponsorSkipEnabled') sponsorSkipEnabled: boolean = true;
   /** 播完自动连播下一集（UGC 合集）；关闭后播完停在剧终画面，由用户手动选择。 */
@@ -312,6 +323,7 @@ export struct PlayerView {
   private fullscreenExitCancel: (() => void) | null = null;
   // AVPlayer 创建本身是异步的：代次使离页/换源前发起的 createAVPlayer 结果失效并立即释放。
   private playerCreateGeneration: number = 0;
+  private sourceRequests: RequestEpoch = new RequestEpoch();
   private playerCreating: boolean = false;
   /** 后台音乐模式：视频轨暂停，独立 DASH 音轨继续播放。 */
   private backgroundAudioOnly: boolean = false;
@@ -329,6 +341,12 @@ export struct PlayerView {
   aboutToAppear(): void {
     // 被其他 NavDestination 覆盖时 aboutToDisappear 已置位；返回同一实例时恢复。
     this.destroyed = false;
+    try { this.systemVolumeLevel = this.systemVolume.level(); } catch (e) {}
+    this.systemVolume.start((percent: number) => {
+      if (this.destroyed) return;
+      try { this.systemVolumeLevel = this.systemVolume.level(); } catch (e) {}
+      if (!this.destroyed && this.gestureAdjustKind === '音量') this.gestureAdjustPercent = percent;
+    });
     this.fullscreen = false;
     this.fullscreenPortrait = false;
     this.fullscreenExitPending = false;
@@ -416,11 +434,9 @@ export struct PlayerView {
         },
         (kind: string, percent: number): void => {
           this.gestureAdjustKind = kind === 'brightness' ? '亮度' : (kind === 'volume' ? '音量' : '');
-          this.gestureAdjustPercent = percent;
+          this.gestureAdjustPercent = kind === 'volume' ? this.systemVolume.percent() : percent;
         },
-        (value: number): void => {
-          this.applyGestureVolume(value);
-        },
+        (value: number): void => {},
         (value: number): void => {
           this.applyGestureVolume(value);
         },
@@ -538,8 +554,17 @@ if (this.runtimeSources.length === 0) {
   }
 
   onAppBackgroundChanged(): void {
-    if (this.appInBackground) this.enterBackgroundAudioOnly();
-    else this.leaveBackgroundAudioOnly();
+    if (this.appInBackground) {
+      if (this.backgroundPlaybackEnabled) this.enterBackgroundAudioOnly();
+      else if (this.playing) this.togglePlay();
+    } else {
+      this.leaveBackgroundAudioOnly();
+    }
+  }
+
+  private setBackgroundPlayback(next: boolean): void {
+    AppStorage.setOrCreate<boolean>('backgroundPlaybackEnabled', next);
+    AppTheme.persistBackgroundPlayback(next);
   }
 
   private enterBackgroundAudioOnly(): void {
@@ -764,6 +789,9 @@ if (this.runtimeSources.length === 0) {
   }
 
   async onSourceVersionChanged(): Promise<void> {
+    if (this.destroyed) return;
+    const request: number = this.sourceRequests.next();
+    this.qualityLoading = false;
     this.releaseSeekPreview();
     this.invalidatePlayerCreation();
     this.seekCtl?.cancel();
@@ -817,10 +845,7 @@ if (this.runtimeSources.length === 0) {
       }
     }
     // await 期间组件可能已销毁（release 已执行），此时再 initPlayer 会泄漏无人释放的 AVPlayer。
-    if (this.destroyed) {
-      this.buffering = false;
-      return;
-    }
+    if (this.destroyed || !this.sourceRequests.isCurrent(request)) return;
     this.dmLoadedCid = -1;
     this.loadDanmaku();
     this.loadSponsorSegments();
@@ -850,6 +875,8 @@ if (this.runtimeSources.length === 0) {
 
   aboutToDisappear(): void {
     this.destroyed = true;
+    this.systemVolume.stop();
+    this.sourceRequests.invalidate();
     this.invalidatePlayerCreation();
     AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
     this.endHoldSpeed();
@@ -907,7 +934,7 @@ if (this.runtimeSources.length === 0) {
       this.volumeRestoreTimer = -1;
       if (this.destroyed) return;
       try {
-        const restoreVolume: number = this.sponsorMuted ? 0 : (this.gestureCtl?.gestureVolume ?? 100) / 100;
+        const restoreVolume: number = this.sponsorMuted ? 0 : 1;
         if (this.player === video && video !== null && this.prepared) video.setVolume(restoreVolume);
         if (this.audioPlayer === audio && audio !== null && this.audioPrepared) audio.setVolume(restoreVolume);
       } catch (e) {
@@ -926,7 +953,7 @@ if (this.runtimeSources.length === 0) {
 
   private restoreUserVolume(): void {
     try {
-      const restoreVolume: number = this.sponsorMuted ? 0 : (this.gestureCtl?.gestureVolume ?? 100) / 100;
+      const restoreVolume: number = this.sponsorMuted ? 0 : 1;
       if (this.player !== null && this.prepared) this.player.setVolume(restoreVolume);
       if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.setVolume(restoreVolume);
     } catch (e) {
@@ -1408,6 +1435,9 @@ if (this.runtimeSources.length === 0) {
   private mergeDanmakuSegment(items: Array<DanmakuItem>): void {
     this.dmEngine.lastPlayerTime = this.playheadSec;
     this.dmEngine.appendSorted(items);
+    if (DEBUG) hilog.info(0x0000, 'BiliPlayback',
+      'danmaku.segment cid=%{public}d added=%{public}d total=%{public}d',
+      this.cid, items.length, this.dmEngine.list.length);
   }
 
   /** 拉取指定分段（0 基）；已加载/加载中自动去重，失败不标记，播放头再次经过时重试。 */
@@ -1485,7 +1515,7 @@ if (this.runtimeSources.length === 0) {
           this.reportVideoSize(p);
           try {
             p.setPlaybackRate(this.playbackRate);
-            p.setVolume(this.sponsorMuted ? 0 : (this.gestureCtl?.gestureVolume ?? 100) / 100);
+            p.setVolume(this.sponsorMuted ? 0 : 1);
           } catch (e) {
             // 某些视频解码器不支持非常用倍速，保持 1x 即可。
           }
@@ -1686,7 +1716,7 @@ if (this.runtimeSources.length === 0) {
         this.audioPrepared = true;
         try {
           audio.setPlaybackRate(this.playbackRate);
-          audio.setVolume(this.sponsorMuted ? 0 : (this.gestureCtl?.gestureVolume ?? 100) / 100);
+          audio.setVolume(this.sponsorMuted ? 0 : 1);
         } catch (e) {
           // 倍速不被音频解码器支持时，设置入口会统一回退到 1x。
         }
@@ -1838,17 +1868,26 @@ if (this.runtimeSources.length === 0) {
   }
 
   async changeQuality(qn: number): Promise<void> {
-    if (this.qualityLoading || qn === this.activeQuality) {
+    if (this.destroyed) return;
+    if (this.qualityLoading) return;
+    if (qn === this.activeQuality) {
+      PlayerQualityPreference.remember(qn);
       this.closeSettingPanels();
       return;
     }
+    const request: number = this.sourceRequests.next();
+    const sourceVersion: number = this.sourceVersion;
+    const cid: number = this.cid;
     this.qualityLoading = true;
     try {
       const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(this.aid, this.bvid, this.cid, qn);
+      if (this.destroyed || !this.sourceRequests.isCurrent(request) ||
+        sourceVersion !== this.sourceVersion || cid !== this.cid) return;
       if (info === null || info.urls.length === 0) {
         this.errorText = '该清晰度暂时不可用';
         return;
       }
+      PlayerQualityPreference.remember(qn);
       const oldPlayer: media.AVPlayer | null = this.player;
       const oldAudioPlayer: media.AVPlayer | null = this.audioPlayer;
       this.invalidatePlayerCreation();
@@ -1891,14 +1930,14 @@ if (this.runtimeSources.length === 0) {
         }
       }
       // await 期间组件可能已销毁，此时重建播放器会泄漏。
-      if (this.destroyed) {
-        this.buffering = false;
-        return;
-      }
+      if (this.destroyed || !this.sourceRequests.isCurrent(request) ||
+        sourceVersion !== this.sourceVersion || cid !== this.cid) return;
       await this.initPlayer();
+    } catch (e) {
+      if (!this.destroyed && this.sourceRequests.isCurrent(request)) this.errorText = '切换清晰度失败，请重试';
     } finally {
       // 同步抛错（如签名异常）也必须复位，否则 qualityLoading 永远卡 true。
-      this.qualityLoading = false;
+      if (!this.destroyed && this.sourceRequests.isCurrent(request)) this.qualityLoading = false;
     }
   }
 
@@ -1972,12 +2011,9 @@ if (this.runtimeSources.length === 0) {
   }
 
   private applyGestureVolume(value: number): void {
-    const normalized: number = this.sponsorMuted ? 0 : Math.max(0, Math.min(1, value / 100));
     try {
-      if (this.player !== null && this.prepared) this.player.setVolume(normalized);
-      if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.setVolume(normalized);
-    } catch (e) {
-    }
+      this.systemVolumeLevel = this.systemVolume.levelForPercent(value);
+    } catch (e) {}
   }
 
   private loadOnlineTotal(): void {
@@ -2001,6 +2037,8 @@ if (this.runtimeSources.length === 0) {
     // 滑动手势判定后不再视为点弹幕。
     this.dmInteraction.cancelPending();
     const x: number = event.fingerList.length > 0 ? event.fingerList[0].localX : this.dmEngine.width / 2;
+    const volume: number = this.systemVolume.percent();
+    if (this.gestureCtl !== null && volume >= 0) this.gestureCtl.gestureVolume = volume;
     this.gestureCtl?.beginPan(x, this.dmEngine.width, this.playheadSec, this.duration);
   }
 
@@ -2228,6 +2266,7 @@ if (this.runtimeSources.length === 0) {
         // 底层状态不允许暂停时保持原 UI，等待 stateChange 校准。
       }
     } else {
+      if (this.appInBackground && !this.backgroundPlaybackEnabled) return;
       if (this.appInBackground && this.audioPlayer !== null && this.audioPrepared) {
         try {
           this.backgroundAudioOnly = true;
@@ -2973,6 +3012,7 @@ if (this.runtimeSources.length === 0) {
     this.dmOpacity = s.opacity;
     this.dmSpeed = s.speed;
     this.dmFontScale = s.fontScale;
+    this.dmSpacing = s.spacing;
     this.dmDensity = s.density;
     this.dmBlockLevel = s.blockLevel;
     this.blockScrollDm = s.blockScroll;
@@ -2982,6 +3022,7 @@ if (this.runtimeSources.length === 0) {
     this.dmEngine.opacity = s.opacity;
     this.dmEngine.speed = s.speed;
     this.dmEngine.fontScale = s.fontScale;
+    this.dmEngine.spacing = s.spacing;
     this.dmEngine.density = s.density;
     this.dmEngine.minWeight = s.blockLevel;
     this.dmEngine.blockScrollDm = s.blockScroll;
@@ -2998,6 +3039,7 @@ if (this.runtimeSources.length === 0) {
     s.opacity = this.dmOpacity;
     s.speed = this.dmSpeed;
     s.fontScale = this.dmFontScale;
+    s.spacing = this.dmSpacing;
     s.density = this.dmDensity;
     s.blockLevel = this.dmBlockLevel;
     s.blockScroll = this.blockScrollDm;
@@ -3039,6 +3081,12 @@ if (this.runtimeSources.length === 0) {
     this.persistDanmaku();
   }
 
+  setDmSpacing(value: number): void {
+    this.dmSpacing = Math.max(0.5, Math.min(2, value));
+    this.dmEngine.setSpacing(this.dmSpacing);
+    this.persistDanmaku();
+  }
+
   setDmDensity(value: number): void {
     this.dmDensity = value;
     this.dmEngine.setDensity(value);
@@ -3068,6 +3116,7 @@ if (this.runtimeSources.length === 0) {
     this.setDmFrameRate(defaults.frameRate);
     this.setDmSpeed(defaults.speed);
     this.setDmFontScale(defaults.fontScale);
+    this.setDmSpacing(defaults.spacing);
     this.setDmDensity(defaults.density);
     this.setDmBlockLevel(defaults.blockLevel);
     this.blockScrollDm = defaults.blockScroll;
@@ -3091,6 +3140,7 @@ if (this.runtimeSources.length === 0) {
 
   build() {
     Stack({ alignContent: Alignment.Center }) {
+      AVVolumePanel({ volumeLevel: this.systemVolumeLevel })
       // 视频画面（外层 Stack 承载镜像翻转：XComponent 自身不支持 transform 属性）
       Stack() {
         XComponent({
@@ -3217,6 +3267,7 @@ if (this.runtimeSources.length === 0) {
       }
 
       PlayerGestureOverlay({
+        chapterTitle: chapterTitleAt(this.chapters, this.progressDisplayTime(), this.duration),
         onlineTotal: this.onlineTotal,
         compactMode: this.compactMode,
         showControls: this.showControls,
@@ -3280,6 +3331,24 @@ if (this.runtimeSources.length === 0) {
         .height('100%')
         .hitTestBehavior(HitTestMode.None)
         .zIndex(80)
+      }
+      if (this.chapters.length > 0 && this.duration > 0 && !this.compactMode &&
+        this.errorText.length === 0 && !this.endScreenOpen && !this.showMoreMenu && !this.showSideDrawer) {
+        Row() {
+          PlayerChapterBar({
+            chapters: this.chapters, progress: this.progressDisplayTime(), duration: this.duration,
+            controlsVisible: this.showControls, fullscreen: this.fullscreen,
+            onSelect: (seconds: number) => {
+              this.seekTo(seconds, true);
+              this.showControls = true;
+              this.scheduleControlsHide();
+            },
+            onOpen: () => this.openSettingsPage('chapters'),
+          })
+        }
+        .width('100%')
+        .position({ left: 0, bottom: this.showControls ? (this.fullscreen ? 88 : 42) : 0 })
+        .zIndex(85)
       }
       // 控件层（播完结束画面为整幅蒙版，不再叠加控制条）
       if ((this.showControls || (!this.playing && this.compactMode && !this.fullscreen)) && this.errorText.length === 0 && !this.endScreenOpen) {
@@ -3584,6 +3653,7 @@ if (this.runtimeSources.length === 0) {
       sponsorUserStats: $sponsorUserStats,
       sponsorWarningReason: $sponsorWarningReason,
       subtitleOn: this.subtitleOn,
+      backgroundPlaybackEnabled: this.backgroundPlaybackEnabled,
       subtitleIndex: this.subtitleIndex,
       subtitles: this.subtitles,
       chapters: this.chapters,
@@ -3595,6 +3665,7 @@ if (this.runtimeSources.length === 0) {
       dmFrameRate: this.dmFrameRate,
       dmSpeed: this.dmSpeed,
       dmFontScale: this.dmFontScale,
+      dmSpacing: this.dmSpacing,
       dmDensity: this.dmDensity,
       dmBlockLevel: this.dmBlockLevel,
       blockScrollDm: this.blockScrollDm,
@@ -3621,7 +3692,7 @@ if (this.runtimeSources.length === 0) {
       onFilterDraftChange: (draft: string) => this.dmFilterDraft = draft,
       onFilterAdd: () => this.submitDmFilterRule().catch(() => {}),
       onFilterDelete: (id: number) => this.deleteDmFilterRule(id).catch(() => {}),
-      onQualityPrefChange: (pref: number) => this.qualityPref = pref,
+      onQualityPrefChange: (pref: number) => { PlayerQualityPreference.useMode(pref); },
       onDownloadQuality: () => this.chooseDownloadQuality(),
       onDownload: () => this.promptDownloadType(),
       onSubtitleChange: (index: number) => this.changeSubtitle(index),
@@ -3630,6 +3701,7 @@ if (this.runtimeSources.length === 0) {
       onDmFrameRateChange: (value: number) => this.setDmFrameRate(value),
       onDmSpeedChange: (value: number) => this.setDmSpeed(value),
       onDmFontScaleChange: (value: number) => this.setDmFontScale(value),
+      onDmSpacingChange: (value: number) => this.setDmSpacing(value),
       onDmDensityChange: (value: number) => this.setDmDensity(value),
       onDmBlockLevelChange: (value: number) => this.setDmBlockLevel(value),
       onToggleDmBlock: (kind: string) => this.toggleDmBlock(kind),
@@ -3643,6 +3715,7 @@ if (this.runtimeSources.length === 0) {
       onTimerChange: (minutes: number) => this.onTimerChanged(minutes),
       onMirrorChange: (next: boolean) => this.mirrorOn = next,
       onSubtitleToggle: (next: boolean) => this.toggleSubtitle(next),
+      onBackgroundPlaybackChange: (next: boolean) => this.setBackgroundPlayback(next),
       onSponsorToggle: (next: boolean) => {
         this.setSponsorEnabled(next);
       },
@@ -3666,6 +3739,7 @@ if (this.runtimeSources.length === 0) {
       onSponsorSaveUserName: () => this.saveSponsorUsername().catch(() => this.toast('昵称更新失败')),
       onSponsorAcknowledgeWarning: () => this.acknowledgeSponsorWarning().catch(() => this.toast('操作失败')),
       onShare: () => this.onShare(),
+      onWatchLater: () => this.onWatchLater(),
       onCopyLink: () => this.copyShareLink(),
       onStub: (message: string) => this.toast(message),
     })

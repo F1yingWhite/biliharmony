@@ -50,7 +50,8 @@ export class PlayerGestureController {
   }
 
   beginPan(eventX: number, viewWidth: number, playheadSec: number, duration: number): void {
-    if (duration <= 0) return;
+    this.loadInitials();
+    this.lastGestureApplyMs = 0;
     this.panStartTime = playheadSec;
     this.panStartX = eventX;
     this.panGestureActive = false;
@@ -67,7 +68,7 @@ export class PlayerGestureController {
     if (this.panMode.length === 0) {
       const absX: number = Math.abs(offsetX);
       const absY: number = Math.abs(offsetY);
-      if (absX > absY * 1.15) {
+      if (duration > 0 && absX > absY * 1.15) {
         this.panMode = 'seek';
       } else if (absY > absX * 1.15) {
         this.panMode = this.panStartX < viewWidth / 2 ? 'brightness' : 'volume';
@@ -125,6 +126,8 @@ export class PlayerGestureController {
     if (this.panMode === 'seek') {
       this.onSeek(-1);
     }
+    if (this.panMode === 'volume') this.onVolumeApply(this.gestureVolume);
+    if (this.panMode === 'brightness') this.onBrightnessApply(this.gestureBrightness);
     this.panMode = '';
     this.panGestureActive = false;
   }

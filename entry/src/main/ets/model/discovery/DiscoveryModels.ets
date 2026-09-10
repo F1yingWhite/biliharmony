@@ -43,10 +43,10 @@ export interface SearchNumOption {
 
 // 视频排序（order 参数，参考 PiliPlus ArchiveFilterType）
 export const VIDEO_ORDER_OPTIONS: Array<SearchOption> = [
-  { label: '综合', value: 'totalrank' },
-  { label: '最多点击', value: 'click' },
-  { label: '最新发布', value: 'pubdate' },
-  { label: '最多弹幕', value: 'dm' },
+  { label: '默认排序', value: 'totalrank' },
+  { label: '新发布', value: 'pubdate' },
+  { label: '播放多', value: 'click' },
+  { label: '弹幕多', value: 'dm' },
   { label: '最多收藏', value: 'stow' },
 ];
 
@@ -313,11 +313,12 @@ export class ArticleSearchResult {
 
 // ===== 综合搜索（all/v2）聚合结果：按 result_type 分区，仅第一页包含番剧/用户分区 =====
 export class SearchAllSection {
-  /** video / bili_user / media_bangumi / media_ft */
+  /** video / bili_user / media_bangumi / media_ft / article */
   type: string = '';
   videos: Array<VideoItem> = [];
   users: Array<UserSearchItem> = [];
   pgc: Array<PgcSearchItem> = [];
+  articles: Array<ArticleSearchItem> = [];
 }
 
 export class SearchAllResult {

@@ -1,21 +1,28 @@
+import { ApiResult, ApiErrorKind } from '../services/network/ApiResult';
 /**
  * 历史与稍后再看 API。
  */
-import { HttpClient, HttpResponse } from '../common/HttpClient';
+import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber } from '../common/Utils';
 import { HistoryPageData, HistoryVideoItem, WatchLaterItem } from '../model/Models';
-import { ActionResult, getData, postVideoAction, webGet } from './internal/ApiCommon';
+import { ActionResult, getData, postVideoAction, webGet, parseDataResult } from './internal/ApiCommon';
 
 export class HistoryApi {
-  static async getHistory(max: number = 0, viewAt: number = 0): Promise<HistoryPageData> {
+  static async getHistory(max: number = 0, viewAt: number = 0): Promise<ApiResult<HistoryPageData>> {
     const params: Record<string, string> = {
       'type': 'archive', 'ps': '20', 'max': String(max), 'view_at': String(viewAt),
     };
     const resp: HttpResponse = await webGet(Api.historyList, params);
-    const data: Record<string, Object> | null = getData(resp);
+    const parsed: ApiResult<Record<string, Object>> = parseDataResult(resp);
+    if (!parsed.ok || parsed.data === null) {
+      return new ApiResult<HistoryPageData>(null, parsed.message, parsed.kind, parsed.code);
+    }
+    const data: Record<string, Object> = parsed.data;
+    if (!Array.isArray(data['list'])) {
+      return new ApiResult<HistoryPageData>(null, '历史记录响应格式异常，请重试', ApiErrorKind.Parse);
+    }
     const result: HistoryPageData = new HistoryPageData();
-    if (data === null) return result;
     const list: Array<Object> = asArray(data['list']);
     for (let i: number = 0; i < list.length; i++) result.items.push(HistoryVideoItem.from(list[i]));
     // 官方游标位于 data.cursor；不能用最后一条 aid 推导，否则第二页会重复或直接失效。
@@ -28,7 +35,7 @@ export class HistoryApi {
       result.viewAt = last.viewAt;
     }
     result.hasMore = list.length >= 20;
-    return result;
+    return new ApiResult<HistoryPageData>(result);
   }
 
   // ===== 稍后再看（列表一次性返回全量，最多 100 条；移植自 PiliPlus UserHttp.seeYouLater / toViewLater 等） =====

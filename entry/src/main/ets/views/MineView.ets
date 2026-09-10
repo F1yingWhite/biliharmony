@@ -4,7 +4,7 @@
  */
 import { promptAction } from '@kit.ArkUI';
 import { fileIo as fs } from '@kit.CoreFileKit';
-import { common } from '@kit.AbilityKit';
+import { common, bundleManager } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { DEBUG } from 'BuildProfile';
 import { AppNavStack, NAV_FAVORITES, NAV_HISTORY, NAV_LOGIN, NAV_RELATION_LIST, NAV_USER_SPACE, NAV_WATCH_LATER,
@@ -12,7 +12,7 @@ import { AppNavStack, NAV_FAVORITES, NAV_HISTORY, NAV_LOGIN, NAV_RELATION_LIST, 
   RelationListParam, UserSpaceParam } from '../common/AppRouter';
 import { UserInfo, UserStat } from '../model/Models';
 import { BiliApi } from '../api/BiliApi';
-import { UserStore } from '../common/UserStore';
+import { UserStore } from '../services/auth/UserStore';
 import { AppTheme } from '../common/AppTheme';
 import { Haptic } from '../common/Haptic';
 import { LoadingView } from '../components/LoadingView';
@@ -32,6 +32,7 @@ export struct MineView {
   @State user: UserInfo = new UserInfo();
   @State stat: UserStat = new UserStat();
   @State autoDark: boolean = false;
+  @State appVersion: string = '';
   /** 定时深色：每分钟应用一次，跨时刻后自动切换明暗（无需重启）。 */
   private autoTimer: number = -1;
   /** 定时深色时段编辑（TimePicker 抽屉）状态；以小时/分钟数字存储，跨组件直接赋值驱动刷新。 */
@@ -61,6 +62,7 @@ export struct MineView {
   }
 
   aboutToAppear(): void {
+    this.loadAppVersion();
     this.autoDark = AppTheme.isAutoDarkEnabled();
     this.init().catch(() => {
     });
@@ -119,6 +121,16 @@ export struct MineView {
     AppTheme.setAutoDarkWindow(s, e);
     AppTheme.applyAutoDark();
     this.showTimeEditor = false;
+  }
+
+  private async loadAppVersion(): Promise<void> {
+    if (this.appVersion.length > 0) return;
+    try {
+      const info: bundleManager.BundleInfo = await bundleManager.getBundleInfoForSelf(0);
+      this.appVersion = 'v' + info.versionName;
+    } catch (e) {
+      // 读取失败时省略版本，不能显示过期的硬编码版本号。
+    }
   }
 
   async init(): Promise<void> {
@@ -496,7 +508,7 @@ export struct MineView {
 
       // ===== 组3：关于 / 清空缓存 / 退出登录 =====
       Column() {
-        this.NavRow('关于', { value: 'v1.0.0' }, () => {
+        this.NavRow('关于', { value: this.appVersion }, () => {
           this.getUIContext().getPromptAction().showDialog({
             title: 'BiliHaromny',
             message: '基于开源项目 PiliPlus 移植的鸿蒙原生哔哩哔哩第三方客户端（API 26）。\n支持沉浸式全屏、封面取色动态主题、环境光自适应。\n仅供学习交流使用。',

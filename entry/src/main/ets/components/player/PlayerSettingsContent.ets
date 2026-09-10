@@ -38,6 +38,7 @@ export struct PlayerSettingsContent {
   @Link sponsorUserStats: string;
   @Link sponsorWarningReason: string;
   @Prop subtitleOn: boolean = false;
+  @Prop backgroundPlaybackEnabled: boolean = false;
   @Prop subtitleIndex: number = -1;
   @Prop subtitles: Array<SubtitleTrack> = [];
   @Prop chapters: Array<VideoChapter> = [];
@@ -49,6 +50,7 @@ export struct PlayerSettingsContent {
   @Prop dmFrameRate: number = 60;
   @Prop dmSpeed: number = 1;
   @Prop dmFontScale: number = 1;
+  @Prop dmSpacing: number = 1;
   @Prop dmDensity: number = 22;
   @Prop dmBlockLevel: number = 0;
   @Prop blockScrollDm: boolean = false;
@@ -81,6 +83,7 @@ export struct PlayerSettingsContent {
   onDmFrameRateChange: (value: number) => void = () => {};
   onDmSpeedChange: (value: number) => void = () => {};
   onDmFontScaleChange: (value: number) => void = () => {};
+  onDmSpacingChange: (value: number) => void = () => {};
   onDmDensityChange: (value: number) => void = () => {};
   onDmBlockLevelChange: (value: number) => void = () => {};
   onToggleDmBlock: (kind: string) => void = () => {};
@@ -91,6 +94,7 @@ export struct PlayerSettingsContent {
   onTimerChange: (minutes: number) => void = () => {};
   onMirrorChange: (next: boolean) => void = () => {};
   onSubtitleToggle: (next: boolean) => void = () => {};
+  onBackgroundPlaybackChange: (next: boolean) => void = () => {};
   onSponsorToggle: (next: boolean) => void = () => {};
   onSponsorModeChange: (category: string, mode: number) => void = () => {};
   onSponsorRefresh: () => void = () => {};
@@ -109,6 +113,7 @@ export struct PlayerSettingsContent {
   onSponsorSaveUserName: () => void = () => {};
   onSponsorAcknowledgeWarning: () => void = () => {};
   onShare: () => void = () => {};
+  onWatchLater: () => void = () => {};
   onCopyLink: () => void = () => {};
   onStub: (message: string) => void = () => {};
 
@@ -124,6 +129,7 @@ export struct PlayerSettingsContent {
       dmFrameRate: this.dmFrameRate,
       dmSpeed: this.dmSpeed,
       dmFontScale: this.dmFontScale,
+      dmSpacing: this.dmSpacing,
       dmDensity: this.dmDensity,
       dmBlockLevel: this.dmBlockLevel,
       blockScrollDm: this.blockScrollDm,
@@ -145,6 +151,7 @@ export struct PlayerSettingsContent {
       onDmFrameRateChange: (value: number) => this.onDmFrameRateChange(value),
       onDmSpeedChange: (value: number) => this.onDmSpeedChange(value),
       onDmFontScaleChange: (value: number) => this.onDmFontScaleChange(value),
+      onDmSpacingChange: (value: number) => this.onDmSpacingChange(value),
       onDmDensityChange: (value: number) => this.onDmDensityChange(value),
       onDmBlockLevelChange: (value: number) => this.onDmBlockLevelChange(value),
       onDmFilterTap: () => this.onDmFilterOpen(),
@@ -286,6 +293,7 @@ export struct PlayerSettingsContent {
           chaptersCount: this.chapters.length,
           sponsorOn: this.sponsorOn,
           subtitleOn: this.subtitleOn,
+          backgroundPlaybackEnabled: this.backgroundPlaybackEnabled,
           downloadBusy: this.downloadBusy,
           downloadProgress: this.downloadProgress,
           onSpeedChange: (rate: number) => this.onSpeedChange(rate),
@@ -296,9 +304,11 @@ export struct PlayerSettingsContent {
           onDmSettings: () => this.onOpenPage('dm'),
           onChapters: () => this.onOpenPage('chapters'),
           onSubtitleToggle: (next: boolean) => this.onSubtitleToggle(next),
+          onBackgroundPlaybackChange: (next: boolean) => this.onBackgroundPlaybackChange(next),
           onSponsorToggle: (next: boolean) => this.onSponsorToggle(next),
           onSponsorSettings: () => this.onOpenPage('sponsor'),
           onShare: () => this.onShare(),
+          onWatchLater: () => this.onWatchLater(),
           onCopyLink: () => this.onCopyLink(),
           onDownload: () => this.onDownload(),
           onStub: (message: string) => this.onStub(message),

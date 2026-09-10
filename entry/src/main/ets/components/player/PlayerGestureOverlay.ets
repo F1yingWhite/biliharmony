@@ -4,6 +4,7 @@ import { image } from '@kit.ImageKit';
 @Component
 export struct PlayerGestureOverlay {
   @Prop onlineTotal: string = '';
+  @Prop chapterTitle: string = '';
   @Prop compactMode: boolean = false;
   @Prop showControls: boolean = false;
   @Prop fullscreen: boolean = false;
@@ -113,6 +114,12 @@ export struct PlayerGestureOverlay {
       .clip(true)
       .shadow({ radius: 5, color: '#77000000', offsetY: 1 })
 
+      if (this.chapterTitle.length > 0) {
+        Text(this.chapterTitle).fontSize(12).fontColor('#FFFFFF').maxLines(1)
+          .width(this.previewWidth()).textAlign(TextAlign.Center)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .textShadow({ radius: 3, color: '#CC000000', offsetX: 0, offsetY: 1 })
+      }
       Text(this.formatSeekTime(this.seekPreviewTime()) + ' / ' + this.formatSeekTime(this.duration))
         .fontSize(this.fullscreen ? 18 : 17)
         .fontWeight(FontWeight.Bold)

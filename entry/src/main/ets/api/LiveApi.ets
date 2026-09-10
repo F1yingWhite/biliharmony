@@ -2,15 +2,24 @@
  * 直播域 API：推荐直播间 / 房间信息 / 播放地址 / 弹幕连接与历史 / 表情 / 发送弹幕 / 醒目留言。
  * 移植自 PiliPlus lib/http/live*.dart
  */
-import { HttpClient, HttpResponse } from '../common/HttpClient';
+import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber, str, toHttps } from '../common/Utils';
 import { LiveChatMessage, LiveDanmakuInfo, LiveDanmakuServer, LiveEmoteItem, LiveEmotePackage, LivePlayInfo,
-  LiveQualityOption, LiveRoomInfo, LiveRoomItem, LiveStatusItem, LiveZone } from '../model/LiveModels';
-import { ActionResult, actionWithCsrf, getData, webGet, webPost } from './internal/ApiCommon';
+  FollowedLivePage, LiveQualityOption, LiveRoomInfo, LiveRoomItem, LiveStatusItem, LiveZone } from '../model/LiveModels';
+import { ActionResult, actionWithCsrf, failureText, getData, webGet, webPost } from './internal/ApiCommon';
 
 export class LiveApi {
+  static async getFollowedLiveRooms(page: number): Promise<FollowedLivePage> {
+    const resp: HttpResponse = await webGet(Api.liveFollowing, {
+      'page': String(page), 'page_size': '9', 'ignoreRecord': '1', 'hit_ab': 'true',
+    }, 'https://live.bilibili.com/');
+    const data: Record<string, Object> | null = getData(resp);
+    if (data === null) throw new Error(failureText(resp, '关注直播加载失败'));
+    return FollowedLivePage.from(data, page);
+  }
+
   // ===== 直播（只读观看） =====
   static async getLiveRooms(page: number, pageSize: number = 20): Promise<Array<LiveRoomItem>> {
     const params: Record<string, string> = {

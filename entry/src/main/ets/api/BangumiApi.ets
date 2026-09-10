@@ -1,7 +1,7 @@
 /**
  * 番剧与影视（PGC）API：详情、追番、索引和时间表。
  */
-import { HttpClient, HttpResponse } from '../common/HttpClient';
+import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { Api, Constants } from '../common/Constants';
 import { asArray, asBool, asNumber, asObject, str } from '../common/Utils';
 import { BangumiIndexItem, BangumiIndexPageData, BangumiSeason, TimeLineDay, TimeLineEpisode,

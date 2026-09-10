@@ -5,6 +5,7 @@
 import { display, window } from '@kit.ArkUI';
 
 export class Immersive {
+  static readonly STATUS_BAR_HEIGHT_KEY: string = 'windowStatusBarHeight';
   private static mainWindow: window.Window | null = null;
   private static cachedStatusBarHeight: number = -1;
   private static cachedBottomInset: number = -1;
@@ -18,7 +19,18 @@ export class Immersive {
     } catch (e) {
       Immersive.mainWindow = null;
     }
+    const win: window.Window | null = Immersive.mainWindow;
+    if (win !== null) {
+      // 系统栏隐藏、恢复和旋转都是异步操作；完成事件必须通知保活的首页重排。
+      win.on('avoidAreaChange', () => Immersive.publishInsets());
+      win.on('windowSizeChange', () => Immersive.publishInsets());
+    }
+    Immersive.publishInsets();
+  }
+
+  private static publishInsets(): void {
     Immersive.invalidate();
+    AppStorage.setOrCreate<number>(Immersive.STATUS_BAR_HEIGHT_KEY, Immersive.statusBarHeight());
   }
 
   /** avoidArea 缓存失效：窗口/系统栏/方向变化后调用，下次取值时重新计算 */

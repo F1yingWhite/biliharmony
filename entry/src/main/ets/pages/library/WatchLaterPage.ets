@@ -1,10 +1,11 @@
+import { RequestEpoch } from '../../common/RequestEpoch';
 /** 登录用户的稍后再看。 */
 import { AppTheme } from '../../common/AppTheme';
 import { Immersive } from '../../common/Immersive';
 import { AppNavStack, NAV_VIDEO_DETAIL, NAV_FAV_SORT, FavSortParam, VideoDetailParam } from '../../common/AppRouter';
 import { BiliApi, ActionResult } from '../../api/BiliApi';
 import { FavoriteFolderItem, FavoriteVideoPageData, HistoryPageData, HistoryVideoItem, VideoItem, WatchLaterItem } from '../../model/Models';
-import { UserStore } from '../../common/UserStore';
+import { UserStore } from '../../services/auth/UserStore';
 import { formatCount, formatDuration, formatRelativeTime } from '../../common/Utils';
 import { LoadingView } from '../../components/LoadingView';
 import { LoadMoreFooter } from '../../components/LoadMoreFooter';
@@ -23,6 +24,7 @@ export struct WatchLaterPage {
   @StorageProp('isDarkMode') isDark: boolean = false;
   private itemsSource: BasicDataSource<WatchLaterItem> = new BasicDataSource<WatchLaterItem>();
   private actionBusy: boolean = false;
+  private listEpoch: RequestEpoch = new RequestEpoch();
 
   aboutToAppear(): void {
     this.prepareAndLoad();
@@ -51,17 +53,20 @@ export struct WatchLaterPage {
   }
 
   async load(): Promise<void> {
-    if (this.loading) return;
+    if (this.loading || this.actionBusy) return;
+    const epoch: number = this.listEpoch.next();
     this.loading = true;
     this.errorText = '';
     try {
       const items: Array<WatchLaterItem> = await HistoryApi.getWatchLaterList();
+      if (!this.listEpoch.isCurrent(epoch)) return;
       this.itemsSource.reset(items);
       this.itemCount = items.length;
     } catch (e) {
+      if (!this.listEpoch.isCurrent(epoch)) return;
       if (this.itemsSource.isEmpty()) this.errorText = '稍后再看加载失败，请检查网络后重试';
     } finally {
-      this.loading = false;
+      if (this.listEpoch.isCurrent(epoch)) this.loading = false;
     }
   }
 
@@ -75,6 +80,9 @@ export struct WatchLaterPage {
         this.toast(result.message);
         return;
       }
+      this.listEpoch.invalidate();
+      this.loading = false;
+      this.errorText = '';
       this.toast('已移除');
       this.itemsSource.reset(this.itemsSource.getAll().filter((v: WatchLaterItem) => v.video.aid !== item.video.aid));
       this.itemCount = this.itemsSource.totalCount();
@@ -115,6 +123,9 @@ export struct WatchLaterPage {
         this.toast(result.message);
         return;
       }
+      this.listEpoch.invalidate();
+      this.loading = false;
+      this.errorText = '';
       this.toast('已清空稍后再看');
       this.itemsSource.clear();
       this.itemCount = 0;

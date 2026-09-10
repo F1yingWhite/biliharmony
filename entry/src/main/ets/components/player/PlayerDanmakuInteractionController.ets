@@ -1,6 +1,6 @@
 import { pasteboard } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem } from '../../api/BiliApi';
-import { UserStore } from '../../common/UserStore';
+import { UserStore } from '../../services/auth/UserStore';
 import { ActiveDm } from './PlayerDanmakuSupport';
 import { PlayerDanmakuEngine } from './PlayerDanmakuEngine';
 

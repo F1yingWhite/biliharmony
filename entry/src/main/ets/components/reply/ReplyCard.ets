@@ -18,9 +18,9 @@ import { curves } from '@kit.ArkUI';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { ActionResult } from '../../api/BiliApi';
 import { UserApi } from '../../api/UserApi';
-import { UserStore } from '../../common/UserStore';
+import { UserStore } from '../../services/auth/UserStore';
 import { CommentApi } from '../../api/CommentApi';
-import { RemoteAssetCache } from '../../common/RemoteAssetCache';
+import { RemoteAssetCache } from '../../services/cache/RemoteAssetCache';
 import { common } from '@kit.AbilityKit';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */

@@ -17,6 +17,7 @@ export struct PlayerSettingsPanel {
   @Prop dmFrameRate: number = 60;
   @Prop dmSpeed: number = 1;
   @Prop dmFontScale: number = 1.0;
+  @Prop dmSpacing: number = 1.0;
   @Prop dmDensity: number = 22;
   @Prop dmBlockLevel: number = 0;
   @Prop blockScrollDm: boolean = false;
@@ -40,6 +41,7 @@ export struct PlayerSettingsPanel {
   onDmFrameRateChange: (value: number) => void = () => {};
   onDmSpeedChange: (value: number) => void = () => {};
   onDmFontScaleChange: (value: number) => void = () => {};
+  onDmSpacingChange: (value: number) => void = () => {};
   onDmDensityChange: (value: number) => void = () => {};
   onDmBlockLevelChange: (value: number) => void = () => {};
   onToggleDmBlock: (kind: string) => void = () => {};
@@ -246,10 +248,18 @@ export struct PlayerSettingsPanel {
           }
           .width('100%')
           .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+          Text(this.dmDensity >= 30 ? '尽量显示全部弹幕，允许相互重叠' :
+            (this.dmDensity >= 27 ? '显示更多弹幕，允许途中交叠' : '优先避让，减少滚动弹幕相互遮挡'))
+            .fontSize(11)
+            .fontColor(this.sectionTitleColor())
+            .width('100%')
+            .padding({ left: 14, right: 14, bottom: 10 })
           this.DmDivider()
           this.DmSliderRow('不透明度', () => this.dmOpacity, 0.2, 1, (value: number) => this.onDmOpacityChange(value))
           this.DmDivider()
           this.DmSliderRow('字体大小', () => this.dmFontScale, 0.7, 1.8, (value: number) => this.onDmFontScaleChange(value))
+          this.DmDivider()
+          this.DmSliderRow('弹幕间距', () => this.dmSpacing, 0.5, 2, (value: number) => this.onDmSpacingChange(value))
           this.DmDivider()
           this.DmSpeedRow(() => this.dmSpeed, (value: number) => this.onDmSpeedChange(value))
           this.DmDivider()

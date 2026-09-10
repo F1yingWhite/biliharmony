@@ -2,7 +2,7 @@
  * 用户装扮公用组件。
  * 评论、动态和个人空间共用同一套头像/挂件比例，避免各页面分别调尺寸后互相漂移。
  */
-import { RemoteAssetCache } from '../common/RemoteAssetCache';
+import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
 import { biliImageThumbnail } from '../common/ImageUrl';
 
 @Component

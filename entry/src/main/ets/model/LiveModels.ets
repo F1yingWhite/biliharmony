@@ -178,8 +178,25 @@ export class LiveChatMessage {
   price: number = 0;
   face: string = '';
   emotes: Array<LiveEmoteItem> = [];
+  /** 独立大表情的 message/text 是替代文字，图片成功显示时不应重复绘制。 */
+  emoteOnly: boolean = false;
   backgroundColor: string = '#FB7299';
-  timestamp: number = 0;
+  endTime: number = 0;
+  // 队列过期按本地接收时间计算；历史基线去重负责阻止旧消息重放。
+  timestamp: number = Math.floor(Date.now() / 1000);
+
+  static textWithoutEmotes(msg: LiveChatMessage): string {
+    if (msg.emoteOnly && msg.emotes.length > 0) return '';
+    let text: string = msg.text;
+    for (let i: number = 0; i < msg.emotes.length; i++) {
+      const emote: LiveEmoteItem = msg.emotes[i];
+      if (emote.unique.length > 0) text = text.split(emote.unique).join('');
+      if (emote.emoji.length > 0 && emote.emoji !== emote.unique) {
+        text = text.split(emote.emoji).join('');
+      }
+    }
+    return text.trim();
+  }
 
   static danmaku(o: Object, index: number = 0): LiveChatMessage {
     const msg: LiveChatMessage = new LiveChatMessage();
@@ -212,7 +229,10 @@ export class LiveChatMessage {
       // 独立直播表情位于 info[0][13]，内容本身通常只是 emoticon_unique。
       if (meta.length > 13) {
         const directEmote: LiveEmoteItem = LiveEmoteItem.from(meta[13]);
-        if (directEmote.url.length > 0) msg.emotes.push(directEmote);
+        if (directEmote.url.length > 0) {
+          msg.emotes.push(directEmote);
+          msg.emoteOnly = true;
+        }
       }
       // 新版协议把可读字段收进 info[0][15]，同时兼容旧版数组。
       if (meta.length > 15) {
@@ -233,7 +253,9 @@ export class LiveChatMessage {
             for (let i: number = 0; i < emoteKeys.length; i++) {
               const emote: LiveEmoteItem = LiveEmoteItem.from(emoteMap[emoteKeys[i]]);
               if (emote.emoji.length === 0) emote.emoji = emoteKeys[i];
-              if (emote.url.length > 0) msg.emotes.push(emote);
+              if (emote.url.length > 0 && !msg.emotes.some((existing: LiveEmoteItem) => existing.url === emote.url)) {
+                msg.emotes.push(emote);
+              }
             }
           } catch (e) {
             // extra 不是合法 JSON 时继续使用旧协议字段。
@@ -248,7 +270,7 @@ export class LiveChatMessage {
     const raw: Record<string, Object> = asObject(o);
     const msg: LiveChatMessage = new LiveChatMessage();
     const fallbackId: string = str(raw, 'timeline', '') + '_' + str(raw, 'nickname', '') + '_' +
-      str(raw, 'text', '') + '_' + String(index);
+      str(raw, 'text', '');
     msg.id = 'live_' + str(raw, 'id_str', str(raw, 'id', fallbackId));
     msg.uname = str(raw, 'nickname', str(asObject(asObject(raw['user'])['base']), 'name', ''));
     msg.text = str(raw, 'text', '');
@@ -256,13 +278,18 @@ export class LiveChatMessage {
     msg.face = toHttps(str(user, 'face', ''));
     msg.color = asNumber(asObject(asObject(raw['user'])['dm_config'])['color'], 0xFFFFFF);
     const directEmote: LiveEmoteItem = LiveEmoteItem.from(raw['emoticon']);
-    if (directEmote.url.length > 0) msg.emotes.push(directEmote);
+    if (directEmote.url.length > 0) {
+      msg.emotes.push(directEmote);
+      msg.emoteOnly = true;
+    }
     const emoteMap: Record<string, Object> = asObject(raw['emots']);
     const keys: Array<string> = Object.keys(emoteMap);
     for (let i: number = 0; i < keys.length; i++) {
       const emote: LiveEmoteItem = LiveEmoteItem.from(emoteMap[keys[i]]);
       if (emote.emoji.length === 0) emote.emoji = keys[i];
-      if (emote.url.length > 0) msg.emotes.push(emote);
+      if (emote.url.length > 0 && !msg.emotes.some((existing: LiveEmoteItem) => existing.url === emote.url)) {
+        msg.emotes.push(emote);
+      }
     }
     return msg;
   }
@@ -279,6 +306,39 @@ export class LiveChatMessage {
     msg.price = asNumber(j['price'], 0);
     msg.backgroundColor = str(j, 'background_bottom_color', str(j, 'background_color', '#FB7299'));
     msg.timestamp = asNumber(j['start_time'], Math.floor(Date.now() / 1000));
+    msg.endTime = asNumber(j['end_time'], 0);
+    if (msg.endTime <= 0 && asNumber(j['time'], 0) > 0) {
+      msg.endTime = msg.timestamp + asNumber(j['time'], 0);
+    }
     return msg;
+  }
+}
+
+
+/** 已关注直播分页：服务端可能同时返回未开播账号，仅把直播中房间交给观看入口。 */
+export class FollowedLivePage {
+  rooms: Array<LiveRoomItem> = [];
+  liveCount: number = 0;
+  hasMore: boolean = false;
+
+  static from(o: Object, page: number): FollowedLivePage {
+    const raw: Record<string, Object> = asObject(o);
+    const result: FollowedLivePage = new FollowedLivePage();
+    const list: Array<Object> = asArray(raw['list']);
+    const seen: Set<number> = new Set<number>();
+    for (let i: number = 0; i < list.length; i++) {
+      const entry: Record<string, Object> = asObject(list[i]);
+      if (asNumber(entry['live_status'], 0) !== 1) continue;
+      const room: LiveRoomItem = LiveRoomItem.from(entry);
+      if (room.roomId <= 0 || seen.has(room.roomId)) continue;
+      room.cover = toHttps(str(entry, 'room_cover', room.cover));
+      room.face = toHttps(str(entry, 'face', str(entry, 'uface', room.face)));
+      room.watched = str(entry, 'text_small', room.watched);
+      result.rooms.push(room);
+      seen.add(room.roomId);
+    }
+    result.liveCount = asNumber(raw['live_count'], result.rooms.length);
+    result.hasMore = page < asNumber(raw['totalPage'], page);
+    return result;
   }
 }

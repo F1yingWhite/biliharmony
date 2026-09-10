@@ -1,7 +1,7 @@
 /**
  * 登录与认证 API：TV 扫码、密码登录和短信登录。
  */
-import { HttpClient, HttpResponse } from '../common/HttpClient';
+import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { appSign } from '../common/AppSign';
 import { Api, Constants } from '../common/Constants';
 import { md5Hex } from '../common/Md5';

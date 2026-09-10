@@ -8,8 +8,8 @@ import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO
   VideoDetailParam } from '../common/AppRouter';
 import { BiliApi, ActionResult } from '../api/BiliApi';
 import { MessageSessionItem, MessageSessionPageData, PrivateMessageItem, PrivateMessagePageData } from '../model/Models';
-import { UserStore } from '../common/UserStore';
-import { MsgUnreadStore } from '../common/MsgUnreadStore';
+import { UserStore } from '../services/auth/UserStore';
+import { MsgUnreadStore } from '../services/message/MsgUnreadStore';
 import { colorWithAlpha, formatRelativeTime } from '../common/Utils';
 import { LoadingView } from '../components/LoadingView';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';

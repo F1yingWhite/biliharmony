@@ -6,13 +6,14 @@ import { webSocket } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError, zlib } from '@kit.BasicServicesKit';
 import { BiliApi } from '../api/BiliApi';
-import { HttpClient } from './HttpClient';
+import { HttpClient } from '../services/network/HttpClient';
 import { LiveChatMessage, LiveDanmakuInfo, LiveDanmakuServer } from '../model/LiveModels';
 import { asObject, asString, asNumber } from './Utils';
 import { LiveApi } from '../api/LiveApi';
 
 export class LiveDanmakuClient {
   private roomId: number = 0;
+  private generation: number = 0;
   private socket: webSocket.WebSocket | null = null;
   private heartbeatTimer: number = -1;
   private retryTimer: number = -1;
@@ -27,10 +28,13 @@ export class LiveDanmakuClient {
     this.close();
     this.roomId = roomId;
     this.closed = false;
+    const generation: number = this.generation;
     try {
       const info: LiveDanmakuInfo | null = await LiveApi.getLiveDanmakuInfo(roomId);
-      if (this.closed || info === null || info.servers.length === 0) {
+      if (this.closed || generation !== this.generation) return;
+      if (info === null || info.servers.length === 0) {
         this.onConnected(false);
+        this.scheduleReconnect();
         return;
       }
       const server: LiveDanmakuServer = info.servers[0];
@@ -57,7 +61,7 @@ export class LiveDanmakuClient {
         } else {
           const packet: ArrayBuffer = value as ArrayBuffer;
           this.decodeQueue = this.decodeQueue.then(async (): Promise<void> => {
-            if (this.socket === ws && !this.closed) await this.parsePackets(packet);
+            if (this.socket === ws && !this.closed && generation === this.generation) await this.parsePackets(packet, generation);
           }).catch((): void => {
             // 单个损坏包不应中断后续消息解码。
           });
@@ -72,6 +76,7 @@ export class LiveDanmakuClient {
       });
       ws.on('error', () => {
         if (this.socket === ws) {
+          this.stopHeartbeat();
           this.onConnected(false);
           this.scheduleReconnect();
         }
@@ -84,16 +89,23 @@ export class LiveDanmakuClient {
           },
         });
       } catch (e) {
-        if (this.socket === ws) this.onConnected(false);
+        if (this.socket === ws && generation === this.generation && !this.closed) {
+          this.onConnected(false);
+          this.scheduleReconnect();
+        }
       }
     } catch (e) {
-      // 弹幕信息拉取或 WebSocket 创建失败：按连接失败处理，重试语义不变。
-      this.onConnected(false);
+      if (!this.closed && generation === this.generation) {
+        this.onConnected(false);
+        this.scheduleReconnect();
+      }
     }
   }
 
   close(): void {
+    this.generation++;
     this.closed = true;
+    this.decodeQueue = Promise.resolve();
     this.stopHeartbeat();
     if (this.retryTimer >= 0) {
       clearTimeout(this.retryTimer);
@@ -156,15 +168,15 @@ export class LiveDanmakuClient {
     return buffer;
   }
 
-  private async parsePackets(buffer: ArrayBuffer): Promise<void> {
+  private async parsePackets(buffer: ArrayBuffer, generation: number): Promise<void> {
     const view: DataView = new DataView(buffer);
     let offset: number = 0;
-    while (offset + 16 <= buffer.byteLength) {
+    while (!this.closed && generation === this.generation && offset + 16 <= buffer.byteLength) {
       const packetLength: number = view.getUint32(offset);
       const headerLength: number = view.getUint16(offset + 4);
       const protocol: number = view.getUint16(offset + 6);
       const operation: number = view.getUint32(offset + 8);
-      if (packetLength < headerLength || packetLength <= 0 || offset + packetLength > buffer.byteLength) break;
+      if (headerLength < 16 || packetLength < headerLength || packetLength <= 0 || offset + packetLength > buffer.byteLength) break;
       if (operation === 8) {
         // WebSocket open 只代表 TCP/TLS 建立；收到 op=8 才是直播弹幕鉴权成功。
         this.onConnected(true);
@@ -180,7 +192,7 @@ export class LiveDanmakuClient {
         const compressed: ArrayBuffer = new ArrayBuffer(compressedView.byteLength);
         new Uint8Array(compressed).set(compressedView);
         const inflated: ArrayBuffer | null = await this.inflateZlib(compressed);
-        if (inflated !== null) await this.parsePackets(inflated);
+        if (inflated !== null) await this.parsePackets(inflated, generation);
       }
       offset += packetLength;
     }

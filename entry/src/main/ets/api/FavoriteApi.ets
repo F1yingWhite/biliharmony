@@ -1,7 +1,7 @@
 /**
  * 收藏夹与合集 API：列表 / 增删改 / 移动 / 排序 / 收藏视频 / 合集视频。
  */
-import { HttpClient, HttpResponse } from '../common/HttpClient';
+import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { appSign } from '../common/AppSign';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber, asBool, str, toHttps } from '../common/Utils';

@@ -3,7 +3,7 @@
  * 用于"沉浸光感"动态主题（视频详情、播放页背景氛围色）
  */
 import { image } from '@kit.ImageKit';
-import { HttpClient } from './HttpClient';
+import { HttpClient } from '../services/network/HttpClient';
 import { RGB, rgbToHex, withSaturation } from './ColorUtil';
 import { Constants } from './Constants';
 

@@ -1,3 +1,4 @@
+import { RequestEpoch } from '../common/RequestEpoch';
 /**
  * 动态视图：关注动态 feed（需登录）
  */
@@ -11,7 +12,7 @@ import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO
   NAV_USER_SPACE, DynamicDetailParam, ImageViewerParam, ImageViewerSrcRect, LiveRoomParam, VideoDetailParam,
     UserSpaceParam, NAV_BANGUMI_DETAIL, BangumiDetailParam } from '../common/AppRouter';
 import { ActionResult } from '../api/BiliApi';
-import { UserStore } from '../common/UserStore';
+import { UserStore } from '../services/auth/UserStore';
 import { LoadingView } from '../components/LoadingView';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { formatCount, formatRelativeTime } from '../common/Utils';
@@ -1018,6 +1019,7 @@ export struct DynamicView {
   private followLoading: boolean = false;
   private liveFetching: boolean = false;
   private accountGeneration: number = 0;
+  private feedEpoch: RequestEpoch = new RequestEpoch();
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
@@ -1034,6 +1036,12 @@ export struct DynamicView {
     // 登录/登出广播：重载动态流（Tabs 保活，aboutToAppear 不会再触发）
     // 关注列表与直播角标属于账号数据，切换账号时必须清空并重新拉取。
     this.accountGeneration++;
+    this.feedEpoch.invalidate();
+    this.feedLoading = false;
+    this.dynSource.clear();
+    this.dynCount = 0;
+    this.dynOffset = '';
+    this.dynHasMore = true;
     this.followed = [];
     this.liveRooms = new Map<number, number>();
     this.followingLoaded = false;
@@ -1087,12 +1095,14 @@ export struct DynamicView {
   }
 
   async loadFeed(reset: boolean): Promise<void> {
-    if (this.feedLoading || (!reset && !this.dynHasMore)) return;
+    if (!reset && (this.feedLoading || !this.dynHasMore)) return;
+    const epoch: number = this.feedEpoch.next();
     this.feedLoading = true;
     try {
       const off: string = reset ? '' : this.dynOffset;
       const page: DynamicPageData = this.hostMid > 0 ?
         await DynamicApi.getUserDynamicFeed(this.hostMid, off) : await DynamicApi.getDynamicFeed(off, this.dynType);
+      if (!this.feedEpoch.isCurrent(epoch)) return;
       if (reset) {
         this.dynSource.reset(page.items);
       } else {
@@ -1102,9 +1112,10 @@ export struct DynamicView {
       this.dynOffset = page.offset;
       this.dynHasMore = page.hasMore;
     } catch (e) {
+      if (!this.feedEpoch.isCurrent(epoch)) return;
       if (this.dynSource.isEmpty()) this.errorText = '动态加载失败，请检查登录状态或网络后重试';
     } finally {
-      this.feedLoading = false;
+      if (this.feedEpoch.isCurrent(epoch)) this.feedLoading = false;
     }
   }
 
@@ -1225,7 +1236,7 @@ export struct DynamicView {
   }
 
   private changeDynType(type: string): void {
-    if (this.dynType === type || this.feedLoading) return;
+    if (this.dynType === type) return;
     this.dynType = type;
     this.dynOffset = '';
     this.dynHasMore = true;

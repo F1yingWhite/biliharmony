@@ -1,3 +1,4 @@
+import { RequestEpoch } from '../common/RequestEpoch';
 /**
  * 首页视图：推荐（app 端接口）+ 热门，双列瀑布流、下拉刷新、触底加载
  */
@@ -8,9 +9,10 @@ import { LoadingView } from '../components/LoadingView';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { Immersive } from '../common/Immersive';
 import { AppTheme } from '../common/AppTheme';
-import { UserStore } from '../common/UserStore';
+import { UserStore } from '../services/auth/UserStore';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { LiveRoomItem } from '../model/LiveModels';
+import { FollowedLiveStrip } from '../components/live/FollowedLiveStrip';
 import { LiveRoomCard } from '../components/live/LiveRoomCard';
 import { NavEntryRow } from '../components/NavEntryRow';
 import { LayoutTokens } from '../common/LayoutTokens';
@@ -22,6 +24,7 @@ import { Haptic } from '../common/Haptic';
 /** 悬浮频道切换条：单独订阅 headerFade，滚动逐帧淡出时不再带动整个 HomeView 重建。 */
 @Component
 struct FloatingSubTabs {
+  @StorageProp('windowStatusBarHeight') statusBarInset: number = 0;
   @StorageProp('headerFade') fade: number = 0;
   @BuilderParam content: () => void;
 
@@ -32,16 +35,16 @@ struct FloatingSubTabs {
     .width('100%')
     .justifyContent(FlexAlign.Center)
     .padding({ left: 10, right: 10 })
-    .margin({ top: Immersive.statusBarHeight() + 50 })
+    .margin({ top: this.statusBarInset + 50 })
     .opacity(1 - this.fade)
     .translate({ y: -12 * this.fade })
-    .animation({ duration: 160, curve: Curve.EaseOut })
     .hitTestBehavior(this.fade > 0.9 ? HitTestMode.None : HitTestMode.Default)
   }
 }
 
 @Component
 export struct HomeView {
+  @StorageProp('windowStatusBarHeight') statusBarInset: number = 0;
   @State tab: number = 0; // 0 推荐 / 1 热门 / 2 直播
   @State visualTab: number = 0;
   @State refreshing: boolean = false;
@@ -62,6 +65,7 @@ export struct HomeView {
   @State recCount: number = 0;
   @State hotCount: number = 0;
   @State liveCount: number = 0;
+  @State followedLiveRefresh: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
@@ -75,6 +79,7 @@ export struct HomeView {
   private liveSource: BasicDataSource<LiveRoomItem> = new BasicDataSource<LiveRoomItem>();
   // 防重入：刷新 / 触底 / 切频道并发触发的重复请求直接丢弃
   private recFetching: boolean = false;
+  private recEpoch: RequestEpoch = new RequestEpoch();
   private hotFetching: boolean = false;
   private liveFetching: boolean = false;
   private readonly refreshTriggerOffset: number = 56;
@@ -92,6 +97,10 @@ export struct HomeView {
   }
 
   async onLoginChanged(): Promise<void> {
+    this.recEpoch.invalidate();
+    this.recFetching = false;
+    this.recSource.clear();
+    this.recCount = 0;
     try {
       await UserStore.ensureLoaded();
       await this.loadRecommend(true);
@@ -100,23 +109,23 @@ export struct HomeView {
     }
   }
 
-  /** 推荐卡 ⋮ 菜单-举报：原因选择后给反馈（Web 端无视频举报接口，本地提示）。 */
+  /** 举报尚未接入提交服务，不能把本地提示当作提交成功。 */
   private reportCard(item: VideoItem): void {
     try {
-      this.getUIContext().getPromptAction().showToast({ message: '已提交举报，感谢反馈' });
+      this.getUIContext().getPromptAction().showToast({ message: '暂不支持应用内举报，请前往哔哩哔哩官方客户端举报' });
     } catch (e) {
       // 弹 toast 失败忽略。
     }
   }
 
-  /** 长按卡片「不感兴趣」：本地从对应信息流移除（本轮会话生效；Web 无服务端反馈接口）。 */
+  /** 本地从当前列表移除，不代表服务端推荐偏好已更新。 */
   private dislikeLocal(item: VideoItem, feedTab: number): void {
     const source: BasicDataSource<VideoItem> = feedTab === 0 ? this.recSource : this.hotSource;
     const key: number = item.aid;
     if (key <= 0) return;
     source.reset(source.getAll().filter((v: VideoItem) => v.aid !== key));
     try {
-      this.getUIContext().getPromptAction().showToast({ message: '已不感兴趣，帮你减少了此类推荐' });
+      this.getUIContext().getPromptAction().showToast({ message: '已从当前列表隐藏' });
     } catch (e) {
       // 弹 toast 失败忽略。
     }
@@ -157,9 +166,10 @@ export struct HomeView {
   }
 
   async loadRecommend(reset: boolean): Promise<void> {
-    if (this.recFetching || (!reset && !this.recHasMore)) {
+    if (!reset && (this.recFetching || !this.recHasMore)) {
       return;
     }
+    const epoch: number = this.recEpoch.next();
     this.recFetching = true;
     try {
       if (reset) {
@@ -169,6 +179,7 @@ export struct HomeView {
       this.recError = '';
       const idx: number = this.recIdx;
       const list: Array<VideoItem> = await FeedApi.getRecommend(idx);
+      if (!this.recEpoch.isCurrent(epoch)) return;
       if (list.length === 0) {
         this.recHasMore = false;
         if (this.recSource.isEmpty()) {
@@ -184,9 +195,10 @@ export struct HomeView {
       }
       this.recCount = this.recSource.totalCount();
     } catch (e) {
+      if (!this.recEpoch.isCurrent(epoch)) return;
       if (this.recSource.isEmpty()) this.recError = '推荐加载失败，请检查网络后重试';
     } finally {
-      this.recFetching = false;
+      if (this.recEpoch.isCurrent(epoch)) this.recFetching = false;
     }
   }
 
@@ -226,6 +238,7 @@ export struct HomeView {
   }
 
   async loadLive(reset: boolean): Promise<void> {
+    if (reset) this.followedLiveRefresh++;
     if (this.liveFetching || (!reset && !this.liveHasMore)) {
       return;
     }
@@ -388,7 +401,7 @@ export struct HomeView {
     .justifyContent(FlexAlign.Center)
     .alignItems(VerticalAlign.Center)
     // 搜索栏和推荐/热门频道栏下方显示，但不参与 Refresh 的下拉距离计算。
-    .margin({ top: Immersive.statusBarHeight() + 88 })
+    .margin({ top: this.statusBarInset + 88 })
     // Done 等结束态不再显示；即使系统状态回调稍晚，请求完成后也立即消失。
     .opacity(this.refreshStatus === RefreshStatus.Refresh || this.refreshing ? 1 : 0)
     .animation({ duration: 120, curve: Curve.EaseOut })
@@ -510,7 +523,7 @@ export struct HomeView {
     .lanes(LayoutTokens.feedColumns(this.viewportWidth), LayoutTokens.feedGap)
     .cachedCount(3)
     // 首屏卡片默认位于搜索栏下方。这个间距属于可滚动内容，滚走后不会因头栏重新出现而顶动卡片。
-    .contentStartOffset(Immersive.statusBarHeight() + 94)
+    .contentStartOffset(this.statusBarInset + 94)
     // 悬浮 Dock 高 52 + 底部边距 16，末端留白必须大于 68 才能完整露出末行。
     .contentEndOffset(Immersive.bottomInset() + 76)
     .padding({ left: LayoutTokens.horizontalPadding(this.viewportWidth),
@@ -539,30 +552,45 @@ export struct HomeView {
   }
 
   @Builder
+  LiveFeedHeader() {
+    Column() {
+      FollowedLiveStrip({ refreshVersion: this.followedLiveRefresh })
+      this.LiveZoneEntry()
+    }.width('100%')
+  }
+
+  @Builder
   LiveFeedList() {
     List({ space: LayoutTokens.feedGap, scroller: this.liveScroller }) {
-      ListItem() {
-        this.LiveZoneEntry()
+      ListItemGroup({ header: this.LiveFeedHeader() }) {
+        LazyForEach(this.liveSource, (item: LiveRoomItem) => {
+          ListItem() {
+            LiveRoomCard({ room: item })
+          }.margin({ bottom: LayoutTokens.feedGap })
+        }, (item: LiveRoomItem) => String(item.roomId))
       }
-      LazyForEach(this.liveSource, (item: LiveRoomItem) => {
-        ListItem() {
-          LiveRoomCard({ room: item })
+      ListItemGroup() {
+        if (this.liveCount === 0) {
+          ListItem() {
+            LoadingView({ loading: this.liveError.length === 0, errorText: this.liveError,
+              onRetry: () => this.loadLive(true).catch(() => {}) })
+          }
         }
-      }, (item: LiveRoomItem) => String(item.roomId))
-      ListItem() {
-        LoadMoreFooter({
-          loading: this.loadingMore,
-          hasMore: this.liveHasMore,
-          moreText: '',
-          endText: '—— 到底啦 ——',
-          loadingText: '加载中…',
-          fixedHeight: this.loadingMore || !this.liveHasMore ? 48 : 1,
-        })
+        ListItem() {
+          LoadMoreFooter({
+            loading: this.loadingMore,
+            hasMore: this.liveHasMore,
+            moreText: '',
+            endText: '—— 到底啦 ——',
+            loadingText: '加载中…',
+            fixedHeight: this.loadingMore || !this.liveHasMore ? 48 : 1,
+          })
+        }
       }
     }
     .width('100%').height('100%').lanes(LayoutTokens.feedColumns(this.viewportWidth), LayoutTokens.feedGap)
     .cachedCount(3)
-    .contentStartOffset(Immersive.statusBarHeight() + 94)
+    .contentStartOffset(this.statusBarInset + 94)
     // 悬浮 Dock 高 52 + 底部边距 16，末端留白必须大于 68 才能完整露出末行。
     .contentEndOffset(Immersive.bottomInset() + 76)
     .padding({ left: LayoutTokens.horizontalPadding(this.viewportWidth),
@@ -576,7 +604,16 @@ export struct HomeView {
 
   @Builder
   FeedPage(feedTab: number) {
-    if (this.channelError(feedTab).length > 0 && this.channelEmpty(feedTab)) {
+    if (feedTab === 2) {
+      Refresh({ refreshing: $$this.refreshing, builder: this.RefreshHeader() }) {
+        this.LiveFeedList()
+      }
+      .refreshOffset(this.refreshTriggerOffset)
+      .onStateChange((status: RefreshStatus) => {
+        if (this.tab === 2) this.refreshStatus = status;
+      })
+      .onRefreshing(() => this.onRefresh(2))
+    } else if (this.channelError(feedTab).length > 0 && this.channelEmpty(feedTab)) {
       LoadingView({
         loading: false,
         empty: false,

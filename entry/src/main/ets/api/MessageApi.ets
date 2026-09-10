@@ -3,7 +3,7 @@
  */
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { DEBUG } from 'BuildProfile';
-import { HttpClient, HttpResponse } from '../common/HttpClient';
+import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber, asBool, str, toHttps, randomString } from '../common/Utils';

@@ -6,7 +6,7 @@ import { BiliApi } from '../api/BiliApi';
 import { AppTheme } from '../common/AppTheme';
 import { AppNavStack, NAV_USER_SPACE, NAV_VIDEO_DETAIL, UserSpaceParam, VideoDetailParam } from '../common/AppRouter';
 import { BasicDataSource } from '../common/BasicDataSource';
-import { MsgUnreadStore } from '../common/MsgUnreadStore';
+import { MsgUnreadStore } from '../services/message/MsgUnreadStore';
 import { colorWithAlpha, formatRelativeTime } from '../common/Utils';
 import { MsgNotifyItem, MsgNotifyPageData } from '../model/Models';
 import { LoadingView } from './LoadingView';
