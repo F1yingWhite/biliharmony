@@ -6,9 +6,11 @@ import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
 import { UserStore } from '../services/auth/UserStore';
 import { SearchHistoryStore } from '../common/SearchHistoryStore';
+import { PlatformStore } from '../common/PlatformStore';
 import { EmoteResolver } from '../common/EmoteResolver';
 import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
 import { SponsorBlockStore } from '../common/SponsorBlock';
+import { HttpClient } from '../services/network/HttpClient';
 
 const DOMAIN: number = 0x0000;
 const TAG: string = 'BiliHarmony';
@@ -18,6 +20,9 @@ export default class EntryAbility extends UIAbility {
     AppStorage.setOrCreate<boolean>('appInBackground', false);
     UserStore.initPersistence(this.context);
     SearchHistoryStore.init(this.context);
+    // 顶层平台（哔哩哔哩 / YouTube）持久化：冷启动即确定首帧渲染哪个外壳。
+    PlatformStore.init();
+    this.applyLaunchProxy(want);
     // 表情占位符映射表磁盘缓存：冷启动即恢复，不依赖网络。
     EmoteResolver.attach(this.context);
     // 表情、用户装扮与典藏卡资源的 cacheDir 落盘入口，并回收旧版头像及评论分享缓存。
@@ -32,6 +37,16 @@ export default class EntryAbility extends UIAbility {
     AppTheme.bindNativeModeApplier((mode: string) => this.applyNativeThemeMode(mode));
     AppTheme.applyCurrentMode();
     if (DEBUG) hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onCreate');
+  }
+
+  /**
+   * 可选 HTTP 代理：仅当启动参数带 `netProxy` 时启用（如
+   * `aa start -a EntryAbility -b <bundle> --ps netProxy http://127.0.0.1:7897`）。
+   * 不传时保持空值，HttpClient 不设置 usingProxy，行为与历史版本一致。
+   */
+  private applyLaunchProxy(want: Want): void {
+    const value: string = want.parameters === undefined ? '' : String(want.parameters['netProxy'] ?? '');
+    if (value.length > 0) HttpClient.setProxy(value);
   }
 
   private applyNativeThemeMode(mode: string): void {

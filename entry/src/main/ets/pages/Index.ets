@@ -2,6 +2,7 @@ import { YouTubeView } from '../views/YouTubeView';
 import { YouTubeDetailPage } from './YouTubeDetail';
 import { YouTubeVideo, YouTubeApi } from '../api/YouTubeApi';
 import { NAV_YOUTUBE_DETAIL } from '../common/AppRouter';
+import { PlatformStore } from '../common/PlatformStore';
 import { MotionTokens } from '../common/MotionTokens';
 /**
  * 主界面：HarmonyOS 7 沉浸光感风格
@@ -71,6 +72,8 @@ struct Index {
   @StorageProp('isDarkMode') @Watch('onThemeChanged') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
   @StorageProp('headerFade') fade: number = 0;
+  /** 顶层平台：哔哩哔哩 / YouTube 同级切换。切换时整块外壳替换，底栏各归其平台。 */
+  @StorageProp(PlatformStore.KEY_PLATFORM) @Watch('onPlatformChanged') platform: string = PlatformStore.BILI;
   @State heroTransitionInputLocked: boolean = false;
   @State heroTransitionClock: number = 0;
   @StorageProp(HERO_NAV_TRANSITION_FINISH_REQUEST_KEY) @Watch('onHeroTransitionFinishRequested')
@@ -81,6 +84,7 @@ struct Index {
   aboutToAppear(): void {
     this.reapplyBarColors();
     UserStore.ensureLoaded();
+    PlatformStore.init();
   }
 
   onPageShow(): void {
@@ -119,8 +123,19 @@ struct Index {
     AppTheme.resetHeaderFade();
   }
 
+  /**
+   * 平台切换：整块外壳被替换，滚动淡出值必须复位，否则切回来头栏仍是收起态。
+   * 系统栏图标按新平台的根页配色重算（YouTube 侧也是浅底玻璃头栏）。
+   */
+  private onPlatformChanged(): void {
+    AppTheme.resetHeaderFade();
+    this.reapplyBarColors();
+  }
+
   /** 广播主 Tab 索引：「我的」页借此在切回时重算缓存大小（Tabs 保活不重走 aboutToAppear）。 */
   private onCurrentTabChanged(): void {
+    // YouTube 激活时哔哩哔哩的 Tabs 没有宿主，广播会让宿主读到过期下标。
+    if (this.platform === PlatformStore.YOUTUBE) return;
     AppStorage.setOrCreate('mainTabIndex', this.currentTab);
   }
 
@@ -565,12 +580,6 @@ struct Index {
       }
       .tabBar(this.TabBarItem(2, '我的', $r('app.media.ic_tab_mine'), $r('app.media.ic_tab_mine_fill')))
       .clip(false)
-
-      TabContent() {
-        YouTubeView()
-      }
-      .tabBar(this.TabBarItem(3, 'YouTube', $r('app.media.ic_youtube_tab'), $r('app.media.ic_youtube_tab')))
-      .clip(false)
     }
     .barHeight(52)
     .barOverlap(true)
@@ -612,12 +621,6 @@ struct Index {
         MineView()
       }
       .tabBar(this.TabBarItem(2, '我的', $r('app.media.ic_tab_mine'), $r('app.media.ic_tab_mine_fill')))
-      .clip(false)
-
-      TabContent() {
-        YouTubeView()
-      }
-      .tabBar(this.TabBarItem(3, 'YouTube', $r('app.media.ic_youtube_tab'), $r('app.media.ic_youtube_tab')))
       .clip(false)
     }
     .barHeight(52)
@@ -710,6 +713,10 @@ struct Index {
     Stack() {
       Navigation(AppNavStack) {
         Stack({ alignContent: Alignment.TopStart }) {
+        if (this.platform === PlatformStore.YOUTUBE) {
+          // YouTube 是同级平台：自带外壳，不使用哔哩哔哩的 Dock 与头栏。
+          YouTubeView()
+        } else {
         // 系统 Tabs：三个视图常驻保活，切换不丢滚动位置
         if (AppTheme.isImmersiveUiSupported()) {
           this.FloatingTabs()
@@ -718,23 +725,22 @@ struct Index {
         }
 
         // 玻璃头栏（上滑渐隐）
-        if (this.currentTab !== 3) {
         GlassHeaderBar({
           onAvatarTap: () => {
             this.switchTab(2);
           },
         })
         .zIndex(3)
-        }
 
         // 头栏收起后的悬浮搜索球（右上角，对齐华为设置的折叠形态：头栏淡出 → 搜索球淡入）
         // 只有真正开始显示时才创建节点；透明度为 0 的可点击节点会抢走消息按钮的事件。
-        if (this.currentTab !== 3 && this.fade > 0.6) {
+        if (this.fade > 0.6) {
           if (AppTheme.isImmersiveUiSupported()) {
             this.SearchFloat()
           } else {
             this.SearchPlain()
           }
+        }
         }
         }
         .width('100%')
