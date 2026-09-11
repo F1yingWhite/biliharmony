@@ -5,10 +5,60 @@ import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { Api, Constants } from '../common/Constants';
 import { asArray, asBool, asNumber, asObject, str } from '../common/Utils';
 import { BangumiIndexItem, BangumiIndexPageData, BangumiSeason, TimeLineDay, TimeLineEpisode,
-  WatchLaterSeasonItem } from '../model/Models';
+  WatchLaterSeasonItem, VideoDetail, VideoPage, PlayUrlInfo } from '../model/Models';
 import { ActionResult, getData, postVideoAction, webGet } from './internal/ApiCommon';
 
 export class BangumiApi {
+  /** 以服务端集信息恢复播放身份，不依赖普通投稿详情是否对 PGC 开放。 */
+  static async getEpisodeVideoDetail(epId: number): Promise<VideoDetail | null> {
+    const season: BangumiSeason | null = await BangumiApi.getSeason(0, epId);
+    if (season === null) throw new Error('番剧详情加载失败，请稍后重试');
+    const episode = season.episodes.find((item) => item.epId === epId);
+    if (episode === undefined || episode.cid <= 0 || episode.aid <= 0) return null;
+    const detail: VideoDetail = new VideoDetail();
+    detail.epId = epId;
+    detail.aid = episode.aid;
+    detail.bvid = episode.bvid;
+    detail.cid = episode.cid;
+    detail.title = season.title + ' ' + episode.title +
+      (episode.longTitle.length > 0 ? ' ' + episode.longTitle : '');
+    detail.desc = season.evaluate;
+    detail.cover = episode.cover.length > 0 ? episode.cover : season.cover;
+    detail.duration = episode.duration;
+    const page: VideoPage = new VideoPage();
+    page.cid = episode.cid;
+    page.part = episode.longTitle.length > 0 ? episode.longTitle : episode.title;
+    page.duration = episode.duration;
+    detail.pages = [page];
+    return detail;
+  }
+
+  /** 使用当前账号的官方 PGC 权限；只处理服务端返回的可播放源。 */
+  static async getPlayUrl(epId: number, cid: number, qn: number): Promise<PlayUrlInfo | null> {
+    if (epId <= 0 || cid <= 0) return null;
+    const resp: HttpResponse = await webGet('https://api.bilibili.com/pgc/player/web/playurl', {
+      'ep_id': String(epId), 'cid': String(cid), 'qn': String(qn),
+      'fnval': '4048', 'fnver': '0', 'fourk': '1', 'https_url_req': '1',
+    }, 'https://www.bilibili.com/bangumi/play/ep' + String(epId));
+    if (!resp.ok) throw new Error(resp.status < 0 ? resp.transportMessage : '番剧播放请求失败，请稍后重试');
+    const json: Record<string, Object> = resp.json();
+    const code: number = asNumber(json['code'], -1);
+    if (code !== 0) {
+      const message: string = str(json, 'message', '');
+      throw new Error(message.length > 0 ? message : '当前账号暂时无法播放本集，请检查观看权限');
+    }
+    const data: Record<string, Object> = asObject(json['result']);
+    if (asNumber(data['is_drm'], 0) !== 0 || data['is_drm'] === true) {
+      throw new Error('此内容需要受保护的播放环境，请前往官方客户端观看');
+    }
+    if (asArray(data['durl']).length > 1) {
+      throw new Error('当前分段格式暂不支持播放，请前往官方客户端观看');
+    }
+    const info: PlayUrlInfo = PlayUrlInfo.fromPlayUrl(data, qn);
+    if (info.urls.length === 0) throw new Error('本集没有可用播放地址，请检查观看权限后重试');
+    return info;
+  }
+
   static async getSeason(seasonId: number, epId: number): Promise<BangumiSeason | null> {
     if (seasonId <= 0 && epId <= 0) return null;
     const params: Record<string, string> = {};

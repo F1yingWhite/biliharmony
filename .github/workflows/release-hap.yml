@@ -58,7 +58,7 @@ jobs:
 
       - name: Run service regression tests
         shell: bash
-        run: /Applications/DevEco-Studio.app/Contents/tools/node/bin/node --test tool/qa/regression.test.cjs
+        run: /Applications/DevEco-Studio.app/Contents/tools/node/bin/node --test --test-timeout=10000 tool/qa/regression.test.cjs tool/qa/lifecycle.test.cjs tool/qa/danmaku.test.cjs tool/qa/parity.test.cjs
 
       - name: Build release HAP
         shell: bash

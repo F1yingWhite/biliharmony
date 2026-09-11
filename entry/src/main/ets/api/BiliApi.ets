@@ -12,6 +12,7 @@ import { PlayUrlInfo, SubtitleCue, SubtitleTrack, VideoDetail, VideoItem,
 import { parseDanmakuSegment, ProtoDanmaku } from '../common/DanmakuProto';
 import { ActionResult, actionWithCsrf, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
 import { CommentLog } from '../common/CommentLog';
+import { BangumiApi } from './BangumiApi';
 
 // 统一走 internal/ApiCommon 的 ActionResult（唯一类型来源），此处 re-export 保持调用方 import 不变。
 export { ActionResult };
@@ -112,7 +113,27 @@ export class BiliApi {
   }
 
   // ===== 视频详情（aid 与 bvid 二选一） =====
-  static async getVideoDetail(aid: number, bvid: string): Promise<VideoDetail | null> {
+  static async getVideoDetail(aid: number, bvid: string, epId: number = 0): Promise<VideoDetail | null> {
+    if (epId > 0) {
+      const episode: VideoDetail | null = await BangumiApi.getEpisodeVideoDetail(epId);
+      if (episode === null) return null;
+      // 可访问的投稿详情补齐 UP 与互动统计；不能让其默认 CID 覆盖用户所选集。
+      try {
+        const detail: VideoDetail | null = await BiliApi.getVideoDetail(episode.aid, episode.bvid);
+        if (detail !== null) {
+          detail.epId = epId;
+          detail.cid = episode.cid;
+          detail.pages = episode.pages;
+          detail.title = episode.title;
+          detail.duration = episode.duration;
+          detail.ugcSeason = null;
+          return detail;
+        }
+      } catch (e) {
+        // PGC 元数据完整时仍可取流，不将投稿接口不可见误判为本集不存在。
+      }
+      return episode;
+    }
     if (aid <= 0 && bvid.length === 0) return null;
     const params: Record<string, string> = bvid.length > 0 ? { 'bvid': bvid } : { 'aid': String(aid) };
     const url: string = Api.videoIntro + '?' + HttpClient.buildQuery(params);
@@ -141,7 +162,9 @@ export class BiliApi {
   }
 
   // ===== 播放地址（DASH 分离音视频可提供 1080P+；aid 与 bvid 二选一） =====
-  static async getPlayUrl(aid: number, bvid: string, cid: number, qn: number = 127): Promise<PlayUrlInfo | null> {
+  static async getPlayUrl(aid: number, bvid: string, cid: number, qn: number = 127,
+    epId: number = 0): Promise<PlayUrlInfo | null> {
+    if (epId > 0) return BangumiApi.getPlayUrl(epId, cid, qn);
     const params: Record<string, string> = {
       'cid': String(cid),
       'qn': String(qn),

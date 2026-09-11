@@ -2,6 +2,7 @@
  * HTTP 客户端封装：基于 @ohos.net.http，附带简单 Cookie 罐
  */
 import { http } from '@kit.NetworkKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { asObject, asString } from '../../common/Utils';
 import { Constants } from '../../common/Constants';
 import { CredentialPolicy } from './CredentialPolicy';
@@ -11,15 +12,38 @@ export class HttpResponse {
   status: number;
   body: string;
   headers: Record<string, string>;
+  /** 平台网络错误码；HTTP/业务失败与账号切换不使用此字段。 */
+  transportCode: number;
 
-  constructor(status: number, body: string, headers: Record<string, string>) {
+  constructor(status: number, body: string, headers: Record<string, string>, transportCode: number = 0) {
     this.status = status;
     this.body = body;
     this.headers = headers;
+    this.transportCode = transportCode;
   }
 
   get ok(): boolean {
     return this.status >= 200 && this.status < 300;
+  }
+
+  get transportMessage(): string {
+    switch (this.transportCode) {
+      case 2300005:
+      case 2300006:
+        return '无法解析服务器地址，请检查网络后重试';
+      case 2300007:
+        return '无法连接服务器，请稍后重试';
+      case 2300028:
+        return '请求超时，请稍后重试';
+      case 2300058:
+      case 2300060:
+      case 2300077:
+        return '安全连接验证失败，请检查系统时间与网络';
+      case 2300063:
+        return '返回内容过大，暂时无法加载';
+      default:
+        return '网络请求失败，请稍后重试';
+    }
   }
 
   /** 解析 JSON body，失败返回空对象 */
@@ -40,6 +64,17 @@ export class HttpResponse {
     } catch (e) {
       return [] as Array<Object>;
     }
+  }
+}
+
+/** 每次请求独立保存错误，避免并发请求覆盖诊断信息。 */
+class HttpExecution {
+  response: http.HttpResponse | null;
+  transportCode: number;
+
+  constructor(response: http.HttpResponse | null, transportCode: number = 0) {
+    this.response = response;
+    this.transportCode = transportCode;
   }
 }
 
@@ -260,9 +295,9 @@ export class HttpClient {
     }
   }
 
-  /** create-try-finally-destroy 公共脚手架：成功返回原始响应，网络异常返回 null */
+  /** 保留平台错误码；不记录可能包含 Cookie、签名或个人数据的异常文本和 URL。 */
   private static async execute(url: string, method: http.RequestMethod, dataType: http.HttpDataType,
-    extraHeaders?: Record<string, string>, body?: string): Promise<http.HttpResponse | null> {
+    extraHeaders?: Record<string, string>, body?: string): Promise<HttpExecution> {
     const request: http.HttpRequest = http.createHttp();
     try {
       const trusted: boolean = CredentialPolicy.allows(url);
@@ -284,9 +319,12 @@ export class HttpClient {
       if (body !== undefined) {
         options.extraData = body;
       }
-      return await request.request(url, options);
+      return new HttpExecution(await request.request(url, options));
     } catch (e) {
-      return null;
+      const code: number = (e as BusinessError).code;
+      const transportCode: number = typeof code === 'number' && Number.isFinite(code) ? code : 0;
+      console.warn('[HttpClient] transport failure code=' + String(transportCode));
+      return new HttpExecution(null, transportCode);
     } finally {
       request.destroy();
     }
@@ -298,10 +336,11 @@ export class HttpClient {
     const session: number = AuthSession.version;
     if (trusted) await HttpClient.ensureBuvid();
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
-    const resp: http.HttpResponse | null =
+    const execution: HttpExecution =
       await HttpClient.execute(url, http.RequestMethod.GET, http.HttpDataType.STRING, extraHeaders);
+    const resp: http.HttpResponse | null = execution.response;
     if (resp === null) {
-      return new HttpResponse(-1, '', {});
+      return new HttpResponse(-1, '', {}, execution.transportCode);
     }
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
     if (trusted) HttpClient.absorbCookies(resp.header);
@@ -314,10 +353,11 @@ export class HttpClient {
     const session: number = AuthSession.version;
     if (trusted) await HttpClient.ensureBuvid();
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
-    const resp: http.HttpResponse | null =
+    const execution: HttpExecution =
       await HttpClient.execute(url, http.RequestMethod.POST, http.HttpDataType.STRING, extraHeaders, body ?? '');
+    const resp: http.HttpResponse | null = execution.response;
     if (resp === null) {
-      return new HttpResponse(-1, '', {});
+      return new HttpResponse(-1, '', {}, execution.transportCode);
     }
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
     if (trusted) HttpClient.absorbCookies(resp.header);
@@ -341,16 +381,18 @@ export class HttpClient {
   /** 下载二进制数据（用于图片取色等） */
   static async getBytes(url: string, extraHeaders?: Record<string, string>): Promise<ArrayBuffer> {
     HttpClient.ensureInit();
-    const resp: http.HttpResponse | null =
+    const execution: HttpExecution =
       await HttpClient.execute(url, http.RequestMethod.GET, http.HttpDataType.ARRAY_BUFFER, extraHeaders);
+    const resp: http.HttpResponse | null = execution.response;
     return resp === null ? new ArrayBuffer(0) : resp.result as ArrayBuffer;
   }
 
   /** 下载二进制数据并校验 HTTP 状态（弹幕分段等需要区分失败以回退的场景）；失败返回 null */
   static async getBinary(url: string, extraHeaders?: Record<string, string>): Promise<ArrayBuffer | null> {
     HttpClient.ensureInit();
-    const resp: http.HttpResponse | null =
+    const execution: HttpExecution =
       await HttpClient.execute(url, http.RequestMethod.GET, http.HttpDataType.ARRAY_BUFFER, extraHeaders);
+    const resp: http.HttpResponse | null = execution.response;
     if (resp === null || resp.responseCode < 200 || resp.responseCode >= 300) {
       return null;
     }

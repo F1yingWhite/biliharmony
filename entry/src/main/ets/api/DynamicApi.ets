@@ -141,9 +141,12 @@ export class DynamicApi {
     const result: DynamicPageData = new DynamicPageData();
     if (data === null) {
       const code: number = asNumber(resp.json()['code'], -1);
-      console.warn('[DynamicFeed] failed status=' + String(resp.status) + ' code=' + String(code));
+      console.warn('[DynamicFeed] failed status=' + String(resp.status) + ' code=' + String(code) +
+        ' transport=' + String(resp.transportCode));
+      if (resp.status < 0) throw new Error(resp.transportMessage);
       throw new Error(code === -101 ? '登录已失效，请重新登录后查看动态' : '动态加载失败，请稍后重试');
     }
+    if (!Array.isArray(data['items'])) throw new Error('动态响应格式异常，请稍后重试');
     const items: Array<Object> = asArray(data['items']);
     for (let i: number = 0; i < items.length; i++) {
       result.items.push(DynamicItem.from(items[i]));

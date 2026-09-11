@@ -78,6 +78,8 @@ export struct VideoDetailPage {
   @State playUrls: Array<string> = [];
   @State playAudioUrls: Array<string> = [];
   @State playbackAddressFailed: boolean = false;
+  @State playbackFailureText: string = '获取播放地址失败';
+  @State previewPlayback: boolean = false;
   @State qualityOptions: Array<VideoQualityOption> = [];
   @State subtitleTracks: Array<SubtitleTrack> = [];
   @State currentQuality: number = 0;
@@ -984,6 +986,7 @@ export struct VideoDetailPage {
   /** 初次加载与手动分 P 使用同一协调器；过期结果既不换源，也不显示错误。 */
   private async loadInitialPlayback(detail: VideoDetail): Promise<void> {
     const request: number = this.playbackSources.next();
+    this.playbackFailureText = '获取播放地址失败';
     this.resetPlaybackSize();
     this.currentCid = detail.cid > 0 ? detail.cid : (detail.pages.length > 0 ? detail.pages[0].cid : 0);
     this.currentPageIndex = 0;
@@ -998,11 +1001,15 @@ export struct VideoDetailPage {
       this.applyPlaybackSource(selection.info, selection.cid, selection.pageIndex,
         Math.max(0, Math.floor(selection.info.lastPlayTime / 1000)));
     } catch (e) {
-      if (!this.destroyed && this.playbackSources.isCurrent(request)) this.playbackAddressFailed = true;
+      if (!this.destroyed && this.playbackSources.isCurrent(request)) {
+        this.playbackAddressFailed = true;
+        this.playbackFailureText = detail.epId > 0 ? (e as Error).message : '获取播放地址失败';
+      }
     }
   }
 
   private applyPlaybackSource(info: PlayUrlInfo, cid: number, index: number, seekSeconds: number): void {
+    this.previewPlayback = info.isPreview;
     this.playUrl = info.url;
     this.playUrls = info.urls;
     this.playAudioUrls = info.audioUrls;
@@ -1074,7 +1081,7 @@ export struct VideoDetailPage {
     this.upFollowerCount = -1;
     this.upVideoCount = -1;
     try {
-      const detail: VideoDetail | null = await BiliApi.getVideoDetail(this.aid, this.bvid);
+      const detail: VideoDetail | null = await BiliApi.getVideoDetail(this.aid, this.bvid, this.param.epId ?? 0);
       if (this.destroyed || !this.initialRequest.isCurrent(request)) return;
       if (detail === null) {
         this.errorText = '视频不存在或已失效';
@@ -1495,7 +1502,8 @@ export struct VideoDetailPage {
     this.pageSwitchingCid = page.cid;
     try {
       const qn: number = PlayerQualityPreference.requested();
-      const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(this.detail.aid, this.detail.bvid, page.cid, qn);
+      const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(this.detail.aid, this.detail.bvid, page.cid, qn,
+        this.detail.epId);
       // 已有更新的分 P 请求在途时，结果与标志复位都归更新的请求处理。
       if (!this.playbackSources.isCurrent(request) || this.destroyed) return;
       this.pageSwitchingCid = 0;
@@ -2790,6 +2798,8 @@ export struct VideoDetailPage {
               aid: this.detail.aid,
               bvid: this.bvid,
               cid: this.currentCid,
+              epId: this.detail.epId,
+              previewPlayback: this.previewPlayback,
               videoDuration: this.currentPageDuration(),
               videoTitle: this.detail.title,
               videoPartTitle: this.currentPageTitle(),
@@ -2919,9 +2929,10 @@ export struct VideoDetailPage {
               .backgroundColor('#52000000')
               .hitTestBehavior(HitTestMode.None)
             Column() {
-              Text('获取播放地址失败')
+              Text(this.playbackFailureText)
                 .fontSize(12)
                 .fontColor('#FFFFFF')
+                .textAlign(TextAlign.Center).padding({ left: 20, right: 20 })
               Button('重试播放').height(36).fontSize(12).fontColor('#FFFFFF')
                 .backgroundColor('#66373C45').borderRadius(18).margin({ top: 10 })
                 .onClick(() => {

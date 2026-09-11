@@ -20,12 +20,12 @@ export class PlaybackSourceCoordinator extends RequestEpoch {
     const cid: number = detail.cid > 0 ? detail.cid : (detail.pages.length > 0 ? detail.pages[0].cid : 0);
     let index: number = detail.pages.findIndex((page) => page.cid === cid);
     if (index < 0) index = 0;
-    const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, cid, quality);
+    const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, cid, quality, detail.epId);
     if (!this.isCurrent(request) || info === null || info.urls.length === 0) return null;
     const lastIndex: number = detail.pages.findIndex((page) => page.cid === info.lastPlayCid);
     if (info.lastPlayCid > 0 && info.lastPlayCid !== cid && detail.pages.length > 1 && lastIndex >= 0) {
       const lastCid: number = info.lastPlayCid;
-      const lastInfo: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, lastCid, quality);
+      const lastInfo: PlayUrlInfo | null = await BiliApi.getPlayUrl(detail.aid, detail.bvid, lastCid, quality, detail.epId);
       if (!this.isCurrent(request)) return null;
       if (lastInfo !== null && lastInfo.urls.length > 0) return new PlaybackSelection(lastInfo, lastCid, lastIndex);
     }
