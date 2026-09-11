@@ -21,6 +21,9 @@ export interface VideoDetailParam {
   bvid: string;
   aid: number;
   title: string;
+  /** 番剧集身份必须贯穿详情和换画质，不能用普通投稿取流代替。 */
+  epId?: number;
+  cid?: number;
   /** 卡片封面：detail 数据回来前先垫在播放区/底图，入场期不出"加载中"占位。 */
   cover?: string;
   /** 点击卡片的窗口矩形（vp）：有值时详情页从卡片位置手动放大入场（根页面 push 无共享元素转场）。 */
@@ -105,6 +108,7 @@ export interface ArticlePageParam {
 }
 
 /** NavDestination 路由名 */
+export const NAV_YOUTUBE_DETAIL: string = 'YouTubeDetail';
 export const NAV_SEARCH: string = 'Search';
 export const NAV_VIDEO_DETAIL: string = 'VideoDetail';
 export const NAV_LOGIN: string = 'Login';

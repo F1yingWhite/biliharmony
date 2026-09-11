@@ -1,3 +1,7 @@
+import { YouTubeView } from '../views/YouTubeView';
+import { YouTubeDetailPage } from './YouTubeDetail';
+import { YouTubeVideo, YouTubeApi } from '../api/YouTubeApi';
+import { NAV_YOUTUBE_DETAIL } from '../common/AppRouter';
 import { MotionTokens } from '../common/MotionTokens';
 /**
  * 主界面：HarmonyOS 7 沉浸光感风格
@@ -461,6 +465,23 @@ struct Index {
         FavoriteFolderSortPage({ param: (param as FavSortParam) })
       }
       .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+    } else if (name === NAV_YOUTUBE_DETAIL) {
+      NavDestination() {
+        if (param !== null && param !== undefined && YouTubeApi.validId((param as YouTubeVideo).id ?? '')) {
+          YouTubeDetailPage({ param: param as YouTubeVideo })
+        } else {
+          this.InvalidParamContent()
+        }
+      }
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+      .onBackPressed(() => {
+        if (AppStorage.get<boolean>('youtubePlayerFullscreen') ?? false) {
+          const token: number = AppStorage.get<number>('youtubeFullscreenExitRequest') ?? 0;
+          AppStorage.setOrCreate<number>('youtubeFullscreenExitRequest', token + 1);
+          return true;
+        }
+        return false;
+      })
     } else if (name === NAV_LOGIN) {
       NavDestination() {
         LoginPage()
@@ -488,7 +509,7 @@ struct Index {
   }
 
   /** 底部导航图标选中弹跳动效比例（0/1/2 对首页/动态/我的）。 */
-  @State tabScale: Array<number> = [1, 1, 1];
+  @State tabScale: Array<number> = [1, 1, 1, 1];
 
   /** 轻触底部导航：轻震 + 图标先缩后弹回（只有切到别的 Tab 才弹）。 */
   private tapTabItem(index: number): void {
@@ -544,6 +565,12 @@ struct Index {
       }
       .tabBar(this.TabBarItem(2, '我的', $r('app.media.ic_tab_mine'), $r('app.media.ic_tab_mine_fill')))
       .clip(false)
+
+      TabContent() {
+        YouTubeView()
+      }
+      .tabBar(this.TabBarItem(3, 'YouTube', $r('app.media.ic_youtube_tab'), $r('app.media.ic_youtube_tab')))
+      .clip(false)
     }
     .barHeight(52)
     .barOverlap(true)
@@ -585,6 +612,12 @@ struct Index {
         MineView()
       }
       .tabBar(this.TabBarItem(2, '我的', $r('app.media.ic_tab_mine'), $r('app.media.ic_tab_mine_fill')))
+      .clip(false)
+
+      TabContent() {
+        YouTubeView()
+      }
+      .tabBar(this.TabBarItem(3, 'YouTube', $r('app.media.ic_youtube_tab'), $r('app.media.ic_youtube_tab')))
       .clip(false)
     }
     .barHeight(52)
@@ -685,16 +718,18 @@ struct Index {
         }
 
         // 玻璃头栏（上滑渐隐）
+        if (this.currentTab !== 3) {
         GlassHeaderBar({
           onAvatarTap: () => {
             this.switchTab(2);
           },
         })
         .zIndex(3)
+        }
 
         // 头栏收起后的悬浮搜索球（右上角，对齐华为设置的折叠形态：头栏淡出 → 搜索球淡入）
         // 只有真正开始显示时才创建节点；透明度为 0 的可点击节点会抢走消息按钮的事件。
-        if (this.fade > 0.6) {
+        if (this.currentTab !== 3 && this.fade > 0.6) {
           if (AppTheme.isImmersiveUiSupported()) {
             this.SearchFloat()
           } else {

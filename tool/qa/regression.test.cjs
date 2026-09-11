@@ -99,6 +99,42 @@ function httpMock(handler) {
 }
 const response = (body, header = {}, responseCode = 200) => ({ result: JSON.stringify(body), header, responseCode });
 
+test('PGC: episode metadata uses the selected episode identity rather than the first episode', async () => {
+  const env = environment({'services/network/HttpClient': {HttpClient:{buildQuery:p=>new URLSearchParams(p).toString()}},
+    'api/internal/ApiCommon': {webGet: async () => ({
+    ok:true,json:()=>({code:0,result:{title:'Series',episodes:[
+      {id:10,aid:1,bvid:'first',cid:100,title:'1',duration:1000},
+      {id:20,aid:2,bvid:'selected',cid:200,title:'2',long_title:'Episode',duration:120000}
+    ]}})
+  })}});
+  const {BangumiApi} = env.load('api/BangumiApi');
+  const detail = await BangumiApi.getEpisodeVideoDetail(20);
+  assert.equal(detail.epId,20);assert.equal(detail.cid,200);assert.equal(detail.aid,2);
+  assert.equal(detail.bvid,'selected');assert.equal(detail.duration,120);
+  assert.equal(detail.pages.length,1);assert.equal(detail.pages[0].cid,200);
+  assert.equal(await BangumiApi.getEpisodeVideoDetail(99),null);
+});
+
+test('PGC: authenticated endpoint preserves preview and rejects denied, DRM and segmented results', async () => {
+  const calls=[];let payload={code:0,result:{quality:32,is_preview:1,
+    durl:[{url:'https://cdn.example.test/preview.mp4',backup_url:[]}]}};
+  const env=environment({'services/network/HttpClient':{},'api/internal/ApiCommon':{
+    webGet:async(...args)=>{calls.push(args);return {ok:true,json:()=>payload};}
+  }});
+  const {BangumiApi}=env.load('api/BangumiApi');
+  const info=await BangumiApi.getPlayUrl(20,200,80);
+  assert.equal(info.isPreview,true);assert.equal(info.quality,32);
+  assert.match(calls[0][0],/\/pgc\/player\/web\/playurl$/);
+  assert.equal(calls[0][1].ep_id,'20');assert.equal(calls[0][1].cid,'200');assert.equal(calls[0][1].qn,'80');
+  assert.equal(calls[0][2],'https://www.bilibili.com/bangumi/play/ep20');
+  payload={code:-10403,message:'大会员专享限制'};
+  await assert.rejects(()=>BangumiApi.getPlayUrl(20,200,80),/大会员/);
+  payload={code:0,result:{is_drm:1}};
+  await assert.rejects(()=>BangumiApi.getPlayUrl(20,200,80),/受保护/);
+  payload={code:0,result:{durl:[{url:'segment1'},{url:'segment2'}]}};
+  await assert.rejects(()=>BangumiApi.getPlayUrl(20,200,80),/分段格式/);
+});
+
 test('HTTP: third-party requests never send/absorb credentials or wait for Bilibili SPI', async () => {
   const net = httpMock(() => response({}, { 'set-cookie': 'SESSDATA=foreign' }));
   const env = environment({ '@kit.NetworkKit': net });
@@ -143,6 +179,34 @@ test('HTTP: an old response cannot restore cookies after logout', async () => {
   pending.resolve(response({ code: 0, data: {} }, { 'set-cookie': 'SESSDATA=test-old' }));
   assert.equal((await request).ok, false);
   assert.equal(HttpClient.getCookie('SESSDATA'), '');
+});
+
+test('HTTP: concurrent transport failures retain their own platform code and release requests', async () => {
+  const first = deferred(), second = deferred(); let destroyed = 0, calls = 0;
+  const net = httpMock(() => ++calls === 1 ? first.promise : second.promise);
+  const create = net.http.createHttp;
+  net.http.createHttp = () => Object.assign(create(), {destroy() { destroyed++; }});
+  const {HttpClient} = environment({'@kit.NetworkKit': net}).load('services/network/HttpClient');
+  HttpClient.setCookie('buvid3', 'real-device-id');
+  const a = HttpClient.get('https://api.bilibili.com/first');
+  const b = HttpClient.get('https://api.bilibili.com/second');
+  await tick();
+  second.reject({code:2300063, message:'sensitive URL and cookie must not be logged'});
+  first.reject({code:2300028});
+  const [timeout, oversized] = await Promise.all([a,b]);
+  assert.equal(timeout.status,-1); assert.equal(timeout.transportCode,2300028);
+  assert.match(timeout.transportMessage,/超时/);
+  assert.equal(oversized.transportCode,2300063); assert.match(oversized.transportMessage,/过大/);
+  assert.equal(destroyed,2);
+});
+
+test('HTTP: business errors and session invalidation are distinct from transport failure', async () => {
+  const net = httpMock(() => response({code:-101}));
+  const env = environment({'@kit.NetworkKit':net});
+  const {HttpClient} = env.load('services/network/HttpClient');
+  HttpClient.setCookie('buvid3','real-device-id');
+  const result = await HttpClient.get('https://api.bilibili.com/test');
+  assert.equal(result.status,200); assert.equal(result.json().code,-101); assert.equal(result.transportCode,0);
 });
 
 test('Unread: logout resets immediately; old account and pre-clear responses cannot write back', async () => {
@@ -416,4 +480,71 @@ test('Asset cache: concurrent callers share a three-download bound and queued wo
   assert.equal(env.maxActive(), 3);
   assert.equal(env.files.size, 9);
   assert.equal(env.handles.size, 0);
+});
+
+test('YouTube: search parses bounded JSON without executing scripts and deduplicates videos', () => {
+  const {YouTubeApi}=environment({'services/network/HttpClient':{}}).load('api/YouTubeApi');
+  const renderer={videoRenderer:{videoId:'aqz-KE-bpKQ',title:{runs:[{text:'title }; " '},{text:'end'}]},
+    ownerText:{runs:[{text:'Blender'}]},lengthText:{simpleText:'10:35'},viewCountText:{simpleText:'100 views'}}};
+  const data={contents:{sections:[renderer,renderer,{videoRenderer:{videoId:'bad',title:{simpleText:'wrong'}}},
+    {adSlotRenderer:{slot:renderer}}]}};
+  const html='before<script>var ytInitialData = '+JSON.stringify(data)+';throw new Error("never execute");</script>';
+  const items=YouTubeApi.parseSearch(html);
+  assert.equal(items.length,1);assert.equal(items[0].title,'title }; " end');
+  assert.equal(items[0].channel,'Blender');assert.equal(items[0].duration,'10:35');
+  assert.equal(YouTubeApi.parseSearch('window["ytInitialData"] = {"contents":{}};').length,0);
+  assert.throws(()=>YouTubeApi.parseSearch('<html>consent required</html>'),/验证页/);
+  assert.equal(YouTubeApi.initialObject('var ytInitialData = {"x":"unfinished','ytInitialData'),null);
+});
+
+test('YouTube: only recognized YouTube hosts and valid IDs can reach playback', () => {
+  const {YouTubeApi}=environment({'services/network/HttpClient':{}}).load('api/YouTubeApi');
+  for(const value of ['aqz-KE-bpKQ','https://youtu.be/aqz-KE-bpKQ?si=test',
+    'https://www.youtube.com/watch?foo=1&v=aqz-KE-bpKQ&t=20','https://m.youtube.com/shorts/aqz-KE-bpKQ']) {
+    assert.equal(YouTubeApi.videoId(value),'aqz-KE-bpKQ');
+  }
+  for(const value of ['https://youtube.com.evil.test/watch?v=aqz-KE-bpKQ',
+    'https://evil.test/youtube.com/watch?v=aqz-KE-bpKQ','javascript:alert(1)',"aqz-KE-bpKQ'",'https://youtu.be/aqz-KE-bpKQextra']) {
+    assert.equal(YouTubeApi.videoId(value),'');
+  }
+});
+
+test('YouTube: network failures, verification pages and restricted metadata stay explicit', async () => {
+  let response={ok:false,status:-1,transportMessage:'timeout'};
+  const calls=[];
+  const {YouTubeApi}=environment({'services/network/HttpClient':{HttpClient:{get:async(...args)=>{
+    calls.push(args);return response;
+  }}}}).load('api/YouTubeApi');
+  await assert.rejects(()=>YouTubeApi.search('a & b'),/连接失败/);
+  assert.match(calls[0][0],/search_query=a%20%26%20b/);
+  assert.equal(calls[0][1].Cookie,undefined);assert.equal(calls[0][1].Referer,undefined);
+  response={ok:true,body:'var ytInitialPlayerResponse = '+JSON.stringify({playabilityStatus:{reason:'请登录'}})+';'};
+  await assert.rejects(()=>YouTubeApi.detail('aqz-KE-bpKQ'),/请登录/);
+  response={ok:true,body:'var ytInitialPlayerResponse = '+JSON.stringify({videoDetails:{title:'Bunny',author:'Blender',
+    shortDescription:'Full description\nline 2',lengthSeconds:'635',viewCount:'200'}})+';'};
+  const detail=await YouTubeApi.detail('aqz-KE-bpKQ');
+  assert.equal(detail.title,'Bunny');assert.equal(detail.description,'Full description\nline 2');
+  assert.equal(detail.duration,'10:35');
+  await assert.rejects(()=>YouTubeApi.detail('invalid'),/无效/);
+  response={ok:true,body:'var ytInitialPlayerResponse = {"playabilityStatus":{"reason":"请登录"}};'+
+    'var ytInitialData = '+JSON.stringify({contents:{twoColumnWatchNextResults:{results:{results:{contents:[
+      {videoPrimaryInfoRenderer:{title:{runs:[{text:'Public title'}]},dateText:{simpleText:'2026年9月11日'}}},
+      {videoSecondaryInfoRenderer:{owner:{videoOwnerRenderer:{title:{runs:[{text:'Creator'}]}}},
+        attributedDescription:{content:'Public full description'}}}
+    ]}}}}})+';'};
+  const publicDetail=await YouTubeApi.detail('aqz-KE-bpKQ');
+  assert.equal(publicDetail.title,'Public title');assert.equal(publicDetail.channel,'Creator');
+  assert.equal(publicDetail.description,'Public full description');assert.equal(publicDetail.published,'2026年9月11日');
+
+});
+
+test('YouTube: iframe identifies the actual app and cannot interpolate an arbitrary video ID', () => {
+  const {youtubePlayerHtml,youtubePlaybackError}=environment({'services/network/HttpClient':{}}).load('common/YouTubePlayerHtml');
+  const html=youtubePlayerHtml('aqz-KE-bpKQ');
+  assert.match(html,/https:\/\/com\.piliplus\.harmony/);
+  assert.match(html,/visibilitychange/);assert.match(html,/pauseVideo/);
+  assert.equal(youtubePlayerHtml("';alert(1)//"),'');
+  assert.match(youtubePlaybackError('YT_ERROR_153'),/验证/);
+  assert.match(youtubePlaybackError('YT_ERROR_150'),/嵌入/);
+  assert.equal(youtubePlaybackError('YT_READY'),'');
 });

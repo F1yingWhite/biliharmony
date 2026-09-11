@@ -71,6 +71,8 @@ export struct PlayerView {
   @Prop aid: number = 0;
   @Prop bvid: string = '';
   @Prop cid: number = 0;
+  @Prop epId: number = 0;
+  @Prop previewPlayback: boolean = false;
   /** 视频时长（秒，业务页详情数据）：弹幕分段数预估用；0 表示未知，由播放器 durationUpdate 兜底。 */
   @Prop videoDuration: number = 0;
   @Prop videoTitle: string = '';
@@ -1880,7 +1882,7 @@ if (this.runtimeSources.length === 0) {
     const cid: number = this.cid;
     this.qualityLoading = true;
     try {
-      const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(this.aid, this.bvid, this.cid, qn);
+      const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(this.aid, this.bvid, this.cid, qn, this.epId);
       if (this.destroyed || !this.sourceRequests.isCurrent(request) ||
         sourceVersion !== this.sourceVersion || cid !== this.cid) return;
       if (info === null || info.urls.length === 0) {
@@ -1888,6 +1890,7 @@ if (this.runtimeSources.length === 0) {
         return;
       }
       PlayerQualityPreference.remember(qn);
+      this.previewPlayback = info.isPreview;
       const oldPlayer: media.AVPlayer | null = this.player;
       const oldAudioPlayer: media.AVPlayer | null = this.audioPlayer;
       this.invalidatePlayerCreation();
@@ -2723,6 +2726,10 @@ if (this.runtimeSources.length === 0) {
   }
 
   private async startMediaDownload(audioOnly: boolean): Promise<void> {
+    if (this.epId > 0) {
+      this.toast('番剧下载暂未开放');
+      return;
+    }
     if (this.downloadBusy || VideoDownloadService.isActive()) {
       this.toast('已有下载任务正在进行');
       return;
@@ -3238,6 +3245,14 @@ if (this.runtimeSources.length === 0) {
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .textAlign(TextAlign.Center)
           .align(Alignment.Bottom)
+      }
+
+      if (this.previewPlayback && this.errorText.length === 0) {
+        Text('试看 · 完整内容需相应观看权限')
+          .fontSize(11).fontColor('#FFFFFF').backgroundColor('#99000000')
+          .padding({ left: 10, right: 10, top: 5, bottom: 5 }).borderRadius(6)
+          .align(Alignment.TopEnd).margin({ top: 42, right: 12 })
+          .hitTestBehavior(HitTestMode.None)
       }
 
       // 错误遮罩

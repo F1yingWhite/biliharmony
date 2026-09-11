@@ -283,6 +283,7 @@ export class UgcSeason {
 }
 
 export class VideoDetail {
+  epId: number = 0;
   aid: number = 0;
   bvid: string = '';
   cid: number = 0;
@@ -394,6 +395,7 @@ export class SubtitleCue {
 }
 
 export class PlayUrlInfo {
+  isPreview: boolean = false;
   url: string = '';
   urls: Array<string> = [];
   audioUrl: string = '';
@@ -417,6 +419,7 @@ export class PlayUrlInfo {
     const dashVideo: Array<Object> = asArray(dash['video']);
     const dashAudio: Array<Object> = asArray(dash['audio']);
     const info: PlayUrlInfo = new PlayUrlInfo();
+    info.isPreview = asNumber(j['is_preview'], 0) === 1 || j['is_preview'] === true;
     info.quality = asNumber(j['quality'], 0);
     info.format = str(j, 'format', '');
     info.lastPlayTime = asNumber(j['last_play_time'], 0);

@@ -59,13 +59,15 @@ def main():
         cmd.append('--no-parallel')
     print(f'[build] {cmd}')
     env = os.environ.copy()
-    env['HOME'] = env.get('HOME', str(Path.home()))
+    java_home = Path('/Applications/DevEco-Studio.app/Contents/jbr/Contents/Home')
+    if sys.platform == 'darwin' and (java_home / 'bin/java').is_file():
+        env['JAVA_HOME'] = str(java_home)
+        env['PATH'] = str(java_home / 'bin') + os.pathsep + env.get('PATH', '')
     proc = subprocess.run(cmd, cwd=ROOT, env=env)
     unsigned = ROOT / 'entry/build/default/outputs/default/entry-default-unsigned.hap'
-    if proc.returncode != 0 and unsigned.exists():
-        # 本仓库签名配置指向 Windows 本机路径；跨平台构建可产出 unsigned HAP。
-        print('注意: hvigor 未完成签名，但已生成 unsigned HAP（CompileArkTS 通过）。')
-    elif proc.returncode != 0:
+    if proc.returncode != 0:
+        # 输出目录可能残留旧包；构建失败时不能把它当作本轮成功产物并继续安装。
+        print('构建失败，停止后续安装；输出目录中的已有 HAP 不代表本轮构建成功。')
         sys.exit(proc.returncode)
     if unsigned.exists():
         print(f'产物: {unsigned} {unsigned.stat().st_size} bytes')
@@ -73,14 +75,12 @@ def main():
         print('构建完成，但未找到 unsigned HAP；可能构建签名后路径不同。')
     if args.install:
         from qa_common import device, APP_ID
-        hap = unsigned
+        signed = ROOT / 'entry/build/default/outputs/default/entry-default-signed.hap'
+        hap = signed if signed.exists() and (not unsigned.exists() or
+            signed.stat().st_mtime >= unsigned.stat().st_mtime) else unsigned
         if not hap.exists():
-            signed = ROOT / 'entry/build/default/outputs/default/entry-default-signed.hap'
-            if signed.exists():
-                hap = signed
-            else:
-                print('未找到可安装 HAP')
-                sys.exit(2)
+            print('未找到可安装 HAP')
+            sys.exit(2)
         device().run(['install', '-r', str(hap)], check=True)
         print('安装完成')
 

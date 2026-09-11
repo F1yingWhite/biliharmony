@@ -1122,8 +1122,7 @@ export struct DynamicView {
     } catch (e) {
       if (!this.feedEpoch.isCurrent(epoch)) return;
       this.feedNeedsLogin = (e as Error).message === '登录已失效，请重新登录后查看动态';
-      if (this.dynSource.isEmpty()) this.errorText = this.feedNeedsLogin ?
-        '登录已失效，请重新登录后查看动态' : '动态加载失败，请稍后重试';
+      if (this.dynSource.isEmpty()) this.errorText = (e as Error).message || '动态加载失败，请稍后重试';
       else this.feedMoreFailed = true;
     } finally {
       if (this.feedEpoch.isCurrent(epoch)) this.feedLoading = false;

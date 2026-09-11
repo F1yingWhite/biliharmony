@@ -525,7 +525,7 @@ test('dynamic detail: failed continuation preserves comments and retries the sam
     if (calls.length === 1) throw new Error('offline');
     return {replies: [{rpid: 2}], cursor: '3', hasMore: false};
   }}}});
-  const Harness = env.methodHarness('pages/DynamicDetail', '  private async loadReplies(', '  /** 切换评论排序',
+  const Harness = env.methodHarness('pages/DynamicDetail', '  private async loadReplies(', '  private changeReplySort(',
     "import { CommentApi } from '../api/CommentApi';");
   const page = new Harness();
   Object.assign(page, {destroyed: false, repliesLoading: false, repliesFailed: false,
@@ -805,6 +805,24 @@ test('dynamic comments: sorting during loading drops the old response',async()=>
   assert.deepEqual(p.replies,[{rpid:2}]);assert.equal(p.replyCursor,'new');assert.equal(p.repliesLoading,false);
 });
 
+test('dynamic comments: changing sort keeps visible rows until replacement and preserves them on failure',async()=>{
+  const failed=deferred(),retry=deferred();const calls=[];
+  const env=environment({'api/CommentApi':{CommentApi:{getReplies:(id,type,cursor,mode)=>{
+    calls.push({cursor,mode});return calls.length===1?failed.promise:retry.promise;
+  }}}});
+  const Harness=env.methodHarness('pages/DynamicDetail','  private async loadReplies(', '  /**\n   * 评论项状态修改',
+    "import { CommentApi } from '../api/CommentApi';");
+  const p=new Harness();Object.assign(p,{destroyed:false,repliesEpoch:epoch(env),repliesLoading:false,
+    item:{commentId:1,commentType:11},repliesHasMore:false,replies:[{rpid:9}],replyCursor:'old',replySortMode:3,param:{}});
+  p.changeReplySort(2);assert.deepEqual(p.replies,[{rpid:9}]);assert.equal(p.repliesLoading,true);
+  failed.reject(Error('offline'));await tick();
+  assert.deepEqual(p.replies,[{rpid:9}]);assert.equal(p.replyCursor,'old');
+  assert.equal(p.repliesMoreFailed,true);assert.equal(p.repliesRetryReset,true);
+  const pending=p.loadReplies(p.repliesMoreFailed&&p.repliesRetryReset);
+  retry.resolve({replies:[{rpid:10}],cursor:'new',hasMore:true});await pending;
+  assert.deepEqual(calls,[{cursor:'',mode:2},{cursor:'',mode:2}]);assert.deepEqual(p.replies,[{rpid:10}]);
+});
+
 test('dynamic feed: failed continuation keeps cards and offset, then retries the same page',async()=>{
   let calls=0;const offsets=[];const env=environment({'api/DynamicApi':{DynamicApi:{getDynamicFeed:async off=>{
     offsets.push(off);if(++calls===1)throw Error('offline');return {items:[{dynId:'2'}],offset:'end',hasMore:false};
@@ -824,6 +842,9 @@ test('dynamic API: unsuccessful response is not a successful empty feed',()=>{
     "import {asArray,asBool,asNumber,str} from '../common/Utils'; const getData=r=>r.data; class DynamicPageData {items=[];offset='';hasMore=false;}");
   assert.throws(()=>Harness.parseDynamicPage({data:null,status:200,json:()=>({code:-500})}),/动态加载失败/);
   assert.throws(()=>Harness.parseDynamicPage({data:null,status:200,json:()=>({code:-101})}),/登录已失效/);
+  assert.throws(()=>Harness.parseDynamicPage({data:null,status:-1,transportCode:2300028,
+    transportMessage:'请求超时，请稍后重试',json:()=>({})}),/请求超时/);
+  assert.throws(()=>Harness.parseDynamicPage({data:{}}),/响应格式异常/);
   assert.deepEqual(Harness.parseDynamicPage({data:{items:[],has_more:false}}).items,[]);
 });
 

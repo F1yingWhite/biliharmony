@@ -163,8 +163,7 @@ export struct BangumiDetailPage {
     return label;
   }
 
-  /** 点选集跳现有视频详情页播放。PGC 每集带独立 aid/bvid/cid，免费集走 x/player/playurl 即可取流；
-   * 会员/付费集需要 /pgc/player/web/playurl 鉴权，本版本暂不支持，由视频详情页的错误态兜底提示。 */
+  /** 保留集 ID 与 CID，详情和换画质始终使用 PGC 鉴权取流。 */
   private playEpisode(ep: BangumiEpisode): void {
     if (ep.aid <= 0 && ep.bvid.length === 0) {
       this.toast('该集暂未上线');
@@ -179,7 +178,8 @@ export struct BangumiDetailPage {
       this.loadReplies(true).catch(() => {
       });
     }
-    const param: VideoDetailParam = { bvid: ep.bvid, aid: ep.aid, title: this.episodeFullTitle(ep) };
+    const param: VideoDetailParam = { bvid: ep.bvid, aid: ep.aid, title: this.episodeFullTitle(ep),
+      epId: ep.epId, cid: ep.cid, cover: ep.cover };
     AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
   }
 

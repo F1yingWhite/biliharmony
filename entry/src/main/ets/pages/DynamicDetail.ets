@@ -281,13 +281,10 @@ export struct DynamicDetailPage {
     }
   }
 
-  /** 切换评论排序：清空列表与游标，重新拉第一页。 */
+  /** 保留现有楼层直到新排序首屏返回，避免清空长列表使滚动位置和排序按钮跳动。 */
   private changeReplySort(mode: number): void {
     if (this.replySortMode === mode || this.destroyed) return;
     this.replySortMode = mode;
-    this.replyCursor = '';
-    this.repliesHasMore = true;
-    this.replies = [];
     this.loadReplies(true).catch(() => {
     });
   }
@@ -595,6 +592,9 @@ export struct DynamicDetailPage {
               .fontWeight(FontWeight.Medium)
               .fontColor(this.isDark ? '#D8D8DC' : '#61666D')
             Blank()
+            if (this.repliesLoading && this.replies.length > 0) {
+              LoadingProgress().width(16).height(16).color(this.accent).margin({ right: 8 })
+            }
             ReplySortChips({
               mode: this.replySortMode,
               onChange: (mode: number) => {
@@ -608,6 +608,11 @@ export struct DynamicDetailPage {
           .onAreaChange((_oldArea, area) => {
             this.commentsOffset = Math.max(0, Number(area.position.y));
           })
+          if (this.repliesMoreFailed && this.repliesRetryReset && this.replies.length > 0) {
+            Text('排序加载失败，当前保留原评论 · 点击重试')
+              .fontSize(12).fontColor(this.accent).padding(8)
+              .onClick(() => this.loadReplies(true).catch(() => {}))
+          }
           if (this.repliesLoading && this.replies.length === 0) {
             LoadingView({ loading: true, skeleton: 'comments' })
           } else if (this.repliesFailed) {
