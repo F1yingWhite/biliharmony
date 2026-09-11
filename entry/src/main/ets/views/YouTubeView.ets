@@ -1,6 +1,6 @@
 import { inputMethod } from '@kit.IMEKit';
 import { curves } from '@kit.ArkUI';
-import { YouTubeApi, YouTubeVideo } from '../api/YouTubeApi';
+import { YouTubeApi, YouTubeSearchPage, YouTubeVideo } from '../api/YouTubeApi';
 import { AppNavStack, NAV_YOUTUBE_DETAIL } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { RequestEpoch } from '../common/RequestEpoch';
@@ -9,6 +9,7 @@ import { AppTheme } from '../common/AppTheme';
 import { Haptic } from '../common/Haptic';
 import { MotionTokens } from '../common/MotionTokens';
 import { LayoutTokens } from '../common/LayoutTokens';
+import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
 
 /**
  * YouTube 平台外壳：与哔哩哔哩同级，而不是底部 Dock 的第 4 个 Tab。
@@ -38,6 +39,15 @@ export struct YouTubeView {
   @State videos: Array<YouTubeVideo> = [];
   @State loading: boolean = false;
   @State error: string = '';
+  /** 下一页 token；空串表示没有更多（列表底部如实收尾，不假装还有）。 */
+  @State continuation: string = '';
+  @State loadingMore: boolean = false;
+  /** 翻页失败只在底部提示，已加载的结果保持不动。 */
+  @State moreError: string = '';
+  /** 缩略图 URL → 本地文件 URI；ArkUI Image() 不读应用代理，只能走应用自己的下载管线。 */
+  @State thumbLocal: Map<string, string> = new Map<string, string>();
+  /** 已解码完成的封面；用于淡入，避免图片在卡片上突然出现。 */
+  @State coversReady: Map<string, boolean> = new Map<string, boolean>();
   @State accountSheet: boolean = false;
   /** 双列/多列与左右内缩都随屏宽变化，与哔哩哔哩首页同一套 LayoutTokens 断点。 */
   @State viewportWidth: number = 360;
@@ -82,18 +92,127 @@ export struct YouTubeView {
     const token: number = this.request.next();
     this.loading = true;
     this.error = '';
+    this.moreError = '';
     this.searched = query;
     this.videos = [];
+    this.continuation = '';
+    this.thumbLocal = new Map<string, string>();
+    this.coversReady = new Map<string, boolean>();
     this.scroller.scrollTo({ xOffset: 0, yOffset: 0 });
-    YouTubeApi.search(query).then((result: Array<YouTubeVideo>) => {
+    YouTubeApi.search(query).then((page: YouTubeSearchPage) => {
       if (!this.request.isCurrent(token)) return;
-      this.videos = result;
+      this.videos = page.videos;
+      this.continuation = page.continuation;
+      this.primeThumbnails(page.videos);
     }).catch((e: Object) => {
       if (!this.request.isCurrent(token)) return;
       this.error = (e as Error).message || '搜索失败，请重试';
     }).finally(() => {
       if (this.request.isCurrent(token)) this.loading = false;
     });
+  }
+
+  /** 跨页去重：同一视频可能同时出现在两页，重复 id 会让列表键冲突。 */
+  private appendVideos(incoming: Array<YouTubeVideo>): void {
+    const seen: Set<string> = new Set<string>();
+    const merged: Array<YouTubeVideo> = [];
+    for (const video of this.videos) {
+      seen.add(video.id);
+      merged.push(video);
+    }
+    for (const video of incoming) {
+      if (seen.has(video.id)) continue;
+      seen.add(video.id);
+      merged.push(video);
+    }
+    this.videos = merged;
+  }
+
+  /** 触底加载下一页；失败保留已有结果，只在底部显示错误与重试。 */
+  private loadMore(): void {
+    if (this.loading || this.loadingMore || this.moreError.length > 0) return;
+    if (this.continuation.length === 0) return;
+    const request: number = this.request.next();
+    const token: string = this.continuation;
+    this.loadingMore = true;
+    YouTubeApi.searchMore(token).then((page: YouTubeSearchPage) => {
+      if (!this.request.isCurrent(request)) return;
+      this.appendVideos(page.videos);
+      this.continuation = page.continuation;
+    }).catch((e: Object) => {
+      if (!this.request.isCurrent(request)) return;
+      this.moreError = (e as Error).message || '加载更多失败，请重试';
+    }).finally(() => {
+      if (this.request.isCurrent(request)) this.loadingMore = false;
+    });
+  }
+
+  /**
+   * 缩略图两段式：先认磁盘命中，首帧就能用本地文件；未命中的再经应用 HTTP 栈下载。
+   * 这样在只能靠代理出网的环境里卡片不会整片空白，命中后也不再重复请求 CDN。
+   */
+  private primeThumbnails(list: Array<YouTubeVideo>): void {
+    const next: Map<string, string> = new Map<string, string>();
+    const pending: Array<string> = [];
+    for (const video of list) {
+      const url: string = video.thumbnail;
+      if (url.length === 0) continue;
+      const cached: string = RemoteAssetCache.cachedThumbnail(url);
+      if (cached !== url) next.set(url, cached);
+      else if (!pending.includes(url)) pending.push(url);
+    }
+    const merged: Map<string, string> = new Map<string, string>(this.thumbLocal);
+    next.forEach((value: string, key: string) => merged.set(key, value));
+    this.thumbLocal = merged;
+    // 磁盘命中的封面直接可见：本地解码很快，不需要再看一次淡入。
+    const ready: Map<string, boolean> = new Map<string, boolean>(this.coversReady);
+    let changed: boolean = false;
+    next.forEach((value: string, key: string) => {
+      if (ready.get(key) !== true) {
+        ready.set(key, true);
+        changed = true;
+      }
+    });
+    if (changed) this.coversReady = ready;
+    for (const url of pending) this.downloadThumbnail(url);
+  }
+
+  private downloadThumbnail(url: string): void {
+    RemoteAssetCache.ensureThumbnail(url).then((local: string) => {
+      if (local === url || this.thumbLocal.get(url) === local) return;
+      // 结果已被换掉（新搜索／已离开）时不再写回，避免旧列表的图混进新列表。
+      let used: boolean = false;
+      for (const video of this.videos) {
+        if (video.thumbnail === url) { used = true; break; }
+      }
+      if (!used) return;
+      const next: Map<string, string> = new Map<string, string>(this.thumbLocal);
+      next.set(url, local);
+      this.thumbLocal = next;
+      // 与 onComplete 双保险：即使平台未回调解码完成，封面也不会永久停在透明态。
+      const ready: Map<string, boolean> = new Map<string, boolean>(this.coversReady);
+      ready.set(url, true);
+      this.coversReady = ready;
+    }).catch(() => {
+      // 下载失败保持远端 URL，交给 Image 组件自己的加载与占位逻辑。
+    });
+  }
+
+  /** 卡片封面：优先本地缓存文件，未命中时回落到远端 URL。 */
+  private thumbnailOf(video: YouTubeVideo): string {
+    const local: string | undefined = this.thumbLocal.get(video.thumbnail);
+    return local !== undefined && local.length > 0 ? local : video.thumbnail;
+  }
+
+  private coverReady(video: YouTubeVideo): boolean {
+    return this.coversReady.get(video.thumbnail) === true;
+  }
+
+  private markCoverReady(video: YouTubeVideo): void {
+    if (this.coversReady.get(video.thumbnail) === true) return;
+    const next: Map<string, boolean> = new Map<string, boolean>(this.coversReady);
+    next.set(video.thumbnail, true);
+    this.coversReady = next;
   }
 
   /** 分类 chip：填入关键词并切到搜索 Tab 展示结果。 */
@@ -153,13 +272,18 @@ export struct YouTubeView {
     Column() {
       // 封面：点击区是封面本身，与哔哩哔哩一致。
       Stack() {
-        Image(video.thumbnail)
+        Image(this.thumbnailOf(video))
           .width('100%')
           .aspectRatio(4 / 3)
           .objectFit(ImageFit.Cover)
           .backgroundColor(this.isDark ? '#2A2C31' : '#E5E7EB')
           .draggable(false)
           .syncLoad(false)
+          // 封面淡入：解码完成前保持透明，完成后过渡出现（失败也收尾，不留空白卡）。
+          .opacity(this.coverReady(video) ? 1 : 0)
+          .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
+          .onComplete(() => { this.markCoverReady(video); })
+          .onError(() => { this.markCoverReady(video); })
 
         // 底部渐变行：左 = 观看次数，右 = 时长（对齐哔哩哔哩「播放/弹幕 ... 时长」层级）。
         Stack({ alignContent: Alignment.Bottom }) {
@@ -187,7 +311,9 @@ export struct YouTubeView {
           .width('100%').height(32).padding({ left: 8, right: 8 })
           .alignItems(VerticalAlign.Center)
         }
-        .width('100%')
+        // 必须显式铺满：只给宽度的子节点会被父 Stack 垂直居中，
+        // 结果观看数/时长那一行跑到封面正中间，而不是贴底。
+        .width('100%').height('100%')
       }
       .width('100%')
       .aspectRatio(4 / 3)
@@ -375,6 +501,34 @@ export struct YouTubeView {
     .alignSelf(ItemAlign.Center)
   }
 
+  /**
+   * 结果列表底部：加载中 / 失败重试 / 到底了。
+   * 尺寸与 LoadMoreFooter 同规格，但强调色取 YouTube 红（AppTheme.DANGER），
+   * 不把哔哩哔哩的粉色带进 YouTube 外壳。
+   */
+  @Builder
+  ResultFooter() {
+    Row({ space: 8 }) {
+      if (this.loadingMore) {
+        LoadingProgress().width(20).height(20).color(AppTheme.DANGER)
+        Text('正在加载更多…').fontSize(12).fontColor(this.isDark ? '#D0D0D0' : '#676B72')
+      } else if (this.moreError.length > 0) {
+        Text(this.moreError).fontSize(12).maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+          .fontColor(this.isDark ? '#FFAAAA' : '#B3261E')
+        Text('重试').fontSize(12).fontColor(AppTheme.DANGER)
+          .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+          .onClick(() => {
+            this.moreError = '';
+            this.loadMore();
+          })
+      } else if (this.continuation.length === 0) {
+        Text('—— 到底啦 ——').fontSize(12).fontColor('#9499A0')
+      }
+    }
+    .width('100%').height(48).justifyContent(FlexAlign.Center)
+  }
+
   /** 搜索结果区：加载 / 错误 / 空 / 列表四态互斥，与哔哩哔哩三态写法一致。 */
   @Builder
   ResultArea() {
@@ -393,15 +547,11 @@ export struct YouTubeView {
     } else if (this.videos.length > 0) {
       // 双列网格：与哔哩哔哩首页一致的 lanes 瀑布流布局与列间距。
       List({ space: LayoutTokens.feedGap, scroller: this.scroller }) {
-        ForEach(this.videos, (video: YouTubeVideo) => {
-          ListItem() { this.VideoCard(video) }
-        }, (video: YouTubeVideo) => video.id)
-        ListItem() {
-          // 公开搜索页的翻页依赖 continuation token，尚未验证；
-          // 先如实说明只展示首批，不假装还有更多。
-          Text('已展示本次搜索结果，试试更具体的关键词')
-            .fontSize(12).fontColor('#888888').width('100%').textAlign(TextAlign.Center)
-            .padding({ top: 8 })
+        // footer 挂在 ListItemGroup 上：双列 lanes 下才能整宽居中（同首页做法）。
+        ListItemGroup({ footer: this.ResultFooter() }) {
+          ForEach(this.videos, (video: YouTubeVideo) => {
+            ListItem() { this.VideoCard(video) }
+          }, (video: YouTubeVideo) => video.id)
         }
       }
       .layoutWeight(1).width('100%')
@@ -410,6 +560,7 @@ export struct YouTubeView {
       .contentEndOffset(Immersive.bottomInset() + 76)
       .scrollBar(BarState.Off)
       .onDidScroll((offset: number) => AppTheme.updateHeaderFade(offset))
+      .onReachEnd(() => { this.loadMore(); })
     } else {
       Column({ space: 12 }) {
         Text(this.searched.length > 0 ? '没有找到相关视频' : '探索 YouTube')

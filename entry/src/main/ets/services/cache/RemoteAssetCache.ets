@@ -14,6 +14,8 @@ const DIR_LEGACY_AVATARS: string = 'avatars';
 const DIR_DECORATIONS: string = 'decorations';
 const DIR_COLLECTIONS: string = 'collections';
 const DIR_COLLECTION_MEDIA: string = 'collection_media';
+/** 视频缩略图（目前用于 YouTube 卡片）：与其它远程图片同一条可配代理的下载管线。 */
+const DIR_THUMBNAILS: string = 'thumbnails';
 const MAX_IMAGE_BYTES: number = 32 * 1024 * 1024;
 const MAX_MEDIA_BYTES: number = 80 * 1024 * 1024;
 
@@ -71,6 +73,19 @@ export class RemoteAssetCache {
 
   static ensureCollectionMedia(url: string): Promise<string> {
     return RemoteAssetCache.ensure(url, DIR_COLLECTION_MEDIA, true);
+  }
+
+  /**
+   * 列表缩略图：ArkUI `Image()` 走系统网络栈，既不读 HttpClient 的 usingProxy，
+   * 也不读 ArkWeb 的代理下发，因此在只能靠代理出网的环境里会整片空白。
+   * 走这条管线后缩略图与应用其余流量同源，并且命中后不再重复请求。
+   */
+  static cachedThumbnail(url: string): string {
+    return RemoteAssetCache.cached(url, DIR_THUMBNAILS, false);
+  }
+
+  static ensureThumbnail(url: string): Promise<string> {
+    return RemoteAssetCache.ensure(url, DIR_THUMBNAILS, false);
   }
 
   private static cached(url: string, subdir: string, media: boolean): string {

@@ -126,8 +126,8 @@ node --test --test-timeout=20000 \
 ## 五、未完成项（按建议顺序）
 
 1. **播放器画面验收**（见第一节）——唯一的功能缺口。
-2. **搜索分页**：公开搜索页的翻页依赖 `continuationCommand` token（实测存在，长度 708，位于
-   `ytInitialData` 内），尚未接入。当前列表底部如实提示只展示首批，口径是诚实的，不要改成假加载。
+2. ~~**搜索分页**~~：已接入（见文末回执）。网页端翻页是 InnerTube `youtubei/v1/search` 的
+   continuation POST，不是给结果页加 page 参数；token 与 key 都来自上一页 HTML。
 3. **`lifecycle.test.cjs` 约 20 处内联锚点**未迁入 `ANCHOR` 常量（33 处 `methodHarness` 调用中）。
    单行锚点抗漂移稍好，但同样是静默失效点。你之前问过是否该删——**结论是不该删**
    （`lifecycle` 是唯一覆盖 `DynamicView`/`BangumiDetail` 的文件）。建议迁锚点，不要删用例。
@@ -191,7 +191,7 @@ node --test --test-timeout=20000 \
 
 1. **真实音视频解码/音画同步未验收**：被上述风控挡住。若要继续，需要换一个未被标记的代理
    出口（本机 Clash 选其他节点）再试，这属于改动本机代理配置，需先确认。
-2. 搜索分页（`continuationCommand`）未接入。
+2. ~~搜索分页（`continuationCommand`）未接入~~ —— 已接入（InnerTube continuation + 触底加载）。
 3. `lifecycle.test.cjs` 约 20 处内联锚点未迁入 `ANCHOR` 常量（不建议删用例）。
 4. 两条消息为 "1" 的提交（`c4b1f6a`、`61607ae`）未补 CHANGELOG。
 
