@@ -11,6 +11,7 @@ import { AppTheme } from '../common/AppTheme';
 import { MotionTokens } from '../common/MotionTokens';
 import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
 import { YouTubeWatchLaterStore } from '../common/YouTubeWatchLaterStore';
+import { YouTubeHistoryStore } from '../common/YouTubeHistoryStore';
 import { systemShare } from '@kit.ShareKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 
@@ -183,7 +184,11 @@ export struct YouTubeDetailPage {
     } catch (e) {
       if (this.request.isCurrent(token)) this.detailError = (e as Error).message || '详情加载失败';
     } finally {
-      if (this.request.isCurrent(token)) this.detailLoading = false;
+      if (this.request.isCurrent(token)) {
+        this.detailLoading = false;
+        // 本地观看历史：详情成功与否都记一次（失败时用参数里已有的元数据兜底）。
+        YouTubeHistoryStore.record(this.video);
+      }
     }
   }
 

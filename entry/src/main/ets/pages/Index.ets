@@ -483,7 +483,9 @@ struct Index {
       .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
     } else if (name === NAV_YOUTUBE_SAVED) {
       NavDestination() {
-        YouTubeSavedPage()
+        // 同一页两种模式：稍后观看 / 观看历史（都是本地列表）。
+        YouTubeSavedPage({ mode: typeof param === 'string' && (param as string).length > 0 ?
+          param as string : 'later' })
       }
       .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
     } else if (name === NAV_YOUTUBE_DETAIL) {
