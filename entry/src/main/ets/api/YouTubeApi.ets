@@ -96,6 +96,14 @@ export class YouTubeApi {
 
   static validId(id: string): boolean { return /^[a-zA-Z0-9_-]{11}$/.test(id); }
 
+  /**
+   * 规范分享/打开链接：只用校验过的 11 位 ID 拼，绝不把用户输入直接塞进 URL。
+   * 无效 ID 返回空串，调用方据此禁用入口，而不是发一个畸形链接。
+   */
+  static watchUrl(id: string): string {
+    return YouTubeApi.validId(id) ? 'https://youtu.be/' + id : '';
+  }
+
   /** 只接受 YouTube 自己的链接，避免把任意 URL 交给网络层或播放器。 */
   static videoId(input: string): string {
     const value: string = input.trim();

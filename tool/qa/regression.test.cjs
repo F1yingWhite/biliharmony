@@ -529,6 +529,12 @@ test('YouTube: only recognized YouTube hosts and valid IDs can reach playback', 
     'https://evil.test/youtube.com/watch?v=aqz-KE-bpKQ','javascript:alert(1)',"aqz-KE-bpKQ'",'https://youtu.be/aqz-KE-bpKQextra']) {
     assert.equal(YouTubeApi.videoId(value),'');
   }
+  // 分享/打开链接只由校验过的 ID 拼出：非法输入返回空串，绝不把用户输入塞进 URL。
+  assert.equal(YouTubeApi.watchUrl('aqz-KE-bpKQ'),'https://youtu.be/aqz-KE-bpKQ');
+  assert.equal(YouTubeApi.videoId(YouTubeApi.watchUrl('aqz-KE-bpKQ')),'aqz-KE-bpKQ');
+  for(const value of ["aqz-KE-bpKQ'",'javascript:alert(1)','','aqz-KE-bpKQextra','https://evil.test/x']) {
+    assert.equal(YouTubeApi.watchUrl(value),'');
+  }
 });
 
 test('YouTube: network failures, verification pages and restricted metadata stay explicit', async () => {

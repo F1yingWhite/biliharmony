@@ -10,6 +10,8 @@ import { youtubeFullscreenProbeHtml, youtubePlayerHtml, youtubePlaybackError,
 import { AppTheme } from '../common/AppTheme';
 import { MotionTokens } from '../common/MotionTokens';
 import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
+import { systemShare } from '@kit.ShareKit';
+import { pasteboard } from '@kit.BasicServicesKit';
 
 /**
  * YouTube 视频详情页。
@@ -254,14 +256,66 @@ export struct YouTubeDetailPage {
     AppNavStack.pushPathByName(NAV_YOUTUBE_DETAIL, video);
   }
 
+  private toast(message: string): void {
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: message });
+    } catch (e) {
+      // 组件销毁后调用会抛异常，忽略。
+    }
+  }
+
   private async openYouTube(): Promise<void> {
     this.pause();
+    // 官方客户端/Premium 的离线下载是唯一合规的离线路径，这里只负责把用户送过去。
+    const url: string = YouTubeApi.watchUrl(this.param.id);
+    if (url.length === 0) {
+      this.toast('视频链接无效');
+      return;
+    }
     try {
       const context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      await context.openLink('https://www.youtube.com/watch?v=' + this.param.id);
+      await context.openLink(url);
     } catch (_) {
-      this.getUIContext().getPromptAction().showToast({ message: '无法打开 YouTube，请检查浏览器' });
+      this.toast('无法打开 YouTube，请检查浏览器');
     }
+  }
+
+  /** 系统分享：与 B 站详情页同一套 ShareKit，只分享规范链接与标题，不涉及媒体流。 */
+  private shareVideo(): void {
+    const url: string = YouTubeApi.watchUrl(this.param.id);
+    if (url.length === 0) {
+      this.toast('视频链接无效，无法分享');
+      return;
+    }
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+    if (context === undefined) {
+      this.toast('无法打开系统分享');
+      return;
+    }
+    const data: systemShare.SharedData = new systemShare.SharedData({
+      utd: 'general.hyperlink',
+      title: this.video.title.length > 0 ? this.video.title : 'YouTube 视频',
+      content: url,
+      description: this.video.channel,
+    });
+    const controller: systemShare.ShareController = new systemShare.ShareController(data);
+    controller.show(context, { previewMode: systemShare.SharePreviewMode.DETAIL }).catch((error: Error) => {
+      this.toast('分享失败：' + error.message);
+    });
+  }
+
+  private copyLink(): void {
+    const url: string = YouTubeApi.watchUrl(this.param.id);
+    if (url.length === 0) {
+      this.toast('视频链接无效');
+      return;
+    }
+    const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, url);
+    pasteboard.getSystemPasteboard().setData(data).then(() => {
+      this.toast('链接已复制');
+    }).catch(() => {
+      this.toast('复制失败');
+    });
   }
 
   // ===== 播放器 =====
@@ -374,6 +428,19 @@ export struct YouTubeDetailPage {
     .width('100%').alignItems(VerticalAlign.Center)
   }
 
+  /** 次级动作胶囊：与「我的」页说明按钮同规格；强调色只留给主按钮。 */
+  @Builder
+  QuietAction(label: string, action: () => void) {
+    Text(label)
+      .fontSize(13)
+      .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+      .height(32).padding({ left: 14, right: 14 })
+      .borderRadius(16)
+      .backgroundColor(this.isDark ? '#2B2D34' : '#F0F1F3')
+      .stateStyles({ pressed: { opacity: 0.9 }, normal: { opacity: 1 } })
+      .onClick(action)
+  }
+
   /** 相关推荐单行：与 B 站 RelatedVideoRow 同构（封面 120×68 + 标题两行 + 频道/数据）。 */
   @Builder
   RelatedRow(video: YouTubeVideo) {
@@ -433,6 +500,13 @@ export struct YouTubeDetailPage {
         Text([this.video.views, this.video.published, this.video.duration]
           .filter((v: string) => v.length > 0).join(' · '))
           .fontSize(12).fontColor('#9499A0').width('100%')
+
+        // 只放能闭环的动作：分享与复制链接。点赞/投币/收藏/发评论需要账号，不摆空按钮。
+        Row({ space: 10 }) {
+          this.QuietAction('分享', () => this.shareVideo())
+          this.QuietAction('复制链接', () => this.copyLink())
+        }
+        .width('100%')
 
         if (this.detailLoading) {
           Row({ space: 8 }) {
