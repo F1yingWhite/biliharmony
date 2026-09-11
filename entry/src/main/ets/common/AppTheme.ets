@@ -32,7 +32,10 @@ export class AppTheme {
   ];
   /** 危险/删除/清空等否定操作的统一红，取代历史遗留的 #FA4B4B / #FB4A4A 两套红。 */
   static readonly DANGER: string = '#FB4A4A';
+  /** 生效强调色：全局组件读它；YouTube 平台下由 applyPlatformAccent 接管为红色。 */
   static readonly KEY_ACCENT: string = 'accentColor';
+  /** 用户自选主题色：只在哔哩哔哩侧生效，切平台不会改写它。 */
+  static readonly KEY_USER_ACCENT: string = 'userAccentColor';
   static readonly KEY_DARK: string = 'isDarkMode';
   static readonly KEY_THEME_MODE: string = 'themeMode';
   static readonly KEY_SYSTEM_DARK: string = 'systemDarkMode';
@@ -68,12 +71,17 @@ export class AppTheme {
     // 避免 13 段 if (AppStorage.get(...) === undefined) 样板。
     PersistentStorage.persistProp<string>(AppTheme.KEY_THEME_MODE, AppTheme.MODE_SYSTEM);
     PersistentStorage.persistProp<string>(AppTheme.KEY_ACCENT, Constants.brandPink);
+    PersistentStorage.persistProp<string>(AppTheme.KEY_USER_ACCENT, Constants.brandPink);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_DARK, false);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_GLASS_ENABLED, true);
     PersistentStorage.persistProp<number>('videoQualityPref', 0);
     PersistentStorage.persistProp<number>('videoManualQuality', 0);
     AppTheme.ensureString(AppTheme.KEY_THEME_MODE, AppTheme.MODE_SYSTEM);
     AppTheme.ensureString(AppTheme.KEY_ACCENT, Constants.brandPink);
+    // 迁移：老版本只持久化过 accentColor（那就是用户自选值），首次升级时把它迁到新键，
+    // 之后平台强调色只改生效值，不再动自选值。
+    AppTheme.ensureString(AppTheme.KEY_USER_ACCENT,
+      AppStorage.get<string>(AppTheme.KEY_ACCENT) ?? Constants.brandPink);
     AppTheme.ensureBool(AppTheme.KEY_DARK, false);
     AppTheme.ensureBool(AppTheme.KEY_SYSTEM_DARK, false);
     AppTheme.ensureNumber(AppTheme.KEY_HEADER_FADE, 0);
@@ -304,9 +312,24 @@ export class AppTheme {
     AppStorage.setOrCreate<number>(AppTheme.KEY_HEADER_FADE, 0);
   }
 
-  /** 设置主题强调色（取色结果） */
+  /** 用户选择主题色：记为自选值并立即生效（YouTube 平台下仍以红色为准）。 */
   static setAccent(hex: string): void {
+    AppStorage.setOrCreate<string>(AppTheme.KEY_USER_ACCENT, hex);
     AppStorage.setOrCreate<string>(AppTheme.KEY_ACCENT, hex);
+  }
+
+  /** 用户自选主题色（哔哩哔哩侧强调色）。 */
+  static userAccent(): string {
+    const v: string | undefined = AppStorage.get<string>(AppTheme.KEY_USER_ACCENT);
+    return v === undefined || v.length === 0 ? Constants.brandPink : v;
+  }
+
+  /**
+   * 平台强调色：切到 YouTube 时全局主题色变红（与搜索按钮、Dock 同一支红），
+   * 切回哔哩哔哩恢复用户自选色。只改生效值，不写自选值，来回切换不污染用户偏好。
+   */
+  static applyPlatformAccent(isYouTube: boolean): void {
+    AppStorage.setOrCreate<string>(AppTheme.KEY_ACCENT, isYouTube ? AppTheme.DANGER : AppTheme.userAccent());
   }
 
   static getAccent(): string {

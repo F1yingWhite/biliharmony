@@ -42,6 +42,12 @@ test('private notification cards retain body and image messages retain dimension
   assert.equal(video.richTitle, '视频');
 });
 
+/** AppTheme 依赖的平台边界：只用到命名空间里的少量成员，空壳即可。 */
+function themeMocks() {
+  return {'@kit.ArkUI':{uiMaterial:{}},'@kit.AbilityKit':{common:{}},
+    '@kit.ArkData':{preferences:{}},'@kit.BasicServicesKit':{deviceInfo:{}}};
+}
+
 function environment(mocks = {}) {
   const cache = new Map();
   const storage = new Map();
@@ -766,7 +772,7 @@ test('YouTube: continuation parsing accepts both containers and rejects garbage'
   assert.throws(()=>YouTubeApi.parseContinuation('<!doctype html>'),/翻页数据/);
 });
 test('Platform: switching platforms invalidates in-flight work and persists the choice', () => {
-  const env=environment({});
+  const env=environment(themeMocks());
   const {PlatformStore}=env.load('common/PlatformStore');
   assert.equal(PlatformStore.current(),'bili');
   assert.equal(PlatformStore.isYouTube(),false);
@@ -788,6 +794,36 @@ test('Platform: switching platforms invalidates in-flight work and persists the 
   assert.equal(PlatformStore.current(),'bili');
 });
 
+test('Theme: the accent follows the platform and never overwrites the user choice', () => {
+  // 需求：切到 YouTube 后全局主题色变红，切回哔哩哔哩恢复用户自选色。
+  // accentColor 是持久化的用户偏好，所以「自选值」和「生效值」必须分开，
+  // 否则 YouTube 的红会被写进用户偏好，重启后连哔哩哔哩也变红。
+  const env=environment(themeMocks());
+  const {AppTheme}=env.load('common/AppTheme');
+  const {PlatformStore}=env.load('common/PlatformStore');
+
+  AppTheme.setAccent('#008AC5');
+  assert.equal(AppTheme.getAccent(),'#008AC5');
+  assert.equal(env.storage.get('accentColor'),'#008AC5');
+
+  PlatformStore.switchTo(PlatformStore.YOUTUBE);
+  assert.equal(AppTheme.getAccent(),AppTheme.DANGER);
+  // 自选值仍然是用户的蓝色：平台切换不能污染偏好。
+  assert.equal(AppTheme.userAccent(),'#008AC5');
+  assert.equal(env.storage.get('userAccentColor'),'#008AC5');
+
+  PlatformStore.switchTo(PlatformStore.BILI);
+  assert.equal(AppTheme.getAccent(),'#008AC5');
+
+  // 冷启动路径：平台已是 YouTube 时 syncAccent 也必须给出红色。
+  PlatformStore.switchTo(PlatformStore.YOUTUBE);
+  AppTheme.setAccent('#43A047');
+  PlatformStore.syncAccent();
+  assert.equal(AppTheme.getAccent(),AppTheme.DANGER);
+  assert.equal(AppTheme.userAccent(),'#43A047');
+  PlatformStore.switchTo(PlatformStore.BILI);
+  assert.equal(AppTheme.getAccent(),'#43A047');
+});
 test('Platform: the main dock owns only Bilibili tabs and Index dispatches on platform', () => {
   // 回归背景：YouTube 曾是底部 Dock 的第 4 个 Tab，使 `currentTab !== 3` 这类魔数
   // 在主框架里出现两次。提升为平台状态后，Dock 只归哔哩哔哩所有。

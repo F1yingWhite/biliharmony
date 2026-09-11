@@ -29,6 +29,8 @@ export default class EntryAbility extends UIAbility {
     // 表情、用户装扮与典藏卡资源的 cacheDir 落盘入口，并回收旧版头像及评论分享缓存。
     RemoteAssetCache.attach(this.context);
     AppTheme.init(this.context);
+    // 冷启动就按平台定强调色：YouTube 红 / 哔哩哔哩用户自选色。
+    PlatformStore.syncAccent();
     AppTheme.initThemeStore(this.context).catch(() => {
       // 主题偏好恢复失败不影响启动；PersistentStorage 默认值兜底。
     });
