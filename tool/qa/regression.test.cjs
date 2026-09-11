@@ -831,6 +831,48 @@ test('YouTube: search suggestions come from the public JSON endpoint and fail so
   assert.deepEqual(await failing.YouTubeApi.suggest('x'),[]);
   assert.deepEqual(await failing.YouTubeApi.suggest('  '),[]);
 });
+test('Watch later: the local list is newest-first, deduplicated and account-free', async () => {
+  // 需求：YouTube 侧的「稍后观看」在游客范围内可用——只存 id 与公开元数据，不涉及取流。
+  const disk=new Map();
+  const prefs={getPreferences:async()=>({getSync:(k,d)=>disk.has(k)?disk.get(k):d,
+    putSync:(k,v)=>{disk.set(k,v);},flush:async()=>{}})};
+  const env=environment({'@kit.AbilityKit':{common:{}},'@kit.ArkData':{preferences:prefs}});
+  const {YouTubeWatchLaterStore}=env.load('common/YouTubeWatchLaterStore');
+  const make=(id,title)=>({id,title,channel:'频道',
+    thumbnail:'https://i.ytimg.com/vi/'+id+'/hqdefault.jpg',
+    duration:'1:00',views:'1次观看',published:'1天前'});
+  YouTubeWatchLaterStore.init({});
+
+  YouTubeWatchLaterStore.add(make('aqz-KE-bpKQ','A'));
+  YouTubeWatchLaterStore.add(make('eW09jkDM9_s','B'));
+  YouTubeWatchLaterStore.add(make('aqz-KE-bpKQ','A2'));
+  // 重复保存提到最前并更新元数据，而不是出现两条。
+  assert.deepEqual(YouTubeWatchLaterStore.list().map(v=>v.id),['aqz-KE-bpKQ','eW09jkDM9_s']);
+  assert.equal(YouTubeWatchLaterStore.list()[0].title,'A2');
+  assert.equal(YouTubeWatchLaterStore.contains('eW09jkDM9_s'),true);
+  // toggle 返回操作后的状态：已在列表里就是取消保存。
+  assert.equal(YouTubeWatchLaterStore.toggle(make('eW09jkDM9_s','B')),false);
+  assert.equal(YouTubeWatchLaterStore.count(),1);
+  // 数量广播给「我的」页入口行，返回时不会读到旧值。
+  assert.equal(env.storage.get('youtubeWatchLaterCount'),1);
+  // 没有 id 的条目不进列表。
+  YouTubeWatchLaterStore.add(make('','空'));
+  assert.equal(YouTubeWatchLaterStore.count(),1);
+  assert.deepEqual((await YouTubeWatchLaterStore.ensureLoaded()).map(v=>v.id),['aqz-KE-bpKQ']);
+
+  YouTubeWatchLaterStore.clear();
+  assert.equal(YouTubeWatchLaterStore.count(),0);
+  assert.equal(env.storage.get('youtubeWatchLaterCount'),0);
+
+  // 落盘内容损坏时按空列表处理，不能让本地列表把启动带崩。
+  const broken=new Map([['youtubeWatchLaterJson','{not json']]);
+  const brokenPrefs={getPreferences:async()=>({getSync:(k,d)=>broken.has(k)?broken.get(k):d,
+    putSync:(k,v)=>{broken.set(k,v);},flush:async()=>{}})};
+  const env2=environment({'@kit.AbilityKit':{common:{}},'@kit.ArkData':{preferences:brokenPrefs}});
+  const store2=env2.load('common/YouTubeWatchLaterStore').YouTubeWatchLaterStore;
+  store2.init({});
+  assert.deepEqual(await store2.ensureLoaded(),[]);
+});
 test('Platform: switching platforms invalidates in-flight work and persists the choice', () => {
   const env=environment(themeMocks());
   const {PlatformStore}=env.load('common/PlatformStore');

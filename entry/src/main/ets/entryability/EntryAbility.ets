@@ -7,6 +7,7 @@ import { Immersive } from '../common/Immersive';
 import { UserStore } from '../services/auth/UserStore';
 import { SearchHistoryStore } from '../common/SearchHistoryStore';
 import { YouTubeSearchHistoryStore } from '../common/YouTubeSearchHistoryStore';
+import { YouTubeWatchLaterStore } from '../common/YouTubeWatchLaterStore';
 import { PlatformStore } from '../common/PlatformStore';
 import { EmoteResolver } from '../common/EmoteResolver';
 import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
@@ -24,6 +25,8 @@ export default class EntryAbility extends UIAbility {
     SearchHistoryStore.init(this.context);
     // YouTube 侧搜索历史独立存储：两个平台的搜索词不混在一起。
     YouTubeSearchHistoryStore.init(this.context);
+    // 本地稍后观看：不需要账号，游客也能用。
+    YouTubeWatchLaterStore.init(this.context);
     // 顶层平台（哔哩哔哩 / YouTube）持久化：冷启动即确定首帧渲染哪个外壳。
     PlatformStore.init();
     this.applyLaunchProxy(want);

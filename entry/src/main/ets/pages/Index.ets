@@ -1,7 +1,8 @@
 import { YouTubeView } from '../views/YouTubeView';
 import { YouTubeDetailPage } from './YouTubeDetail';
+import { YouTubeSavedPage } from './YouTubeSaved';
 import { YouTubeVideo, YouTubeApi } from '../api/YouTubeApi';
-import { NAV_YOUTUBE_DETAIL } from '../common/AppRouter';
+import { NAV_YOUTUBE_DETAIL, NAV_YOUTUBE_SAVED } from '../common/AppRouter';
 import { PlatformStore } from '../common/PlatformStore';
 import { MotionTokens } from '../common/MotionTokens';
 /**
@@ -478,6 +479,11 @@ struct Index {
     } else if (name === NAV_FAV_SORT) {
       NavDestination() {
         FavoriteFolderSortPage({ param: (param as FavSortParam) })
+      }
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+    } else if (name === NAV_YOUTUBE_SAVED) {
+      NavDestination() {
+        YouTubeSavedPage()
       }
       .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
     } else if (name === NAV_YOUTUBE_DETAIL) {
