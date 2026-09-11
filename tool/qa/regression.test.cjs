@@ -674,6 +674,51 @@ test('YouTube: comment requests reuse the page InnerTube config and send no cred
   assert.match(headers['User-Agent'],/Mozilla\/5\.0/);
   assert.equal(headers.Cookie,undefined);assert.equal(headers.Referer,undefined);
 });
+test('YouTube: search filters come from the page and are replayed verbatim', async () => {
+  // 筛选项（类型/时长/上传时间/功能/排序）由结果页下发，params 必须原样回传：
+  // 自己拼 protobuf 会猜错含义，筛选结果与服务端不一致。
+  const dialog={header:{searchHeaderRenderer:{searchFilterButton:{buttonRenderer:{command:{openPopupAction:{
+    popup:{searchFilterOptionsDialogRenderer:{groups:[
+      {searchFilterGroupRenderer:{title:{simpleText:'类型'},filters:[
+        {searchFilterRenderer:{label:{simpleText:'长视频'},navigationEndpoint:{searchEndpoint:{params:'EgIQAQ%3D%3D'}}}},
+        {searchFilterRenderer:{label:{simpleText:'短片'},navigationEndpoint:{searchEndpoint:{params:'EgIQCQ%3D%3D'}}}},
+        {searchFilterRenderer:{label:{simpleText:'缺参数'},navigationEndpoint:{searchEndpoint:{}}}}
+      ]}},
+      {searchFilterGroupRenderer:{title:{simpleText:'排序'},filters:[
+        {searchFilterRenderer:{label:{simpleText:'按观看次数'},navigationEndpoint:{searchEndpoint:{params:'CAM%3D'}}}}
+      ]}}
+    ]}}}}}}}}};
+  const empty={contents:{twoColumnSearchResultsRenderer:{primaryContents:{sectionListRenderer:{contents:[
+    {itemSectionRenderer:{contents:[]}}]}}}}};
+  const html='var ytInitialData = '+JSON.stringify(empty)+';var ytInitialData2 = '+JSON.stringify(dialog)+';';
+  const {YouTubeApi}=environment({'services/network/HttpClient':{}}).load('api/YouTubeApi');
+  // 文件名必须带 searchHeaderRenderer 那段：把两组数据合到同一份 ytInitialData 里再解析。
+  const merged={contents:empty.contents,header:dialog.header};
+  const mergedHtml='var ytInitialData = '+JSON.stringify(merged)+';';
+  const groups=YouTubeApi.parseFilters(mergedHtml);
+  assert.equal(groups.length,2);
+  assert.equal(groups[0].title,'类型');
+  // 缺 params 的选项被丢弃，不能生成一个点了没反应的按钮。
+  assert.equal(groups[0].filters.length,2);
+  assert.equal(groups[0].filters[0].label,'长视频');
+  assert.equal(groups[0].filters[0].params,'EgIQAQ%3D%3D');
+  assert.equal(groups[1].filters[0].params,'CAM%3D');
+  assert.deepEqual(YouTubeApi.parseFilters('<html></html>'),[]);
+
+  // 带筛选的搜索：params 必须出现在 URL 里，且不做二次转义（页面给的就是已转义串）。
+  const calls=[];
+  const env=environment({'services/network/HttpClient':{HttpClient:{get:async(...args)=>{
+    calls.push(args);return {ok:true,body:mergedHtml};
+  }}}});
+  const api=env.load('api/YouTubeApi');
+  const page=await api.YouTubeApi.search('音乐','EgIQAQ%3D%3D');
+  assert.equal(page.filters.length,2);
+  assert.match(calls[0][0],/search_query=%E9%9F%B3%E4%B9%90/);
+  assert.match(calls[0][0],/&sp=EgIQAQ%3D%3D/);
+  // 不传筛选时不出现 sp 参数。
+  await api.YouTubeApi.search('音乐');
+  assert.doesNotMatch(calls[1][0],/sp=/);
+});
 test('YouTube: public pages are requested as a desktop client or the page has no parseable results', async () => {
   // 回归背景：不带 User-Agent 时 YouTube 返回验证页/移动版页面，ytInitialData 里
   // 没有 videoRenderer，搜索会整体失败。实测同一 URL：桌面 UA 可解析 22 条，移动 UA 直接抛错。
