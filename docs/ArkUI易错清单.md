@@ -186,6 +186,85 @@ else { List }
 
 **案例**：`pages/RankPage.ets`、`pages/LibraryPages.ets`。
 
+## 17. 测试夹具按源码文本切片：CRLF 会让跨行锚点静默失配 ★曾导致 6 个用例集体失效
+
+**症状**：`tool/qa/*.test.cjs` 里 6 个用例同时失败，报 `AssertionError: assert.ok(begin >= 0 && finish > begin)`。看起来像评论换根/换排序的并发回归，实际生产代码完全正常。
+
+**根因（两重）**：
+
+1. `methodHarness(file, start, end)` 靠**源码字符串精确匹配**抽取生产方法，锚点一变就断：`private` 被去掉、参数补了类型注解（`DynTypeChip(label, type)` → `DynTypeChip(label: string, type: string)`）、注释文案改名，都会让 `indexOf` 返回 -1；
+2. **最隐蔽的一层**：仓库 `.ets` 是 **CRLF 检出**（`core.autocrlf`），而锚点多行字面量按 `\n` 书写。于是即使文本内容一字不差，跨行锚点照样匹配失败。
+
+**正确写法**：
+
+- `readSource` 一律把源码**归一为 LF** 再切片：`.replace(/\r\n/g, '\n')`，让锚点只依赖内容、不依赖检出时的行尾；
+- 锚点**集中成常量**（`lifecycle.test.cjs` 的 `ANCHOR`），不得内联在用例里；
+- 断言**带锚点内容**，失败时直接指出漂的是哪一个，而不是一句裸断言。
+
+```js
+assert.ok(begin >= 0, `锚点未命中 start（${file}.ets）：${JSON.stringify(start)}`);
+assert.ok(finish > begin, `锚点未命中 end（${file}.ets）：${JSON.stringify(end)}`);
+```
+
+**规则**：改动被 `methodHarness` 切片的方法签名或紧邻注释时，**必须在同一个提交里同步锚点并重跑该测试文件**。锚点漂移会伪装成功能回归，反过来也会让真实回归被误判为"夹具又断了"而放过。
+
+**遗留风险（待迁移）**：`lifecycle.test.cjs` 有 33 处 `methodHarness` 调用，其中约 20 处仍是**内联硬编码锚点**（已迁入 `ANCHOR` 的只是少数）。单行锚点抗漂移稍好（例如 `'  async loadReplies('` 恰因去掉 `private` 而侥幸存活），但同样是静默失效点。**`ANCHOR` 常量尚未覆盖全部调用点，新增/修改用例时不要再写内联锚点。**
+
+**更彻底的解法（未做）**：把并发决策逻辑抽成不依赖页面类的纯模块（工程已有先例：评论改动已抽到 `common/ReplyMutation.ets`），让测试直接调用模块 API、不再切片页面源码。这是根治方向，比继续维护锚点更划算。
+
+**案例**：`tool/qa/lifecycle.test.cjs`（`ANCHOR` 常量）、`regression.test.cjs` / `danmaku.test.cjs` / `parity.test.cjs` 的 `readSource`。
+
+---
+
+## 18. ArkWeb 不共享应用的网络代理；外部页面还可能按 UA 返回不同结构 ★曾导致播放器空白
+
+两个独立的坑，都在 YouTube 侧踩到，且都会**表现为"功能坏了"而其实不是**。
+
+### 18a. `usingProxy` / 系统代理对 Web 组件无效
+
+`@ohos.net.http` 的 `HttpClient` 设了 `usingProxy`，**只影响应用自身的 HTTP 请求**；
+`Web` 组件里的 Chromium 是独立网络栈：
+
+- 它默认走**系统代理**，而模拟器/设备上可能根本没有系统代理参数
+  （本环境 `persist.net.http.proxy`、`persist.net.proxy.host` 都不存在）；
+- SDK 里确有 `webview.ProxyConfig.applyProxyOverride(proxyConfig, callback)`（API 15+，静态方法）
+  可以给 ArkWeb 单独下发代理，但**并非所有 SDK 的类型索引都能取到**：本机 API 26 SDK
+  编译报 `Property 'applyProxyOverride' does not exist on type 'typeof ProxyConfig'`，
+  尽管它在 `.d.ts` 的 `class ProxyConfig` 内。
+
+**症状**：应用侧搜索/详情一切正常，播放器页面永远停在 `about:blank`，且**没有任何错误回调**
+（脚本加载不到 ⇒ `document.title` 信号通道不发火 ⇒ 只能靠超时兜底）。很容易误判成
+`loadData` 用法错误或 origin 配置错误。
+
+**排查第一步**：先确认设备到目标域名的可达性，而不是先怀疑代码。
+
+```bash
+hdc shell ping -c 2 -W 3 www.youtube.com   # 100% 丢包 ⇒ 网络不通，不是导航问题
+hdc shell ping -c 2 -W 3 www.baidu.com     # 正常 ⇒ 设备整体出网没问题
+```
+
+**规则**：给 Web 组件接代理必须用 ArkWeb 自己的代理 API，且要**编译期验证该 API 在目标
+SDK 上可用**；不可用时不要合入，并如实记录"播放器画面未验收"。
+
+### 18b. 公开网页按 User-Agent 返回不同结构
+
+对同一 URL 实测 YouTube：
+
+| User-Agent | 结果 |
+| --- | --- |
+| 桌面 Chrome | `ytInitialData` 含 `videoRenderer`，解析出 22 条 |
+| 无 UA / 移动 Chrome | 返回验证页或移动版页面，**没有 `videoRenderer`**，解析整体抛错 |
+
+即：**解析器逻辑完全正确，失败根因是请求头。** 这类"字段消失"必须先怀疑服务端按客户端
+能力/UA 分叉，再去改解析器。
+
+**规则**：抓取公开页面时显式声明 UA，并写一条**锁定请求头**的回归测试
+（`regression.test.cjs` 的 `YouTube: public pages are requested as a desktop client...`），
+否则将来有人"顺手清理掉看起来没用的 header"，功能会静默失效。
+
+**案例**：`entry/src/main/ets/api/YouTubeApi.ets`（`DESKTOP_UA`）、
+`entry/src/main/ets/pages/YouTubeDetail.ets`、`services/network/HttpClient.ets`（可选代理）。
+
 ---
 
 ## 附：提交前自检清单
