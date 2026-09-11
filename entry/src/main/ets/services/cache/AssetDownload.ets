@@ -1,5 +1,6 @@
-import { http } from '@kit.NetworkKit';
+import { connection, http } from '@kit.NetworkKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
+import { HttpClient } from '../network/HttpClient';
 
 /** 有界流式落盘：不拼接整个响应；短写续写，失败只删除临时文件。 */
 export class AssetDownload {
@@ -75,12 +76,18 @@ export class AssetDownload {
           }
         }).catch(() => stop()).finally(() => { pending -= chunk.byteLength; });
       });
-      const status: number = await stream.requestInStream(url, {
+      const options: http.HttpRequestOptions = {
         method: http.RequestMethod.GET,
         connectTimeout: 10000,
         readTimeout: readTimeout,
         maxLimit: limit,
-      });
+      };
+      // 缓存下载同样是应用流量，必须沿用 HttpClient 那份代理解析：
+      // 漏掉它时，只能靠代理出网的环境里缩略图会安静地全部失败（0 字节 .part）。
+      // 默认空值不写 usingProxy，与历史行为一致。
+      const proxy: connection.HttpProxy | null = HttpClient.proxyConfig();
+      if (proxy !== null) options.usingProxy = proxy;
+      const status: number = await stream.requestInStream(url, options);
       await ended;
       await writes;
       if (failed || status < 200 || status >= 300 || received < 12) return false;

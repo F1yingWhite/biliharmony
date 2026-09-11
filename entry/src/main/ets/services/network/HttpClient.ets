@@ -102,11 +102,13 @@ export class HttpClient {
 
   /**
    * 把 `http://主机:端口` 解析为 HttpProxy 所需的 host / port。
+   * 公开给同样需要出网的非 HttpClient 通道（如 AssetDownload 的流式缓存下载）：
+   * 代理解析规则只此一份，避免各通道各写一套导致行为不一致。
    * 注意 HttpProxy.host 只接受主机名，协议前缀会在匹配时被忽略，
    * 端口必须通过 port 字段单独给出，因此不能把整个 URL 塞进 host。
    * 缺省端口按协议取常见值（http 8080 / socks 1080），显式端口始终优先。
    */
-  private static proxyConfig(): connection.HttpProxy | null {
+  static proxyConfig(): connection.HttpProxy | null {
     const raw: string = HttpClient.proxy();
     if (raw.length === 0) return null;
     let rest: string = raw;

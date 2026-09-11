@@ -292,6 +292,25 @@ ArkWeb 日志里就是这条——注意它不是网络错误：
 必须在该回调里**复位去重标记再重发**。回归测试
 `YouTube: the player document survives the initial about:blank navigation` 锁定该分支。
 
+### 18e. `Image()` 和流式下载同样不读应用代理 ★曾导致整个列表封面空白
+
+「代理只覆盖一部分通道」这件事在同一轮里踩了三次，这里是第三次：
+
+- `Image(url)` 走**系统网络栈**，既不看 `HttpClient` 的 `usingProxy`，也不看 ArkWeb 的代理下发。
+  在只能靠代理出网的环境里，接口数据全部正常，**卡片封面整片灰**，而且没有任何报错回调。
+- `services/cache/AssetDownload.ets` 自己 `http.createHttp()` + `requestInStream`，
+  同样绕过了 `HttpClient.execute`。漏配 `usingProxy` 时缓存下载安静地失败，
+  只在缓存目录留下 0 字节的 `*.part`——**看不出是网络问题**。
+
+**规则**：新开任何一条出网通道（流式下载、WebView、系统图片加载），都要显式承接代理配置，
+并写一条断言 `usingProxy` 存在/缺省的回归测试；代理解析只保留一份。
+列表类图片统一走 `RemoteAssetCache`（`cachedThumbnail`/`ensureThumbnail`），
+首帧读磁盘命中、未命中再下载，界面用本地 file URI 渲染。
+
+**排查顺序**：接口有数据但图片空白 ⇒ 先看图片通道是否走了代理，再看 DNS。
+本环境 `hdc shell ping i.ytimg.com` 直接 `Try again`（域名都解析不出来），
+而同一张图在 Mac 上经代理 `curl` 是 200——两侧结论完全相反。
+
 ### 18d. 播放器渲染出来了 ≠ 播放能验收；还要分清播放层风控
 
 播放器文档加载成功后，YouTube 仍可能对**被标记的出口 IP** 返回

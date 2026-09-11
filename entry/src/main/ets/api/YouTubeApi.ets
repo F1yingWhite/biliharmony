@@ -14,6 +14,28 @@ export class YouTubeVideo {
   notice: string = '';
 }
 
+/** 搜索结果的一页：视频列表 + 下一页 token（空串表示没有更多，调用方据此如实收尾）。 */
+export class YouTubeSearchPage {
+  videos: Array<YouTubeVideo> = [];
+  continuation: string = '';
+}
+
+/** InnerTube 翻页请求体。字段名是 YouTube 自己的拼写，不能改名。 */
+interface InnerTubeClient {
+  clientName: string;
+  clientVersion: string;
+  hl: string;
+}
+
+interface InnerTubeContext {
+  client: InnerTubeClient;
+}
+
+interface InnerTubeRequest {
+  context: InnerTubeContext;
+  continuation: string;
+}
+
 function textValue(value: Object | undefined): string {
   const node: Record<string, Object> = asObject(value);
   if (typeof node['simpleText'] === 'string') return asString(node['simpleText']);
@@ -29,6 +51,13 @@ export class YouTubeApi {
    */
   private static readonly DESKTOP_UA: string =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+  /**
+   * InnerTube 翻页配置来自搜索页 HTML 自带的 ytcfg（公开网页配置，不是账号凭据）。
+   * 只在进程内缓存；取不到就关闭翻页，而不是拿旧值拼一个可能已失效的请求。
+   */
+  private static innerApiKey: string = '';
+  private static innerClientVersion: string = '';
 
   static validId(id: string): boolean { return /^[a-zA-Z0-9_-]{11}$/.test(id); }
 
@@ -105,14 +134,41 @@ export class YouTubeApi {
     for (const key of Object.keys(record)) YouTubeApi.collect(record[key], videos, seen, depth + 1);
   }
 
-  static parseSearch(html: string): Array<YouTubeVideo> {
+  /**
+   * 搜索结果列表的下一页 token。位置固定：primaryContents → sectionListRenderer →
+   * contents 末尾的 continuationItemRenderer。取不到就返回空串——列表如实收尾，
+   * 不伪造"还有更多"。
+   */
+  private static searchContinuation(initial: Record<string, Object>): string {
+    const primary: Record<string, Object> = asObject(asObject(asObject(initial['contents'])
+      ['twoColumnSearchResultsRenderer'])['primaryContents']);
+    const sections: Object = asObject(primary['sectionListRenderer'])['contents'];
+    if (!Array.isArray(sections)) return '';
+    for (const section of sections as Array<Object>) {
+      // 注意：asObject 只兜住自己那一层，中间层缺失时索引结果仍是 undefined，
+      // 必须把索引结果再包一次，否则这里会抛 TypeError 而不是返回空 token。
+      const endpoint: Record<string, Object> =
+        asObject(asObject(asObject(section)['continuationItemRenderer'])['continuationEndpoint']);
+      const token: string = asString(asObject(endpoint['continuationCommand'])['token']);
+      if (token.length > 0) return token;
+    }
+    return '';
+  }
+
+  static parseSearchPage(html: string): YouTubeSearchPage {
     const initial: Record<string, Object> | null = YouTubeApi.initialObject(html, 'ytInitialData');
     if (initial === null || initial['contents'] === undefined) {
       throw new Error('YouTube 返回了验证页或页面格式已变化，请稍后重试');
     }
-    const videos: Array<YouTubeVideo> = [];
-    YouTubeApi.collect(initial['contents'], videos, new Set<string>(), 0);
-    return videos;
+    const page: YouTubeSearchPage = new YouTubeSearchPage();
+    YouTubeApi.collect(initial['contents'], page.videos, new Set<string>(), 0);
+    page.continuation = YouTubeApi.searchContinuation(initial);
+    return page;
+  }
+
+  /** 只取视频列表的兼容入口；翻页需要 continuation，请用 parseSearchPage。 */
+  static parseSearch(html: string): Array<YouTubeVideo> {
+    return YouTubeApi.parseSearchPage(html).videos;
   }
 
   private static async page(url: string): Promise<string> {
@@ -130,11 +186,99 @@ export class YouTubeApi {
     return response.body;
   }
 
-  static async search(query: string): Promise<Array<YouTubeVideo>> {
+  /** 从 ytcfg 里取字符串配置。 */
+  private static configString(html: string, key: string): string {
+    const match: RegExpMatchArray | null = html.match(new RegExp('"' + key + '"\\s*:\\s*"([^"]*)"'));
+    return match === null ? '' : match[1];
+  }
+
+  /** 记住本次页面下发的 InnerTube 配置；缺失时关闭翻页（宁可少翻页，也不发无效请求）。 */
+  private static rememberInnerTube(html: string, page: YouTubeSearchPage): void {
+    const key: string = YouTubeApi.configString(html, 'INNERTUBE_API_KEY');
+    const version: string = YouTubeApi.configString(html, 'INNERTUBE_CLIENT_VERSION');
+    if (key.length === 0 || version.length === 0) {
+      page.continuation = '';
+      return;
+    }
+    YouTubeApi.innerApiKey = key;
+    YouTubeApi.innerClientVersion = version;
+  }
+
+  static async search(query: string): Promise<YouTubeSearchPage> {
     const term: string = query.trim().substring(0, 200);
-    if (term.length === 0) return [];
-    return YouTubeApi.parseSearch(await YouTubeApi.page(
-      'https://www.youtube.com/results?search_query=' + encodeURIComponent(term) + '&hl=zh-CN'));
+    if (term.length === 0) return new YouTubeSearchPage();
+    const html: string = await YouTubeApi.page(
+      'https://www.youtube.com/results?search_query=' + encodeURIComponent(term) + '&hl=zh-CN');
+    const page: YouTubeSearchPage = YouTubeApi.parseSearchPage(html);
+    YouTubeApi.rememberInnerTube(html, page);
+    return page;
+  }
+
+  /**
+   * 解析 InnerTube 翻页响应。新老两种容器都兼容：
+   * onResponseReceivedCommands[].appendContinuationItemsAction / reloadContinuationItemsCommand，
+   * 以及旧版 continuationContents.sectionListContinuation。解析不到就是空页，不抛错。
+   */
+  static parseContinuation(json: string): YouTubeSearchPage {
+    const page: YouTubeSearchPage = new YouTubeSearchPage();
+    let data: Record<string, Object>;
+    try {
+      data = asObject(JSON.parse(json) as Object);
+    } catch (_) {
+      throw new Error('YouTube 返回了无法解析的翻页数据');
+    }
+    const lists: Array<Object> = [];
+    const commands: Object = data['onResponseReceivedCommands'];
+    if (Array.isArray(commands)) {
+      for (const command of commands as Array<Object>) {
+        const record: Record<string, Object> = asObject(command);
+        const append: Object = asObject(record['appendContinuationItemsAction'])['continuationItems'];
+        const reload: Object = asObject(record['reloadContinuationItemsCommand'])['continuationItems'];
+        if (Array.isArray(append)) lists.push(append);
+        if (Array.isArray(reload)) lists.push(reload);
+      }
+    }
+    if (lists.length === 0) {
+      const legacy: Object =
+        asObject(asObject(data['continuationContents'])['sectionListContinuation'])['contents'];
+      if (Array.isArray(legacy)) lists.push(legacy);
+    }
+    const seen: Set<string> = new Set<string>();
+    for (const list of lists) {
+      YouTubeApi.collect(list, page.videos, seen, 0);
+      for (const item of list as Array<Object>) {
+        const endpoint: Record<string, Object> =
+          asObject(asObject(asObject(item)['continuationItemRenderer'])['continuationEndpoint']);
+        const token: string = asString(asObject(endpoint['continuationCommand'])['token']);
+        if (token.length > 0) page.continuation = token;
+      }
+    }
+    return page;
+  }
+
+  /**
+   * 翻页：YouTube 网页端的「加载更多」走 InnerTube continuation（POST + 页面下发的 key），
+   * 不是给结果页加 page 参数。token 由上一页携带，空 token 直接返回空页。
+   */
+  static async searchMore(token: string): Promise<YouTubeSearchPage> {
+    if (token.length === 0 || YouTubeApi.innerApiKey.length === 0) return new YouTubeSearchPage();
+    const body: InnerTubeRequest = {
+      context: { client: { clientName: 'WEB', clientVersion: YouTubeApi.innerClientVersion, hl: 'zh-CN' } },
+      continuation: token,
+    };
+    const response: HttpResponse = await HttpClient.post(
+      'https://www.youtube.com/youtubei/v1/search?key=' + YouTubeApi.innerApiKey + '&prettyPrint=false',
+      JSON.stringify(body), {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        // 与首页请求同样的桌面 UA：缺了它会拿到验证页而不是结果。
+        'User-Agent': YouTubeApi.DESKTOP_UA,
+      });
+    if (!response.ok) throw new Error(response.status < 0 ?
+      'YouTube 连接失败，请确认当前网络能访问 YouTube。' + response.transportMessage :
+      'YouTube 暂时无法访问（HTTP ' + String(response.status) + '）');
+    return YouTubeApi.parseContinuation(response.body);
   }
 
   static async detail(id: string): Promise<YouTubeVideo> {

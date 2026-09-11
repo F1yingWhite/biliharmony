@@ -394,9 +394,10 @@ test('History pager: clearing history invalidates an in-flight page', async () =
   assert.equal(pager.loading, false);
 });
 
-function assetEnvironment({ chunks, status = 200, writeFailure = false, burst = false }) {
+function assetEnvironment({ chunks, status = 200, writeFailure = false, burst = false }, proxy = null) {
   const files = new Map();
   const handles = new Map();
+  const optionsSeen = [];
   let fd = 0, active = 0, maximumActive = 0;
   const io = {
     OpenMode: { READ_WRITE: 1, CREATE: 2, TRUNC: 4 },
@@ -422,7 +423,8 @@ function assetEnvironment({ chunks, status = 200, writeFailure = false, burst = 
     let destroyed = false;
     return {
       on(event, handler) { listeners[event] = handler; },
-      requestInStream() {
+      requestInStream(url, options) {
+        optionsSeen.push(options);
         active++;
         maximumActive = Math.max(maximumActive, active);
         // Deliberately resolve status BEFORE body completion.
@@ -439,8 +441,9 @@ function assetEnvironment({ chunks, status = 200, writeFailure = false, burst = 
       destroy() { if (!destroyed) { destroyed = true; active--; } }
     };
   } } };
-  const env = environment({ '@kit.NetworkKit': network, '@kit.CoreFileKit': { fileIo: io } });
-  return { ...env, files, handles, maxActive: () => maximumActive };
+  const env = environment({ '@kit.NetworkKit': network, '@kit.CoreFileKit': { fileIo: io },
+    'services/network/HttpClient': { HttpClient: { proxyConfig: () => proxy } } });
+  return { ...env, files, handles, optionsSeen, maxActive: () => maximumActive };
 }
 
 test('Asset cache: stream completion and short writes finish before atomic publication', async () => {
@@ -474,6 +477,22 @@ test('Asset cache: oversized, invalid, HTTP-error and failed writes preserve ori
   }
 });
 
+test('Asset cache: streaming downloads use the configured proxy and stay direct by default', async () => {
+  // 回归背景：AssetDownload 自己 createHttp + requestInStream，不经过 HttpClient.execute。
+  // 漏掉 usingProxy 时，只能靠代理出网的环境里缓存图片会安静地全部失败（0 字节 .part），
+  // 表现为列表封面整片空白而不是报错。
+  const direct = assetEnvironment({ chunks: [Buffer.from('GIF89a0123456789')] });
+  const { AssetDownload: Direct } = direct.load('services/cache/AssetDownload');
+  assert.equal(await Direct.save('https://cdn.test/a.gif', '/cache/a.gif', 1024, 10000, () => true), true);
+  // 默认空值不写 usingProxy，行为与历史版本一致。
+  assert.equal(direct.optionsSeen[0].usingProxy, undefined);
+
+  const proxy = { host: '127.0.0.1', port: 7890, exclusionList: [] };
+  const proxied = assetEnvironment({ chunks: [Buffer.from('GIF89a0123456789')] }, proxy);
+  const { AssetDownload } = proxied.load('services/cache/AssetDownload');
+  assert.equal(await AssetDownload.save('https://cdn.test/a.gif', '/cache/a.gif', 1024, 10000, () => true), true);
+  assert.deepEqual(proxied.optionsSeen[0].usingProxy, proxy);
+});
 test('Asset cache: concurrent callers share a three-download bound and queued work completes', async () => {
   const env = assetEnvironment({ chunks: [Buffer.alloc(20)] });
   const { AssetDownload } = env.load('services/cache/AssetDownload');
@@ -573,6 +592,82 @@ test('YouTube: public pages are requested as a desktop client or the page has no
   assert.match(calls[1][0],/youtube\.com\/watch/);
 });
 
+test('YouTube: search pages carry the continuation token and paging posts it back', async () => {
+  // 回归背景：网页端「加载更多」走 InnerTube continuation（POST + 页面下发的 key），
+  // 不是给结果页加 page 参数。token 必须由上一页携带，请求体与请求头都不能省。
+  const id='aqz-KE-bpKQ', token='CONT_TOKEN_1';
+  const initial={contents:{twoColumnSearchResultsRenderer:{primaryContents:{sectionListRenderer:{contents:[
+    {itemSectionRenderer:{contents:[{videoRenderer:{videoId:id,title:{runs:[{text:'Bunny'}]},
+      ownerText:{runs:[{text:'Blender'}]},lengthText:{simpleText:'10:35'}}}]}},
+    {continuationItemRenderer:{continuationEndpoint:{continuationCommand:{token}}}},
+  ]}}}}};
+  const html='var ytInitialData = '+JSON.stringify(initial)+';'
+    +'"INNERTUBE_API_KEY":"KEY123","INNERTUBE_CLIENT_VERSION":"2.2026.01.00"';
+  const page2={onResponseReceivedCommands:[{appendContinuationItemsAction:{continuationItems:[
+    {itemSectionRenderer:{contents:[{videoRenderer:{videoId:'eW09jkDM9_s',title:{runs:[{text:'Second'}]}}}]}},
+    {continuationItemRenderer:{continuationEndpoint:{continuationCommand:{token:'CONT_TOKEN_2'}}}},
+  ]}}]};
+  const calls=[];
+  const {YouTubeApi}=environment({'services/network/HttpClient':{HttpClient:{
+    get:async(...args)=>{calls.push(['get',...args]);return {ok:true,body:html};},
+    post:async(...args)=>{calls.push(['post',...args]);return {ok:true,body:JSON.stringify(page2)};},
+  }}}).load('api/YouTubeApi');
+
+  const first=await YouTubeApi.search('blender');
+  assert.equal(first.videos.length,1);assert.equal(first.videos[0].id,id);
+  assert.equal(first.continuation,token);
+
+  const second=await YouTubeApi.searchMore(first.continuation);
+  assert.equal(second.videos.length,1);assert.equal(second.videos[0].id,'eW09jkDM9_s');
+  assert.equal(second.continuation,'CONT_TOKEN_2');
+
+  const [kind,url,body,headers]=calls[1];
+  assert.equal(kind,'post');
+  assert.match(url,/youtubei\/v1\/search\?key=KEY123/);
+  const parsed=JSON.parse(body);
+  assert.equal(parsed.continuation,token);
+  assert.equal(parsed.context.client.clientName,'WEB');
+  assert.equal(parsed.context.client.clientVersion,'2.2026.01.00');
+  assert.equal(headers['Content-Type'],'application/json');
+  assert.match(headers['User-Agent'],/Mozilla\/5\.0/);
+  assert.doesNotMatch(headers['User-Agent'],/Mobile/i);
+  // 第三方主机不得携带任何 B 站凭证。
+  assert.equal(headers.Cookie,undefined);assert.equal(headers.Referer,undefined);
+});
+
+test('YouTube: paging stops honestly when the page carries no InnerTube config', async () => {
+  // 没有 key/clientVersion 时不能拿旧值或空值拼请求：宁可停在首批，也不发无效请求。
+  const token='CONT_TOKEN_1';
+  const initial={contents:{twoColumnSearchResultsRenderer:{primaryContents:{sectionListRenderer:{contents:[
+    {itemSectionRenderer:{contents:[{videoRenderer:{videoId:'aqz-KE-bpKQ',title:{runs:[{text:'Bunny'}]}}}]}},
+    {continuationItemRenderer:{continuationEndpoint:{continuationCommand:{token}}}},
+  ]}}}}};
+  const calls=[];
+  const {YouTubeApi}=environment({'services/network/HttpClient':{HttpClient:{
+    get:async(...args)=>{calls.push(args);return {ok:true,body:'var ytInitialData = '+JSON.stringify(initial)+';'};},
+    post:async(...args)=>{calls.push(args);return {ok:true,body:'{}'};},
+  }}}).load('api/YouTubeApi');
+  const page=await YouTubeApi.search('blender');
+  assert.equal(page.videos.length,1);
+  assert.equal(page.continuation,'');
+  const more=await YouTubeApi.searchMore('');
+  assert.equal(more.videos.length,0);assert.equal(more.continuation,'');
+  assert.equal(calls.length,1);
+});
+
+test('YouTube: continuation parsing accepts both containers and rejects garbage', () => {
+  const {YouTubeApi}=environment({'services/network/HttpClient':{}}).load('api/YouTubeApi');
+  const legacy={continuationContents:{sectionListContinuation:{contents:[
+    {itemSectionRenderer:{contents:[{videoRenderer:{videoId:'eW09jkDM9_s',title:{runs:[{text:'Legacy'}]}}}]}},
+    {continuationItemRenderer:{continuationEndpoint:{continuationCommand:{token:'NEXT'}}}},
+  ]}}};
+  const page=YouTubeApi.parseContinuation(JSON.stringify(legacy));
+  assert.equal(page.videos.length,1);assert.equal(page.videos[0].title,'Legacy');
+  assert.equal(page.continuation,'NEXT');
+  // 空响应不抛错（翻页调用方按空页收尾），非法 JSON 才报错。
+  assert.equal(YouTubeApi.parseContinuation('{}').videos.length,0);
+  assert.throws(()=>YouTubeApi.parseContinuation('<!doctype html>'),/翻页数据/);
+});
 test('Platform: switching platforms invalidates in-flight work and persists the choice', () => {
   const env=environment({});
   const {PlatformStore}=env.load('common/PlatformStore');
