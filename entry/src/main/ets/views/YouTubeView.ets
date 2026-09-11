@@ -52,6 +52,7 @@ export struct YouTubeView {
   @State accountSheet: boolean = false;
   /** 本地稍后观看数量：由 YouTubeWatchLaterStore 广播，返回本页时不会读到旧值。 */
   @StorageProp('youtubeWatchLaterCount') savedCount: number = 0;
+  @StorageProp('youtubeHistoryCount') historyCount: number = 0;
   /** 输入联想（防抖后取回）与本地搜索历史；两者都与哔哩哔哩搜索页对等。 */
   @State suggestions: Array<string> = [];
   @State history: Array<string> = [];
@@ -759,7 +760,7 @@ export struct YouTubeView {
               Text('Google 账号未连接').fontSize(12).fontColor('#9499A0')
             }.alignItems(HorizontalAlign.Start).layoutWeight(1)
           }.width('100%').alignItems(VerticalAlign.Center)
-          Text('当前可用的是游客探索、搜索与本机稍后观看；观看历史、订阅与播放列表需要账号，暂未开放。')
+          Text('当前可用的是游客探索、搜索，以及本机的稍后观看与观看历史；订阅与播放列表需要账号，暂未开放。')
             .fontSize(12).lineHeight(18).fontColor('#9499A0').width('100%')
           // 说明入口沿用哔哩哔哩「我的」页的胶囊按钮规格（圆角 18）。
           Text('了解如何连接')
@@ -789,7 +790,22 @@ export struct YouTubeView {
               .color(this.isDark ? '#1FFFFFFF' : '#0F000000')
               .margin({ left: 48, right: 14 })
           }.width('100%')
-          ForEach(['观看历史', '订阅内容', '播放列表'], (label: string, index: number) => {
+          // 观看历史同样是本机列表（打开详情即记录），也不需要账号。
+          Column() {
+            Row({ space: 14 }) {
+              Text('观看历史').fontSize(15).fontColor(AppTheme.onSurface()).layoutWeight(1)
+              Text(this.historyCount > 0 ? String(this.historyCount) : '本机')
+                .fontSize(12).fontColor('#9499A0')
+              Image($r('app.media.ic_arrow_right')).width(18).height(18).fillColor('#C1C2C5')
+            }
+            .width('100%').height(48).padding({ left: 14, right: 14 })
+            .alignItems(VerticalAlign.Center)
+            .onClick(() => { AppNavStack.pushPathByName(NAV_YOUTUBE_SAVED, 'history'); })
+            Divider().strokeWidth(0.5)
+              .color(this.isDark ? '#1FFFFFFF' : '#0F000000')
+              .margin({ left: 48, right: 14 })
+          }.width('100%')
+          ForEach(['订阅内容', '播放列表'], (label: string, index: number) => {
             Column() {
               Row({ space: 14 }) {
                 Text(label).fontSize(15).fontColor('#9499A0').layoutWeight(1)
@@ -799,7 +815,7 @@ export struct YouTubeView {
               .width('100%').height(48).padding({ left: 14, right: 14 })
               .alignItems(VerticalAlign.Center)
               .onClick(() => { this.toast('连接 YouTube 账号后可用'); })
-              if (index < 2) {
+              if (index < 1) {
                 Divider().strokeWidth(0.5)
                   .color(this.isDark ? '#1FFFFFFF' : '#0F000000')
                   .margin({ left: 48, right: 14 })

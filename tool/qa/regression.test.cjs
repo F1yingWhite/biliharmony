@@ -873,6 +873,44 @@ test('Watch later: the local list is newest-first, deduplicated and account-free
   store2.init({});
   assert.deepEqual(await store2.ensureLoaded(),[]);
 });
+test('Watch history: local, newest-first, capped, and independent from watch later', async () => {
+  // 本地观看历史：打开详情即记录，同样不需要账号；上限比稍后观看大（流水 vs 待办）。
+  const disk=new Map();
+  const prefs={getPreferences:async()=>({getSync:(k,d)=>disk.has(k)?disk.get(k):d,
+    putSync:(k,v)=>{disk.set(k,v);},flush:async()=>{}})};
+  const env=environment({'@kit.AbilityKit':{common:{}},'@kit.ArkData':{preferences:prefs}});
+  const {YouTubeHistoryStore}=env.load('common/YouTubeHistoryStore');
+  const {YouTubeWatchLaterStore}=env.load('common/YouTubeWatchLaterStore');
+  const make=(id,title)=>({id,title,channel:'频道',thumbnail:'https://i.ytimg.com/vi/'+id+'/hqdefault.jpg',
+    duration:'1:00',views:'1次观看',published:'1天前'});
+  YouTubeHistoryStore.init({});
+  YouTubeWatchLaterStore.init({});
+
+  YouTubeHistoryStore.record(make('aqz-KE-bpKQ','A'));
+  YouTubeHistoryStore.record(make('eW09jkDM9_s','B'));
+  // 重复打开同一视频只更新时间与元数据，不产生第二条。
+  YouTubeHistoryStore.record(make('aqz-KE-bpKQ','A2'));
+  assert.deepEqual(YouTubeHistoryStore.list().map(v=>v.id),['aqz-KE-bpKQ','eW09jkDM9_s']);
+  assert.equal(YouTubeHistoryStore.list()[0].title,'A2');
+  assert.equal(env.storage.get('youtubeHistoryCount'),2);
+
+  // 两个本地列表各自独立：写历史不会动到稍后观看，反之亦然。
+  YouTubeWatchLaterStore.add(make('xOXolSQcEb4','W'));
+  assert.equal(YouTubeWatchLaterStore.count(),1);
+  assert.equal(YouTubeHistoryStore.count(),2);
+  // 两个列表各自广播自己的计数：入口行读的就是这两个键。
+  assert.equal(env.storage.get('youtubeHistoryCount'),2);
+  assert.equal(env.storage.get('youtubeWatchLaterCount'),1);
+
+  assert.deepEqual(YouTubeHistoryStore.remove('aqz-KE-bpKQ').map(v=>v.id),['eW09jkDM9_s']);
+  YouTubeHistoryStore.clear();
+  assert.equal(env.storage.get('youtubeHistoryCount'),0);
+  assert.equal(YouTubeWatchLaterStore.count(),1);
+
+  for(let i=0;i<205;i++) YouTubeHistoryStore.record(make('id'+String(i).padStart(9,'0'),'t'+String(i)));
+  assert.equal(YouTubeHistoryStore.count(),200);
+  assert.equal(YouTubeHistoryStore.list()[0].title,'t204');
+});
 test('Platform: switching platforms invalidates in-flight work and persists the choice', () => {
   const env=environment(themeMocks());
   const {PlatformStore}=env.load('common/PlatformStore');
