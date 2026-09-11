@@ -56,7 +56,7 @@ export class BangumiApi {
     });
     const data: Record<string, Object> | null = getData(
       await webGet(Api.bangumiIndex, params, undefined, headers));
-    if (data === null) return result;
+    if (data === null) throw new Error('番剧索引加载失败');
     result.hasNext = asBool(data['has_next'], false);
     result.total = asNumber(data['total'], 0);
     const list: Array<Object> = asArray(data['list']);
@@ -74,15 +74,21 @@ export class BangumiApi {
     };
     const resp: HttpResponse = await webGet(Api.pgcTimeline, params, 'https://www.bilibili.com/anime/timeline/');
     const json: Record<string, Object> = resp.json();
-    if (asNumber(json['code'], -1) !== 0) return result;
+    if (asNumber(json['code'], -1) !== 0) throw new Error('时间表加载失败');
     const days: Array<Object> = asArray(json['result']);
     for (let i: number = 0; i < days.length; i++) {
       const raw: Record<string, Object> = asObject(days[i]);
       const day: TimeLineDay = new TimeLineDay();
       day.date = str(raw, 'date', '');
+      day.dateTimestamp = asNumber(raw['date_ts'], 0);
+      day.isToday = asNumber(raw['is_today'], 0) === 1;
       day.dayOfWeek = asNumber(raw['day_of_week'], 0);
       const episodes: Array<Object> = asArray(raw['episodes']);
-      for (let j: number = 0; j < episodes.length; j++) day.episodes.push(TimeLineEpisode.from(episodes[j]));
+      for (let j: number = 0; j < episodes.length; j++) {
+        const episode: TimeLineEpisode = TimeLineEpisode.from(episodes[j]);
+        episode.seasonType = types;
+        day.episodes.push(episode);
+      }
       result.push(day);
     }
     return result;

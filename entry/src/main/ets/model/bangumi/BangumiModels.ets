@@ -35,6 +35,8 @@ export class BangumiEpisode {
 }
 /** PGC 季详情；注意 pgc/view/web/season 的数据主体在 result 而非 data。 */
 export class BangumiSeason {
+  /** 1 番剧、4 国创，其余为影视类型；未知类型使用通用文案。 */
+  seasonType: number = 0;
   seasonId: number = 0;
   title: string = '';
   /** 副标题（"更新至第x话" 等） */
@@ -69,6 +71,7 @@ export class BangumiSeason {
     const j: Record<string, Object> = asObject(o);
     const s: BangumiSeason = new BangumiSeason();
     s.seasonId = asNumber(j['season_id'], 0);
+    s.seasonType = asNumber(j['type'], asNumber(j['season_type'], 0));
     s.title = str(j, 'title', '');
     s.subtitle = str(j, 'subtitle', '');
     s.cover = toHttps(str(j, 'cover', ''));

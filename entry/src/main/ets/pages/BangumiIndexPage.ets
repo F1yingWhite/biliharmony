@@ -2,6 +2,8 @@
  * 番剧索引页：按类型（番剧/国创/电影/电视剧/纪录片）× 状态（全部/连载/完结）筛选的番剧聚合。
  * 数据源 pgc/season/index/result，点击条目进入番剧详情。
  */
+import { RequestEpoch } from '../common/RequestEpoch';
+import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, NAV_BANGUMI_DETAIL, NAV_BANGUMI_TIMELINE, BangumiDetailParam } from '../common/AppRouter';
 import { BangumiApi } from '../api/BangumiApi';
@@ -20,8 +22,8 @@ interface BangumiTypeOption {
 
 const BANGUMI_TYPES: Array<BangumiTypeOption> = [
   { label: '番剧', value: 1 },
-  { label: '国创', value: 2 },
-  { label: '影视', value: 4 },
+  { label: '国创', value: 4 },
+  { label: '电影', value: 2 },
   { label: '剧集', value: 5 },
   { label: '纪录片', value: 3 },
 ];
@@ -39,90 +41,96 @@ export struct BangumiIndexPage {
   @State loading: boolean = false;
   @State page: number = 1;
   @State hasMore: boolean = true;
-  @State listLoading: boolean = false;
+  @State moreFailed: boolean = false;
   @State errorText: string = '';
+  @State failed: boolean = false;
   @State totalText: string = '';
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   private source: BasicDataSource<BangumiIndexItem> = new BasicDataSource<BangumiIndexItem>();
-  // 当前请求参数快照，避免切换筛选后旧请求结果覆盖新列表。
-  private requestKey: string = '';
-  private static requestSeq: number = 0;
+  private requestEpoch: RequestEpoch = new RequestEpoch();
+  private destroyed: boolean = false;
 
   aboutToAppear(): void {
-    this.load(true).catch(() => {
-    });
+    this.destroyed = false;
+    this.load(true).catch(() => {});
   }
 
-  private filterKey(): string {
-    return String(this.type) + '_' + String(this.finish);
+  aboutToDisappear(): void {
+    this.destroyed = true;
+    this.requestEpoch.invalidate();
   }
 
   async load(reset: boolean): Promise<void> {
-    if (this.loading || (!reset && !this.hasMore)) {
-      return;
-    }
+    if (this.destroyed || (!reset && (this.loading || !this.hasMore))) return;
+    const epoch: number = this.requestEpoch.next();
     this.loading = true;
-    if (reset) this.errorText = '';
-    const key: string = this.filterKey();
-    this.requestKey = key;
-    BangumiIndexPage.requestSeq++;
-    const seq: number = BangumiIndexPage.requestSeq;
+    this.failed = false;
+    this.moreFailed = false;
+    if (reset) {
+      this.errorText = '';
+      this.source.clear();
+      this.totalText = '';
+      this.page = 1;
+      this.hasMore = true;
+    }
+    const pn: number = reset ? 1 : this.page + 1;
     try {
-      const pn: number = reset ? 1 : this.page + 1;
       const data = await BangumiApi.getIndex(this.type, this.finish, pn, 0);
-      // 筛选切换后到达的旧响应直接丢弃，避免张冠李戴。
-      if (this.requestKey !== key || seq !== BangumiIndexPage.requestSeq) {
-        return;
-      }
-      if (data.items.length === 0 && reset) {
-        this.errorText = '该筛选下暂无作品';
-      }
+      if (!this.requestEpoch.isCurrent(epoch)) return;
       if (reset) {
         this.source.reset(data.items);
-        this.page = 1;
-        this.hasMore = data.hasNext;
         this.totalText = data.total > 0 ? '共 ' + String(data.total) + ' 部' : '';
+        if (data.items.length === 0) this.errorText = '该筛选下暂无作品';
       } else {
         this.source.append(data.items);
-        this.page = pn;
-        this.hasMore = data.hasNext;
       }
+      this.page = pn;
+      this.hasMore = data.hasNext && data.items.length > 0;
     } catch (e) {
-      if (reset && this.source.isEmpty()) {
-        this.errorText = '加载失败，点击重试';
+      if (!this.requestEpoch.isCurrent(epoch)) return;
+      if (reset) {
+        this.failed = true;
+        this.errorText = '加载失败，请检查网络后重试';
+      } else {
+        this.moreFailed = true;
       }
     } finally {
-      if (seq === BangumiIndexPage.requestSeq) {
-        this.loading = false;
-      }
+      if (this.requestEpoch.isCurrent(epoch)) this.loading = false;
     }
   }
 
   switchFilter(nextType: number, nextFinish: number): void {
-    if (this.listLoading) {
-      return;
-    }
-    this.listLoading = true;
+    if (this.type === nextType && this.finish === nextFinish) return;
     this.type = nextType;
     this.finish = nextFinish;
-    this.load(true).finally(() => {
-      this.listLoading = false;
-    });
+    this.load(true).catch(() => {});
   }
 
   @Builder
-  Chip(label: string, active: boolean, onTap: () => void) {
+  ResultFooter() {
+    LoadMoreFooter({
+      loading: this.loading,
+      hasMore: this.hasMore,
+      moreText: this.moreFailed ? '加载失败 · 点击重试' : '加载更多',
+      endText: '已显示全部作品',
+      fixedHeight: 44,
+      onLoadMore: () => this.load(false).catch(() => {}),
+    })
+  }
+
+  @Builder
+  Chip(label: string, value: number, isType: boolean) {
     Text(label)
       .fontSize(13)
-      .fontColor(active ? '#FFFFFF' : (this.isDark ? '#C9C9CE' : '#61666D'))
+      .fontColor((isType ? this.type : this.finish) === value ? '#FFFFFF' : (this.isDark ? '#C9C9CE' : '#61666D'))
       .padding({ left: 13, right: 13, top: 6, bottom: 6 })
       .borderRadius(15)
-      .backgroundColor(active ? this.accent : (this.isDark ? '#2A2C31' : '#F0F1F3'))
+      .backgroundColor((isType ? this.type : this.finish) === value ? this.accent : (this.isDark ? '#2A2C31' : '#F0F1F3'))
       .animation({ duration: 160, curve: Curve.EaseOut })
       .onClick(() => {
         Haptic.tap();
-        onTap();
+        this.switchFilter(isType ? value : this.type, isType ? this.finish : value);
       })
   }
 
@@ -130,7 +138,7 @@ export struct BangumiIndexPage {
   TypeRow() {
     Row({ space: 8 }) {
       ForEach(BANGUMI_TYPES, (o: BangumiTypeOption) => {
-        this.Chip(o.label, o.value === this.type, () => this.switchFilter(o.value, this.finish))
+        this.Chip(o.label, o.value, true)
       }, (o: BangumiTypeOption) => 't' + o.label)
       Blank()
     }
@@ -141,7 +149,7 @@ export struct BangumiIndexPage {
   FinishRow() {
     Row({ space: 8 }) {
       ForEach(FINISH_OPTIONS, (o: BangumiTypeOption) => {
-        this.Chip(o.label, o.value === this.finish, () => this.switchFilter(this.type, o.value))
+        this.Chip(o.label, o.value, false)
       }, (o: BangumiTypeOption) => 'f' + o.label)
       Blank()
     }
@@ -192,6 +200,7 @@ export struct BangumiIndexPage {
       .aspectRatio(0.7)
       .clip(true)
       Text(item.title)
+        .height(36).lineHeight(18)
         .fontSize(13)
         .fontColor(this.isDark ? '#F0F0F2' : '#18191C')
         .maxLines(2)
@@ -199,6 +208,7 @@ export struct BangumiIndexPage {
         .width('100%')
       if (item.indexShow.length > 0) {
         Text(item.indexShow)
+          .height(14)
           .fontSize(10)
           .fontColor('#9499A0')
           .maxLines(1)
@@ -206,11 +216,14 @@ export struct BangumiIndexPage {
           .width('100%')
       } else if (item.subTitle.length > 0) {
         Text(item.subTitle)
+          .height(14)
           .fontSize(10)
           .fontColor('#9499A0')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
+      } else {
+        Text('').height(14)
       }
     }
     .width('100%')
@@ -265,34 +278,22 @@ export struct BangumiIndexPage {
       .padding({ left: 12, right: 12, top: 10, bottom: 4 })
 
       if (this.source.isEmpty() && this.loading) {
-        LoadingView({ loading: true })
-          .margin({ top: 40 })
+        LoadingView({ skeleton: 'poster', loading: true })
+
       } else if (this.source.isEmpty() && this.errorText.length > 0) {
-        LoadingView({ loading: false, empty: true, emptyText: this.errorText, onRetry: () => {
+        LoadingView({ skeleton: 'poster', loading: false, empty: !this.failed, emptyText: this.errorText, errorText: this.failed ? this.errorText : '', onRetry: () => {
           this.load(true).catch(() => {
           });
         } })
-          .margin({ top: 40 })
+
       } else {
-        List() {
+        List({ space: 12 }) {
+          ListItemGroup({ footer: this.ResultFooter(), space: 12 }) {
           LazyForEach(this.source, (item: BangumiIndexItem) => {
             ListItem() {
               this.CoverCard(item)
             }
           }, (item: BangumiIndexItem) => String(item.seasonId))
-          ListItem() {
-            Text(this.hasMore ? (this.loading ? '加载中…' : '加载更多') : '—— 到底啦 ——')
-              .width('100%')
-              .fontSize(12)
-              .fontColor('#9499A0')
-              .textAlign(TextAlign.Center)
-              .padding({ top: 12, bottom: 12 })
-              .onClick(() => {
-                if (this.hasMore && !this.loading) {
-                  this.load(false).catch(() => {
-                  });
-                }
-              })
           }
         }
         .width('100%')
@@ -304,7 +305,7 @@ export struct BangumiIndexPage {
         .scrollBar(BarState.Off)
         .cachedCount(6)
         .onReachEnd(() => {
-          if (this.hasMore && !this.loading) {
+          if (this.hasMore && !this.loading && !this.moreFailed) {
             this.load(false).catch(() => {
             });
           }
@@ -313,7 +314,7 @@ export struct BangumiIndexPage {
     }
     .width('100%')
     .height('100%')
-    .padding({ top: Immersive.statusBarHeight() })
+    .padding({ top: Immersive.statusBarHeight(), bottom: Immersive.bottomInset() })
     .backgroundColor(this.isDark ? '#141519' : '#F6F7F9')
   }
 }

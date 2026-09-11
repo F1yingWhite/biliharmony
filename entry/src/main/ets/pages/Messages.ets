@@ -1,3 +1,4 @@
+import { MotionTokens } from '../common/MotionTokens';
 /** B 站消息中心：私信会话/聊天 + 回复我的/@我/收到的赞/系统通知 五个分类 Tab。 */
 import { AppTheme } from '../common/AppTheme';
 import { display } from '@kit.ArkUI';
@@ -34,6 +35,11 @@ export struct MessagesPage {
   @State draft: string = '';
   @State sending: boolean = false;
   @State readAllLoading: boolean = false;
+  @State viewportWidth: number = 400;
+  private messageScroller: Scroller = new Scroller();
+  private firstVisibleMessage: number = 0;
+  private pendingScrollIndex: number | null = null;
+  private scrollTimer: number = -1;
   /** 顶部分类 Tab：0 私信 1 回复 2 @我 3 赞 4 系统 */
   @State activeTab: number = 0;
   @StorageProp('messageThreadOpen') threadOpen: boolean = false;
@@ -103,6 +109,8 @@ export struct MessagesPage {
   async openSession(item: MessageSessionItem): Promise<void> {
     this.messageGeneration++;
     this.current = item;
+    this.draft = '';
+    this.pendingScrollIndex = null;
     AppStorage.setOrCreate<boolean>('messageThreadOpen', true);
     this.messages = [];
     this.messageError = '';
@@ -124,7 +132,12 @@ export struct MessagesPage {
         return;
       }
       this.messageError = '';
+      const previousCount: number = this.messages.length;
+      const firstVisible: number = this.firstVisibleMessage;
       this.messages = reset ? data.messages : this.mergeMessages(data.messages, this.messages);
+      // 首次进入看最新消息；向前翻页保留原来的阅读位置。
+      this.pendingScrollIndex = reset ? -1 : firstVisible + this.messages.length - previousCount;
+      this.scheduleMessageScroll();
       this.minSeqno = data.minSeqno > 0 ? data.minSeqno : this.minSeqno;
       this.hasMore = data.hasMore;
       if (reset && this.messages.length > 0) {
@@ -136,7 +149,7 @@ export struct MessagesPage {
         });
       }
     } catch (e) {
-      // 保留当前会话内容，触顶或重试时可再次请求。
+      if (generation === this.messageGeneration) this.messageError = '消息加载失败，请重试';
     } finally {
       if (generation === this.messageGeneration) this.messageLoading = false;
     }
@@ -181,6 +194,8 @@ export struct MessagesPage {
       local.timestamp = Math.floor(Date.now() / 1000);
       local.seqno = Date.now();
       this.messages = this.messages.concat([local]);
+      this.pendingScrollIndex = -1;
+      this.scheduleMessageScroll();
       if (this.draft.trim() === content) this.draft = '';
     } catch (e) {
       if (generation === this.messageGeneration && this.current.talkerId === talkerId) {
@@ -202,9 +217,29 @@ export struct MessagesPage {
   }
 
   aboutToDisappear(): void {
+    this.messageGeneration++;
+    if (this.scrollTimer >= 0) clearTimeout(this.scrollTimer);
     // 离开消息中心回到首页时重新拉一次未读数，让头栏角标与服务端已读状态对齐。
     MsgUnreadStore.refresh().catch(() => {
     });
+  }
+
+  private scheduleMessageScroll(): void {
+    const index: number | null = this.pendingScrollIndex;
+    if (index === null || !this.threadOpen) return;
+    this.pendingScrollIndex = null;
+    const generation: number = this.messageGeneration;
+    if (this.scrollTimer >= 0) clearTimeout(this.scrollTimer);
+    this.scrollTimer = setTimeout(() => {
+      this.scrollTimer = -1;
+      if (!this.threadOpen || generation !== this.messageGeneration) return;
+      if (index < 0) this.messageScroller.scrollToIndex(this.messages.length, false, ScrollAlign.END);
+      else this.messageScroller.scrollToIndex(index, false, ScrollAlign.START);
+    }, 120);
+  }
+
+  private bubbleWidth(): number {
+    return Math.max(120, Math.min(280, this.viewportWidth - 96));
   }
 
   @Builder
@@ -217,7 +252,7 @@ export struct MessagesPage {
   @Builder
   SessionRow(item: MessageSessionItem) {
     Row({ space: 12 }) {
-      Stack({ alignContent: Alignment.TopEnd }) {
+      Stack({ alignContent: Alignment.Center }) {
         if (item.avatar.length > 0) {
           Image(item.avatar).width(48).height(48).borderRadius(24).objectFit(ImageFit.Cover)
         } else {
@@ -229,7 +264,7 @@ export struct MessagesPage {
           Text(item.unread > 99 ? '99+' : String(item.unread))
             .fontSize(9).fontColor('#FFFFFF').backgroundColor(AppTheme.DANGER)
             .padding({ left: 5, right: 5, top: 2, bottom: 2 }).borderRadius(9)
-            .translate({ x: 5, y: -3 })
+            .position({ right: -3, top: -3 })
         }
       }
       .width(50).height(50)
@@ -238,6 +273,7 @@ export struct MessagesPage {
           Text(item.name.length > 0 ? item.name : '用户 ' + String(item.talkerId))
             .fontSize(15).fontWeight(FontWeight.Medium)
             .fontColor(this.isDark ? '#FFFFFF' : '#18191C').layoutWeight(1).maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(formatRelativeTime(item.timestamp))
             .fontSize(10).fontColor('#B0B3B8')
           Text('⋯')
@@ -348,7 +384,7 @@ export struct MessagesPage {
 
   private imageMessageHeight(item: PrivateMessageItem): number {
     if (item.imageWidth <= 0 || item.imageHeight <= 0) return 180;
-    return Math.max(120, Math.min(300, 240 * item.imageHeight / item.imageWidth));
+    return Math.max(80, Math.min(300, Math.min(240, this.bubbleWidth()) * item.imageHeight / item.imageWidth));
   }
 
   private componentRect(id: string): ImageViewerSrcRect | undefined {
@@ -438,23 +474,22 @@ export struct MessagesPage {
           .fontSize(13)
           .fontWeight(FontWeight.Medium)
           .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .lineHeight(19)
         if (item.richDesc.length > 0) {
           Text(item.richDesc)
-            .fontSize(11)
-            .fontColor('#9499A0')
-            .maxLines(2)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .fontSize(14)
+            .fontColor(this.isDark ? '#C5CAD3' : '#5C626E')
+            .lineHeight(21)
+            .copyOption(CopyOptions.LocalDevice)
         }
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
     }
-    .width(280)
+    .width(this.bubbleWidth())
     .padding(8)
     .borderRadius(10)
-    .backgroundColor(this.isDark ? '#25262A' : '#E8EAED')
+    .backgroundColor(this.isDark ? '#292C33' : '#FFFFFF')
     .id(this.richCardId(item))
     .onClick(() => this.openRichMessage(item))
   }
@@ -463,19 +498,27 @@ export struct MessagesPage {
   ImageMessageCard(item: PrivateMessageItem) {
     Image(biliImageThumbnail(item.imageUrl, 640))
       .id(this.richMediaId(item))
-      .width(240)
+      .width(Math.min(240, this.bubbleWidth()))
       .height(this.imageMessageHeight(item))
-      .objectFit(ImageFit.Cover)
+      .objectFit(ImageFit.Contain)
       .borderRadius(10)
       .clip(true)
       .onClick(() => this.openRichMessage(item))
   }
 
   @Builder
+  MessageAvatar(mine: boolean) {
+    Image(mine ? (UserStore.current?.face || $r('app.media.placeholder_avatar_noface')) :
+      (this.current.avatar || $r('app.media.placeholder_avatar_noface')))
+      .width(34).height(34).borderRadius(17).objectFit(ImageFit.Cover)
+  }
+
+  @Builder
   MessageBubble(item: PrivateMessageItem) {
-    Row() {
+    Row({ space: 8 }) {
       if (item.senderId === (UserStore.current?.mid ?? 0)) Blank()
-      Column({ space: 4 }) {
+      else this.MessageAvatar(false)
+      Column({ space: 5 }) {
         if (item.imageUrl.length > 0) {
           this.ImageMessageCard(item)
         } else if (item.richTitle.length > 0 || item.richCover.length > 0 || item.richUrl.length > 0) {
@@ -483,24 +526,27 @@ export struct MessagesPage {
         } else {
           Text(item.text)
             .fontSize(14)
-            .fontColor(item.senderId === (UserStore.current?.mid ?? 0) ? '#FFFFFF' : (this.isDark ? '#FFFFFF' : '#18191C'))
-            .lineHeight(20)
-            .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+            .fontColor(this.isDark ? '#F1F2F5' : '#242833')
+            .lineHeight(21)
+            .copyOption(CopyOptions.LocalDevice)
+            .padding({ left: 12, right: 12, top: 10, bottom: 10 })
             .borderRadius(14)
-            .backgroundColor(item.senderId === (UserStore.current?.mid ?? 0) ? this.accent :
-              (this.isDark ? '#303136' : '#F1F3F5'))
+            .backgroundColor(item.senderId === (UserStore.current?.mid ?? 0) ?
+              colorWithAlpha(this.accent, this.isDark ? '55' : '26') : (this.isDark ? '#292C33' : '#FFFFFF'))
         }
         Text(formatRelativeTime(item.timestamp))
-          .fontSize(9)
-          .fontColor(item.senderId === (UserStore.current?.mid ?? 0) ? '#CCFFFFFF' : '#9499A0')
+          .fontSize(10)
+          .fontColor(this.isDark ? '#A5AAB5' : '#808792')
           .padding({ left: 4, right: 4 })
       }
       .alignItems(item.senderId === (UserStore.current?.mid ?? 0) ? HorizontalAlign.End : HorizontalAlign.Start)
-      .constraintSize({ maxWidth: 280 })
-      if (item.senderId !== (UserStore.current?.mid ?? 0)) Blank()
+      .constraintSize({ maxWidth: this.bubbleWidth() })
+      if (item.senderId === (UserStore.current?.mid ?? 0)) this.MessageAvatar(true)
+      else Blank()
     }
     .width('100%')
-    .padding({ top: 5, bottom: 5 })
+    .alignItems(VerticalAlign.Top)
+    .padding({ top: 8, bottom: 8 })
   }
 
   @Builder
@@ -523,6 +569,7 @@ export struct MessagesPage {
     .width('100%')
     .padding({ left: 10, right: 10, top: 8, bottom: 8 })
     .border({ width: { top: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
+    .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
   }
 
   @Builder
@@ -558,7 +605,7 @@ export struct MessagesPage {
   @Builder
   SessionListContent() {
     if (this.sessionCount === 0) {
-      LoadingView({ loading: this.sessionLoading, empty: !this.sessionLoading && this.sessionError.length === 0,
+      LoadingView({ skeleton: 'sessions', loading: this.sessionLoading, empty: !this.sessionLoading && this.sessionError.length === 0,
         emptyText: '暂无私信会话', errorText: this.sessionError,
         onRetry: () => this.loadSessions(true).catch(() => {
         }) })
@@ -709,7 +756,7 @@ export struct MessagesPage {
           this.ReportUserButton()
         },
       })
-      List() {
+      List({ scroller: this.messageScroller }) {
         ListItem() {
           Text(this.messageLoading ? '加载中…' : (this.messageError.length > 0 ? this.messageError + ' · 点此重试' :
             (this.hasMore ? '加载更早消息' : '没有更早消息了')))
@@ -729,13 +776,14 @@ export struct MessagesPage {
       .layoutWeight(1)
       .padding({ left: 10, right: 10 })
       .scrollBar(BarState.Off)
+      .onScrollIndex((start: number) => this.firstVisibleMessage = start)
       .contentEndOffset(12)
       .clip(true)
       this.Composer()
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+    .backgroundColor(this.isDark ? '#18191C' : '#F4F5F7')
   }
 
   build() {
@@ -748,7 +796,7 @@ export struct MessagesPage {
       .translate({ x: this.threadOpen ? '-24%' : '0%' })
       .opacity(this.threadOpen ? 0.88 : 1)
       .hitTestBehavior(this.threadOpen ? HitTestMode.None : HitTestMode.Default)
-      .animation({ duration: 187, curve: Curve.EaseOut })
+      .animation({ duration: MotionTokens.navigation, curve: Curve.EaseOut })
 
       Stack({ alignContent: Alignment.TopStart }) {
         this.MessageThreadPage()
@@ -759,12 +807,16 @@ export struct MessagesPage {
       .zIndex(1)
       .hitTestBehavior(this.threadOpen ? HitTestMode.Default : HitTestMode.None)
       .shadow({ radius: 12, color: '#26000000', offsetX: -5, offsetY: 0 })
-      .animation({ duration: 187, curve: Curve.EaseOut })
+      .animation({ duration: MotionTokens.navigation, curve: Curve.EaseOut })
     }
     .width('100%')
     .height('100%')
     .clip(true)
-    .padding({ top: Immersive.statusBarHeight() })
+    .padding({ top: Immersive.statusBarHeight(), bottom: Immersive.bottomInset() })
+    .onAreaChange((previous: Area, current: Area) => {
+      const width: number = Number(current.width);
+      if (width > 0) this.viewportWidth = width;
+    })
     .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
   }
 }

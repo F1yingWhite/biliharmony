@@ -18,6 +18,7 @@ export struct BangumiListPage {
   @State loading: boolean = false;
   @State count: number = 0;
   @State errorText: string = '';
+  @State failed: boolean = false;
   @State page: number = 1;
   @State hasMore: boolean = false;
   @State listLoading: boolean = false;
@@ -36,6 +37,7 @@ export struct BangumiListPage {
     }
     this.loading = true;
     if (reset) this.errorText = '';
+    this.failed = false;
     try {
       await UserStore.ensureLoaded();
       const mid: number = UserStore.current !== null ? UserStore.current.mid : 0;
@@ -60,7 +62,8 @@ export struct BangumiListPage {
       this.count = this.source.totalCount();
     } catch (e) {
       if (reset && this.source.isEmpty()) {
-        this.errorText = '加载失败，点击重试';
+        this.failed = true;
+        this.errorText = '加载失败，请检查网络后重试';
       }
     } finally {
       this.loading = false;
@@ -68,10 +71,12 @@ export struct BangumiListPage {
   }
 
   switchType(t: number): void {
-    if (t === this.type || this.listLoading) {
+    if (t === this.type || this.listLoading || this.loading) {
       return;
     }
     this.type = t;
+    this.source.clear();
+    this.count = 0;
     this.listLoading = true;
     this.load(true).finally(() => {
       this.listLoading = false;
@@ -101,19 +106,20 @@ export struct BangumiListPage {
       .border({ width: { bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
 
       if (this.source.isEmpty() && this.loading) {
-        LoadingView({ loading: true })
-          .margin({ top: 60 })
+        LoadingView({ skeleton: 'list', loading: true })
+
       } else if (this.source.isEmpty() && this.errorText.length > 0) {
-        LoadingView({
+        LoadingView({ skeleton: 'list',
           loading: false,
-          empty: this.errorText.length === 0 ? false : true,
+          empty: !this.failed,
           emptyText: this.errorText,
+          errorText: this.failed ? this.errorText : '',
           onRetry: () => {
             this.load(true).catch(() => {
             });
           },
         })
-          .margin({ top: 60 })
+
       } else {
         List() {
           LazyForEach(this.source, (item: WatchLaterSeasonItem) => {

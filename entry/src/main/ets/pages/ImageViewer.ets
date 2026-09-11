@@ -41,6 +41,8 @@ struct ZoomableImage {
   @Prop snapshotId: string = '';
   onLongPress: () => void = () => {};
   onZoomChange: (zoomed: boolean) => void = () => {};
+  @Prop @Watch('prepareExit') exitRequested: boolean = false;
+  onExitReady: () => void = () => {};
   onNaturalSize: (width: number, height: number) => void = () => {};
   /** 单击：参数=是否落在图片内容上。命中内容→切换顶/底 UI 栏（捏合误识别单击不会弹掉查看器）；
    * 落在黑色留白区→关闭查看器。 */
@@ -73,6 +75,19 @@ struct ZoomableImage {
     } catch (e) {
       // 取不到屏幕尺寸时保持 0，首帧 onAreaChange 再兜底写入。
     }
+  }
+
+  private prepareExit(): void {
+    if (!this.exitRequested) return;
+    // 先把缩放与平移恢复到 hero 使用的 contain 矩形，避免两种尺寸的图片重叠。
+    this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut, onFinish: () => {
+      this.onZoomChange(false);
+      this.onExitReady();
+    } }, () => {
+      this.scaleValue = 1;
+      this.offsetX = 0;
+      this.offsetY = 0;
+    });
   }
 
   private clampScale(value: number): number {
@@ -506,10 +521,23 @@ export struct ImageViewerPage {
     this.goBack();
   }
 
+  @State resetZoomForExit: boolean = false;
+  private exitStarted: boolean = false;
+
   goBack(): void {
     if (this.closing) return;
     this.closing = true;
     this.interactionReady = false;
+    if (this.currentZoomed) {
+      this.resetZoomForExit = true;
+      return;
+    }
+    this.finishBack();
+  }
+
+  private finishBack(): void {
+    if (this.exitStarted) return;
+    this.exitStarted = true;
     if (this.heroFallbackTimer >= 0) {
       clearTimeout(this.heroFallbackTimer);
       this.heroFallbackTimer = -1;
@@ -922,6 +950,8 @@ export struct ImageViewerPage {
               previewSource: this.sourcePreviewFor(index),
               transitionId: this.transitionIdFor(index),
               snapshotId: this.snapshotIdFor(index),
+              exitRequested: this.resetZoomForExit && index === this.currentIndex,
+              onExitReady: () => this.finishBack(),
                onLongPress: () => {
                  if (this.interactionReady) this.actionMenuOpen = true;
                },
@@ -1007,7 +1037,8 @@ export struct ImageViewerPage {
               .padding({ left: 16, right: 16, top: 8, bottom: 8 })
               .borderRadius(18)
               .backgroundColor('#73000000')
-              .margin({ bottom: 12 })
+              .margin({ bottom: this.param.images.length > 1 ? 12 : Immersive.bottomInset() + 16 })
+              .accessibilityText('查看原图')
               .onClick(() => this.viewOriginal())
           }
           if (this.param.images.length > 1) {

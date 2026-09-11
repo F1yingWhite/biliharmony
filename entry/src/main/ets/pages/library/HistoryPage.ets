@@ -50,6 +50,7 @@ export struct HistoryPage {
 
   private async prepareAndLoad(): Promise<void> {
     const session: number = AuthSession.version;
+    this.loading = true;
     try {
       await UserStore.ensureLoaded();
       if (this.destroyed || session !== AuthSession.version) return;
@@ -60,6 +61,8 @@ export struct HistoryPage {
       await this.load(true);
     } catch (e) {
       if (!this.destroyed && session === AuthSession.version) this.errorText = '历史记录加载失败，请检查网络后重试';
+    } finally {
+      if (!this.destroyed && session === AuthSession.version) this.loading = false;
     }
   }
 
@@ -97,7 +100,7 @@ export struct HistoryPage {
         },
       })
       if (this.itemCount === 0) {
-        LoadingView({ loading: this.loading, empty: !this.loading && this.errorText.length === 0,
+        LoadingView({ skeleton: 'list', loading: this.loading, empty: !this.loading && this.errorText.length === 0,
           emptyText: '暂无观看历史', errorText: this.errorText,
           onRetry: () => this.prepareAndLoad().catch(() => {
           }) })

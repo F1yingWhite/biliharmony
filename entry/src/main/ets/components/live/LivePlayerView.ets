@@ -20,6 +20,8 @@ export struct LivePlayerView {
   @Prop @Watch('onMessagesChanged') messages: Array<LiveChatMessage> = [];
   @Prop @Watch('onSyncVersionChanged') syncVersion: number = 0;
   @Prop title: string = '';
+  @Prop retrying: boolean = false;
+  onRetry: () => void = () => {};
   @Prop superChats: Array<LiveChatMessage> = [];
   @State viewportHeight: number = 240;
   @Prop uname: string = '';
@@ -218,7 +220,7 @@ export struct LivePlayerView {
       await this.initPlayer();
     } else {
       this.buffering = false;
-      this.errorText = '直播暂时无法播放：' + message.substring(0, 80);
+      this.errorText = '直播暂时无法播放，请重新加载';
     }
   }
 
@@ -270,6 +272,11 @@ export struct LivePlayerView {
       this.exitFullscreen();
       return;
     }
+    if (this.destroyed) return;
+    if (this.fullscreenTimer >= 0) {
+      clearTimeout(this.fullscreenTimer);
+      this.fullscreenTimer = -1;
+    }
     this.fullscreen = true;
     this.dmRenderer.setPlayback(this.playing, true);
     AppStorage.setOrCreate<boolean>('livePlayerFullscreen', true);
@@ -285,7 +292,7 @@ export struct LivePlayerView {
     if (this.fullscreenTimer >= 0) clearTimeout(this.fullscreenTimer);
     this.fullscreenTimer = setTimeout(() => {
       this.fullscreenTimer = -1;
-      if (this.destroyed) return;
+      if (this.destroyed || this.fullscreen) return;
       this.onFullscreenChange(false);
       AppStorage.setOrCreate<boolean>('livePlayerFullscreen', false);
     }, 220);
@@ -505,11 +512,16 @@ export struct LivePlayerView {
         LoadingProgress().width(38).height(38).color('#FFFFFF')
       }
       if (this.errorText.length > 0) {
-        Text(this.errorText)
-          .fontSize(13)
-          .fontColor('#FFFFFF')
-          .maxLines(3)
-          .padding(20)
+        Column({ space: 10 }) {
+          Text(this.errorText).fontSize(13).fontColor('#FFFFFF').maxLines(3).textAlign(TextAlign.Center)
+          if (!this.buffering) {
+            Button(this.retrying ? '正在重新加载…' : '重新加载')
+              .height(36).fontSize(12).fontColor('#FFFFFF')
+              .backgroundColor('#993D424A').borderRadius(18)
+              .enabled(!this.retrying)
+              .onClick(() => this.onRetry())
+          }
+        }.padding(20).zIndex(5)
       }
 
       if (this.controls) {

@@ -1,3 +1,4 @@
+import { MotionTokens } from '../common/MotionTokens';
 /**
  * 主界面：HarmonyOS 7 沉浸光感风格
  * - Navigation 根：Search / VideoDetail / Login 以 NavDestination 入栈
@@ -558,7 +559,7 @@ struct Index {
     // 深色模式给原生玻璃叠一层深色吸收底：透明度必须足够高才能压住
     // 系统材质在深色下的白雾（实测 ~70% 仍泛白，Dock 整条变浅灰）。
     .barBackgroundColor(this.glassOn ? (this.isDark ? '#EA15161A' : '#00000000') : AppTheme.floatBg(this.isDark, false))
-    .animationDuration(320)
+    .animationDuration(MotionTokens.navigation)
     .animationMode(AnimationMode.CONTENT_FIRST)
     .onChange(() => {
       AppTheme.resetHeaderFade();
@@ -592,7 +593,7 @@ struct Index {
     // 左右滑动留给各页面内部的频道 Tabs（首页推荐/热门/直播，动态全部/视频/番剧）。
     .scrollable(false)
     .barBackgroundColor(AppTheme.floatBg(this.isDark, this.glassOn))
-    .animationDuration(320)
+    .animationDuration(MotionTokens.navigation)
     .animationMode(AnimationMode.CONTENT_FIRST)
     .onChange(() => {
       AppTheme.resetHeaderFade();

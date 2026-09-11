@@ -315,7 +315,7 @@ export struct LoginPage {
       .backgroundColor(this.tab === index ? this.accent : (this.isDark ? '#2F3136' : '#FFFFFF'))
       .animation({ duration: 180, curve: Curve.EaseOut })
       .onClick(() => {
-        if (this.loggedIn || this.tab === index) return;
+        if (this.loggedIn || this.pwdLoading || this.smsLoading || this.tab === index) return;
         this.tab = index;
         // 扫码轮询只在扫码 tab 运行；切回时若二维码仍有效则恢复
         if (index === 0) {
@@ -462,9 +462,13 @@ export struct LoginPage {
                   .backgroundColor('#FFFFFF')
               } else {
                 Column({ space: 10 }) {
-                  Text(this.qrError ? '⚠' : '↻')
-                    .fontSize(44)
-                    .fontColor(this.qrError ? AppTheme.DANGER : this.accent)
+                  if (!this.qrError && !this.expired) {
+                    LoadingProgress().width(36).height(36).color(this.accent)
+                  } else {
+                    Text(this.qrError ? '⚠' : '↻')
+                      .fontSize(36)
+                      .fontColor(this.qrError ? AppTheme.DANGER : this.accent)
+                  }
                   Text(this.qrError ? '点击重新获取' : (this.expired ? '二维码已过期' : '加载中...'))
                     .fontSize(13)
                     .fontColor('#9499A0')

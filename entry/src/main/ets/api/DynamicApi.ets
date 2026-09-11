@@ -4,7 +4,7 @@
 import { HttpClient, HttpResponse } from '../services/network/HttpClient';
 import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
-import { asObject, asArray, asBool, str, randomString } from '../common/Utils';
+import { asObject, asArray, asBool, asNumber, str, randomString } from '../common/Utils';
 import { DynamicItem, DynamicPageData } from '../model/Models';
 import { ActionResult, actionWithCsrf, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
 
@@ -140,7 +140,9 @@ export class DynamicApi {
     const data: Record<string, Object> | null = getData(resp);
     const result: DynamicPageData = new DynamicPageData();
     if (data === null) {
-      return result;
+      const code: number = asNumber(resp.json()['code'], -1);
+      console.warn('[DynamicFeed] failed status=' + String(resp.status) + ' code=' + String(code));
+      throw new Error(code === -101 ? '登录已失效，请重新登录后查看动态' : '动态加载失败，请稍后重试');
     }
     const items: Array<Object> = asArray(data['items']);
     for (let i: number = 0; i < items.length; i++) {

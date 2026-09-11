@@ -135,3 +135,20 @@ export function toHttps(url: string): string {
   }
   return url;
 }
+
+/** 搜索接口文本：先移除高亮标签，再单次解码实体，保留原文中的转义尖括号。 */
+export function searchPlainText(value: string): string {
+  return value.replace(/<[^>]*>/g, '').replace(/&(#x[0-9a-f]+|#[0-9]+|quot|apos|amp|lt|gt|nbsp);/gi,
+    (entity: string, name: string): string => {
+      const key: string = name.toLowerCase();
+      if (key === 'quot') return '"';
+      if (key === 'apos') return "'";
+      if (key === 'amp') return '&';
+      if (key === 'lt') return '<';
+      if (key === 'gt') return '>';
+      if (key === 'nbsp') return ' ';
+      const code: number = key.startsWith('#x') ? parseInt(key.substring(2), 16) : parseInt(key.substring(1), 10);
+      if (code <= 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) return entity;
+      return String.fromCodePoint(code);
+    });
+}

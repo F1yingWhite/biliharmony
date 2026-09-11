@@ -1,72 +1,50 @@
-/**
- * 通用状态组件：加载中 / 空内容 / 错误重试
- */
+import { LoadingSkeleton } from './LoadingSkeleton';
+import { MotionTokens } from '../common/MotionTokens';
+
+/** 通用加载、空态和错误状态；已知内容结构的页面传入 skeleton。 */
 @Component
 export struct LoadingView {
-  // 必须加 @Prop：父组件状态变化时要同步刷新，否则卡在创建时的状态
-  // （例如列表清空后重新加载，会一直停留在"加载中"/空态）。
   @Prop loading: boolean = true;
   @Prop empty: boolean = false;
   @Prop emptyText: string = '暂无内容';
   @Prop errorText: string = '';
+  @Prop retryText: string = '重新加载';
+  @Prop skeleton: string = '';
   @StorageProp('accentColor') accent: string = '#FB7299';
-  onRetry: () => void = () => {
-  };
+  @StorageProp('isDarkMode') isDark: boolean = false;
+  onRetry: () => void = () => {};
 
   build() {
     Column() {
-      if (this.loading) {
-        // B 站经典小电视抖天线加载动画
-        Image($r('app.media.bilix_loading_tv'))
-          .width(72)
-          .height(72)
-          .margin({ top: 40 })
-        Text('加载中...')
-          .fontSize(13)
-          .fontColor('#999999')
-          .margin({ top: 12 })
-      } else if (this.empty) {
-        Column() {
-          // 22 娘空箱插图
-          Image($r('app.media.bilix_empty_2233'))
-            .width(200)
-            .aspectRatio(560 / 316)
-            .margin({ top: 40 })
-          Text(this.emptyText)
-            .fontSize(13)
-            .fontColor('#999999')
-            .margin({ top: 10 })
+      if (this.loading && this.skeleton.length > 0) {
+        LoadingSkeleton({ layout: this.skeleton })
+      } else if (this.loading) {
+        Column({ space: 12 }) {
+          LoadingProgress().width(30).height(30).color(this.accent)
+          Text('正在加载…').fontSize(12).fontColor(this.isDark ? '#A5AAB5' : '#7D8490')
         }
-        .width('100%')
-      } else if (this.errorText.length > 0) {
-        Column() {
-          // 2233 断网插图
-          Image($r('app.media.bilix_error_2233'))
-            .width(200)
-            .aspectRatio(560 / 316)
-            .margin({ top: 40 })
-          Text('加载失败')
-            .fontSize(15)
-            .fontColor('#666666')
-            .margin({ top: 10 })
-          Text(this.errorText)
-            .fontSize(12)
-            .fontColor('#999999')
-            .margin({ top: 8 })
-            .maxLines(2)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-          Button('重试')
-            .fontSize(13)
-            .fontColor(this.accent)
-            .backgroundColor('#00000000')
-            .margin({ top: 14 })
-            .onClick(() => {
-              this.onRetry();
-            })
+        .width('100%').padding({ top: 48, bottom: 48 })
+        .accessibilityGroup(true).accessibilityText('正在加载内容')
+      } else if (this.errorText.length > 0 || this.empty) {
+        Column({ space: 12 }) {
+          Image(this.errorText.length > 0 ? $r('app.media.bilix_error_2233') : $r('app.media.bilix_empty_2233'))
+            .width(160).aspectRatio(560 / 316).objectFit(ImageFit.Contain)
+          Text(this.errorText.length > 0 ? '暂时没能加载出来' : this.emptyText)
+            .fontSize(15).fontWeight(FontWeight.Medium)
+            .fontColor(this.isDark ? '#E6E9EF' : '#434955').textAlign(TextAlign.Center)
+          if (this.errorText.length > 0) {
+            Text(this.errorText).fontSize(12).lineHeight(18)
+              .fontColor(this.isDark ? '#A5AAB5' : '#7D8490').textAlign(TextAlign.Center)
+            Button(this.retryText).height(40).fontSize(13).fontColor(this.accent)
+              .backgroundColor(this.isDark ? '#252A34' : '#EEF0F5').borderRadius(20)
+              .padding({ left: 24, right: 24 }).margin({ top: 4 })
+              .onClick(() => this.onRetry())
+          }
         }
-        .width('100%')
+        .width('100%').padding({ left: 28, right: 28, top: 40, bottom: 32 })
+        .transition(MotionTokens.appear())
       }
-    }
-    .width('100%')
+    }.width('100%')
+    .transition(MotionTokens.appear())
   }
 }

@@ -133,13 +133,17 @@ export struct LiveRoomPage {
   }
 
   async changeQuality(qn: number): Promise<void> {
-    if (this.qualityLoading || this.refreshing) return;
+    if (this.qualityLoading || this.refreshing || this.loading || this.destroyed) return;
     this.qualityLoading = true;
     const generation: number = this.lifecycleGeneration;
     try {
       const next: LivePlayInfo | null = await LiveApi.getLivePlayInfo(this.param.roomId, qn);
-      if (!this.destroyed && generation === this.lifecycleGeneration && next !== null && next.url.length > 0) {
-        this.playInfo = next;
+      if (this.destroyed || generation !== this.lifecycleGeneration) return;
+      if (next === null || next.url.length === 0) throw new Error('empty quality url');
+      this.playInfo = next;
+    } catch (e) {
+      if (!this.destroyed && generation === this.lifecycleGeneration) {
+        this.getUIContext().getPromptAction().showToast({ message: '画质切换失败，已保留当前画质，请稍后重试' });
       }
     } finally {
       if (!this.destroyed && generation === this.lifecycleGeneration) this.qualityLoading = false;
@@ -602,7 +606,12 @@ export struct LiveRoomPage {
             if (this.loading) {
               LoadingProgress().width(38).height(38).color('#FFFFFF')
             } else {
-              Text(this.errorText).fontSize(14).fontColor('#FFFFFF')
+              Column({ space: 12 }) {
+                Text(this.errorText).fontSize(14).fontColor('#FFFFFF').textAlign(TextAlign.Center)
+                Button('重新加载').height(36).fontSize(12).fontColor('#FFFFFF')
+                  .backgroundColor('#553D424A').borderRadius(18)
+                  .onClick(() => this.loadRoom())
+              }.padding(20)
             }
           }
         }
@@ -629,6 +638,8 @@ export struct LiveRoomPage {
         LivePlayerView({
           playInfo: this.playInfo, messages: this.messages, superChats: this.superChats,
           syncVersion: this.liveSyncVersion,
+          retrying: this.refreshing,
+          onRetry: () => this.syncLive(),
           title: this.roomInfo.title, uname: this.roomInfo.uname,
           onQualityChange: (qn: number) => this.changeQuality(qn),
           onFullscreenChange: (value: boolean) => this.fullscreen = value,
@@ -641,6 +652,7 @@ export struct LiveRoomPage {
       if (!this.fullscreen) {
         BackButton({ variant: BackButtonVariant.DARK })
           .margin({ left: 10, top: Immersive.statusBarHeight() + this.roomHeaderHeight + 8 })
+          .zIndex(3)
       }
       if (this.qualityLoading) {
         Row({ space: 7 }) {

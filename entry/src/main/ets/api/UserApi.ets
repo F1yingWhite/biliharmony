@@ -66,7 +66,7 @@ export class UserApi {
     const endpoint: string = mode === 'follower' ? Api.userFollowers : Api.userFollowings;
     const resp: HttpResponse = await webGet(endpoint, params);
     const data: Record<string, Object> | null = getData(resp);
-    if (data === null) return result;
+    if (data === null) throw new Error('用户列表加载失败');
     result.total = asNumber(data['total'], 0);
     const list: Array<Object> = asArray(data['list']);
     for (let i: number = 0; i < list.length; i++) {
@@ -218,7 +218,7 @@ export class UserApi {
     const data: Record<string, Object> | null = getData(await webGet(Api.blackList, {
       'pn': String(Math.max(1, page)), 'ps': '30',
     }));
-    if (data === null) return result;
+    if (data === null) throw new Error('用户列表加载失败');
     result.total = asNumber(data['total'], 0);
     const users: Array<Object> = asArray(data['list']);
     for (let i: number = 0; i < users.length; i++) {

@@ -1,3 +1,4 @@
+import { LoadMoreFooter } from '../components/LoadMoreFooter';
 /**
  * 排行榜页：全站排行 / 每周必看 / 入站必刷
  * 全站排行 ranking/v2(rid=0)；每周必看 popular/series 最新一期；入站必刷 popular/precious
@@ -15,6 +16,10 @@ import { SearchApi } from '../api/SearchApi';
 
 @Component
 export struct RankPage {
+  @State preciousPage: number = 0;
+  @State preciousHasMore: boolean = true;
+  private lifecycleGeneration: number = 0;
+  private destroyed: boolean = false;
   @State tab: number = 0; // 0 全站排行 / 1 每周必看 / 2 入站必刷
   @State rankLoading: boolean = false;
   @State weeklyLoading: boolean = false;
@@ -33,47 +38,61 @@ export struct RankPage {
   private weeklySource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
   private preciousSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
 
+  aboutToDisappear(): void {
+    this.destroyed = true;
+    this.lifecycleGeneration++;
+  }
+
   aboutToAppear(): void {
+    this.destroyed = false;
+    this.rankLoading = false;
+    this.weeklyLoading = false;
+    this.preciousLoading = false;
     this.loadRank().catch(() => {
     });
   }
 
   async loadRank(): Promise<void> {
-    if (this.rankLoading) {
+    const generation: number = this.lifecycleGeneration;
+    if (this.destroyed || this.rankLoading) {
       return;
     }
     this.rankLoading = true;
     this.rankError = '';
     try {
       const list: Array<VideoItem> = await SearchApi.getRankVideos(0);
+      if (this.destroyed || generation !== this.lifecycleGeneration) return;
       this.rankSource.reset(list);
       this.rankCount = this.rankSource.totalCount();
       if (list.length === 0) {
-        this.rankError = '排行榜加载失败，请检查网络后重试';
+        this.rankError = '排行榜暂时无法加载，请稍后重试';
       }
     } catch (e) {
-      if (this.rankSource.isEmpty()) {
-        this.rankError = '排行榜加载失败，请检查网络后重试';
+      if (!this.destroyed && generation === this.lifecycleGeneration && this.rankSource.isEmpty()) {
+        this.rankError = '排行榜暂时无法加载，请稍后重试';
       }
     } finally {
-      this.rankLoading = false;
+      if (!this.destroyed && generation === this.lifecycleGeneration) this.rankLoading = false;
     }
   }
 
   /** 每周必看：series/list 取最新一期 number，再由 series/one 拉该期视频。 */
   async loadWeekly(): Promise<void> {
-    if (this.weeklyLoading) {
+    const generation: number = this.lifecycleGeneration;
+    if (this.destroyed || this.weeklyLoading) {
       return;
     }
     this.weeklyLoading = true;
     this.weeklyError = '';
     try {
       const series: Array<PopularSeriesItem> = await SearchApi.getPopularSeriesList();
+      if (this.destroyed || generation !== this.lifecycleGeneration) return;
       if (series.length === 0) {
         this.weeklyError = '每周必看加载失败，请检查网络后重试';
         return;
       }
       const data: PopularSeriesData = await SearchApi.getPopularSeriesOne(series[0].number);
+      if (this.destroyed || generation !== this.lifecycleGeneration) return;
       this.weeklyLabel = data.label.length > 0 ? data.label : series[0].name;
       this.weeklySource.reset(data.videos);
       this.weeklyCount = this.weeklySource.totalCount();
@@ -81,33 +100,34 @@ export struct RankPage {
         this.weeklyError = '每周必看加载失败，请检查网络后重试';
       }
     } catch (e) {
-      if (this.weeklySource.isEmpty()) {
+      if (!this.destroyed && generation === this.lifecycleGeneration && this.weeklySource.isEmpty()) {
         this.weeklyError = '每周必看加载失败，请检查网络后重试';
       }
     } finally {
-      this.weeklyLoading = false;
+      if (!this.destroyed && generation === this.lifecycleGeneration) this.weeklyLoading = false;
     }
   }
 
-  async loadPrecious(): Promise<void> {
-    if (this.preciousLoading) {
-      return;
-    }
+  async loadPrecious(reset: boolean = true): Promise<void> {
+    if (this.destroyed || this.preciousLoading || (!reset && !this.preciousHasMore)) return;
+    const generation: number = this.lifecycleGeneration;
+    const page: number = reset ? 1 : this.preciousPage + 1;
     this.preciousLoading = true;
     this.preciousError = '';
     try {
-      const list: Array<VideoItem> = await SearchApi.getPopularPrecious(1);
-      this.preciousSource.reset(list);
+      const list: Array<VideoItem> = await SearchApi.getPopularPrecious(page);
+      if (this.destroyed || generation !== this.lifecycleGeneration) return;
+      if (reset) this.preciousSource.reset(list);
+      else this.preciousSource.append(list);
+      this.preciousPage = page;
+      this.preciousHasMore = list.length >= 100;
       this.preciousCount = this.preciousSource.totalCount();
-      if (list.length === 0) {
-        this.preciousError = '入站必刷加载失败，请检查网络后重试';
-      }
     } catch (e) {
-      if (this.preciousSource.isEmpty()) {
+      if (!this.destroyed && generation === this.lifecycleGeneration) {
         this.preciousError = '入站必刷加载失败，请检查网络后重试';
       }
     } finally {
-      this.preciousLoading = false;
+      if (!this.destroyed && generation === this.lifecycleGeneration) this.preciousLoading = false;
     }
   }
 
@@ -152,7 +172,8 @@ export struct RankPage {
         .fontSize(15)
         .fontWeight(FontWeight.Bold)
         .fontColor(index < 3 ? this.accent : '#9499A0')
-        .width(26)
+        .width(34)
+        .maxLines(1)
         .textAlign(TextAlign.Center)
       Column() {
         VideoRowCard({
@@ -182,9 +203,9 @@ export struct RankPage {
     source: BasicDataSource<VideoItem>, onRetry: () => void) {
     Column() {
       if (getLoading() && getCount() === 0) {
-        LoadingView({ loading: true })
+        LoadingView({ skeleton: 'list', loading: true })
       } else if (getCount() === 0) {
-        LoadingView({
+        LoadingView({ skeleton: 'list',
           loading: false,
           empty: getError().length === 0,
           emptyText: '暂无榜单数据',
@@ -207,11 +228,22 @@ export struct RankPage {
               this.RankRow(item, index)
             }
           }, (item: VideoItem, index: number) => item.bvid + String(item.aid) + '_' + String(index))
+          if (source === this.preciousSource) {
+            ListItem() {
+              LoadMoreFooter({ loading: this.preciousLoading, hasMore: this.preciousHasMore,
+                moreText: this.preciousError.length > 0 ? '加载失败 · 点击重试' : '加载更多',
+                loadingText: '加载中…', fixedHeight: 48,
+                onLoadMore: () => this.loadPrecious(false) })
+            }
+          }
         }
         .width('100%')
         .height('100%')
         .cachedCount(5)
         .scrollBar(BarState.Off)
+        .onReachEnd(() => {
+          if (source === this.preciousSource && this.preciousError.length === 0) this.loadPrecious(false);
+        })
       }
     }
     .width('100%')
@@ -260,7 +292,7 @@ export struct RankPage {
     }
     .width('100%')
     .height('100%')
-    .padding({ top: Immersive.statusBarHeight() })
+    .padding({ top: Immersive.statusBarHeight(), bottom: Immersive.bottomInset() })
     .backgroundColor(this.isDark ? '#18191C' : '#F6F7F8')
     .constraintSize({ maxWidth: LayoutTokens.pageMaxWidth })
     .alignSelf(ItemAlign.Center)

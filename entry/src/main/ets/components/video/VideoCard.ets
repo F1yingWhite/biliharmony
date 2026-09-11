@@ -1,3 +1,4 @@
+import { MotionTokens } from '../../common/MotionTokens';
 /**
  * 视频卡片（B 站风格）：封面数据叠层 + 标题 + UP 主信息行
  * 首页信息流可开卡片右下 ⋮（举报/不想看浮层）
@@ -26,6 +27,8 @@ export struct VideoCard {
   @Prop video: VideoItem = new VideoItem();
   /** 用户空间等紧凑网格隐藏 UP/分区行，复用同一封面和跳转逻辑。 */
   @Prop compact: boolean = false;
+  /** 首页采用更舒展的圆角和文字留白。 */
+  @Prop homeStyle: boolean = false;
   @Prop horizontal: boolean = false;
   /**
    * 卡片 id 前缀：同一窗口内可能有多个常驻容器渲染同一视频（首页推荐/热门 Tabs、
@@ -46,6 +49,7 @@ export struct VideoCard {
   aboutToReuse(params: Record<string, Object>): void {
     this.video = params.video as VideoItem;
     this.compact = params.compact === true;
+    this.homeStyle = params.homeStyle === true;
     this.horizontal = params.horizontal === true;
     this.idPrefix = params.idPrefix === undefined ? '' : params.idPrefix as string;
     this.wholeCardTransition = params.wholeCardTransition === true;
@@ -181,9 +185,9 @@ export struct VideoCard {
       }
       .width('100%')
       // 首页标题预留两行 38vp + 顶部 8vp，避免作者行贴住第二行标题。
-      .height(this.showMore ? 46 : 38)
+      .height(this.homeStyle ? 50 : (this.showMore ? 46 : 38))
       .alignItems(VerticalAlign.Top)
-      .padding({ left: 10, right: 10, top: 8 })
+      .padding({ left: this.homeStyle ? 12 : 10, right: this.homeStyle ? 12 : 10, top: this.homeStyle ? 10 : 8 })
       .onClick(() => this.openDetail())
 
       // 底栏只保留 UP 标识、作者与竖向菜单；播放数据已回到封面叠层。
@@ -197,7 +201,7 @@ export struct VideoCard {
               .border({ width: 0.8, color: this.isDark ? '#666970' : '#AEB2B8', radius: 2 })
             Text(this.video.upName)
               .fontSize(11)
-              .fontColor(this.isDark ? '#8a8a8a' : '#9499A0')
+              .fontColor(this.isDark ? '#A5AAB5' : '#7D8490')
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
               .layoutWeight(1)
@@ -210,23 +214,24 @@ export struct VideoCard {
           }
         }
         .width('100%')
-        .height(this.showMore ? 26 : 30)
-        .padding({ left: 10, right: 5 })
+        .height(this.homeStyle ? 32 : (this.showMore ? 26 : 30))
+        .padding({ left: this.homeStyle ? 12 : 10, right: this.homeStyle ? 8 : 5 })
         .alignItems(VerticalAlign.Center)
       }
     }
     .width('100%')
     // 首页底栏整体下移 6vp；收回多余底部留白，保持卡片总高度不变。
-    .padding({ bottom: this.showMore ? 2 : 6 })
+    .padding({ bottom: this.homeStyle ? 6 : (this.showMore ? 2 : 6) })
     .alignItems(HorizontalAlign.Start)
     // 白色卡片承载边界：封面通顶、文字区内缩，浅色白底/深色深灰底。
-    .backgroundColor(this.isDark ? '#2B2D34' : '#FFFFFF')
-    .borderRadius(6)
+    .backgroundColor(this.isDark ? (this.homeStyle ? '#24272E' : '#2B2D34') : '#FFFFFF')
+    .borderRadius(this.homeStyle ? 16 : 6)
     .clip(true)
-    .shadow({ radius: 4, color: this.isDark ? '#52000000' : '#18000000', offsetX: 0, offsetY: 1 })
+    .shadow({ radius: this.homeStyle ? 8 : 4, color: this.homeStyle ? '#08000000' : (this.isDark ? '#52000000' : '#18000000'), offsetX: 0, offsetY: 1 })
+    .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
     .stateStyles({
       pressed: {
-        opacity: 0.85,
+        opacity: 0.9,
       },
       normal: {
         opacity: 1,

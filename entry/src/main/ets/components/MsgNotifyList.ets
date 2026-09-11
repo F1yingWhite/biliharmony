@@ -208,7 +208,7 @@ export struct MsgNotifyList {
   build() {
     Column() {
       if (this.itemCount === 0) {
-        LoadingView({
+        LoadingView({ skeleton: 'sessions',
           loading: this.loading,
           empty: !this.loading && this.error.length === 0,
           emptyText: this.emptyText(),

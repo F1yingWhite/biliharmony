@@ -5,6 +5,8 @@
  * - !hasMore：「到底啦」占位
  * height > 0 时使用固定高度（信息流触底自动加载场景），否则用上下 padding（点击加载场景）。
  */
+import { MotionTokens } from '../common/MotionTokens';
+
 @Component
 export struct LoadMoreFooter {
   @Prop loading: boolean = false;
@@ -44,6 +46,9 @@ export struct LoadMoreFooter {
         Text(this.moreText)
           .fontSize(this.fontSize)
           .fontColor(this.accent)
+          .padding({ left: 16, right: 16, top: 10, bottom: 10 })
+          .borderRadius(18)
+          .stateStyles({ pressed: { opacity: 0.9 }, normal: { opacity: 1 } })
           .onClick(() => {
             if (this.clickable) {
               this.onLoadMore();
@@ -54,6 +59,7 @@ export struct LoadMoreFooter {
       Text(this.endText)
         .fontSize(this.fontSize)
         .fontColor('#9499A0')
+        .transition(MotionTokens.appear())
     }
   }
 

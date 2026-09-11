@@ -12,6 +12,7 @@ import { ActionResult } from '../api/BiliApi';
 import { BangumiApi } from '../api/BangumiApi';
 import { Immersive } from '../common/Immersive';
 import { LoadingView } from '../components/LoadingView';
+import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { BackButton, BackButtonVariant } from '../components/BackButton';
 import { ReplyCard } from '../components/reply/ReplyCard';
 import { ReplyComposer } from '../components/reply/ReplyComposer';
@@ -40,6 +41,9 @@ export struct BangumiDetailPage {
   @State replies: Array<ReplyItem> = [];
   @State repliesLoading: boolean = false;
   @State repliesFailed: boolean = false;
+  @State repliesMoreFailed: boolean = false;
+  private repliesRetryReset: boolean = false;
+  private repliesEpoch: RequestEpoch = new RequestEpoch();
   @State repliesHasMore: boolean = true;
   @State replySortMode: number = 3; // 3 最热，2 最新
   @State replyVersion: number = 0;
@@ -76,6 +80,7 @@ export struct BangumiDetailPage {
   }
 
   aboutToDisappear(): void {
+    this.repliesEpoch.invalidate();
     this.threadEpoch.invalidate();
     this.threadLoading = false;
     this.destroyed = true;
@@ -97,7 +102,7 @@ export struct BangumiDetailPage {
       const season: BangumiSeason | null = await BangumiApi.getSeason(this.param.seasonId, this.param.epId);
       if (this.destroyed) return;
       if (season === null) {
-        this.errorText = '番剧信息加载失败，请检查网络后重试';
+        this.errorText = '详情加载失败，请检查网络后重试';
         return;
       }
       this.season = season;
@@ -108,7 +113,7 @@ export struct BangumiDetailPage {
       this.loadReplies(true).catch(() => {
       });
     } catch (e) {
-      if (!this.destroyed) this.errorText = '番剧信息加载失败，请检查网络后重试';
+      if (!this.destroyed) this.errorText = '详情加载失败，请检查网络后重试';
     } finally {
       if (!this.destroyed) this.loading = false;
     }
@@ -137,11 +142,19 @@ export struct BangumiDetailPage {
     return ep !== null ? ep.aid : 0;
   }
 
+  private followLabel(): string {
+    return this.season.seasonType === 1 || this.season.seasonType === 4 ? '追番' : '追剧';
+  }
+
+  private episodeUnit(): string {
+    return this.season.seasonType === 1 || this.season.seasonType === 4 ? '话' : '集';
+  }
+
   private currentEpLabel(): string {
     const ep: BangumiEpisode | null = this.currentEpisode();
     if (ep === null || ep.title.length === 0) return '';
     // title 是纯数字时展示"第 x 话"，PV/SP 等标签原样展示。
-    return /^[0-9]+$/.test(ep.title) ? '第 ' + ep.title + ' 话' : ep.title;
+    return /^[0-9]+$/.test(ep.title) ? '第 ' + ep.title + ' ' + this.episodeUnit() : ep.title;
   }
 
   private episodeFullTitle(ep: BangumiEpisode): string {
@@ -172,7 +185,7 @@ export struct BangumiDetailPage {
 
   private async toggleFollow(): Promise<void> {
     if (!UserStore.isLogin) {
-      this.toast('请先登录后再追番');
+      this.toast('请先登录后再' + this.followLabel());
       AppNavStack.pushPathByName(NAV_LOGIN, null);
       return;
     }
@@ -195,26 +208,35 @@ export struct BangumiDetailPage {
 
   // ===== 评论（组装方式同动态详情） =====
   private async loadReplies(reset: boolean): Promise<void> {
+    if (this.destroyed || (!reset && (this.repliesLoading || !this.repliesHasMore))) return;
+    const request: number = this.repliesEpoch.next();
     const oid: number = this.replyOid();
-    if (this.repliesLoading || oid <= 0 || (!reset && !this.repliesHasMore)) return;
+    if (oid <= 0) {
+      this.repliesLoading = false;
+      return;
+    }
     this.repliesLoading = true;
+    this.repliesMoreFailed = false;
+    this.repliesRetryReset = reset;
     if (reset) this.repliesFailed = false;
     try {
       const data: ReplyData = await CommentApi.getReplies(oid, 1, reset ? '' : this.replyCursor, this.replySortMode);
-      if (this.destroyed) return;
+      if (this.destroyed || !this.repliesEpoch.isCurrent(request)) return;
       this.replies = reset ? data.replies : this.replies.concat(data.replies);
       this.replyCursor = data.cursor;
       this.repliesHasMore = data.hasMore;
     } catch (e) {
-      if (!this.destroyed && this.replies.length === 0) this.repliesFailed = true;
+      if (this.destroyed || !this.repliesEpoch.isCurrent(request)) return;
+      if (this.replies.length === 0) this.repliesFailed = true;
+      else this.repliesMoreFailed = true;
     } finally {
-      if (!this.destroyed) this.repliesLoading = false;
+      if (!this.destroyed && this.repliesEpoch.isCurrent(request)) this.repliesLoading = false;
     }
   }
 
   /** 切换评论排序：清空列表与游标，重新拉第一页。 */
   private changeReplySort(mode: number): void {
-    if (this.replySortMode === mode || this.repliesLoading) return;
+    if (this.replySortMode === mode || this.destroyed) return;
     this.replySortMode = mode;
     this.replyCursor = '';
     this.repliesHasMore = true;
@@ -445,7 +467,7 @@ export struct BangumiDetailPage {
       sourceCover: this.season.poster.length > 0 ? this.season.poster : this.season.cover,
       sourceTitle: this.season.title,
       sourceUpName: '',
-      scanHint: '长按扫码查看番剧',
+      scanHint: '长按扫码查看详情',
     })
   }
 
@@ -622,10 +644,10 @@ export struct BangumiDetailPage {
               }
               .alignItems(VerticalAlign.Bottom)
             }
-            Text(formatCount(this.season.views) + ' 播放 · ' + formatCount(this.favorites) + ' 追番')
+            Text(formatCount(this.season.views) + ' 播放 · ' + formatCount(this.favorites) + ' ' + this.followLabel())
               .fontSize(12)
               .fontColor('#E6FFFFFF')
-            Text(this.followed ? '已追番' : '+ 追番')
+            Text((this.followed ? '已' : '+ ') + this.followLabel())
               .fontSize(13)
               .fontColor('#FFFFFF')
               .padding({ left: 20, right: 20, top: 6, bottom: 6 })
@@ -716,7 +738,7 @@ export struct BangumiDetailPage {
           .border({ width: ep.epId === this.currentEpId ? 1.5 : 0, color: this.accent, radius: 6 })
           .hitTestBehavior(HitTestMode.None)
       }
-      .width('100%')
+      .width('100%').aspectRatio(16 / 10).clip(true)
       Text(ep.longTitle.length > 0 ? ep.longTitle : this.episodeFullTitle(ep))
         .fontSize(11)
         .fontColor(ep.epId === this.currentEpId ? this.accent : (this.isDark ? '#D8D8DC' : '#303236'))
@@ -741,12 +763,13 @@ export struct BangumiDetailPage {
             .fontWeight(FontWeight.Bold)
             .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
           if (this.season.total > 0) {
-            Text('全 ' + String(this.season.total) + ' 话')
+            Text('共 ' + String(this.season.total) + ' ' + this.episodeUnit())
               .fontSize(12)
               .fontColor('#9499A0')
           }
           if (this.season.newEpDesc.length > 0) {
             Text(this.season.newEpDesc)
+              .layoutWeight(1)
               .fontSize(12)
               .fontColor('#9499A0')
               .maxLines(1)
@@ -881,6 +904,7 @@ export struct BangumiDetailPage {
           .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
         if (this.currentEpLabel().length > 0) {
           Text(this.currentEpLabel())
+            .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
             .fontSize(12)
             .fontColor('#9499A0')
         }
@@ -905,7 +929,7 @@ export struct BangumiDetailPage {
           .fontColor('#9499A0')
           .padding(18)
       } else if (this.repliesLoading && this.replies.length === 0) {
-        LoadingProgress().width(24).height(24).color(this.accent).margin({ top: 18, bottom: 18 })
+        LoadingView({ loading: true, skeleton: 'comments' })
       } else if (this.repliesFailed) {
         Text('评论加载失败，点击重试')
           .fontSize(12)
@@ -939,16 +963,14 @@ export struct BangumiDetailPage {
           })
         // 稳定 key：点赞视觉态由 ReplyCard 的 @State 镜像原地刷新，避免整卡重建闪烁。
         }, (reply: ReplyItem) => String(reply.rpid))
-        if (this.repliesHasMore) {
-          Text(this.repliesLoading ? '加载中…' : '加载更多评论')
-            .width('100%')
-            .height(46)
-            .textAlign(TextAlign.Center)
-            .fontSize(12)
-            .fontColor('#9499A0')
-            .onClick(() => this.loadReplies(false).catch(() => {
-            }))
-        }
+        LoadMoreFooter({
+          loading: this.repliesLoading,
+          hasMore: this.repliesHasMore || this.repliesMoreFailed,
+          moreText: this.repliesMoreFailed ? '加载失败，点击重试' : '加载更多评论',
+          endText: '没有更多评论了',
+          fixedHeight: 46,
+          onLoadMore: () => this.loadReplies(this.repliesMoreFailed && this.repliesRetryReset).catch(() => {}),
+        })
       }
     }
     .width('100%')
@@ -960,7 +982,7 @@ export struct BangumiDetailPage {
     Column() {
       if (this.loading) {
         this.StateHeader()
-        LoadingView({ loading: true })
+        LoadingView({ loading: true, skeleton: 'season' })
       } else if (this.errorText.length > 0) {
         this.StateHeader()
         LoadingView({

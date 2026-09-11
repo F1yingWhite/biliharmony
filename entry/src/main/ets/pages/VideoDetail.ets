@@ -110,6 +110,8 @@ export struct VideoDetailPage {
   @State replyHasMore: boolean = true;
   @State replyLoading: boolean = false;
   @State replyLoadError: string = '';
+  private repliesEpoch: RequestEpoch = new RequestEpoch();
+  private replyRetryReset: boolean = false;
   @State replyItemCount: number = 0;
   @State replyPrefetchCount: number = 0;
   // 回复详情是视频页内的二级导航状态；放入 AppStorage 供 NavDestination
@@ -438,6 +440,9 @@ export struct VideoDetailPage {
 
   /** 播放中仅长屏/竖向画幅收缩；暂停后任何画幅都可收成继续播放横幅。 */
   private shouldCollapsePlayer(): boolean {
+    // 起播缓冲时 playerPlaying 仍为 false，不能把它当成用户暂停；首个真实视频帧出现前
+    // 保持播放区完整高度，避免用户滚动简介/评论时把封面和加载中的 Surface 压成横条。
+    if (this.startupCoverVisible || this.playUrl.length === 0 || this.playbackAddressFailed) return false;
     return VideoDetailGeometry.shouldCollapse(this.playerPlaying, this.detail, this.currentCid,
       this.realVideoWidth, this.realVideoHeight);
   }
@@ -874,6 +879,7 @@ export struct VideoDetailPage {
   }
 
   aboutToDisappear(): void {
+    this.repliesEpoch.invalidate();
     this.threadEpoch.invalidate();
     this.threadLoading = false;
     this.destroyed = true;
@@ -1756,11 +1762,14 @@ export struct VideoDetailPage {
   }
 
   async loadReplies(reset: boolean): Promise<void> {
-    if (this.replyLoading) {
+    if (this.destroyed || (!reset && !this.replyHasMore)) return;
+    if (!reset && this.replyLoading) {
       CommentLog.warn('ui.replies.skip', 'reason=loading aid=' + String(this.detail.aid) +
         ' reset=' + String(reset));
       return;
     }
+    const request: number = this.repliesEpoch.next();
+    this.replyRetryReset = reset;
     this.replyLoading = true;
     this.replyLoadError = '';
     if (reset) this.replyPrefetchCount = 0;
@@ -1773,7 +1782,7 @@ export struct VideoDetailPage {
     let loaded: boolean = false;
     try {
       const data = await CommentApi.getReplies(this.detail.aid, 1, cursor, this.replySortMode);
-      if (this.destroyed) {
+      if (this.destroyed || !this.repliesEpoch.isCurrent(request)) {
         CommentLog.warn('ui.replies.drop', 'reason=destroyed aid=' + String(this.detail.aid) +
           ' rows=' + String(data.replies.length));
         return;
@@ -1798,17 +1807,16 @@ export struct VideoDetailPage {
         String(this.replySource.totalCount()) + ' cursorLen=' + String(this.replyCursor.length) +
         ' hasMore=' + String(this.replyHasMore) + ' ms=' + String(CommentLog.elapsed(startedAt)));
     } catch (e) {
-      // 评论加载失败保持现有列表，replyLoading 复位后空态/重试入口正常可用。
-      if (!this.destroyed && this.replySource.isEmpty()) {
-        this.replyLoadError = '评论加载失败，请检查网络后重试';
-      }
+      if (this.destroyed || !this.repliesEpoch.isCurrent(request)) return;
+      // 保留已加载内容，首屏与分页都展示可重试的错误。
+      this.replyLoadError = '评论加载失败，请检查网络后重试';
       CommentLog.error('ui.replies.error', 'aid=' + String(this.detail.aid) + ' reset=' + String(reset) +
         ' cursorLen=' + String(cursor.length) + ' ms=' + String(CommentLog.elapsed(startedAt)) +
         ' error=' + CommentLog.errorText(e as Object));
     } finally {
-      if (!this.destroyed) this.replyLoading = false;
+      if (!this.destroyed && this.repliesEpoch.isCurrent(request)) this.replyLoading = false;
     }
-    if (!loaded) return;
+    if (!loaded || this.destroyed || !this.repliesEpoch.isCurrent(request)) return;
     // 某些视频首页只返回置顶/精选的少量评论，自动继续取页直到首屏够用。
     if (this.replyHasMore && this.replySource.totalCount() < 20 && this.replyPrefetchCount < 5) {
       this.replyPrefetchCount++;
@@ -1820,7 +1828,7 @@ export struct VideoDetailPage {
   }
 
   changeReplySort(mode: number): void {
-    if (this.replySortMode === mode || this.replyLoading) {
+    if (this.replySortMode === mode || this.destroyed) {
       CommentLog.warn('ui.replies.sort.skip', 'current=' + String(this.replySortMode) + ' requested=' +
         String(mode) + ' loading=' + String(this.replyLoading));
       return;
@@ -2691,7 +2699,7 @@ export struct VideoDetailPage {
             this.changeReplySort(mode);
           },
           onLoadMore: (reset: boolean) => {
-            this.loadReplies(reset);
+            this.loadReplies(reset || (this.replyLoadError.length > 0 && this.replyRetryReset));
           },
           onLike: (item: ReplyItem) => this.actionReplyLike(item),
           onDislike: (item: ReplyItem) => this.actionReplyDislike(item),
@@ -2914,6 +2922,12 @@ export struct VideoDetailPage {
               Text('获取播放地址失败')
                 .fontSize(12)
                 .fontColor('#FFFFFF')
+              Button('重试播放').height(36).fontSize(12).fontColor('#FFFFFF')
+                .backgroundColor('#66373C45').borderRadius(18).margin({ top: 10 })
+                .onClick(() => {
+                  this.playbackAddressFailed = false;
+                  this.loadInitialPlayback(this.detail);
+                })
             }
           }
         }
@@ -2933,9 +2947,9 @@ export struct VideoDetailPage {
             .backgroundColor('#000000')
             .margin({ bottom: -12 })
           if (this.loading) {
-            LoadingView({ loading: true })
+            LoadingView({ skeleton: 'detail', loading: true })
           } else if (this.errorText.length > 0) {
-            LoadingView({
+            LoadingView({ skeleton: 'detail',
               loading: false,
               empty: false,
               errorText: this.errorText,

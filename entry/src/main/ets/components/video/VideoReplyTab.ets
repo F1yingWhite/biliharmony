@@ -67,9 +67,9 @@ export struct VideoReplyTab {
       this.sortBar()
       if (this.itemCount === 0) {
         Column() {
-          LoadingView({
+          LoadingView({ skeleton: 'comments',
             loading: this.loading,
-            // 错误与真实空列表互斥；LoadingView 的空态优先级高于错误态。
+            // 错误与真实空列表互斥，失败时保留重试入口。
             empty: !this.loading && this.errorText.length === 0,
             emptyText: '还没有评论，快来抢沙发～',
             errorText: this.errorText,
@@ -105,11 +105,11 @@ export struct VideoReplyTab {
           ListItem() {
             this.loadMoreFooter({
               loading: this.loading,
-              hasMore: this.hasMore,
-              moreText: '继续加载更多评论',
+              hasMore: this.hasMore || this.errorText.length > 0,
+              moreText: this.errorText.length > 0 ? '加载失败，点击重试' : '继续加载更多评论',
               endText: '—— 评论到底啦 ——',
               onTap: () => {
-                if (this.hasMore && !this.loading) this.onLoadMore(false);
+                if ((this.hasMore || this.errorText.length > 0) && !this.loading) this.onLoadMore(false);
               },
             })
           }
@@ -123,7 +123,7 @@ export struct VideoReplyTab {
           return { offsetRemain: this.onScrollFrame(offset, this.scroller, state) };
         })
         .onReachEnd(() => {
-          if (this.hasMore) {
+          if (this.hasMore && !this.loading && this.errorText.length === 0) {
             this.onLoadMore(false);
           }
         })

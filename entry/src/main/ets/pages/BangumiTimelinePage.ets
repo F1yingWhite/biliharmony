@@ -1,7 +1,8 @@
 /**
- * 新番时间表：近一周（前后各 6 天）番剧/国创开播安排，按天分组展示。
+ * 新番时间表：今天起未来一周番剧/国创开播安排，按天分组展示。
  * 数据源 pgc/web/timeline（types 1 番剧 / 4 国创），点击条目进番剧详情。
  */
+import { RequestEpoch } from '../common/RequestEpoch';
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, NAV_BANGUMI_DETAIL, BangumiDetailParam } from '../common/AppRouter';
 import { PageHeader } from '../components/PageHeader';
@@ -18,30 +19,32 @@ export struct BangumiTimelinePage {
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
 
+  private requestEpoch: RequestEpoch = new RequestEpoch();
+
+  aboutToDisappear(): void {
+    this.requestEpoch.invalidate();
+  }
+
   async aboutToAppear(): Promise<void> {
     this.loadTimeline().catch(() => {
     });
   }
 
   async loadTimeline(): Promise<void> {
+    const epoch: number = this.requestEpoch.next();
     this.loading = true;
     this.errorText = '';
     try {
       // types=1 番剧 + types=4 国创 分别获取后按日期合并。
-      const bangumi: Array<TimeLineDay> = await BangumiApi.getTimeline(1, 0, 7);
-      const guochuang: Array<TimeLineDay> = await BangumiApi.getTimeline(4, 0, 7);
-      this.days = this.mergeDays(bangumi, guochuang);
+      const timelines: Array<Array<TimeLineDay>> = await Promise.all([
+        BangumiApi.getTimeline(1, 0, 7), BangumiApi.getTimeline(4, 0, 7),
+      ]);
+      if (this.requestEpoch.isCurrent(epoch)) this.days = this.mergeDays(timelines[0], timelines[1]);
     } catch (e) {
-      this.errorText = '时间表加载失败，请检查网络后重试';
+      if (this.requestEpoch.isCurrent(epoch)) this.errorText = '时间表加载失败，请检查网络后重试';
     } finally {
-      this.loading = false;
+      if (this.requestEpoch.isCurrent(epoch)) this.loading = false;
     }
-  }
-
-  /** 本地日期（与接口 MM-DD 格式一致）。 */
-  private todayLabel(): string {
-    const d: Date = new Date();
-    return String(d.getMonth() + 1) + '-' + String(d.getDate());
   }
 
   /** 按日期排序合并两档 types。 */
@@ -53,10 +56,14 @@ export struct BangumiTimelinePage {
         if (day.date.length === 0) continue;
         const existing: TimeLineDay | undefined = map.get(day.date);
         if (existing !== undefined) {
+          existing.isToday = existing.isToday || day.isToday;
+          existing.dateTimestamp = existing.dateTimestamp || day.dateTimestamp;
           existing.episodes = existing.episodes.concat(day.episodes);
         } else {
           const merged: TimeLineDay = new TimeLineDay();
           merged.date = day.date;
+          merged.dateTimestamp = day.dateTimestamp;
+          merged.isToday = day.isToday;
           merged.dayOfWeek = day.dayOfWeek;
           merged.episodes = day.episodes.slice();
           map.set(day.date, merged);
@@ -65,9 +72,11 @@ export struct BangumiTimelinePage {
     };
     feed(a);
     feed(b);
-    const keys: Array<string> = Array.from(map.keys()).sort();
-    const out: Array<TimeLineDay> = [];
-    for (let i: number = 0; i < keys.length; i++) out.push(map.get(keys[i]) as TimeLineDay);
+    const out: Array<TimeLineDay> = Array.from(map.values());
+    out.sort((left: TimeLineDay, right: TimeLineDay) => left.dateTimestamp - right.dateTimestamp);
+    for (let i: number = 0; i < out.length; i++) {
+      out[i].episodes.sort((left: TimeLineEpisode, right: TimeLineEpisode) => left.pubTime.localeCompare(right.pubTime));
+    }
     return out;
   }
 
@@ -80,7 +89,7 @@ export struct BangumiTimelinePage {
           .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
         Text(day.date)
           .fontSize(12).fontColor('#9499A0')
-        if (day.date === this.todayLabel()) {
+        if (day.isToday) {
           Text('今天')
             .fontSize(10).fontColor('#FFFFFF').backgroundColor(this.accent)
             .padding({ left: 6, right: 6, top: 1, bottom: 1 }).borderRadius(4)
@@ -141,19 +150,12 @@ export struct BangumiTimelinePage {
       PageHeader({ title: '新番时间表' })
       if (this.loading) {
         Column() {
-          LoadingView({ loading: true })
+          LoadingView({ loading: true, skeleton: 'list' })
         }
         .width('100%').layoutWeight(1)
       } else if (this.errorText.length > 0) {
-        Column({ space: 10 }) {
-          Text(this.errorText).fontSize(13).fontColor('#9499A0')
-          Text('重试').fontSize(13).fontColor(this.accent)
-            .padding({ left: 14, right: 14, top: 6, bottom: 6 })
-            .border({ width: 1, color: this.accent, radius: 14 })
-            .onClick(() => this.loadTimeline().catch(() => {
-            }))
-        }
-        .width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
+        LoadingView({ loading: false, errorText: this.errorText,
+          onRetry: () => this.loadTimeline().catch(() => {}) })
       } else {
         List() {
           ForEach(this.days, (day: TimeLineDay, index: number) => {
@@ -169,7 +171,7 @@ export struct BangumiTimelinePage {
     }
     .width('100%')
     .height('100%')
-    .padding({ top: Immersive.statusBarHeight() })
+    .padding({ top: Immersive.statusBarHeight(), bottom: Immersive.bottomInset() })
     .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
   }
 }

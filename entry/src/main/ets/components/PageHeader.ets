@@ -37,10 +37,12 @@ export struct PageHeader {
       })
       this.middle()
       Text(this.title)
+        .layoutWeight(1)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
         .fontSize(18)
         .fontWeight(FontWeight.Bold)
         .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-      Blank()
       this.trailing()
     }
     .width('100%')
