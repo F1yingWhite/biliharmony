@@ -17,6 +17,22 @@
 /Applications/DevEco-Studio.app/Contents/tools/node/bin/node --test --test-timeout=10000 tool/qa/regression.test.cjs tool/qa/lifecycle.test.cjs tool/qa/danmaku.test.cjs tool/qa/parity.test.cjs
 ```
 
+Windows（DevEco 装在 `D:\DevEco Studio`）等价命令，`ARKTS_TEST_TYPESCRIPT` 指向 DevEco 自带 TypeScript：
+
+```powershell
+$env:ARKTS_TEST_TYPESCRIPT = 'D:\DevEco Studio\tools\hvigor\hvigor\node_modules\typescript'
+& 'D:\DevEco Studio\tools\node\node.exe' --test --test-timeout=20000 `
+  tool/qa/regression.test.cjs tool/qa/lifecycle.test.cjs tool/qa/danmaku.test.cjs tool/qa/parity.test.cjs
+```
+
+预期 **126 项全部通过**。这两组命令在 Windows 的受限沙箱下会因 `spawn EPERM` 失败
+（Node `--test` 需要管道捕获子进程输出），需在允许管道/完整访问的终端里运行。
+
+> **锚点维护**：`methodHarness` 按源码文本切片抽取生产方法，锚点集中在
+> `lifecycle.test.cjs` 的 `ANCHOR` 常量里。改动被切片的方法签名或紧邻注释后，
+> 必须同步锚点并重跑该文件，否则用例会以"看起来像功能回归"的方式失败。
+> 详见 `docs/ArkUI易错清单.md` 第 17 条。
+
 测试直接转译并执行 ArkTS 服务源码，平台网络/文件接口使用可控替身；覆盖凭证隔离、账号切换、
 播放与搜索乱序响应、历史分页失败、缓存流式写入与并发限制。播放器/搜索测试提取生产方法，
 UI DSL 的合法性仍由完整 `CompileArkTS` 构建验证。这些测试不能替代真机播放与 UI 验收。
@@ -51,6 +67,27 @@ python3 tool/qa/run_all.py --only-audit
 - `animation_probe.py` 分析全屏旋转连续截图的方向、重复帧和可选感知哈希
 - `audit_ui.py`   UI 重叠 / 越界 / 对齐 / 行距审计
 - `smoke.py`      快速冒烟入口
+- `build_install.ps1` Windows 构建+安装（DevEco 装在 `D:\DevEco Studio` 时用；hvigor 输出重定向到
+  临时文件再读取，因为 PowerShell 管道在大输出时会挂起；带产物新鲜度校验，拒绝安装旧 HAP）
+- `ui_probe.ps1`  Windows UI 探针：`dump` / `nodes` / `tap` / `tapxy` / `back` / `start` / `stop`，
+  自动 dump 到 `.qa/ui/`。`-Action tap -Text "我的"` 按文本定位并点击
+
+## 模拟器验收 YouTube（可选）
+
+YouTube 需要出网。应用侧 HTTP 支持可选代理，默认关闭（不配置时代码路径与历史版本一致）：
+
+```powershell
+hdc rport tcp:7897 tcp:7897
+hdc shell aa start -a EntryAbility -b com.piliplus.harmony --ps netProxy http://127.0.0.1:7897
+```
+
+注意两点：
+
+- 该代理**只覆盖应用自身的 HTTP 请求**（搜索、详情元数据）。ArkWeb 播放器是独立网络栈，
+  不走这个代理，其画面需要在设备本身能直达 YouTube 时才能验收——详见
+  `docs/ArkUI易错清单.md` 第 18 条。
+- 公开搜索页必须声明桌面版 UA。不带 UA 时 YouTube 返回验证页/移动版页面，
+  `ytInitialData` 里没有 `videoRenderer`，搜索会整体失败。该行为已由回归测试锁定。
 
 ## 产物
 
