@@ -18,6 +18,7 @@ import { Haptic } from '../common/Haptic';
 import { LoadingView } from '../components/LoadingView';
 import { formatCount } from '../common/Utils';
 import { Immersive } from '../common/Immersive';
+import { PlatformStore } from '../common/PlatformStore';
 import { DecoratedAvatar } from '../components/UserDecorations';
 import { UserApi } from '../api/UserApi';
 
@@ -383,6 +384,14 @@ export struct MineView {
         this.MenuRow($r('app.media.ic_dislike'), '黑名单', () => {
           if (UserStore.isLogin) AppNavStack.pushPathByName(NAV_BLACK_LIST, null);
           else AppNavStack.pushPathByName(NAV_LOGIN, null);
+        })
+
+        this.GroupDivider()
+
+        // 顶层平台切换：YouTube 与哔哩哔哩同级，切入后由 YouTube 自己的外壳接管
+        // （自带玻璃头栏与底部 Dock），回程在 YouTube「我的」页。
+        this.MenuRow($r('app.media.ic_youtube'), 'YouTube', () => {
+          PlatformStore.switchTo(PlatformStore.YOUTUBE);
         })
       }
       .width('100%')

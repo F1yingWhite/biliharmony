@@ -22,6 +22,14 @@ function textValue(value: Object | undefined): string {
 }
 
 export class YouTubeApi {
+  /**
+   * 请求公开页面时声明桌面版 UA。不带 UA 会被 YouTube 判为不可信客户端并返回
+   * 验证页/移动版页面：ytInitialData 里没有 videoRenderer，搜索解析会失败。
+   * 这是服务端兼容性所需，不涉及伪装登录态，也不改变任何账号语义。
+   */
+  private static readonly DESKTOP_UA: string =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
   static validId(id: string): boolean { return /^[a-zA-Z0-9_-]{11}$/.test(id); }
 
   /** 只接受 YouTube 自己的链接，避免把任意 URL 交给网络层或播放器。 */
@@ -109,7 +117,12 @@ export class YouTubeApi {
 
   private static async page(url: string): Promise<string> {
     const response: HttpResponse = await HttpClient.get(url, {
-      'Accept': 'text/html', 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      'Accept': 'text/html',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      // 必须声明桌面版 UA：不带 UA 时 YouTube 返回验证页/移动版页面，
+      // ytInitialData 里没有 videoRenderer，解析会直接抛"页面格式已变化"。
+      // 实测同一 URL：桌面 UA → 22 条结果可解析；移动 UA → 解析失败。
+      'User-Agent': YouTubeApi.DESKTOP_UA,
     });
     if (!response.ok) throw new Error(response.status < 0 ?
       'YouTube 连接失败，请确认当前网络能访问 YouTube。' + response.transportMessage :

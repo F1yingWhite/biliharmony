@@ -70,13 +70,20 @@ export struct YouTubeDetailPage {
     }
   }
 
+  private playerLoaded: boolean = false;
+
   private loadPlayer(): void {
+    // 代理下发回调与 onControllerAttached 都可能触发加载；重复导航会白白打断播放器。
+    // Web 组件刚挂上控制器时还不能接受 loadData，等 attached 置位后再导航。
+    if (this.playerLoaded || !this.attached) return;
+    this.playerLoaded = true;
     this.clearTimer();
     this.playerError = '';
     this.playerLoading = true;
     try {
       this.controller.loadData(youtubePlayerHtml(this.param.id), 'text/html', 'UTF-8', YOUTUBE_PLAYER_ORIGIN + '/');
     } catch (_) {
+      this.playerLoaded = false;
       this.playerTitle('YT_NETWORK_ERROR');
       return;
     }
@@ -85,6 +92,13 @@ export struct YouTubeDetailPage {
       this.playerLoading = false;
       this.playerError = '播放器加载较慢，请检查网络后重试';
     }, 25000);
+  }
+
+  /** 「重试播放」需要允许重新导航，因此先复位 loadPlayer 的去重标记。 */
+  private retryPlayer(): void {
+    this.playerLoaded = false;
+    this.initialPageLoaded = false;
+    this.loadPlayer();
   }
 
   private playerTitle(title: string): void {
@@ -162,7 +176,7 @@ export struct YouTubeDetailPage {
             if (this.playerLoading) Text('正在连接 YouTube 播放器…').fontSize(13).fontColor('#888888')
             if (this.playerError.length > 0) {
               Text(this.playerError).fontSize(14).fontColor(this.isDark ? '#FFAAAA' : '#B3261E')
-              Button('重试播放').onClick(() => this.loadPlayer())
+              Button('重试播放').onClick(() => this.retryPlayer())
             }
             Text(this.video.title || 'YouTube 视频').fontSize(20).fontWeight(FontWeight.Bold).width('100%')
               .fontColor(this.isDark ? '#FFFFFF' : '#18191C')

@@ -2,6 +2,7 @@
  * HTTP 客户端封装：基于 @ohos.net.http，附带简单 Cookie 罐
  */
 import { http } from '@kit.NetworkKit';
+import { connection } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { asObject, asString } from '../../common/Utils';
 import { Constants } from '../../common/Constants';
@@ -79,6 +80,60 @@ class HttpExecution {
 }
 
 export class HttpClient {
+  /**
+   * 可选 HTTP 代理（形如 `http://127.0.0.1:7897`），供网络受限环境下访问境外站点。
+   * 以 AppStorage 的 `netProxy` 为准，**默认为空 → 完全不设置 usingProxy**，
+   * 因此不配置代理时所有请求行为与历史版本逐字节一致。
+   */
+  static readonly KEY_PROXY: string = 'netProxy';
+
+  static proxy(): string {
+    try {
+      const value: string | undefined = AppStorage.get<string>(HttpClient.KEY_PROXY);
+      return value === undefined ? '' : value;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  static setProxy(value: string): void {
+    AppStorage.setOrCreate<string>(HttpClient.KEY_PROXY, value.trim());
+  }
+
+  /**
+   * 把 `http://主机:端口` 解析为 HttpProxy 所需的 host / port。
+   * 注意 HttpProxy.host 只接受主机名，协议前缀会在匹配时被忽略，
+   * 端口必须通过 port 字段单独给出，因此不能把整个 URL 塞进 host。
+   * 缺省端口按协议取常见值（http 8080 / socks 1080），显式端口始终优先。
+   */
+  private static proxyConfig(): connection.HttpProxy | null {
+    const raw: string = HttpClient.proxy();
+    if (raw.length === 0) return null;
+    let rest: string = raw;
+    let scheme: string = 'http';
+    const schemeAt: number = rest.indexOf('://');
+    if (schemeAt > 0) {
+      scheme = rest.substring(0, schemeAt).toLowerCase();
+      rest = rest.substring(schemeAt + 3);
+    }
+    // 去掉可能存在的路径部分
+    const slashAt: number = rest.indexOf('/');
+    if (slashAt >= 0) rest = rest.substring(0, slashAt);
+    let host: string = rest;
+    let port: number = 0;
+    const colonAt: number = rest.lastIndexOf(':');
+    if (colonAt > 0) {
+      const parsed: number = Number.parseInt(rest.substring(colonAt + 1), 10);
+      if (!Number.isNaN(parsed) && parsed > 0 && parsed <= 65535) {
+        port = parsed;
+        host = rest.substring(0, colonAt);
+      }
+    }
+    if (host.length === 0) return null;
+    if (port === 0) port = scheme.indexOf('socks') === 0 ? 1080 : 8080;
+    return { host: host, port: port, exclusionList: [] };
+  }
+
   private static cookieJar: Record<string, string> = {};
   // App 端互动接口（如视频点踩）使用 access_key，不能混入 Web Cookie 头。
   private static appAccessToken: string = '';
@@ -318,6 +373,11 @@ export class HttpClient {
       };
       if (body !== undefined) {
         options.extraData = body;
+      }
+      // 仅在显式配置代理时启用，默认路径不写 usingProxy（避免影响既有请求语义）。
+      const proxy: connection.HttpProxy | null = HttpClient.proxyConfig();
+      if (proxy !== null) {
+        options.usingProxy = proxy;
       }
       return new HttpExecution(await request.request(url, options));
     } catch (e) {
