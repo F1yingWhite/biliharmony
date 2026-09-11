@@ -5,7 +5,8 @@ import { PageHeader } from '../components/PageHeader';
 import { AppNavStack } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { RequestEpoch } from '../common/RequestEpoch';
-import { youtubePlayerHtml, youtubePlaybackError, YOUTUBE_PLAYER_ORIGIN } from '../common/YouTubePlayerHtml';
+import { youtubeFullscreenProbeHtml, youtubePlayerHtml, youtubePlaybackError,
+  YOUTUBE_PLAYER_ORIGIN } from '../common/YouTubePlayerHtml';
 import { AppTheme } from '../common/AppTheme';
 import { MotionTokens } from '../common/MotionTokens';
 import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
@@ -109,7 +110,10 @@ export struct YouTubeDetailPage {
     this.playerError = '';
     this.playerLoading = true;
     try {
-      this.controller.loadData(youtubePlayerHtml(this.param.id), 'text/html', 'UTF-8', YOUTUBE_PLAYER_ORIGIN + '/');
+      // ytPlayerProbe 是 QA 开关（默认关）：只加载一个全屏按钮页，用于验证全屏/返回联动。
+      const probe: boolean = AppStorage.get<boolean>('ytPlayerProbe') === true;
+      this.controller.loadData(probe ? youtubeFullscreenProbeHtml() : youtubePlayerHtml(this.param.id),
+        'text/html', 'UTF-8', YOUTUBE_PLAYER_ORIGIN + '/');
     } catch (_) {
       this.playerLoaded = false;
       this.playerTitle('YT_NETWORK_ERROR');

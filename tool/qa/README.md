@@ -93,6 +93,16 @@ hdc shell aa start -a EntryAbility -b com.piliplus.harmony --ps netProxy http://
 - 公开搜索页必须声明桌面版 UA。不带 UA 时 YouTube 返回验证页/移动版页面，
   `ytInitialData` 里没有 `videoRenderer`，搜索会整体失败。该行为已由回归测试锁定。
 
+**播放层被风控挡住时如何验收全屏/返回联动**：YouTube 的「请登录，以便我们确认你不是
+聊天机器人」面板会顶掉官方控件，全屏按钮点不到。此时用 QA 探针页（默认关）验证应用侧管线：
+
+```bash
+hdc shell aa start -a EntryAbility -b com.piliplus.harmony --ps netProxy http://127.0.0.1:7890 --ps ytPlayerProbe 1
+```
+
+进任意视频详情会加载一个只有「全屏探针」按钮的本地页面（不请求任何远端内容）：点它应进入
+横屏沉浸全屏并隐藏头栏，按返回键应恢复竖屏与头栏。**不传 `ytPlayerProbe` 时永远走真实播放器。**
+
 播放器画面渲染出来后，点播放仍可能被 YouTube 的「请登录，以便我们确认你不是聊天机器人」
 拦截（出口 IP 风控，第 18d 条）——它没有 `onError` 事件，既不能记成应用缺陷，
 也不能当作播放验收通过。

@@ -571,6 +571,15 @@ test('YouTube: iframe identifies the actual app and cannot interpolate an arbitr
   assert.equal(youtubePlaybackError('YT_READY'),'');
 });
 
+test('YouTube: the fullscreen probe stays offline and never interpolates page data', () => {
+  // QA 探针页只在 ytPlayerProbe 打开时加载，用来验证全屏/返回联动（播放层被风控挡住时）。
+  // 它必须完全离线：任何远端请求都会让"验证应用侧管线"这件事本身失真。
+  const {youtubeFullscreenProbeHtml}=environment({'services/network/HttpClient':{}}).load('common/YouTubePlayerHtml');
+  const html=youtubeFullscreenProbeHtml();
+  assert.match(html,/requestFullscreen/);
+  assert.doesNotMatch(html,/https?:\/\//);
+  assert.doesNotMatch(html,/videoId|ytimg|youtube\.com/);
+});
 test('YouTube: public pages are requested as a desktop client or the page has no parseable results', async () => {
   // 回归背景：不带 User-Agent 时 YouTube 返回验证页/移动版页面，ytInitialData 里
   // 没有 videoRenderer，搜索会整体失败。实测同一 URL：桌面 UA 可解析 22 条，移动 UA 直接抛错。
