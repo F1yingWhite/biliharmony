@@ -1,6 +1,7 @@
 import { inputMethod } from '@kit.IMEKit';
 import { curves } from '@kit.ArkUI';
-import { YouTubeApi, YouTubeSearchPage, YouTubeVideo } from '../api/YouTubeApi';
+import { YouTubeApi, YouTubeSearchFilter, YouTubeSearchFilterGroup, YouTubeSearchPage,
+  YouTubeVideo } from '../api/YouTubeApi';
 import { AppNavStack, NAV_YOUTUBE_DETAIL, NAV_YOUTUBE_SAVED } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { RequestEpoch } from '../common/RequestEpoch';
@@ -56,6 +57,11 @@ export struct YouTubeView {
   /** 输入联想（防抖后取回）与本地搜索历史；两者都与哔哩哔哩搜索页对等。 */
   @State suggestions: Array<string> = [];
   @State history: Array<string> = [];
+  /** 搜索筛选：定义来自结果页，选中后原样回传 params 重新搜索。 */
+  @State filterGroups: Array<YouTubeSearchFilterGroup> = [];
+  @State activeFilterLabel: string = '';
+  @State activeFilterParams: string = '';
+  @State filterSheet: boolean = false;
   /** 双列/多列与左右内缩都随屏宽变化，与哔哩哔哩首页同一套 LayoutTokens 断点。 */
   @State viewportWidth: number = 360;
   /** Dock 激活色与弹跳比例：与主框架 FloatingTabs 取同一来源。 */
@@ -160,21 +166,29 @@ export struct YouTubeView {
     this.runSearch(query);
   }
 
-  private runSearch(query: string): void {
+  /** 换关键词时清掉旧筛选；同一关键词下换筛选则保留（由 applyFilter 传入 params）。 */
+  private runSearch(query: string, filterParams: string = ''): void {
+    if (query !== this.searched) {
+      this.activeFilterLabel = '';
+      this.activeFilterParams = '';
+      this.filterGroups = [];
+    }
     const token: number = this.request.next();
     this.loading = true;
     this.error = '';
     this.moreError = '';
     this.searched = query;
+    this.activeFilterParams = filterParams;
     this.videos = [];
     this.continuation = '';
     this.thumbLocal = new Map<string, string>();
     this.coversReady = new Map<string, boolean>();
     this.scroller.scrollTo({ xOffset: 0, yOffset: 0 });
-    YouTubeApi.search(query).then((page: YouTubeSearchPage) => {
+    YouTubeApi.search(query, filterParams).then((page: YouTubeSearchPage) => {
       if (!this.request.isCurrent(token)) return;
       this.videos = page.videos;
       this.continuation = page.continuation;
+      if (page.filters.length > 0) this.filterGroups = page.filters;
       this.primeThumbnails(page.videos);
     }).catch((e: Object) => {
       if (!this.request.isCurrent(token)) return;
@@ -182,6 +196,20 @@ export struct YouTubeView {
     }).finally(() => {
       if (this.request.isCurrent(token)) this.loading = false;
     });
+  }
+
+  /** 应用某个筛选项：同一个关键词重新搜一次，保留筛选标签以便取消。 */
+  private applyFilter(filter: YouTubeSearchFilter): void {
+    Haptic.light();
+    this.filterSheet = false;
+    this.activeFilterLabel = filter.label;
+    this.runSearch(this.searched, filter.params);
+  }
+
+  private clearFilter(): void {
+    Haptic.light();
+    this.activeFilterLabel = '';
+    if (this.searched.length > 0) this.runSearch(this.searched, '');
   }
 
   /** 跨页去重：同一视频可能同时出现在两页，重复 id 会让列表键冲突。 */
@@ -686,9 +714,74 @@ export struct YouTubeView {
     .width('100%').height(48).justifyContent(FlexAlign.Center)
   }
 
+  /**
+   * 筛选条：与哔哩哔哩结果页的 chips 同一作用（点开面板选类型/时长/上传时间/功能/排序）。
+   * 选中的筛选项显示成可取消的标签，避免用户忘了自己筛过什么。
+   */
+  @Builder
+  FilterBar() {
+    Row({ space: 8 }) {
+      Text('筛选')
+        .fontSize(12)
+        .fontColor(this.activeFilterLabel.length > 0 ? AppTheme.DANGER : (this.isDark ? '#E6E6E6' : '#454A50'))
+        .height(30).padding({ left: 14, right: 14 })
+        .borderRadius(15)
+        .backgroundColor(this.isDark ? '#2B2D34' : '#EDEFF2')
+        .onClick(() => { this.filterSheet = true; })
+      if (this.activeFilterLabel.length > 0) {
+        Row({ space: 5 }) {
+          Text(this.activeFilterLabel).fontSize(12).fontColor(AppTheme.DANGER).maxLines(1)
+          Image($r('app.media.ic_close')).width(10).height(10).fillColor(AppTheme.DANGER)
+        }
+        .height(30).padding({ left: 12, right: 10 })
+        .borderRadius(15)
+        .backgroundColor(this.isDark ? '#3A2A2C' : '#FDECEE')
+        .onClick(() => this.clearFilter())
+      }
+      Blank()
+    }
+    .width('100%').height(38)
+    .alignItems(VerticalAlign.Center)
+  }
+
+  /** 筛选面板：分组展示页面下发的筛选项，按下的那项用强调色标出。 */
+  @Builder
+  FilterSheet() {
+    Scroll() {
+      Column({ space: 14 }) {
+        Text('搜索过滤条件').fontSize(17).fontWeight(FontWeight.Bold).width('100%')
+          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+        ForEach(this.filterGroups, (group: YouTubeSearchFilterGroup) => {
+          Column({ space: 8 }) {
+            Text(group.title).fontSize(13).fontWeight(FontWeight.Medium).width('100%')
+              .fontColor(this.isDark ? '#C8C8CC' : '#5A5F66')
+            Flex({ wrap: FlexWrap.Wrap }) {
+              ForEach(group.filters, (filter: YouTubeSearchFilter) => {
+                Text(filter.label)
+                  .fontSize(13)
+                  .fontColor(filter.params === this.activeFilterParams ?
+                    '#FFFFFF' : (this.isDark ? '#E6E6E6' : '#18191C'))
+                  .padding({ left: 14, right: 14, top: 8, bottom: 8 })
+                  .borderRadius(17)
+                  .margin({ right: 8, bottom: 8 })
+                  .backgroundColor(filter.params === this.activeFilterParams ? AppTheme.DANGER :
+                    (this.isDark ? '#2B2D34' : '#F0F1F3'))
+                  .onClick(() => this.applyFilter(filter))
+              }, (filter: YouTubeSearchFilter) => filter.params)
+            }.width('100%')
+          }.width('100%').alignItems(HorizontalAlign.Start)
+        }, (group: YouTubeSearchFilterGroup) => group.title)
+      }
+      .width('100%').padding(18).alignItems(HorizontalAlign.Start)
+    }
+    .width('100%').scrollBar(BarState.Off)
+  }
+
   /** 搜索结果区：加载 / 错误 / 空 / 列表四态互斥，与哔哩哔哩三态写法一致。 */
   @Builder
   ResultArea() {
+    // 筛选条放在四态之外：结果为空时也必须能取消筛选，否则用户会被自己筛进去出不来。
+    if (this.filterGroups.length > 0 && !this.loading) this.FilterBar()
     if (this.loading) {
       Column({ space: 12 }) {
         LoadingProgress().width(36).height(36).color(AppTheme.DANGER)
@@ -702,8 +795,9 @@ export struct YouTubeView {
         })
       }.layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
     } else if (this.videos.length > 0) {
-      // 双列网格：与哔哩哔哩首页一致的 lanes 瀑布流布局与列间距。
-      List({ space: LayoutTokens.feedGap, scroller: this.scroller }) {
+      Column() {
+        // 双列网格：与哔哩哔哩首页一致的 lanes 瀑布流布局与列间距。
+        List({ space: LayoutTokens.feedGap, scroller: this.scroller }) {
         // footer 挂在 ListItemGroup 上：双列 lanes 下才能整宽居中（同首页做法）。
         ListItemGroup({ footer: this.ResultFooter() }) {
           ForEach(this.videos, (video: YouTubeVideo) => {
@@ -711,13 +805,15 @@ export struct YouTubeView {
           }, (video: YouTubeVideo) => video.id)
         }
       }
-      .layoutWeight(1).width('100%')
-      .lanes(LayoutTokens.feedColumns(this.viewportWidth), LayoutTokens.feedGap)
-      // 悬浮 Dock 高 52 + 底边距 16，末端留白必须大于 68 才能完整露出末行（同首页）。
-      .contentEndOffset(Immersive.bottomInset() + 76)
-      .scrollBar(BarState.Off)
-      .onDidScroll((offset: number) => AppTheme.updateHeaderFade(offset))
-      .onReachEnd(() => { this.loadMore(); })
+        .layoutWeight(1).width('100%')
+        .lanes(LayoutTokens.feedColumns(this.viewportWidth), LayoutTokens.feedGap)
+        // 悬浮 Dock 高 52 + 底边距 16，末端留白必须大于 68 才能完整露出末行（同首页）。
+        .contentEndOffset(Immersive.bottomInset() + 76)
+        .scrollBar(BarState.Off)
+        .onDidScroll((offset: number) => AppTheme.updateHeaderFade(offset))
+        .onReachEnd(() => { this.loadMore(); })
+      }
+      .width('100%').layoutWeight(1)
     } else {
       Column({ space: 12 }) {
         Text(this.searched.length > 0 ? '没有找到相关视频' : '探索 YouTube')
@@ -744,6 +840,11 @@ export struct YouTubeView {
       right: LayoutTokens.horizontalPadding(this.viewportWidth) })
     .constraintSize({ maxWidth: LayoutTokens.feedMaxWidth })
     .alignSelf(ItemAlign.Center)
+    .bindSheet($$this.filterSheet, this.FilterSheet(), {
+      height: 420,
+      dragBar: true,
+      backgroundColor: this.isDark ? '#24272E' : '#FFFFFF',
+    })
   }
 
   /** 「我的」：账号能力未接入，只做诚实说明，不放无法闭环的登录按钮。 */

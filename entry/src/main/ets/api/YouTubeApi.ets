@@ -17,10 +17,24 @@ export class YouTubeVideo {
   subscribers: string = '';
 }
 
-/** 搜索结果的一页：视频列表 + 下一页 token（空串表示没有更多，调用方据此如实收尾）。 */
+/** 搜索筛选的一个选项：label 是页面给的中文名，params 是回传时必须原样带的串。 */
+export class YouTubeSearchFilter {
+  label: string = '';
+  params: string = '';
+}
+
+/** 一组筛选（类型 / 时长 / 上传时间 / 功能 / 排序）。 */
+export class YouTubeSearchFilterGroup {
+  title: string = '';
+  filters: Array<YouTubeSearchFilter> = [];
+}
+
+/** 搜索结果的一页：视频列表 + 下一页 token（空串表示没有更多）+ 可用筛选项。 */
 export class YouTubeSearchPage {
   videos: Array<YouTubeVideo> = [];
   continuation: string = '';
+  /** 只有首页带筛选定义；翻页响应里没有。 */
+  filters: Array<YouTubeSearchFilterGroup> = [];
 }
 
 /** 一条评论。只读公开数据，不涉及账号或发布能力。 */
@@ -209,6 +223,42 @@ export class YouTubeApi {
     return page;
   }
 
+  /**
+   * 搜索筛选定义：页面把「类型 / 时长 / 上传时间 / 功能 / 排序」放在搜索框旁边的
+   * 过滤弹层里（searchFilterOptionsDialogRenderer）。只读取 label 与 params，
+   * 不解释 params 的内容——回传时原样带上即可。
+   */
+  static parseFilters(html: string): Array<YouTubeSearchFilterGroup> {
+    const initial: Record<string, Object> | null = YouTubeApi.initialObject(html, 'ytInitialData');
+    if (initial === null) return [];
+    const header: Record<string, Object> = asObject(asObject(initial['header'])['searchHeaderRenderer']);
+    const button: Record<string, Object> = asObject(asObject(header['searchFilterButton'])['buttonRenderer']);
+    // 每一层索引的结果都要再包一次 asObject：索引出来的是 Object，不能直接当 Record 用。
+    const dialog: Record<string, Object> = asObject(
+      asObject(asObject(asObject(button['command'])['openPopupAction'])['popup'])
+        ['searchFilterOptionsDialogRenderer']);
+    const groups: Object = asObject(dialog)['groups'];
+    const out: Array<YouTubeSearchFilterGroup> = [];
+    if (!Array.isArray(groups)) return out;
+    for (const entry of groups as Array<Object>) {
+      const group: Record<string, Object> = asObject(asObject(entry)['searchFilterGroupRenderer']);
+      const filters: Object = group['filters'];
+      if (!Array.isArray(filters)) continue;
+      const parsed: YouTubeSearchFilterGroup = new YouTubeSearchFilterGroup();
+      parsed.title = textValue(group['title']);
+      for (const item of filters as Array<Object>) {
+        const renderer: Record<string, Object> = asObject(asObject(item)['searchFilterRenderer']);
+        const endpoint: Record<string, Object> = asObject(asObject(renderer['navigationEndpoint'])['searchEndpoint']);
+        const filter: YouTubeSearchFilter = new YouTubeSearchFilter();
+        filter.label = textValue(renderer['label']);
+        filter.params = asString(endpoint['params']);
+        if (filter.label.length > 0 && filter.params.length > 0) parsed.filters.push(filter);
+      }
+      if (parsed.filters.length > 0) out.push(parsed);
+    }
+    return out;
+  }
+
   /** 只取视频列表的兼容入口；翻页需要 continuation，请用 parseSearchPage。 */
   static parseSearch(html: string): Array<YouTubeVideo> {
     return YouTubeApi.parseSearchPage(html).videos;
@@ -290,13 +340,19 @@ export class YouTubeApi {
     return true;
   }
 
-  static async search(query: string): Promise<YouTubeSearchPage> {
+  /**
+   * 搜索。`filterParams` 来自上一页 `/results` 里的筛选项，必须原样回传（含 %3D 转义），
+   * 不自己拼 protobuf，避免猜错含义。
+   */
+  static async search(query: string, filterParams: string = ''): Promise<YouTubeSearchPage> {
     const term: string = query.trim().substring(0, 200);
     if (term.length === 0) return new YouTubeSearchPage();
+    const suffix: string = filterParams.length > 0 ? '&sp=' + filterParams : '';
     const html: string = await YouTubeApi.page(
-      'https://www.youtube.com/results?search_query=' + encodeURIComponent(term) + '&hl=zh-CN');
+      'https://www.youtube.com/results?search_query=' + encodeURIComponent(term) + suffix + '&hl=zh-CN');
     const page: YouTubeSearchPage = YouTubeApi.parseSearchPage(html);
     if (!YouTubeApi.rememberInnerTube(html)) page.continuation = '';
+    page.filters = YouTubeApi.parseFilters(html);
     return page;
   }
 
