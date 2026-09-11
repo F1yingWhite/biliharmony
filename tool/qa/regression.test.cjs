@@ -771,6 +771,66 @@ test('YouTube: continuation parsing accepts both containers and rejects garbage'
   assert.equal(YouTubeApi.parseContinuation('{}').videos.length,0);
   assert.throws(()=>YouTubeApi.parseContinuation('<!doctype html>'),/翻页数据/);
 });
+test('Search history: each platform keeps its own list, deduplicated and capped', async () => {
+  // 需求：YouTube 侧要有和哔哩哔哩对等的本地搜索历史，但两边不能混存。
+  const disk=new Map();
+  const prefs={getPreferences:async()=>({getSync:(k,d)=>disk.has(k)?disk.get(k):d,
+    putSync:(k,v)=>{disk.set(k,v);},flush:async()=>{}})};
+  const env=environment({'@kit.AbilityKit':{common:{}},'@kit.ArkData':{preferences:prefs}});
+  const {YouTubeSearchHistoryStore}=env.load('common/YouTubeSearchHistoryStore');
+  const {SearchHistoryStore}=env.load('common/SearchHistoryStore');
+  YouTubeSearchHistoryStore.init({});
+  SearchHistoryStore.init({});
+
+  YouTubeSearchHistoryStore.add('blender');
+  YouTubeSearchHistoryStore.add('音乐');
+  YouTubeSearchHistoryStore.add('blender');
+  // 重复项提到最前而不是新增一条。
+  assert.deepEqual(YouTubeSearchHistoryStore.items(),['blender','音乐']);
+  SearchHistoryStore.add('bad apple');
+  assert.deepEqual(SearchHistoryStore.items(),['bad apple']);
+
+  // 两个平台各自写自己的键：清空一边不影响另一边。
+  assert.equal(env.storage.get('youtubeSearchHistoryJson'),'["blender","音乐"]');
+  assert.equal(env.storage.get('searchHistoryJson'),'["bad apple"]');
+  YouTubeSearchHistoryStore.clear();
+  assert.deepEqual(YouTubeSearchHistoryStore.items(),[]);
+  assert.deepEqual(SearchHistoryStore.items(),['bad apple']);
+
+  for(let i=0;i<25;i++) YouTubeSearchHistoryStore.add('kw'+String(i));
+  assert.equal(YouTubeSearchHistoryStore.items().length,20);
+  assert.equal(YouTubeSearchHistoryStore.items()[0],'kw24');
+  assert.deepEqual(YouTubeSearchHistoryStore.remove('kw24')[0],'kw23');
+  // 落盘的是同一份内容，重启后能读回来。
+  assert.deepEqual(await YouTubeSearchHistoryStore.ensureLoaded(),YouTubeSearchHistoryStore.items());
+});
+
+test('YouTube: search suggestions come from the public JSON endpoint and fail soft', async () => {
+  const calls=[];
+  const body='["blender",["blender","blender教程","blender","",42],"x"]';
+  const {YouTubeApi}=environment({'services/network/HttpClient':{HttpClient:{get:async(...args)=>{
+    calls.push(args);return {ok:true,body};
+  }}}}).load('api/YouTubeApi');
+  // 非字符串项与重复项都要丢掉。
+  assert.deepEqual(YouTubeApi.parseSuggest(body),['blender','blender教程']);
+  assert.deepEqual(YouTubeApi.parseSuggest('not json'),[]);
+  assert.deepEqual(YouTubeApi.parseSuggest('["only-key"]'),[]);
+  // 建议条数封顶 8：输入联想是辅助，不该占满整屏（实测 10 条会被悬浮 Dock 压住）。
+  const many='["q",'+JSON.stringify(Array.from({length:12},(_,i)=>'s'+String(i))) + ']';
+  assert.equal(YouTubeApi.parseSuggest(many).length,8);
+  assert.deepEqual(await YouTubeApi.suggest('blender'),['blender','blender教程']);
+  const [url,headers]=calls[0];
+  assert.match(url,/^https:\/\/suggestqueries\.google\.com\/complete\/search/);
+  assert.match(url,/ds=yt/);assert.match(url,/q=blender/);
+  assert.match(headers['User-Agent'],/Mozilla\/5\.0/);
+  assert.equal(headers.Cookie,undefined);assert.equal(headers.Referer,undefined);
+  // 网络失败返回空数组：联想是输入辅助，不能把异常抛给调用方。
+  const failing=environment({'services/network/HttpClient':{HttpClient:{get:async()=>{
+    throw new Error('offline');
+  }}}}).load('api/YouTubeApi');
+  assert.deepEqual(await failing.YouTubeApi.suggest('x'),[]);
+  assert.deepEqual(await failing.YouTubeApi.suggest('  '),[]);
+});
 test('Platform: switching platforms invalidates in-flight work and persists the choice', () => {
   const env=environment(themeMocks());
   const {PlatformStore}=env.load('common/PlatformStore');

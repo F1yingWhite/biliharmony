@@ -6,6 +6,7 @@ import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
 import { UserStore } from '../services/auth/UserStore';
 import { SearchHistoryStore } from '../common/SearchHistoryStore';
+import { YouTubeSearchHistoryStore } from '../common/YouTubeSearchHistoryStore';
 import { PlatformStore } from '../common/PlatformStore';
 import { EmoteResolver } from '../common/EmoteResolver';
 import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
@@ -21,6 +22,8 @@ export default class EntryAbility extends UIAbility {
     AppStorage.setOrCreate<boolean>('appInBackground', false);
     UserStore.initPersistence(this.context);
     SearchHistoryStore.init(this.context);
+    // YouTube 侧搜索历史独立存储：两个平台的搜索词不混在一起。
+    YouTubeSearchHistoryStore.init(this.context);
     // 顶层平台（哔哩哔哩 / YouTube）持久化：冷启动即确定首帧渲染哪个外壳。
     PlatformStore.init();
     this.applyLaunchProxy(want);

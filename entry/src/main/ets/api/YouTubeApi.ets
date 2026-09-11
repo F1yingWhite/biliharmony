@@ -229,6 +229,48 @@ export class YouTubeApi {
     return response.body;
   }
 
+  /**
+   * 搜索联想：Google 的公开 suggest 接口，`client=firefox` 返回纯 JSON（不是 JSONP），
+   * 因此不需要执行任何远端脚本。失败一律返回空数组——联想挂了不能影响输入与搜索本身。
+   */
+  static async suggest(query: string): Promise<Array<string>> {
+    const term: string = query.trim().substring(0, 200);
+    if (term.length === 0) return [];
+    try {
+      const response: HttpResponse = await HttpClient.get(
+        'https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&hl=zh-CN&q=' +
+        encodeURIComponent(term), {
+          'Accept': 'application/json',
+          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+          'User-Agent': YouTubeApi.DESKTOP_UA,
+        });
+      if (!response.ok) return [];
+      return YouTubeApi.parseSuggest(response.body);
+    } catch (e) {
+      // 联想是输入辅助，网络失败不该把异常抛给调用方，更不该挡住输入与搜索。
+      return [];
+    }
+  }
+
+  /** 联想响应是 `["关键词", ["建议", ...], ...]`；只取字符串项并去重。 */
+  static parseSuggest(body: string): Array<string> {
+    try {
+      const parsed: Object = JSON.parse(body) as Object;
+      if (!Array.isArray(parsed) || (parsed as Array<Object>).length < 2) return [];
+      const list: Object = (parsed as Array<Object>)[1];
+      if (!Array.isArray(list)) return [];
+      const out: Array<string> = [];
+      for (const item of list as Array<Object>) {
+        if (typeof item !== 'string') continue;
+        const value: string = (item as string).trim();
+        if (value.length > 0 && out.indexOf(value) < 0 && out.length < 8) out.push(value);
+      }
+      return out;
+    } catch (e) {
+      return [];
+    }
+  }
+
   /** 从 ytcfg 里取字符串配置。 */
   private static configString(html: string, key: string): string {
     const match: RegExpMatchArray | null = html.match(new RegExp('"' + key + '"\\s*:\\s*"([^"]*)"'));

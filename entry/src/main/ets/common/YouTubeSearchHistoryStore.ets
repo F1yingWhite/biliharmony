@@ -2,12 +2,12 @@ import { common } from '@kit.AbilityKit';
 import { KeywordHistoryStore } from './KeywordHistoryStore';
 
 /**
- * 哔哩哔哩侧搜索历史。逻辑在 KeywordHistoryStore：YouTube 需要同一套能力但独立存储，
- * 两个平台的搜索词混在一起既没有意义，清空历史也会互相影响。
+ * YouTube 侧搜索历史：与哔哩哔哩同一套能力、各自独立存储。
+ * 搜索词属于平台内容，混存会让两边的历史互相污染。
  */
-const store: KeywordHistoryStore = new KeywordHistoryStore('searchHistoryJson', 'bili_search_state');
+const store: KeywordHistoryStore = new KeywordHistoryStore('youtubeSearchHistoryJson', 'youtube_search_state');
 
-export class SearchHistoryStore {
+export class YouTubeSearchHistoryStore {
   static init(context: common.UIAbilityContext): void {
     store.init(context);
   }
