@@ -7,7 +7,9 @@ const root = path.resolve(__dirname, '../../entry/src/main/ets');
 const sourceOverride = process.env.ARKTS_TEST_SOURCE_ROOT;
 function readSource(filename) {
   const override = sourceOverride && path.join(sourceOverride, path.relative(root, filename));
-  return fs.readFileSync(override && fs.existsSync(override) ? override : filename, 'utf8');
+  // .ets 是 CRLF 检出，锚点按 \n 书写：统一归一为 LF，避免跨行锚点静默失配。
+  return fs.readFileSync(override && fs.existsSync(override) ? override : filename, 'utf8')
+    .replace(/\r\n/g, '\n');
 }
 const ts = require(process.env.ARKTS_TEST_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript');
