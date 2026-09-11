@@ -1,3 +1,4 @@
+import { RequestEpoch } from '../common/RequestEpoch';
 /**
  * 分区频道页：展示 B 站主要视频分区（关卡/动画/…），点击进该分区排行列表。
  * 数据复用 getRankVideos(rid)——rid 即分区 id，一个无端到新端点的轻量频道浏览。
@@ -20,9 +21,35 @@ export struct ZoneChannelPage {
   @State zoneLabel: string = '';
   @State loading: boolean = false;
   @State errorText: string = '';
+  @State failed: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   private videoSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
+
+  private requestEpoch: RequestEpoch = new RequestEpoch();
+
+  aboutToDisappear(): void {
+    this.requestEpoch.invalidate();
+  }
+
+  private selectZone(zone: SearchNumOption): void {
+    this.requestEpoch.invalidate();
+    this.loading = false;
+    this.videoSource.clear();
+    this.zoneId = zone.value;
+    this.zoneLabel = zone.label;
+    this.load(true);
+  }
+
+  private backToZones(): void {
+    this.requestEpoch.invalidate();
+    this.loading = false;
+    this.failed = false;
+    this.errorText = '';
+    this.zoneId = -1;
+    this.zoneLabel = '';
+    this.videoSource.clear();
+  }
 
   /** 去掉"不限",只留真实分区入口 */
   private zones(): Array<SearchNumOption> {
@@ -35,6 +62,7 @@ export struct ZoneChannelPage {
 
   @Builder
   ZoneGrid() {
+    Scroll() {
     Column({ space: 2 }) {
       ForEach(this.zones(), (z: SearchNumOption) => {
         Row({ space: 12 }) {
@@ -62,12 +90,7 @@ export struct ZoneChannelPage {
         .padding({ left: 14, right: 14 })
         .borderRadius(10)
         .backgroundColor(this.isDark ? '#26272B' : '#FFFFFF')
-        .onClick(() => {
-          this.zoneId = z.value;
-          this.zoneLabel = z.label;
-          this.load(true).catch(() => {
-          });
-        })
+        .onClick(() => this.selectZone(z))
         .animation({ duration: 120 })
       }, (z: SearchNumOption) => String(z.value))
     }
@@ -75,60 +98,49 @@ export struct ZoneChannelPage {
     .padding({ left: 12, right: 12 })
     .constraintSize({ maxWidth: LayoutTokens.readingMaxWidth })
     .alignSelf(ItemAlign.Center)
+    }.width('100%').layoutWeight(1).scrollBar(BarState.Off)
+      .align(Alignment.TopStart).padding({ top: 8 })
   }
 
   async load(reset: boolean): Promise<void> {
-    if (this.loading) {
+    if (this.loading || this.zoneId < 0) {
       return;
     }
+    const epoch: number = this.requestEpoch.next();
     this.loading = true;
     this.errorText = '';
+    this.failed = false;
     try {
       const list: Array<VideoItem> = await SearchApi.getRankVideos(this.zoneId);
+      if (!this.requestEpoch.isCurrent(epoch)) return;
       if (list.length === 0 && reset) {
         this.errorText = '该分区暂无可展示视频，请稍后再试';
       }
       this.videoSource.reset(list);
     } catch (e) {
+      if (!this.requestEpoch.isCurrent(epoch)) return;
       if (this.videoSource.isEmpty()) {
+        this.failed = true;
         this.errorText = '加载失败，请检查网络后重试';
       }
     } finally {
-      this.loading = false;
+      if (this.requestEpoch.isCurrent(epoch)) this.loading = false;
     }
   }
 
   @Builder
   ZoneVideos() {
     Column() {
-      Row({ space: 8 }) {
-        Text('‹')
-          .fontSize(24)
-          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-          .onClick(() => {
-            this.zoneId = -1;
-            this.zoneLabel = '';
-            this.videoSource.clear();
-          })
-        Text(this.zoneLabel + ' 排行')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-      }
-      .width('100%')
-      .height(48)
-      .padding({ left: 12, right: 12 })
-
       if (this.videoSource.isEmpty() && this.loading) {
-        LoadingView({ loading: true })
-          .margin({ top: 60 })
+        LoadingView({ skeleton: 'list', loading: true })
+
       } else if (this.videoSource.isEmpty() && this.errorText.length > 0) {
-        LoadingView({ loading: false, empty: true, emptyText: this.errorText,
+        LoadingView({ skeleton: 'list', loading: false, empty: !this.failed, emptyText: this.errorText, errorText: this.failed ? this.errorText : '',
           onRetry: () => {
             this.load(true).catch(() => {
             });
           } })
-          .margin({ top: 60 })
+
       } else {
         List() {
           LazyForEach(this.videoSource, (item: VideoItem) => {
@@ -159,7 +171,8 @@ export struct ZoneChannelPage {
 
   build() {
     Column() {
-      PageHeader({ title: this.zoneId < 0 ? '分区频道' : this.zoneLabel })
+      PageHeader({ title: this.zoneId < 0 ? '分区频道' : this.zoneLabel + '排行',
+        onBack: () => { if (this.zoneId >= 0) this.backToZones(); else AppNavStack.pop(); } })
       if (this.zoneId < 0) {
         this.ZoneGrid()
       } else {
@@ -168,7 +181,7 @@ export struct ZoneChannelPage {
     }
     .width('100%')
     .height('100%')
-    .padding({ top: Immersive.statusBarHeight() })
+    .padding({ top: Immersive.statusBarHeight(), bottom: Immersive.bottomInset() })
     .backgroundColor(this.isDark ? '#141519' : '#F6F7F9')
   }
 }

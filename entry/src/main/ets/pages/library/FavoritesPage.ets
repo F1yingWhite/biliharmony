@@ -24,6 +24,9 @@ export struct FavoritesPage {
   @State hasMore: boolean = true;
   @State loading: boolean = false;
   @State videoLoading: boolean = false;
+  @State folderError: string = '';
+  @State collectionError: string = '';
+  @State videoError: string = '';
   @State collectionHasMore: boolean = true;
   @State collectionLoading: boolean = false;
   // ===== 收藏夹管理状态 =====
@@ -64,6 +67,7 @@ export struct FavoritesPage {
     const user = UserStore.current;
     if (user === null) return;
     this.collectionLoading = true;
+    this.collectionError = '';
     try {
       const page: number = reset ? 1 : this.collectionPage + 1;
       const data = await FavoriteApi.getCollectedFolders(user.mid, page);
@@ -75,6 +79,7 @@ export struct FavoritesPage {
       this.collectionPage = page;
       this.collectionHasMore = data.hasMore;
     } catch (e) {
+      this.collectionError = '加载失败，请检查网络后重试';
     } finally {
       this.collectionLoading = false;
     }
@@ -85,6 +90,7 @@ export struct FavoritesPage {
     const user = UserStore.current;
     if (user === null) return;
     this.loading = true;
+    this.folderError = '';
     try {
       const page: number = reset ? 1 : this.folderPage + 1;
       const data = await FavoriteApi.getFavoriteFolders(user.mid, page);
@@ -96,6 +102,7 @@ export struct FavoritesPage {
       this.folderPage = page;
       this.hasMore = data.hasMore;
     } catch (e) {
+      this.folderError = '加载失败，请检查网络后重试';
     } finally {
       this.loading = false;
     }
@@ -117,6 +124,7 @@ export struct FavoritesPage {
     const folderId: number = this.selected.id;
     const folderType: number = this.selected.type;
     this.videoLoading = true;
+    this.videoError = '';
     try {
       const page: number = reset ? 1 : this.videoPage + 1;
       const data: FavoriteVideoPageData = folderType === 21 ?
@@ -130,6 +138,8 @@ export struct FavoritesPage {
       this.videoPage = page;
       this.hasMore = data.hasMore;
     } catch (e) {
+      if (generation !== this.videoRequestGeneration) return;
+      this.videoError = '加载失败，请检查网络后重试';
     } finally {
       if (generation === this.videoRequestGeneration) this.videoLoading = false;
     }
@@ -412,6 +422,22 @@ export struct FavoritesPage {
   }
 
   /** 收藏集 Tab 有自己的加载/到底状态，footer 需要按当前列表切换。 */
+  private currentEmpty(): boolean {
+    if (this.selected.id > 0) return this.videosSource.isEmpty();
+    return this.category === 1 ? this.collectionsSource.isEmpty() : this.foldersSource.isEmpty();
+  }
+
+  private currentError(): string {
+    if (this.selected.id > 0) return this.videoError;
+    return this.category === 1 ? this.collectionError : this.folderError;
+  }
+
+  private retryCurrent(): void {
+    if (this.selected.id > 0) this.loadVideos(this.currentEmpty());
+    else if (this.category === 1) this.loadCollections(this.currentEmpty());
+    else this.loadFolders(this.currentEmpty());
+  }
+
   private footerLoading(): boolean {
     if (this.selected.id > 0) return this.videoLoading;
     return this.category === 1 ? this.collectionLoading : this.loading;
@@ -666,9 +692,11 @@ export struct FavoritesPage {
           .width('100%')
           .border({ width: { bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
         }
-        if ((this.selected.id > 0 ? this.videoLoading : this.loading) &&
-          this.foldersSource.isEmpty() && this.videosSource.isEmpty()) {
-          LoadingView({ loading: true })
+        if (this.currentEmpty()) {
+          LoadingView({ skeleton: 'list', loading: this.footerLoading(),
+            empty: !this.footerLoading() && this.currentError().length === 0,
+            emptyText: this.selected.id > 0 ? '收藏夹里还没有视频' : (this.category === 1 ? '暂无收藏集' : '暂无收藏夹'),
+            errorText: this.currentError(), onRetry: () => this.retryCurrent() })
         } else {
           List() {
             if (this.selected.id === 0) {
@@ -727,14 +755,14 @@ export struct FavoritesPage {
             ListItem() {
               LoadMoreFooter({
                 loading: this.footerLoading(),
-                hasMore: this.footerHasMore(),
-                moreText: '继续加载',
+                hasMore: this.currentError().length > 0 || this.footerHasMore(),
+                moreText: this.currentError().length > 0 ? '加载失败 · 点击重试' : '继续加载',
                 endText: this.selected.id === 0 && this.category === 1 ? '—— 收藏集到底啦 ——' : '—— 到底啦 ——',
                 loadingText: '加载中…',
                 accentLoadingText: true,
                 padTop: 18,
                 padBottom: 18,
-                onLoadMore: () => this.loadMore(),
+                onLoadMore: () => this.currentError().length > 0 ? this.retryCurrent() : this.loadMore(),
               })
             }
           }
@@ -742,7 +770,7 @@ export struct FavoritesPage {
           .padding({ left: 12, right: 12 })
           .cachedCount(5)
           .scrollBar(BarState.Off)
-          .onReachEnd(() => this.loadMore())
+          .onReachEnd(() => { if (this.currentError().length === 0) this.loadMore(); })
         }
         // 编辑模式底部操作条：多选删除/移动 + 排序提示
         if (this.editing && this.selected.id > 0) {

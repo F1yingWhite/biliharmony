@@ -1,3 +1,4 @@
+import { MotionTokens } from '../common/MotionTokens';
 import { RequestEpoch } from '../common/RequestEpoch';
 /**
  * 首页视图：推荐（app 端接口）+ 热门，双列瀑布流、下拉刷新、触底加载
@@ -34,8 +35,8 @@ struct FloatingSubTabs {
     }
     .width('100%')
     .justifyContent(FlexAlign.Center)
-    .padding({ left: 10, right: 10 })
-    .margin({ top: this.statusBarInset + 50 })
+    .padding({ left: 16, right: 16 })
+    .margin({ top: this.statusBarInset + 54 })
     .opacity(1 - this.fade)
     .translate({ y: -12 * this.fade })
     .hitTestBehavior(this.fade > 0.9 ? HitTestMode.None : HitTestMode.Default)
@@ -83,6 +84,7 @@ export struct HomeView {
   private hotFetching: boolean = false;
   private liveFetching: boolean = false;
   private readonly refreshTriggerOffset: number = 56;
+  private readonly homeGap: number = 12;
 
   async aboutToAppear(): Promise<void> {
     // 切到首页 Tab 时强制回到顶部状态，避免残留 fade 导致搜索栏和搜索球同时出现。
@@ -166,37 +168,30 @@ export struct HomeView {
   }
 
   async loadRecommend(reset: boolean): Promise<void> {
-    if (!reset && (this.recFetching || !this.recHasMore)) {
-      return;
-    }
+    if (!reset && this.recFetching) return;
     const epoch: number = this.recEpoch.next();
     this.recFetching = true;
+    this.recHasMore = true;
+    this.recError = '';
     try {
-      if (reset) {
-        this.recIdx = 0;
-        this.recHasMore = true;
-      }
-      this.recError = '';
-      const idx: number = this.recIdx;
-      const list: Array<VideoItem> = await FeedApi.getRecommend(idx);
-      if (!this.recEpoch.isCurrent(epoch)) return;
-      if (list.length === 0) {
-        this.recHasMore = false;
-        if (this.recSource.isEmpty()) {
-          this.recError = '推荐接口请求失败，请检查网络后重试';
-        }
+      // 推荐不是有限列表。空响应也可能来自网络失败、过滤或服务端暂时没有候选。
+      // 每轮最多尝试三批，既能跳过重复页，也不会在异常时无限请求。
+      for (let attempt: number = 0; attempt < 3; attempt++) {
+        const idx: number = this.recIdx;
+        const list: Array<VideoItem> = await FeedApi.getRecommend(idx);
+        if (!this.recEpoch.isCurrent(epoch)) return;
+        this.recIdx = idx + Math.max(1, list.length);
+        const fresh: Array<VideoItem> = reset ? list : this.dedupVideos(this.recSource, list);
+        if (fresh.length === 0) continue;
+        if (reset) this.recSource.reset(fresh);
+        else this.recSource.append(fresh);
+        this.recCount = this.recSource.totalCount();
         return;
       }
-      this.recIdx = idx + list.length;
-      if (reset) {
-        this.recSource.reset(list);
-      } else {
-        this.recSource.append(this.dedupVideos(this.recSource, list));
-      }
-      this.recCount = this.recSource.totalCount();
+      this.recError = this.recSource.isEmpty() ? '暂时没有获取到推荐，请重试' : '暂时没有新推荐，点击重试';
     } catch (e) {
       if (!this.recEpoch.isCurrent(epoch)) return;
-      if (this.recSource.isEmpty()) this.recError = '推荐加载失败，请检查网络后重试';
+      this.recError = '推荐加载失败，请检查网络后重试';
     } finally {
       if (this.recEpoch.isCurrent(epoch)) this.recFetching = false;
     }
@@ -307,7 +302,7 @@ export struct HomeView {
   }
 
   onReachEnd(feedTab: number): void {
-    if (this.loadingMore) {
+    if (this.loadingMore || (feedTab === 0 && this.recError.length > 0)) {
       return;
     }
     this.loadingMore = true;
@@ -323,15 +318,16 @@ export struct HomeView {
   SubTabItem(label: string, index: number) {
     Stack({ alignContent: Alignment.Center }) {
       Text(label)
-        .fontSize(14)
+        .fontSize(17)
         .fontWeight(this.visualTab === index ? FontWeight.Bold : FontWeight.Normal)
         .fontColor(this.visualTab === index ? this.accent : (this.isDark ? '#A8A8AC' : '#767B82'))
     }
-    .width(62)
-    .height(30)
-    .borderRadius(15)
+    .width(68)
+    .height(40)
+    .borderRadius(20)
     .backgroundColor(this.visualTab === index ? this.accentBg() : '#00000000')
-    .scale({ x: this.visualTab === index ? 1.0 : 1.0, y: this.visualTab === index ? 1.0 : 1.0 })
+    .accessibilityText(label)
+    .accessibilitySelected(this.visualTab === index)
     .animation({ duration: 180, curve: Curve.EaseOut })
     .onClick(() => {
       Haptic.light();
@@ -360,17 +356,26 @@ export struct HomeView {
 
   @Builder
   SubTabs() {
-    Row({ space: 2 }) {
+    Row({ space: 4 }) {
       this.SubTabItem('推荐', 0)
       this.SubTabItem('热门', 1)
       this.SubTabItem('直播', 2)
+      Blank()
+      Row({ space: 4 }) {
+        Image($r('app.media.ic_sort')).width(15).height(15)
+          .fillColor(this.isDark ? '#B4B6BE' : '#737985')
+        Text('分区').fontSize(12).fontColor(this.isDark ? '#B4B6BE' : '#737985')
+      }
+      .height(40)
+      .padding({ left: 8, right: 4 })
+      .accessibilityText('分区频道')
+      .onClick(() => {
+        Haptic.light();
+        AppNavStack.pushPathByName(NAV_ZONE, null);
+      })
     }
-    .width(196)
-    .height(36)
-    .padding(3)
-    .borderRadius(18)
-    .backgroundColor(this.glassOn ? '#00000000' : (this.isDark ? '#D9202125' : '#E8FFFFFF'))
-    .systemMaterial(AppTheme.floatMaterial(this.glassOn))
+    .width('100%')
+    .height(44)
     .alignItems(VerticalAlign.Center)
   }
 
@@ -413,10 +418,14 @@ export struct HomeView {
     LoadMoreFooter({
       loading: this.loadingMore,
       hasMore: this.channelHasMore(feedTab),
-      moreText: '',
-      endText: '—— 到底啦 ——',
+      moreText: feedTab === 0 ? this.recError : '',
+      endText: feedTab === 0 ? '' : '—— 到底啦 ——',
       loadingText: '加载中…',
-      fixedHeight: this.loadingMore || !this.channelHasMore(feedTab) ? 48 : 1,
+      fixedHeight: 48,
+      onLoadMore: () => {
+        this.recError = '';
+        this.onReachEnd(feedTab);
+      },
     })
   }
 
@@ -430,42 +439,6 @@ export struct HomeView {
     this.VideoFeedFooter(1)
   }
 
-  /** 热门频道顶部的排行榜入口：全站排行 / 每周必看 / 入站必刷。 */
-  @Builder
-  HotRankEntry() {
-    NavEntryRow({
-      icon: $r('app.media.ic_hot'),
-      title: '排行榜',
-      onTap: () => {
-        AppNavStack.pushPathByName(NAV_RANK, null);
-      },
-    })
-  }
-
-  /** 热门频道顶部入口：分区频道（进分区排行浏览）。 */
-  @Builder
-  ZoneEntry() {
-    NavEntryRow({
-      icon: $r('app.media.ic_sort'),
-      title: '分区频道',
-      onTap: () => {
-        AppNavStack.pushPathByName(NAV_ZONE, null);
-      },
-    })
-  }
-
-  /** 热门频道顶部入口：番剧索引（类型×状态聚合浏览）。 */
-  @Builder
-  BangumiEntry() {
-    NavEntryRow({
-      icon: $r('app.media.ic_favorite'),
-      title: '番剧索引',
-      onTap: () => {
-        AppNavStack.pushPathByName(NAV_BANGUMI_INDEX, null);
-      },
-    })
-  }
-
   @Builder
   LiveFooter() {
     LoadMoreFooter({
@@ -474,33 +447,55 @@ export struct HomeView {
       moreText: '',
       endText: '—— 到底啦 ——',
       loadingText: '加载中…',
-      fixedHeight: this.loadingMore || !this.liveHasMore ? 48 : 1,
+      fixedHeight: 48,
     })
   }
 
   @Builder
-  VideoFeedList(feedTab: number) {
-    List({ space: LayoutTokens.feedGap, scroller: feedTab === 0 ? this.recScroller : this.hotScroller }) {
-      // 热门频道首个卡片为排行榜入口，随列表一起滚动。
+  DiscoveryEntry(icon: Resource, label: string, destination: string, tint: string) {
+    Row({ space: 6 }) {
+      Image(icon).width(17).height(17).fillColor(tint)
+      Text(label).fontSize(12).fontWeight(FontWeight.Medium)
+        .fontColor(this.isDark ? '#E2E4EA' : '#434955')
+    }
+    .layoutWeight(1)
+    .height(44)
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor(this.isDark ? '#252830' : '#FFFFFF')
+    .borderRadius(12)
+    .onClick(() => {
+      Haptic.light();
+      AppNavStack.pushPathByName(destination, null);
+    })
+  }
+
+  @Builder
+  VideoFeedHeader(feedTab: number) {
+    Column({ space: 12 }) {
       if (feedTab === 1) {
-        ListItem() {
-          this.HotRankEntry()
-        }
-        ListItem() {
-          this.ZoneEntry()
-        }
-        ListItem() {
-          this.BangumiEntry()
-        }
+        Row({ space: 8 }) {
+          this.DiscoveryEntry($r('app.media.ic_hot'), '排行榜', NAV_RANK, '#EF8858')
+          this.DiscoveryEntry($r('app.media.ic_sort'), '分区频道', NAV_ZONE, '#6B97D4')
+          this.DiscoveryEntry($r('app.media.ic_favorite'), '番剧索引', NAV_BANGUMI_INDEX, this.accent)
+        }.width('100%')
       }
+    }
+    .width('100%')
+    .padding({ bottom: feedTab === 1 ? 14 : 0, left: 2, right: 2 })
+  }
+
+  @Builder
+  VideoFeedList(feedTab: number) {
+    List({ space: this.homeGap, scroller: feedTab === 0 ? this.recScroller : this.hotScroller }) {
       // footer 挂在 ListItemGroup 上：双列 lanes 下保持整宽居中
-      ListItemGroup({ footer: this.VideoFeedFooter(feedTab) }) {
+      ListItemGroup({ header: this.VideoFeedHeader(feedTab), footer: this.VideoFeedFooter(feedTab) }) {
         LazyForEach(feedTab === 0 ? this.recSource : this.hotSource, (item: VideoItem) => {
           ListItem() {
             VideoCard({
               video: item,
               idPrefix: 'home-' + String(feedTab) + '-',
               wholeCardTransition: true,
+              homeStyle: true,
               // 首页卡片底栏 ⋮ → 举报/不想看（不想看即长按同款的本地屏蔽）。
               showMore: true,
               onReport: (v: VideoItem) => this.reportCard(v),
@@ -514,20 +509,20 @@ export struct HomeView {
           }
           // ListItemGroup 内的 ListItem 不参与 List.space，行距靠卡片下 margin 撑出，
           // 与双列横向槽宽（lanes gutter）保持一致。
-          .margin({ bottom: LayoutTokens.feedGap })
+          .margin({ bottom: this.homeGap })
         }, (item: VideoItem) => item.bvid.length > 0 ? item.bvid : String(item.aid) + '_' + feedTab)
       }
     }
     .width('100%')
     .height('100%')
-    .lanes(LayoutTokens.feedColumns(this.viewportWidth), LayoutTokens.feedGap)
+    .lanes(LayoutTokens.feedColumns(this.viewportWidth), this.homeGap)
     .cachedCount(3)
     // 首屏卡片默认位于搜索栏下方。这个间距属于可滚动内容，滚走后不会因头栏重新出现而顶动卡片。
-    .contentStartOffset(this.statusBarInset + 94)
+    .contentStartOffset(this.statusBarInset + 106)
     // 悬浮 Dock 高 52 + 底部边距 16，末端留白必须大于 68 才能完整露出末行。
     .contentEndOffset(Immersive.bottomInset() + 76)
-    .padding({ left: LayoutTokens.horizontalPadding(this.viewportWidth),
-      right: LayoutTokens.horizontalPadding(this.viewportWidth) })
+    .padding({ left: (this.viewportWidth >= 600 ? 24 : 16),
+      right: (this.viewportWidth >= 600 ? 24 : 16) })
     .constraintSize({ maxWidth: LayoutTokens.feedMaxWidth })
     .alignSelf(ItemAlign.Center)
     .scrollBar(BarState.Off)
@@ -561,18 +556,18 @@ export struct HomeView {
 
   @Builder
   LiveFeedList() {
-    List({ space: LayoutTokens.feedGap, scroller: this.liveScroller }) {
+    List({ space: this.homeGap, scroller: this.liveScroller }) {
       ListItemGroup({ header: this.LiveFeedHeader() }) {
         LazyForEach(this.liveSource, (item: LiveRoomItem) => {
           ListItem() {
             LiveRoomCard({ room: item })
-          }.margin({ bottom: LayoutTokens.feedGap })
+          }.margin({ bottom: this.homeGap })
         }, (item: LiveRoomItem) => String(item.roomId))
       }
       ListItemGroup() {
         if (this.liveCount === 0) {
           ListItem() {
-            LoadingView({ loading: this.liveError.length === 0, errorText: this.liveError,
+            LoadingView({ skeleton: 'grid', loading: this.liveError.length === 0, errorText: this.liveError,
               onRetry: () => this.loadLive(true).catch(() => {}) })
           }
         }
@@ -588,13 +583,13 @@ export struct HomeView {
         }
       }
     }
-    .width('100%').height('100%').lanes(LayoutTokens.feedColumns(this.viewportWidth), LayoutTokens.feedGap)
+    .width('100%').height('100%').lanes(LayoutTokens.feedColumns(this.viewportWidth), this.homeGap)
     .cachedCount(3)
-    .contentStartOffset(this.statusBarInset + 94)
+    .contentStartOffset(this.statusBarInset + 106)
     // 悬浮 Dock 高 52 + 底部边距 16，末端留白必须大于 68 才能完整露出末行。
     .contentEndOffset(Immersive.bottomInset() + 76)
-    .padding({ left: LayoutTokens.horizontalPadding(this.viewportWidth),
-      right: LayoutTokens.horizontalPadding(this.viewportWidth) })
+    .padding({ left: (this.viewportWidth >= 600 ? 24 : 16),
+      right: (this.viewportWidth >= 600 ? 24 : 16) })
     .constraintSize({ maxWidth: LayoutTokens.feedMaxWidth })
     .alignSelf(ItemAlign.Center)
     .scrollBar(BarState.Off)
@@ -604,7 +599,11 @@ export struct HomeView {
 
   @Builder
   FeedPage(feedTab: number) {
-    if (feedTab === 2) {
+    if (feedTab === 2 && this.liveCount === 0 && this.liveError.length === 0) {
+      LoadingView({ loading: true, skeleton: 'grid' })
+        .height('100%')
+        .padding({ top: this.statusBarInset + 98 })
+    } else if (feedTab === 2) {
       Refresh({ refreshing: $$this.refreshing, builder: this.RefreshHeader() }) {
         this.LiveFeedList()
       }
@@ -614,7 +613,7 @@ export struct HomeView {
       })
       .onRefreshing(() => this.onRefresh(2))
     } else if (this.channelError(feedTab).length > 0 && this.channelEmpty(feedTab)) {
-      LoadingView({
+      LoadingView({ skeleton: 'grid',
         loading: false,
         empty: false,
         errorText: this.channelError(feedTab),
@@ -625,8 +624,9 @@ export struct HomeView {
       })
       .margin({ top: 110 })
     } else if (this.channelEmpty(feedTab)) {
-      LoadingView({ loading: true })
-        .margin({ top: 110 })
+      LoadingView({ skeleton: 'grid', loading: true })
+        .height('100%')
+        .padding({ top: this.statusBarInset + 98 })
     } else {
       Refresh({ refreshing: $$this.refreshing, builder: this.RefreshHeader() }) {
         if (feedTab === 2) this.LiveFeedList()
@@ -656,7 +656,7 @@ export struct HomeView {
       .barHeight(0)
       .cachedMaxCount(1, TabsCacheMode.CACHE_BOTH_SIDE)
       .animationMode(AnimationMode.CONTENT_FIRST)
-      .animationDuration(320)
+      .animationDuration(MotionTokens.navigation)
       .animationCurve(Curve.EaseInOut)
       .onAnimationStart((index: number, targetIndex: number, extraInfo: TabsAnimationEvent) => {
         this.visualTab = targetIndex;
@@ -680,7 +680,7 @@ export struct HomeView {
 
       this.RefreshIndicator()
 
-      // 紧凑悬浮频道切换：与搜索栏保持同一玻璃层级，不再用实色横条截断信息流。
+      // 频道导航随滚动淡出，右侧分区入口保持独立点击区域。
       // fade 订阅收敛在 FloatingSubTabs 内，滚动不触发 HomeView 本体重建。
       FloatingSubTabs() {
         this.SubTabs()

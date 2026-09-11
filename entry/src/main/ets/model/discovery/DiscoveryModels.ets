@@ -1,5 +1,5 @@
 /** discovery domain models. */
-import { asObject, asString, asNumber, asArray, str, formatCount, toHttps } from '../../common/Utils';
+import { searchPlainText, asObject, asString, asNumber, asArray, str, formatCount, toHttps } from '../../common/Utils';
 import { VideoItem } from '../video/VideoModels';
 
 // ===== 热搜 =====
@@ -205,7 +205,7 @@ export class UserSearchItem {
     const u: UserSearchItem = new UserSearchItem();
     u.mid = asNumber(j['mid'], 0);
     // 昵称里可能包含高亮 <em> 标签，去除
-    u.uname = str(j, 'uname', '').replace(/<[^>]*>/g, '');
+    u.uname = searchPlainText(str(j, 'uname', ''));
     // search/type 的 bili_user 返回 upic；face/pic/avatar 仅用于兼容旧版和代理接口。
     u.face = toHttps(str(j, 'upic', str(j, 'face', str(j, 'pic', str(j, 'avatar', '')))));
     u.fans = asNumber(j['fans'], 0);
@@ -248,11 +248,11 @@ export class PgcSearchItem {
     const item: PgcSearchItem = new PgcSearchItem();
     item.seasonId = asNumber(j['season_id'], 0);
     // 搜索标题可能带高亮 <em> 标签，去除
-    item.title = str(j, 'title', '').replace(/<[^>]*>/g, '');
+    item.title = searchPlainText(str(j, 'title', ''));
     item.cover = toHttps(str(j, 'cover', ''));
     item.areas = str(j, 'areas', '');
     item.styles = str(j, 'styles', '');
-    item.desc = str(j, 'desc', '').replace(/<[^>]*>/g, '');
+    item.desc = searchPlainText(str(j, 'desc', ''));
     item.indexShow = str(j, 'index_show', '');
     item.seasonTypeName = str(j, 'season_type_name', '');
     const mediaScore: Record<string, Object> = asObject(j['media_score']);
@@ -289,15 +289,15 @@ export class ArticleSearchItem {
     const j: Record<string, Object> = asObject(o);
     const item: ArticleSearchItem = new ArticleSearchItem();
     item.id = asNumber(j['id'], 0);
-    item.title = str(j, 'title', '').replace(/<[^>]*>/g, '');
-    item.desc = str(j, 'desc', '').replace(/<[^>]*>/g, '');
+    item.title = searchPlainText(str(j, 'title', ''));
+    item.desc = searchPlainText(str(j, 'desc', ''));
     const imageUrls: Array<Object> = asArray(j['image_urls']);
     if (imageUrls.length > 0) {
       item.cover = toHttps(asString(imageUrls[0], ''));
     }
     item.mid = asNumber(j['mid'], 0);
     // 文章搜索多数时候不返回昵称，保留 author/uname 兜底
-    item.upName = str(j, 'author', str(j, 'uname', '')).replace(/<[^>]*>/g, '');
+    item.upName = searchPlainText(str(j, 'author', str(j, 'uname', '')));
     item.view = asNumber(j['view'], 0);
     item.reply = asNumber(j['reply'], 0);
     item.like = asNumber(j['like'], 0);
@@ -458,6 +458,8 @@ export class WatchLaterSeasonItem {
 /** 时间表里的一天（date 空表示"未知日期"）。 */
 export class TimeLineDay {
   date: string = '';
+  dateTimestamp: number = 0;
+  isToday: boolean = false;
   /** 1-7 对应 周一~周日 */
   dayOfWeek: number = 0;
   episodes: Array<TimeLineEpisode> = [];
@@ -493,7 +495,7 @@ export class TimeLineEpisode {
     ep.seasonType = asNumber(j['season_type'], 1);
     ep.title = str(j, 'title', '');
     ep.cover = toHttps(str(j, 'cover', ''));
-    ep.index = str(j, 'index', '');
+    ep.index = str(j, 'pub_index', str(j, 'index', ''));
     ep.pubTime = str(j, 'pub_time', '');
     ep.badge = str(j, 'badge', '');
     return ep;

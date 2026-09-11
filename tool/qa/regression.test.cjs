@@ -14,6 +14,34 @@ function deferred() {
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+test('private messages preserve full text without classifying it as a share card', () => {
+  const { PrivateMessageItem } = environment().load('model/message/MessageModels');
+  const text = '第一行\n' + '这是一条需要完整显示的长私信。'.repeat(30);
+  const item = PrivateMessageItem.from({ msg_type: 1, content: JSON.stringify({ content: text }) });
+  assert.equal(item.text, text);
+  assert.equal(item.richTitle, '');
+  assert.equal(item.richCover, '');
+  assert.equal(item.richUrl, '');
+});
+
+test('private notification cards retain body and image messages retain dimensions', () => {
+  const { PrivateMessageItem } = environment().load('model/message/MessageModels');
+  const notice = PrivateMessageItem.from({ msg_type: 10,
+    content: JSON.stringify({ title: '登录操作通知', text: '这是通知的完整正文。' }) });
+  assert.equal(notice.richTitle, '登录操作通知');
+  assert.equal(notice.richDesc, '这是通知的完整正文。');
+  const image = PrivateMessageItem.from({ msg_type: 2,
+    content: JSON.stringify({ url: 'https://example.com/image.jpg', width: 600, height: 900 }) });
+  assert.equal(image.imageUrl, 'https://example.com/image.jpg');
+  assert.equal(image.imageWidth, 600);
+  assert.equal(image.imageHeight, 900);
+  assert.equal(image.richUrl, '');
+  const video = PrivateMessageItem.from({ msg_type: 7,
+    content: JSON.stringify({ title: '视频', aid: 123, cover: 'https://example.com/cover.jpg' }) });
+  assert.equal(video.richAid, 123);
+  assert.equal(video.richTitle, '视频');
+});
+
 function environment(mocks = {}) {
   const cache = new Map();
   const storage = new Map();

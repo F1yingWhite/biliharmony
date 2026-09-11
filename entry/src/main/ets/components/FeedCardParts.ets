@@ -20,7 +20,7 @@ export interface FeedTitleParam {
   isDark: boolean;
 }
 
-/** 16:9 封面图（圆角 12 + 占位图 + 主题占位底色） */
+/** 4:3 封面，下载解码期间保留与真实封面同尺寸的主题底色。 */
 @Builder
 export function FeedCoverImage($$: FeedCoverParam) {
   // 缩略图 URL（按双列卡宽 900w 出图）：信息流大批量卡片只拉几 KB~几十 KB 的 webp，

@@ -18,6 +18,7 @@ import { HistoryApi } from '../../api/HistoryApi';
 @Component
 export struct WatchLaterPage {
   @State loading: boolean = false;
+  @State preparing: boolean = true;
   @State itemCount: number = 0;
   @State errorText: string = '';
   @StorageProp('accentColor') accent: string = '#FB7299';
@@ -25,8 +26,18 @@ export struct WatchLaterPage {
   private itemsSource: BasicDataSource<WatchLaterItem> = new BasicDataSource<WatchLaterItem>();
   private actionBusy: boolean = false;
   private listEpoch: RequestEpoch = new RequestEpoch();
+  private prepareEpoch: RequestEpoch = new RequestEpoch();
+  private destroyed: boolean = false;
+
+  aboutToDisappear(): void {
+    this.destroyed = true;
+    this.listEpoch.invalidate();
+    this.prepareEpoch.invalidate();
+  }
 
   aboutToAppear(): void {
+    this.destroyed = false;
+    this.loading = false;
     this.prepareAndLoad();
   }
 
@@ -40,20 +51,25 @@ export struct WatchLaterPage {
   }
 
   private async prepareAndLoad(): Promise<void> {
+    const epoch: number = this.prepareEpoch.next();
+    this.preparing = true;
     try {
       await UserStore.ensureLoaded();
+      if (this.destroyed || !this.prepareEpoch.isCurrent(epoch)) return;
       if (!UserStore.isLogin) {
         this.errorText = '登录后才能查看稍后再看';
         return;
       }
       await this.load();
     } catch (e) {
-      this.errorText = '稍后再看加载失败，请检查网络后重试';
+      if (!this.destroyed && this.prepareEpoch.isCurrent(epoch)) this.errorText = '稍后再看加载失败，请检查网络后重试';
+    } finally {
+      if (!this.destroyed && this.prepareEpoch.isCurrent(epoch)) this.preparing = false;
     }
   }
 
   async load(): Promise<void> {
-    if (this.loading || this.actionBusy) return;
+    if (this.destroyed || this.loading || this.actionBusy) return;
     const epoch: number = this.listEpoch.next();
     this.loading = true;
     this.errorText = '';
@@ -173,7 +189,7 @@ export struct WatchLaterPage {
         },
       })
       if (this.itemCount === 0) {
-        LoadingView({ loading: this.loading, empty: !this.loading && this.errorText.length === 0,
+        LoadingView({ skeleton: 'list', loading: this.loading || this.preparing, empty: !this.loading && this.errorText.length === 0,
           emptyText: '暂无稍后再看内容', errorText: this.errorText,
           onRetry: () => this.prepareAndLoad().catch(() => {
           }) })
@@ -212,7 +228,7 @@ export struct WatchLaterPage {
     }
     .width('100%')
     .height('100%')
-    .padding({ top: Immersive.statusBarHeight() })
+    .padding({ top: Immersive.statusBarHeight(), bottom: Immersive.bottomInset() })
     .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
   }
 }

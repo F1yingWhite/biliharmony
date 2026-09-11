@@ -1,5 +1,5 @@
 /** 直播只读数据模型：列表、播放清晰度、弹幕和醒目留言。 */
-import { asArray, asNumber, asObject, asString, formatCount, str, toHttps } from '../common/Utils';
+import { searchPlainText, asArray, asNumber, asObject, asString, formatCount, str, toHttps } from '../common/Utils';
 
 export class LiveRoomItem {
   roomId: number = 0;
@@ -36,11 +36,11 @@ export class LiveRoomItem {
     item.roomId = asNumber(j['roomid'], asNumber(j['room_id'], 0));
     item.uid = asNumber(j['uid'], 0);
     // 搜索标题可能带高亮 <em> 标签，去除
-    item.title = str(j, 'title', '').replace(/<[^>]*>/g, '');
-    item.uname = str(j, 'uname', '');
+    item.title = searchPlainText(str(j, 'title', ''));
+    item.uname = searchPlainText(str(j, 'uname', ''));
     item.face = toHttps(str(j, 'uface', str(j, 'face', '')));
     item.cover = toHttps(str(j, 'cover', str(j, 'user_cover', '')));
-    item.areaName = str(j, 'cate_name', str(j, 'area_name', ''));
+    item.areaName = searchPlainText(str(j, 'cate_name', str(j, 'area_name', '')));
     item.online = asNumber(j['online'], 0);
     if (item.online > 0) item.watched = formatCount(item.online) + '人气';
     return item;

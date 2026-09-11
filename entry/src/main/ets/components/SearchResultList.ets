@@ -10,8 +10,11 @@ export struct SearchResultList {
   @Prop loading: boolean = false;
   @Prop loadingMore: boolean = false;
   @Prop errorText: string = '';
+  @Prop moreError: string = '';
+  @Prop hasMore: boolean = true;
   @Prop count: number = 0;
   @Prop emptyText: string = '没有找到相关内容';
+  @Prop skeleton: string = '';
   /** 列表项间距（直播双列用 10，其余默认 0） */
   @Prop listSpace: number = 0;
   /** 列表列数：直播双列为 2，其余 1 */
@@ -26,10 +29,22 @@ export struct SearchResultList {
   emptyContent() {
   }
 
+  @Builder
+  ResultFooter() {
+    LoadMoreFooter({
+      loading: this.loadingMore,
+      hasMore: this.hasMore,
+      moreText: this.moreError.length > 0 ? '加载失败 · 点击重试' : '上滑加载更多',
+      endText: '没有更多结果了',
+      fixedHeight: 44,
+      onLoadMore: this.onLoadMore,
+    })
+  }
+
   build() {
     Column() {
       if (this.loading) {
-        LoadingView({ loading: true })
+        LoadingView({ loading: true, skeleton: this.skeleton.length > 0 ? this.skeleton : (this.lanes > 1 ? 'grid' : 'list') })
       } else if (this.errorText.length > 0) {
         LoadingView({ loading: false, errorText: this.errorText, onRetry: this.onRetry })
       } else if (this.count === 0) {
@@ -41,26 +56,24 @@ export struct SearchResultList {
         })
       } else {
         List({ space: this.listSpace }) {
-          this.content()
-          ListItem() {
-            LoadMoreFooter({
-              loading: this.loadingMore,
-              hasMore: true,
-              moreText: this.loadingMore ? '' : '上滑加载更多',
-              endText: '',
-              fixedHeight: 44,
-              onLoadMore: this.onLoadMore,
-            })
+          if (this.lanes > 1) {
+            ListItemGroup({ footer: this.ResultFooter(), space: this.listSpace }) {
+              this.content()
+            }
+          } else {
+            this.content()
+            ListItem() { this.ResultFooter() }
           }
+
         }
         .width('100%')
         .height('100%')
-        .lanes(this.lanes)
+        .lanes(this.lanes, this.lanes > 1 ? 10 : 0)
         .padding(this.horizontalPadding > 0 ? { left: this.horizontalPadding, right: this.horizontalPadding } : 0)
         .cachedCount(5)
         .scrollBar(BarState.Off)
         .onReachEnd((): void => {
-          this.onLoadMore();
+          if (this.hasMore && !this.loadingMore && this.moreError.length === 0) this.onLoadMore();
         })
       }
     }

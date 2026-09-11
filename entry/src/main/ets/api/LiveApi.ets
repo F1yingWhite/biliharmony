@@ -44,6 +44,9 @@ export class LiveApi {
     const resp: HttpResponse = await webGet(Api.liveZoneList, undefined, 'https://live.bilibili.com/');
     const result: Array<LiveZone> = [];
     const json: Record<string, Object> = resp.json();
+    if (!resp.ok || asNumber(json['code'], -1) !== 0 || !Array.isArray(json['data'])) {
+      throw new Error('直播分区加载失败');
+    }
     const list: Array<Object> = asArray(json['data']);
     for (let i: number = 0; i < list.length; i++) {
       const item: Record<string, Object> = asObject(list[i]);
@@ -63,7 +66,7 @@ export class LiveApi {
     };
     const resp: HttpResponse = await webGet(Api.liveZoneRooms, params, 'https://live.bilibili.com/');
     const data: Record<string, Object> | null = getData(resp);
-    if (data === null) return [];
+    if (data === null || !Array.isArray(data['list'])) throw new Error('直播列表加载失败');
     // room/v3/Area/getRoomList 直接返回 data.list 数组。
     const list: Array<Object> = asArray(data['list']);
     const result: Array<LiveRoomItem> = [];

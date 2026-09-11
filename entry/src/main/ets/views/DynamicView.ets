@@ -1,3 +1,4 @@
+import { MotionTokens } from '../common/MotionTokens';
 import { RequestEpoch } from '../common/RequestEpoch';
 /**
  * 动态视图：关注动态 feed（需登录）
@@ -1019,6 +1020,9 @@ export struct DynamicView {
   private followLoading: boolean = false;
   private liveFetching: boolean = false;
   private accountGeneration: number = 0;
+  @State feedMoreFailed: boolean = false;
+  @State feedNeedsLogin: boolean = false;
+  private feedRetryReset: boolean = false;
   private feedEpoch: RequestEpoch = new RequestEpoch();
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
@@ -1097,6 +1101,10 @@ export struct DynamicView {
   async loadFeed(reset: boolean): Promise<void> {
     if (!reset && (this.feedLoading || !this.dynHasMore)) return;
     const epoch: number = this.feedEpoch.next();
+    this.feedMoreFailed = false;
+    this.feedNeedsLogin = false;
+    this.feedRetryReset = reset;
+    this.errorText = '';
     this.feedLoading = true;
     try {
       const off: string = reset ? '' : this.dynOffset;
@@ -1113,9 +1121,22 @@ export struct DynamicView {
       this.dynHasMore = page.hasMore;
     } catch (e) {
       if (!this.feedEpoch.isCurrent(epoch)) return;
-      if (this.dynSource.isEmpty()) this.errorText = '动态加载失败，请检查登录状态或网络后重试';
+      this.feedNeedsLogin = (e as Error).message === '登录已失效，请重新登录后查看动态';
+      if (this.dynSource.isEmpty()) this.errorText = this.feedNeedsLogin ?
+        '登录已失效，请重新登录后查看动态' : '动态加载失败，请稍后重试';
+      else this.feedMoreFailed = true;
     } finally {
       if (this.feedEpoch.isCurrent(epoch)) this.feedLoading = false;
+    }
+  }
+
+  private recoverFeed(): void {
+    if (this.feedNeedsLogin) {
+      AppNavStack.pushPathByName(NAV_LOGIN, null);
+    } else if (this.dynCount === 0) {
+      this.init();
+    } else {
+      this.loadFeed(this.feedMoreFailed && this.feedRetryReset);
     }
   }
 
@@ -1390,22 +1411,21 @@ export struct DynamicView {
   @Builder
   DynBody(tabIdx: number) {
     if (this.loading) {
-      LoadingView({ loading: true })
-        .margin({ top: 80 })
+      LoadingView({ skeleton: 'social', loading: true })
+        .margin({ top: this.embedded ? 4 : Immersive.statusBarHeight() + 86 })
     } else if (!this.login) {
       this.LoginPrompt()
     } else if (this.dynCount === 0) {
-      LoadingView({
+      LoadingView({ skeleton: 'social',
         loading: this.feedLoading,
         empty: this.feedLoading ? false : this.errorText.length === 0,
         emptyText: this.hostMid > 0 ? '该用户暂时没有发布动态' :
           (this.dynType === 'all' ? '暂时没有动态，去关注一些UP主吧' : '该分类下暂无动态'),
         errorText: this.errorText,
-        onRetry: () => {
-          this.init();
-        },
+        retryText: this.feedNeedsLogin ? '去登录' : '重新加载',
+        onRetry: () => this.recoverFeed(),
       })
-      .margin({ top: 80 })
+      .margin({ top: this.embedded ? 4 : Immersive.statusBarHeight() + 86 })
     } else {
       Refresh({ refreshing: $$this.refreshing, builder: this.DynRefreshHeader() }) {
         List({ space: 10 }) {
@@ -1439,12 +1459,13 @@ export struct DynamicView {
           ListItem() {
             LoadMoreFooter({
               loading: this.feedLoading,
-              hasMore: this.dynHasMore,
-              moreText: '继续加载动态',
+              hasMore: this.dynHasMore || this.feedMoreFailed,
+              moreText: this.feedNeedsLogin ? '登录已失效，去登录' : (this.feedMoreFailed ? '加载失败，点击重试' : '继续加载动态'),
               endText: '—— 动态到底啦 ——',
               fixedHeight: 52,
               spinnerSize: 22,
-              clickable: false,
+              clickable: true,
+              onLoadMore: () => this.recoverFeed(),
             })
           }
         }
@@ -1467,7 +1488,7 @@ export struct DynamicView {
           if (!this.embedded) AppTheme.updateHeaderFade(offset);
         })
         .onReachEnd(() => {
-          this.loadFeed(false);
+          if (!this.feedMoreFailed) this.loadFeed(false);
         })
       }
       .refreshOffset(56)
@@ -1564,7 +1585,7 @@ export struct DynamicView {
       .barHeight(0)
       .cachedMaxCount(1, TabsCacheMode.CACHE_BOTH_SIDE)
       .animationMode(AnimationMode.CONTENT_FIRST)
-      .animationDuration(320)
+      .animationDuration(MotionTokens.navigation)
       .animationCurve(Curve.EaseInOut)
       .onChange((index: number) => {
         this.dynTab = index;

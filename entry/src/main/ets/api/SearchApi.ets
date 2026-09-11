@@ -290,7 +290,7 @@ export class SearchApi {
     const resp: HttpResponse = await webGet(Api.rankAll, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
-      return [];
+      throw new Error('服务器暂未返回榜单，请稍后重试');
     }
     const list: Array<Object> = asArray(data['list']);
     const result: Array<VideoItem> = [];
@@ -352,7 +352,7 @@ export class SearchApi {
     const resp: HttpResponse = await webGet(Api.popularPrecious, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
-      return [];
+      throw new Error('入站必刷加载失败');
     }
     const list: Array<Object> = asArray(data['list']);
     const result: Array<VideoItem> = [];

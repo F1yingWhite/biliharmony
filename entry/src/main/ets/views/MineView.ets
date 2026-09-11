@@ -184,7 +184,8 @@ export struct MineView {
         .fontSize(12)
         .fontColor('#9499A0')
     }
-    .layoutWeight(1)
+    .width('33.33%')
+    .padding({ top: 4, bottom: 4 })
     .onClick(() => onTap())
   }
 
@@ -257,6 +258,7 @@ export struct MineView {
           Column({ space: 6 }) {
             Row({ space: 6 }) {
               Text(this.user.uname)
+                .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
                 .fontSize(18)
                 .fontWeight(FontWeight.Bold)
                 .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
@@ -404,8 +406,9 @@ export struct MineView {
                   (this.isDark ? '#C8C8CC' : '#5A5F66'))
                 .backgroundColor(this.themeMode === this.themeModeAt(index) ? this.accent :
                   (this.isDark ? '#3A3D44' : '#F0F1F3'))
-                .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-                .borderRadius(14)
+                .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+                .borderRadius(16)
+                .stateStyles({ pressed: { opacity: 0.9 } })
                 .onClick(() => {
                   AppTheme.setMode(this.themeModeAt(index));
                 })
@@ -473,7 +476,7 @@ export struct MineView {
             .fontSize(15)
             .fontColor(this.itemColor())
           Blank()
-          Row({ space: 10 }) {
+          Row({ space: 4 }) {
             ForEach(AppTheme.PRESET_COLORS, (c: string) => {
               Stack({ alignContent: Alignment.Center }) {
                 Circle()
@@ -485,11 +488,12 @@ export struct MineView {
                     .width(26)
                     .height(26)
                     .fill('#00000000')
-                    .border({ width: 2, color: c })
+                    .border({ width: 2, color: c, radius: 13 })
                 }
               }
-              .width(26)
-              .height(26)
+              .width(32)
+              .height(36)
+              .accessibilityText('主题色 ' + c + (c === this.accent ? '，已选中' : ''))
               .onClick(() => {
                 AppTheme.setAccent(c);
               })
@@ -668,8 +672,8 @@ export struct MineView {
     Stack({ alignContent: Alignment.Bottom }) {
       Column() {
         if (this.loading) {
-          LoadingView({ loading: true })
-            .margin({ top: 80 })
+          LoadingView({ skeleton: 'settings', loading: true })
+            .padding({ top: Immersive.statusBarHeight() + 56 })
         } else {
           List({ space: 12 }) {
             ListItem() {
@@ -698,31 +702,32 @@ export struct MineView {
       // 定时深色时段编辑抽屉：两个 TimePicker + 确认，半透明遮罩点击关闭。
       if (this.showTimeEditor) {
         Column() {
-          Row({ space: 8 }) {
-            Text('开始')
-              .fontSize(14)
-              .fontColor(this.itemColor())
-            TimePicker({ selected: this.makeStartDate() })
-              .width(150)
-              .backgroundColor(Color.Transparent)
-              .onChange((value: TimePickerResult) => {
-                this.startHour = value.hour;
-                this.startMinute = value.minute;
-              })
-            Text('结束')
-              .fontSize(14)
-              .fontColor(this.itemColor())
-            TimePicker({ selected: this.makeEndDate() })
-              .width(150)
-              .backgroundColor(Color.Transparent)
-              .onChange((value: TimePickerResult) => {
-                this.endHour = value.hour;
-                this.endMinute = value.minute;
-              })
+          Row({ space: 12 }) {
+            Column({ space: 6 }) {
+              Text('开始时间').fontSize(14).fontColor(this.itemColor())
+              TimePicker({ selected: this.makeStartDate() })
+                .width('100%').height(160).useMilitaryTime(true)
+                .selectedTextStyle({ color: this.accent, font: { size: 20 } })
+                .backgroundColor(Color.Transparent)
+                .onChange((value: TimePickerResult) => {
+                  this.startHour = value.hour;
+                  this.startMinute = value.minute;
+                })
+            }.layoutWeight(1)
+            Column({ space: 6 }) {
+              Text('结束时间').fontSize(14).fontColor(this.itemColor())
+              TimePicker({ selected: this.makeEndDate() })
+                .width('100%').height(160).useMilitaryTime(true)
+                .selectedTextStyle({ color: this.accent, font: { size: 20 } })
+                .backgroundColor(Color.Transparent)
+                .onChange((value: TimePickerResult) => {
+                  this.endHour = value.hour;
+                  this.endMinute = value.minute;
+                })
+            }.layoutWeight(1)
           }
           .width('100%')
-          .justifyContent(FlexAlign.Center)
-          .padding({ top: 16 })
+          .padding({ top: 20 })
           Text('此时段内自动切换为深色（支持跨午夜）')
             .fontSize(11)
             .fontColor('#9499A0')

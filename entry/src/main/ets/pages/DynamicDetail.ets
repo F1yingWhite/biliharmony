@@ -1,3 +1,5 @@
+import { LoadMoreFooter } from '../components/LoadMoreFooter';
+import { LoadingView } from '../components/LoadingView';
 import { RequestEpoch } from '../common/RequestEpoch';
 /** 动态详情：首屏复用 feed 对象，随后从 detail 接口补齐正文、表情和评论 subject。 */
 import { AppNavStack, DynamicDetailParam, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
@@ -48,7 +50,10 @@ export struct DynamicDetailPage {
   @State loadFailed: boolean = false;
   @State replies: Array<ReplyItem> = [];
   @State repliesLoading: boolean = false;
+  private repliesEpoch: RequestEpoch = new RequestEpoch();
+  private repliesRetryReset: boolean = false;
   @State repliesFailed: boolean = false;
+  @State repliesMoreFailed: boolean = false;
   @State repliesHasMore: boolean = true;
   @State replySortMode: number = 3; // 3 最热，2 最新
   @State replyVersion: number = 0;
@@ -82,12 +87,14 @@ export struct DynamicDetailPage {
   private screenWidthVp: number = 0;
   private screenHeightVp: number = 0;
   @StorageProp('dynamicDetailCloseRequest') @Watch('onCloseRequested') closeRequest: number = 0;
+  @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   private destroyed: boolean = false;
   private replyCursor: string = '';
   private replyLikeBusy: Set<number> = new Set<number>();
   private scroller: Scroller = new Scroller();
   private focusPerformed: boolean = false;
+  private commentsOffset: number = 0;
   private threadCursor: string = '';
   // 评论分享卡离屏渲染用的待截内容；只在生成分享图期间短暂赋值。
   private shareCardItem: ReplyItem = new ReplyItem();
@@ -219,6 +226,7 @@ export struct DynamicDetailPage {
   }
 
   aboutToDisappear(): void {
+    this.repliesEpoch.invalidate();
     this.threadEpoch.invalidate();
     this.threadLoading = false;
     this.destroyed = true;
@@ -232,7 +240,7 @@ export struct DynamicDetailPage {
       const detail: DynamicItem | null = await DynamicApi.getDynamicDetail(this.item.dynId);
       if (!this.destroyed && detail !== null) {
         this.item = detail;
-        if (this.replies.length === 0) await this.loadReplies(true);
+        if (this.replies.length === 0 && !this.repliesLoading) await this.loadReplies(true);
       }
       if (!this.destroyed && detail === null) this.loadFailed = true;
     } catch (e) {
@@ -243,33 +251,39 @@ export struct DynamicDetailPage {
   }
 
   private async loadReplies(reset: boolean): Promise<void> {
-    if (this.repliesLoading || this.item.commentId <= 0 || this.item.commentType <= 0 ||
-      (!reset && !this.repliesHasMore)) return;
+    if (this.destroyed || this.item.commentId <= 0 || this.item.commentType <= 0 ||
+      (!reset && (this.repliesLoading || !this.repliesHasMore))) return;
+    const request: number = this.repliesEpoch.next();
+    this.repliesRetryReset = reset;
     this.repliesLoading = true;
+    this.repliesMoreFailed = false;
     if (reset) this.repliesFailed = false;
     try {
       const data: ReplyData = await CommentApi.getReplies(this.item.commentId, this.item.commentType,
         reset ? '' : this.replyCursor, this.replySortMode);
-      if (this.destroyed) return;
+      if (this.destroyed || !this.repliesEpoch.isCurrent(request)) return;
       this.replies = reset ? data.replies : this.replies.concat(data.replies);
       this.replyCursor = data.cursor;
       this.repliesHasMore = data.hasMore;
       if (this.param.focusComments === true && !this.focusPerformed) {
         this.focusPerformed = true;
         setTimeout(() => {
-          if (!this.destroyed) this.scroller.scrollTo({ xOffset: 0, yOffset: 100000, animation: true });
+          if (!this.destroyed) this.scroller.scrollTo({ xOffset: 0, yOffset: this.commentsOffset, animation: true });
         }, 80);
       }
     } catch (e) {
-      if (!this.destroyed && this.replies.length === 0) this.repliesFailed = true;
+      if (!this.destroyed && this.repliesEpoch.isCurrent(request)) {
+        if (this.replies.length === 0) this.repliesFailed = true;
+        else this.repliesMoreFailed = true;
+      }
     } finally {
-      if (!this.destroyed) this.repliesLoading = false;
+      if (!this.destroyed && this.repliesEpoch.isCurrent(request)) this.repliesLoading = false;
     }
   }
 
   /** 切换评论排序：清空列表与游标，重新拉第一页。 */
   private changeReplySort(mode: number): void {
-    if (this.replySortMode === mode || this.repliesLoading) return;
+    if (this.replySortMode === mode || this.destroyed) return;
     this.replySortMode = mode;
     this.replyCursor = '';
     this.repliesHasMore = true;
@@ -562,7 +576,7 @@ export struct DynamicDetailPage {
           DynCard({ item: this.item, embedded: true, detailMode: true, idPrefix: 'dyndetail-' })
           if (this.loading) {
             Row({ space: 8 }) {
-              LoadingProgress().width(18).height(18).color('#FB7299')
+              LoadingProgress().width(18).height(18).color(this.accent)
               Text('正在补全动态内容…').fontSize(12).fontColor('#9499A0')
             }
             .width('100%')
@@ -591,8 +605,11 @@ export struct DynamicDetailPage {
           .width('100%')
           .padding({ top: 10, bottom: 10 })
           .border({ width: { top: 0.5 }, color: this.isDark ? '#36383D' : '#E7E9EC' })
+          .onAreaChange((_oldArea, area) => {
+            this.commentsOffset = Math.max(0, Number(area.position.y));
+          })
           if (this.repliesLoading && this.replies.length === 0) {
-            LoadingProgress().width(24).height(24).color('#FB7299').margin({ top: 18, bottom: 18 })
+            LoadingView({ loading: true, skeleton: 'comments' })
           } else if (this.repliesFailed) {
             Text('评论加载失败，点击重试').fontSize(12).fontColor('#9499A0').padding(18)
               .onClick(() => this.loadReplies(true).catch(() => {
@@ -620,12 +637,14 @@ export struct DynamicDetailPage {
               })
             // 稳定 key：点赞视觉态由 ReplyCard 的 @State 镜像原地刷新，避免整卡重建闪烁。
             }, (reply: ReplyItem) => String(reply.rpid))
-            if (this.repliesHasMore) {
-              Text(this.repliesLoading ? '加载中…' : '加载更多评论')
-                .width('100%').height(46).textAlign(TextAlign.Center).fontSize(12).fontColor('#9499A0')
-                .onClick(() => this.loadReplies(false).catch(() => {
-                }))
-            }
+            LoadMoreFooter({
+              loading: this.repliesLoading,
+              hasMore: this.repliesHasMore || this.repliesMoreFailed,
+              moreText: this.repliesMoreFailed ? '评论加载失败 · 点击重试' : '加载更多评论',
+              endText: '已显示全部评论',
+              fixedHeight: 46,
+              onLoadMore: () => this.loadReplies(this.repliesMoreFailed && this.repliesRetryReset).catch(() => {}),
+            })
           }
         }
         .width('100%')

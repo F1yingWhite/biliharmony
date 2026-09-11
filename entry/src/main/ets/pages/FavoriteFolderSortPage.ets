@@ -1,5 +1,7 @@
+import { LoadingView } from '../components/LoadingView';
+import { MotionTokens } from '../common/MotionTokens';
 /**
- * 收藏夹排序页：拖拽排序自建收藏夹（长按拖动或按钮上移/下移），保存后服务端生效。
+ * 收藏夹排序页：通过上移/下移按钮排序自建收藏夹，保存后服务端生效。
  * 对齐 PiliPlus FavFolderSortPage；排序接口 /x/v3/fav/folder/sort 需登录 + appSign。
  */
 import { Immersive } from '../common/Immersive';
@@ -25,12 +27,15 @@ export struct FavoriteFolderSortPage {
   }
 
   private move(index: number, delta: number): void {
+    if (this.saving) return;
     const target: number = index + delta;
     if (target < 0 || target >= this.sort.length) return;
     const next: Array<FavoriteFolderItem> = this.sort.slice();
     const item: FavoriteFolderItem = next.splice(index, 1)[0];
     next.splice(target, 0, item);
-    this.sort = next;
+    this.getUIContext().animateTo({ duration: MotionTokens.content, curve: Curve.EaseOut }, () => {
+      this.sort = next;
+    });
   }
 
   private async save(): Promise<void> {
@@ -44,6 +49,8 @@ export struct FavoriteFolderSortPage {
       } else {
         this.getUIContext().getPromptAction().showToast({ message: result.message });
       }
+    } catch (e) {
+      this.getUIContext().getPromptAction().showToast({ message: '保存失败，请重试' });
     } finally {
       this.saving = false;
     }
@@ -70,10 +77,12 @@ export struct FavoriteFolderSortPage {
         Row({ space: 6 }) {
           // 上移（第一个禁用）
           Text('↑').fontSize(14).fontColor(index === 0 ? '#B4B6BA' : this.accent)
-            .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+            .width(36).height(36).textAlign(TextAlign.Center)
+            .enabled(!this.saving && index > 0).accessibilityText('上移' + item.title)
             .onClick(() => this.move(index, -1))
           Text('↓').fontSize(14).fontColor(index === this.sort.length - 1 ? '#B4B6BA' : this.accent)
-            .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+            .width(36).height(36).textAlign(TextAlign.Center)
+            .enabled(!this.saving && index < this.sort.length - 1).accessibilityText('下移' + item.title)
             .onClick(() => this.move(index, 1))
         }
         Text(String(index + 1)).fontSize(10).fontColor('#B0B3B8')
@@ -91,6 +100,9 @@ export struct FavoriteFolderSortPage {
       Text('点击 ↑↓ 调整显示顺序，保存后同步到账号')
         .fontSize(11).fontColor('#9499A0')
         .width('100%').padding({ left: 14, top: 8, bottom: 4 })
+      if (this.sort.length === 0) {
+        LoadingView({ loading: false, empty: true, emptyText: '暂无可排序的收藏夹' })
+      }
       List() {
         ForEach(this.sort, (item: FavoriteFolderItem, index: number) => {
           ListItem() { this.Row2(item, index) }
@@ -105,6 +117,7 @@ export struct FavoriteFolderSortPage {
 
       Button(this.saving ? '保存中…' : '保存排序')
         .width('86%').height(44).borderRadius(22)
+        .enabled(!this.saving && this.sort.length > 1)
         .fontSize(15).fontColor('#FFFFFF').backgroundColor(this.accent)
         .margin({ bottom: Immersive.bottomInset() + 16 })
         .onClick(() => this.save().catch(() => {

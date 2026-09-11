@@ -17,7 +17,7 @@ export class FavoriteApi {
     const resp: HttpResponse = await webGet(Api.favoriteFolders, params);
     const data: Record<string, Object> | null = getData(resp);
     const result: FavoriteFolderPageData = new FavoriteFolderPageData();
-    if (data === null) return result;
+    if (data === null) throw new Error('收藏内容加载失败，请重试');
     const list: Array<Object> = asArray(data['list']);
     for (let i: number = 0; i < list.length; i++) result.folders.push(FavoriteFolderItem.from(list[i]));
     result.hasMore = asBool(data['has_more'], list.length >= 20);
@@ -116,7 +116,7 @@ export class FavoriteApi {
     const resp: HttpResponse = await webGet(Api.favoriteResources, params);
     const data: Record<string, Object> | null = getData(resp);
     const result: FavoriteVideoPageData = new FavoriteVideoPageData();
-    if (data === null) return result;
+    if (data === null) throw new Error('收藏内容加载失败，请重试');
     const list: Array<Object> = asArray(data['medias']);
     for (let i: number = 0; i < list.length; i++) {
       const j: Record<string, Object> = asObject(list[i]);
@@ -214,7 +214,7 @@ export class FavoriteApi {
     const resp: HttpResponse = await webGet(Api.collectedFolders, params);
     const data: Record<string, Object> | null = getData(resp);
     const result: FavoriteFolderPageData = new FavoriteFolderPageData();
-    if (data === null) return result;
+    if (data === null) throw new Error('收藏内容加载失败，请重试');
     const list: Array<Object> = asArray(data['list']);
     for (let i: number = 0; i < list.length; i++) result.folders.push(FavoriteFolderItem.from(list[i]));
     result.hasMore = asBool(data['has_more'], list.length >= 20);
@@ -228,7 +228,7 @@ export class FavoriteApi {
     const resp: HttpResponse = await webGet(Api.collectionResources, params);
     const data: Record<string, Object> | null = getData(resp);
     const result: FavoriteVideoPageData = new FavoriteVideoPageData();
-    if (data === null) return result;
+    if (data === null) throw new Error('收藏内容加载失败，请重试');
     const list: Array<Object> = asArray(data['medias']);
     for (let i: number = 0; i < list.length; i++) {
       const j: Record<string, Object> = asObject(list[i]);

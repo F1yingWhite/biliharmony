@@ -43,7 +43,7 @@ export class HistoryApi {
     const resp: HttpResponse = await webGet(Api.toviewList);
     const data: Record<string, Object> | null = getData(resp);
     const result: Array<WatchLaterItem> = [];
-    if (data === null) return result;
+    if (data === null) throw new Error('稍后再看加载失败');
     const list: Array<Object> = asArray(data['list']);
     for (let i: number = 0; i < list.length; i++) result.push(WatchLaterItem.from(list[i]));
     return result;

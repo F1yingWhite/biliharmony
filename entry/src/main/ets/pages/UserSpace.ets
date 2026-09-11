@@ -1,3 +1,4 @@
+import { MotionTokens } from '../common/MotionTokens';
 /**
  * 用户空间页（P3）：banner 氛围头部 + 资料卡 + 投稿 Tab（排序 chips + 双列流分页）
  * 入口：搜索用户卡片 / 视频详情 UP 主条
@@ -811,7 +812,7 @@ export struct UserSpacePage {
       }
 
       if (this.arcLoading && this.videosSource.isEmpty()) {
-        LoadingView({ loading: true })
+        LoadingView({ loading: true, skeleton: 'grid' })
       } else if (this.videosSource.isEmpty()) {
         LoadingView({
           loading: false,
@@ -898,11 +899,11 @@ export struct UserSpacePage {
     Stack({ alignContent: Alignment.TopStart }) {
       if (this.loading) {
         Column() {
-          LoadingView({ loading: true })
+          LoadingView({ loading: true, skeleton: 'profile' })
         }
         .width('100%')
         .height('100%')
-        .justifyContent(FlexAlign.Center)
+        .padding({ top: Immersive.statusBarHeight() + 48 })
         .backgroundColor(this.isDark ? '#18191C' : '#F6F7F8')
       } else if (this.errorText.length > 0) {
         Column() {
@@ -952,7 +953,7 @@ export struct UserSpacePage {
               .scrollable(true)
               .cachedMaxCount(1, TabsCacheMode.CACHE_BOTH_SIDE)
               .animationMode(AnimationMode.CONTENT_FIRST)
-              .animationDuration(300)
+              .animationDuration(MotionTokens.navigation)
               .animationCurve(Curve.EaseInOut)
               .onAnimationStart((index: number, targetIndex: number, extraInfo: TabsAnimationEvent) => {
                 this.visualSpaceTab = targetIndex;

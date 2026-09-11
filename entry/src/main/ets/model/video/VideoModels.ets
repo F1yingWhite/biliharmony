@@ -1,5 +1,5 @@
 /** video domain models. */
-import { asObject, asString, asNumber, asArray, asBool, str, formatCount, toHttps } from '../../common/Utils';
+import { searchPlainText, asObject, asString, asNumber, asArray, asBool, str, formatCount, toHttps } from '../../common/Utils';
 
 // ===== 视频卡片项（统一 app 推荐 / 热门 / 搜索结果） =====
 export class VideoItem {
@@ -116,7 +116,7 @@ export class VideoItem {
     v.bvid = str(item, 'bvid', '');
     v.title = str(item, 'title', '');
     // 搜索结果的标题里可能包含高亮 <em> 标签，去除
-    v.title = v.title.replace(/<[^>]*>/g, '');
+    v.title = searchPlainText(v.title);
     v.cover = toHttps(str(item, 'pic', ''));
     v.duration = parseDurationText(str(item, 'duration', ''));
     v.pubdate = asNumber(item['pubdate'], 0);

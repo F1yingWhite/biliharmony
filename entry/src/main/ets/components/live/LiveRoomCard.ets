@@ -1,3 +1,4 @@
+import { MotionTokens } from '../../common/MotionTokens';
 import { LiveRoomItem } from '../../model/LiveModels';
 import { AppNavStack, LiveRoomParam, NAV_LIVE_ROOM } from '../../common/AppRouter';
 import { FeedCardTitle, FeedCoverImage, FeedGradientMask } from '../FeedCardParts';
@@ -28,6 +29,8 @@ export struct LiveRoomCard {
             .fontColor('#FFFFFF')
           Blank()
           Text(this.room.areaName)
+            .layoutWeight(1).textAlign(TextAlign.End)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
             .fontSize(10)
             .fontColor('#FFFFFF')
             .maxLines(1)
@@ -68,7 +71,8 @@ export struct LiveRoomCard {
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
-    .stateStyles({ pressed: { opacity: 0.82 }, normal: { opacity: 1 } })
+    .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
+    .stateStyles({ pressed: { opacity: 0.9 }, normal: { opacity: 1 } })
     .onClick(() => {
       const param: LiveRoomParam = {
         roomId: this.room.roomId, uid: this.room.uid, title: this.room.title,

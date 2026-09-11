@@ -1,3 +1,4 @@
+import { MotionTokens } from '../../common/MotionTokens';
 /**
  * 横向视频行卡片：封面（可带右下角徽标）+ 标题 + UP 主 + 可选第三行灰字。
  * compact = 搜索结果样式（130 宽封面 / 13 号标题 / 整行水平内边距）；
@@ -44,6 +45,8 @@ export struct VideoRowCard {
           .borderRadius(this.compact ? 6 : 7)
           // 历史/收藏/搜索结果等长列表中的封面异步解码（syncLoad=false），滚动不卡。
           .syncLoad(false)
+          .backgroundColor(this.isDark ? '#2A2F39' : '#E5E8EE')
+          .draggable(false)
         if (this.overlayText.length > 0) {
           Text(this.overlayText)
             .fontSize(this.compact ? 10 : 9)
@@ -78,6 +81,7 @@ export struct VideoRowCard {
           .maxLines(1)
         if (this.extraText.length > 0) {
           Text(this.extraText)
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
             .fontSize(11)
             .fontColor('#B0B3B8')
         }
@@ -98,9 +102,10 @@ export struct VideoRowCard {
       this.onTap();
     })
     // 与 VideoCard 等卡片统一的按压反馈：按下轻微淡出，松开恢复。
+    .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
     .stateStyles({
       pressed: {
-        opacity: 0.78,
+        opacity: 0.9,
       },
       normal: {
         opacity: 1,

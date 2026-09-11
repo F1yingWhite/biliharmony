@@ -74,12 +74,17 @@ export class PrivateMessageItem {
     item.text = messageContentText(raw, item.type);
     try {
       const content: Record<string, Object> = asObject(JSON.parse(raw) as Object);
-      item.richTitle = str(content, 'title', str(content, 'content', ''));
-      item.richCover = toHttps(str(content, 'cover', str(content, 'pic', '')));
-      item.richUrl = str(content, 'url', '');
-      item.richBvid = str(content, 'bvid', '');
-      item.richAid = asNumber(content['aid'], 0);
-      item.richDesc = str(content, 'description', str(content, 'desc', ''));
+      // 普通文字也以 {content: ...} 传输，不能因存在 content 字段就转成两行分享卡片。
+      if (item.type !== 1 && item.type !== 2 && item.type !== 5) {
+        item.richTitle = str(content, 'title', '');
+        item.richCover = toHttps(str(content, 'cover', str(content, 'pic', '')));
+        item.richUrl = str(content, 'url', str(content, 'jump_url', ''));
+        item.richBvid = str(content, 'bvid', '');
+        item.richAid = asNumber(content['aid'], 0);
+        item.richDesc = str(content, 'description', str(content, 'desc',
+          str(content, 'text', str(content, 'content', ''))));
+        if (item.richDesc === item.richTitle) item.richDesc = '';
+      }
       if (item.type === 2) {
         item.imageUrl = toHttps(str(content, 'url', str(content, 'image_url', str(content, 'pic_url', ''))));
         item.imageWidth = asNumber(content['width'], asNumber(content['image_width'], 0));
@@ -253,7 +258,7 @@ function messageContentText(raw: string, type: number): string {
     if (type === 1) return str(content, 'content', raw);
     if (type === 2) return '[图片]';
     if (type === 5) return '撤回了一条消息';
-    return str(content, 'text', str(content, 'title', '[消息]'));
+    return str(content, 'text', str(content, 'title', str(content, 'content', '[消息]')));
   } catch (e) {
     return raw;
   }

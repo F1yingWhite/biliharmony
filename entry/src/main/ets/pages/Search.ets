@@ -48,6 +48,8 @@ export struct SearchPage {
   @State articleTotal: number = -1;
   @State loading: boolean = false;
   @State searchError: string = '';
+  @State moreError: string = '';
+  @State hasMoreResults: boolean = true;
   @State loadingMore: boolean = false;
   @State allPage: number = 1;
   @State videoPage: number = 1;
@@ -167,7 +169,13 @@ export struct SearchPage {
     this.showSuggest = s.length > 0;
   }
 
+  private retryMoreSearch(): void {
+    this.moreError = '';
+    this.loadMoreSearch();
+  }
+
   private loadMoreSearch(): void {
+    if (this.moreError.length > 0 || this.hasMoreResults === false) return;
     if (this.loadingMore === false && this.searchInflight === false) {
       this.doSearch(false).catch(() => {
       });
@@ -179,10 +187,12 @@ export struct SearchPage {
     if (kw.length === 0) {
       return;
     }
-    if (this.destroyed || (!reset && this.searchInflight)) return;
+    if (this.destroyed || (!reset && (this.searchInflight || this.hasMoreResults === false))) return;
     const request: number = this.searchRequests.next();
     this.searchInflight = true;
     this.searchError = '';
+    this.moreError = '';
+    if (reset) this.hasMoreResults = true;
     this.showSuggest = false;
     this.searching = true;
     this.loading = reset;
@@ -207,6 +217,11 @@ export struct SearchPage {
           this.allSections = this.mergeAllSections(this.allSections, res.sections);
         }
         this.applyAllTotals(res.totals);
+        const incomingVideos: number = res.sections.reduce((count: number, section: SearchAllSection) =>
+          count + (section.type === SearchTypes.video ? section.videos.length : 0), 0);
+        const loadedVideos: number = this.allSections.reduce((count: number, section: SearchAllSection) =>
+          count + (section.type === SearchTypes.video ? section.videos.length : 0), 0);
+        this.hasMoreResults = incomingVideos > 0 && (this.videoTotal <= 0 || loadedVideos < this.videoTotal);
         this.allPage = page + 1;
       } else if (this.searchTab === 1) {
         if (reset) {
@@ -234,6 +249,7 @@ export struct SearchPage {
           }
           this.resultsSource.append(res.videos.filter((v: VideoItem) => !existing.has(v.bvid + String(v.aid))));
         }
+        this.hasMoreResults = res.videos.length > 0 && this.resultsSource.totalCount() < res.numResults;
         this.videoTotal = res.numResults;
         this.videoPage = page + 1;
       } else if (this.searchTab === 2 || this.searchTab === 3) {
@@ -257,6 +273,7 @@ export struct SearchPage {
         } else {
           this.mediaSource(isBangumi).append(res.items);
         }
+        this.hasMoreResults = res.items.length > 0 && this.mediaSource(isBangumi).totalCount() < res.numResults;
         if (isBangumi) {
           this.bangumiTotal = res.numResults;
           this.bangumiPage = page + 1;
@@ -278,6 +295,7 @@ export struct SearchPage {
         } else {
           this.liveSource.append(res.rooms);
         }
+        this.hasMoreResults = res.rooms.length > 0 && this.liveSource.totalCount() < res.numResults;
         this.liveTotal = res.numResults;
         this.livePage = page + 1;
       } else if (this.searchTab === 5) {
@@ -294,6 +312,7 @@ export struct SearchPage {
         } else {
           this.articleSource.append(res.articles);
         }
+        this.hasMoreResults = res.articles.length > 0 && this.articleSource.totalCount() < res.numResults;
         this.articleTotal = res.numResults;
         this.articlePage = page + 1;
       } else {
@@ -310,12 +329,15 @@ export struct SearchPage {
         } else {
           this.userSource.append(res.users);
         }
+        this.hasMoreResults = res.users.length > 0 && this.userSource.totalCount() < res.numResults;
         this.userTotal = res.numResults;
         this.userPage = page + 1;
       }
     } catch (e) {
       if (!this.destroyed && this.searchRequests.isCurrent(request)) {
-        this.searchError = e instanceof Error ? e.message : '搜索失败，请重试';
+        const message: string = e instanceof Error ? e.message : '搜索失败，请重试';
+        if (reset) this.searchError = message;
+        else this.moreError = message;
       }
     } finally {
       if (!this.destroyed && this.searchRequests.isCurrent(request)) {
@@ -606,9 +628,15 @@ export struct SearchPage {
 
   // ===== 结果态：二级 Tab 栏（轻量文字样式 + 主题色下划线） =====
   @Builder
-  ResultTabBar(index: number, label: string) {
+  ResultTabBar(index: number) {
     Column({ space: 3 }) {
-      Text(label)
+      Text(index === 0 ? '综合' :
+        (index === 1 ? (this.videoTotal >= 0 ? '视频 ' + formatCount(this.videoTotal) : '视频') :
+        (index === 2 ? (this.bangumiTotal >= 0 ? '番剧 ' + formatCount(this.bangumiTotal) : '番剧') :
+        (index === 3 ? (this.ftTotal >= 0 ? '影视 ' + formatCount(this.ftTotal) : '影视') :
+        (index === 4 ? (this.liveTotal >= 0 ? '直播 ' + formatCount(this.liveTotal) : '直播') :
+        (index === 5 ? (this.articleTotal >= 0 ? '专栏 ' + formatCount(this.articleTotal) : '专栏') :
+        (this.userTotal >= 0 ? '用户 ' + formatCount(this.userTotal) : '用户')))))))
         .fontSize(15)
         .fontWeight(this.searchTab === index ? FontWeight.Bold : FontWeight.Normal)
         .fontColor(this.searchTab === index ? (this.isDark ? '#FFFFFF' : '#18191C') : '#9499A0')
@@ -912,6 +940,8 @@ export struct SearchPage {
       SearchResultList({
         loading: this.loading,
         errorText: this.searchError,
+        moreError: this.moreError,
+        hasMore: this.hasMoreResults,
         loadingMore: this.loadingMore,
         count: this.resultsSource.totalCount(),
         emptyText: '没有找到相关视频',
@@ -920,7 +950,7 @@ export struct SearchPage {
           });
         },
         onLoadMore: (): void => {
-          this.loadMoreSearch();
+          this.retryMoreSearch();
         },
         content: (): void => {
           this.VideoListContent()
@@ -946,8 +976,11 @@ export struct SearchPage {
     Column() {
       this.UserSortRow()
       SearchResultList({
+        skeleton: 'sessions',
         loading: this.loading,
         errorText: this.searchError,
+        moreError: this.moreError,
+        hasMore: this.hasMoreResults,
         loadingMore: this.loadingMore,
         count: this.userSource.totalCount(),
         emptyText: '没有找到相关用户',
@@ -956,7 +989,7 @@ export struct SearchPage {
           });
         },
         onLoadMore: (): void => {
-          this.loadMoreSearch();
+          this.retryMoreSearch();
         },
         content: (): void => {
           this.UserListContent()
@@ -1061,8 +1094,11 @@ export struct SearchPage {
   MediaResultTab(isBangumi: boolean, emptyText: string) {
     Column() {
       SearchResultList({
+        skeleton: 'mediaList',
         loading: this.loading,
         errorText: this.searchError,
+        moreError: this.moreError,
+        hasMore: this.hasMoreResults,
         loadingMore: this.loadingMore,
         count: this.mediaSource(isBangumi).totalCount(),
         emptyText: emptyText,
@@ -1071,7 +1107,7 @@ export struct SearchPage {
           });
         },
         onLoadMore: (): void => {
-          this.loadMoreSearch();
+          this.retryMoreSearch();
         },
         content: (): void => {
           if (isBangumi) {
@@ -1103,6 +1139,8 @@ export struct SearchPage {
       SearchResultList({
         loading: this.loading,
         errorText: this.searchError,
+        moreError: this.moreError,
+        hasMore: this.hasMoreResults,
         loadingMore: this.loadingMore,
         count: this.liveSource.totalCount(),
         emptyText: '没有找到相关直播间',
@@ -1114,7 +1152,7 @@ export struct SearchPage {
           });
         },
         onLoadMore: (): void => {
-          this.loadMoreSearch();
+          this.retryMoreSearch();
         },
         content: (): void => {
           this.LiveListContent()
@@ -1188,6 +1226,8 @@ export struct SearchPage {
       SearchResultList({
         loading: this.loading,
         errorText: this.searchError,
+        moreError: this.moreError,
+        hasMore: this.hasMoreResults,
         loadingMore: this.loadingMore,
         count: this.articleSource.totalCount(),
         emptyText: '没有找到相关专栏',
@@ -1196,7 +1236,7 @@ export struct SearchPage {
           });
         },
         onLoadMore: (): void => {
-          this.loadMoreSearch();
+          this.retryMoreSearch();
         },
         content: (): void => {
           this.ArticleListContent()
@@ -1373,11 +1413,11 @@ export struct SearchPage {
     Column() {
       this.VideoSortRow()
       if (this.loading) {
-        LoadingView({ loading: true })
+        LoadingView({ skeleton: 'list', loading: true })
       } else if (this.searchError.length > 0) {
-        LoadingView({ loading: false, errorText: this.searchError, onRetry: () => this.doSearch(true) })
+        LoadingView({ skeleton: 'list', loading: false, errorText: this.searchError, onRetry: () => this.doSearch(true) })
       } else if (this.allSections.length === 0) {
-        LoadingView({
+        LoadingView({ skeleton: 'list',
           loading: false,
           empty: true,
           emptyText: '没有找到相关内容',
@@ -1429,12 +1469,12 @@ export struct SearchPage {
           ListItem() {
             LoadMoreFooter({
               loading: this.loadingMore,
-              hasMore: true,
-              moreText: this.loadingMore ? '' : '上滑加载更多',
-              endText: '',
+              hasMore: this.hasMoreResults,
+              moreText: this.moreError.length > 0 ? '加载失败 · 点击重试' : '上滑加载更多',
+              endText: '没有更多结果了',
               fixedHeight: 44,
               onLoadMore: () => {
-                this.loadMoreSearch();
+                this.retryMoreSearch();
               },
             })
           }
@@ -1500,33 +1540,34 @@ export struct SearchPage {
             TabContent() {
               this.AllResultTab()
             }
-            .tabBar(this.ResultTabBar(0, '综合'))
+            .tabBar(this.ResultTabBar(0))
             TabContent() {
               this.VideoResultTab()
             }
-            .tabBar(this.ResultTabBar(1, this.videoTotal >= 0 ? '视频 ' + formatCount(this.videoTotal) : '视频'))
+            .tabBar(this.ResultTabBar(1))
             TabContent() {
               this.MediaResultTab(true, '没有找到相关番剧')
             }
-            .tabBar(this.ResultTabBar(2, this.bangumiTotal >= 0 ? '番剧 ' + formatCount(this.bangumiTotal) : '番剧'))
+            .tabBar(this.ResultTabBar(2))
             TabContent() {
               this.MediaResultTab(false, '没有找到相关影视')
             }
-            .tabBar(this.ResultTabBar(3, this.ftTotal >= 0 ? '影视 ' + formatCount(this.ftTotal) : '影视'))
+            .tabBar(this.ResultTabBar(3))
             TabContent() {
               this.LiveResultTab()
             }
-            .tabBar(this.ResultTabBar(4, this.liveTotal >= 0 ? '直播 ' + formatCount(this.liveTotal) : '直播'))
+            .tabBar(this.ResultTabBar(4))
             TabContent() {
               this.ArticleResultTab()
             }
-            .tabBar(this.ResultTabBar(5, this.articleTotal >= 0 ? '专栏 ' + formatCount(this.articleTotal) : '专栏'))
+            .tabBar(this.ResultTabBar(5))
             TabContent() {
               this.UserResultTab()
             }
-            .tabBar(this.ResultTabBar(6, this.userTotal >= 0 ? '用户 ' + formatCount(this.userTotal) : '用户'))
+            .tabBar(this.ResultTabBar(6))
           }
           .barMode(BarMode.Scrollable)
+          .barBackgroundColor(this.isDark ? '#18191C' : '#F6F7F8')
           .barHeight(40)
           .divider(null)
           .animationDuration(200)

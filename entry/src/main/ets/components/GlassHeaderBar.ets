@@ -102,11 +102,12 @@ export struct GlassHeaderBar {
             .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
             .layoutWeight(1)
         }
-        .height(32).layoutWeight(1).padding({ left: 12, right: 12 })
-        .borderRadius(16)
-        .backgroundColor(this.glassOn ? (this.isDark ? '#222D3038' : '#55FFFFFF') :
+        .height(36).layoutWeight(1).padding({ left: 12, right: 12 })
+        .borderRadius(18)
+        .backgroundColor(this.glassOn ? (this.isDark ? '#AA292D36' : '#CCFFFFFF') :
           (this.isDark ? '#292B32' : '#EDEFF2'))
         .systemMaterial(AppTheme.floatMaterial(this.glassOn))
+        .border({ width: 0.7, color: this.isDark ? '#22FFFFFF' : '#0D242833' })
         .opacity(this.headerContentOpacity())
         .translate({ y: -8 * this.fade })
         .accessibilityText('搜索：' + (this.hotSearch || '搜索你感兴趣的内容'))
@@ -117,22 +118,23 @@ export struct GlassHeaderBar {
           AppNavStack.pushPathByName(NAV_SEARCH, null);
         })
 
-        Stack({ alignContent: Alignment.TopEnd }) {
+        Stack({ alignContent: Alignment.Center }) {
           Image($r('app.media.ic_message'))
             .width(22)
             .height(22)
+            .renderMode(ImageRenderMode.Template)
             .fillColor(this.isDark ? '#E6E6E6' : '#333333')
-            .margin({ top: 9, right: 9 })
           if (this.msgUnread > 0) {
             Text(this.msgUnread > 99 ? '99+' : String(this.msgUnread))
               .fontSize(9).fontColor('#FFFFFF').backgroundColor(AppTheme.DANGER)
               .padding({ left: 4, right: 4, top: 1, bottom: 1 }).borderRadius(8)
-              .translate({ x: 10, y: 2 })
+              .position({ right: 0, top: 0 })
           }
         }
         // 图形保持 22vp，实际触发区扩大为 40vp，避免只能点到图标笔画才生效。
         .width(40)
         .height(40)
+        .accessibilityText('消息')
         .opacity(this.headerContentOpacity())
         .translate({ y: -8 * this.fade })
         .onClick(() => {
