@@ -6,6 +6,9 @@ import { AppNavStack } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { RequestEpoch } from '../common/RequestEpoch';
 import { youtubePlayerHtml, youtubePlaybackError, YOUTUBE_PLAYER_ORIGIN } from '../common/YouTubePlayerHtml';
+import { AppTheme } from '../common/AppTheme';
+import { MotionTokens } from '../common/MotionTokens';
+import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
 
 @Component
 export struct YouTubeDetailPage {
@@ -20,6 +23,8 @@ export struct YouTubeDetailPage {
   @State playerError: string = '';
   @State playerLoading: boolean = true;
   @State fullscreen: boolean = false;
+  /** 播放器就绪前的海报：复用列表已经缓存的同一张封面，避免一块纯黑。 */
+  @State coverUri: string = '';
   private controller: webview.WebviewController = new webview.WebviewController();
   private request: RequestEpoch = new RequestEpoch();
   private exitHandler: FullScreenExitHandler | null = null;
@@ -30,7 +35,28 @@ export struct YouTubeDetailPage {
   aboutToAppear(): void {
     AppStorage.setOrCreate<boolean>('youtubePlayerFullscreen', false);
     this.video = this.param;
+    this.primeCover();
     this.loadDetail();
+  }
+
+  /**
+   * 海报图：与列表走同一条可配代理的缓存管线（ArkUI Image() 不读应用代理），
+   * 命中磁盘时首帧就有；粘贴链接直接进详情时这里负责下载。
+   */
+  private primeCover(): void {
+    const url: string = this.video.thumbnail;
+    if (url.length === 0) return;
+    const cached: string = RemoteAssetCache.cachedThumbnail(url);
+    if (cached !== url) {
+      this.coverUri = cached;
+      return;
+    }
+    if (this.coverUri.length > 0) return;
+    RemoteAssetCache.ensureThumbnail(url).then((local: string) => {
+      if (local !== url && this.video.thumbnail === url) this.coverUri = local;
+    }).catch(() => {
+      // 拿不到海报不是致命问题：播放器该显示什么还显示什么。
+    });
   }
 
   aboutToDisappear(): void {
@@ -63,6 +89,8 @@ export struct YouTubeDetailPage {
     try {
       const result: YouTubeVideo = await YouTubeApi.detail(this.param.id);
       if (this.request.isCurrent(token)) this.video = result;
+      // 详情返回后再试一次：粘贴链接进详情时参数里没有封面。
+      if (this.request.isCurrent(token)) this.primeCover();
     } catch (e) {
       if (this.request.isCurrent(token)) this.detailError = (e as Error).message || '详情加载失败';
     } finally {
@@ -140,8 +168,9 @@ export struct YouTubeDetailPage {
   build() {
     Column() {
       if (!this.fullscreen) PageHeader({ title: 'YouTube', onBack: () => this.back() })
-      Web({ src: 'about:blank', controller: this.controller })
-        .id('youtube-player').width('100%').height(this.fullscreen ? '100%' : 240)
+      Stack() {
+        Web({ src: 'about:blank', controller: this.controller })
+        .id('youtube-player').width('100%').height('100%')
         .javaScriptAccess(true).domStorageAccess(true).mediaPlayGestureAccess(true)
         .backgroundColor('#000000')
         .onControllerAttached(() => { this.attached = true; this.loadPlayer(); })
@@ -173,13 +202,32 @@ export struct YouTubeDetailPage {
           Immersive.setFullscreen(false);
           Immersive.setBarIcons(this.isDark, this.isDark);
         })
+        // 播放器就绪前用封面当海报：ArkWeb 起播要一两秒，纯黑块看起来像坏了。
+        // 一旦播放器给出就绪/错误信号就撤掉，不挡住 YouTube 自己的界面。
+        if (this.playerLoading && this.coverUri.length > 0) {
+          Image(this.coverUri)
+            .width('100%').height('100%')
+            .objectFit(ImageFit.Cover)
+            .backgroundColor('#000000')
+            .hitTestBehavior(HitTestMode.None)
+            .transition(MotionTokens.appear())
+        }
+      }
+      .width('100%').height(this.fullscreen ? '100%' : 240)
+      .backgroundColor('#000000')
       if (!this.fullscreen) {
         Scroll() {
           Column({ space: 16 }) {
             if (this.playerLoading) Text('正在连接 YouTube 播放器…').fontSize(13).fontColor('#888888')
             if (this.playerError.length > 0) {
               Text(this.playerError).fontSize(14).fontColor(this.isDark ? '#FFAAAA' : '#B3261E')
-              Button('重试播放').onClick(() => this.retryPlayer())
+              // 次级按钮沿用 YouTube「我的」页的胶囊规格，不用系统默认蓝。
+              Button('重试播放')
+                .fontSize(13).fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+                .height(36).padding({ left: 18, right: 18 }).borderRadius(18)
+                .backgroundColor(this.isDark ? '#2B2D34' : '#F0F1F3')
+                .stateStyles({ pressed: { opacity: 0.9 }, normal: { opacity: 1 } })
+                .onClick(() => this.retryPlayer())
             }
             Text(this.video.title || 'YouTube 视频').fontSize(20).fontWeight(FontWeight.Bold).width('100%')
               .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
@@ -187,11 +235,22 @@ export struct YouTubeDetailPage {
               .fontColor(this.isDark ? '#DDDDDD' : '#333333')
             Text([this.video.views, this.video.published, this.video.duration].filter((v: string) => v.length > 0).join(' · '))
               .fontSize(12).fontColor('#888888').width('100%')
-            Button('在 YouTube 打开').fontSize(14).onClick(() => this.openYouTube())
+            // 主按钮取 YouTube 侧强调色（与外壳搜索按钮同规格），系统默认蓝不属于任何一个平台。
+            Button('在 YouTube 打开')
+              .fontSize(14).fontColor('#FFFFFF')
+              .height(36).padding({ left: 18, right: 18 }).borderRadius(18)
+              .backgroundColor(AppTheme.DANGER)
+              .stateStyles({ pressed: { opacity: 0.9 }, normal: { opacity: 1 } })
+              .onClick(() => this.openYouTube())
             if (this.detailLoading) LoadingProgress().width(24).height(24)
             if (this.detailError.length > 0) {
               Text('详情加载受限：' + this.detailError).fontSize(13).fontColor('#888888').width('100%')
-              Button('重试详情').onClick(() => this.loadDetail())
+              Button('重试详情')
+                .fontSize(13).fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+                .height(36).padding({ left: 18, right: 18 }).borderRadius(18)
+                .backgroundColor(this.isDark ? '#2B2D34' : '#F0F1F3')
+                .stateStyles({ pressed: { opacity: 0.9 }, normal: { opacity: 1 } })
+                .onClick(() => this.loadDetail())
             }
             if (this.video.description.length > 0) {
               Text(this.video.description).fontSize(14).lineHeight(22).width('100%')
