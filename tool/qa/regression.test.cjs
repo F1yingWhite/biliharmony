@@ -75,10 +75,13 @@ function environment(mocks = {}) {
   }
   // Extract the unchanged production method body; ArkUI's build DSL is verified separately by CompileArkTS.
   function methodHarness(file, start, end, imports = '') {
-    const source = fs.readFileSync(path.join(root, file + '.ets'), 'utf8');
+    // .ets 是 CRLF 检出，锚点按 \n 书写：统一归一为 LF，避免跨行锚点静默失配。
+    const source = fs.readFileSync(path.join(root, file + '.ets'), 'utf8').replace(/\r\n/g, '\n');
     const begin = source.indexOf(start);
     const finish = source.indexOf(end, begin);
-    assert.ok(begin >= 0 && finish > begin);
+    // 失败时指出漂了哪个锚点：裸断言看起来像功能回归，实际是夹具失效。
+    assert.ok(begin >= 0, `锚点未命中 start（${file}.ets）：${JSON.stringify(start)}`);
+    assert.ok(finish > begin, `锚点未命中 end（${file}.ets）：${JSON.stringify(end)}`);
     return compile(imports + '\nexport class Harness {\n' + source.slice(begin, finish) + '\n}',
       path.join(root, file + '.ets')).Harness;
   }
@@ -548,3 +551,61 @@ test('YouTube: iframe identifies the actual app and cannot interpolate an arbitr
   assert.match(youtubePlaybackError('YT_ERROR_150'),/嵌入/);
   assert.equal(youtubePlaybackError('YT_READY'),'');
 });
+
+test('YouTube: public pages are requested as a desktop client or the page has no parseable results', async () => {
+  // 回归背景：不带 User-Agent 时 YouTube 返回验证页/移动版页面，ytInitialData 里
+  // 没有 videoRenderer，搜索会整体失败。实测同一 URL：桌面 UA 可解析 22 条，移动 UA 直接抛错。
+  const calls=[];
+  const body='var ytInitialData = {"contents":{}};'+
+    'var ytInitialPlayerResponse = {"videoDetails":{"title":"Bunny","author":"Blender","lengthSeconds":"635"}};';
+  const {YouTubeApi}=environment({'services/network/HttpClient':{HttpClient:{get:async(...args)=>{
+    calls.push(args);return {ok:true,body};
+  }}}}).load('api/YouTubeApi');
+  await YouTubeApi.search('blender');
+  await YouTubeApi.detail('aqz-KE-bpKQ');
+  assert.equal(calls.length,2);
+  for(const [,headers] of calls){
+    assert.match(headers['User-Agent'],/Mozilla\/5\.0/);
+    // 桌面版标识：缺少它 YouTube 会判定为不可信客户端。
+    assert.doesNotMatch(headers['User-Agent'],/Mobile/i);
+  }
+  assert.match(calls[0][0],/youtube\.com\/results/);
+  assert.match(calls[1][0],/youtube\.com\/watch/);
+});
+
+test('Platform: switching platforms invalidates in-flight work and persists the choice', () => {
+  const env=environment({});
+  const {PlatformStore}=env.load('common/PlatformStore');
+  assert.equal(PlatformStore.current(),'bili');
+  assert.equal(PlatformStore.isYouTube(),false);
+
+  const token=PlatformStore.nextRequest();
+  assert.equal(PlatformStore.isCurrentRequest(token),true);
+  assert.equal(PlatformStore.switchTo(PlatformStore.YOUTUBE),true);
+  // 切走那一刻仍在途的请求必须失效，否则旧结果会写进新平台的状态。
+  assert.equal(PlatformStore.isCurrentRequest(token),false);
+  assert.equal(PlatformStore.isYouTube(),true);
+
+  // 重复切到同一平台不产生副作用，调用方据此决定是否暂停播放/退出全屏。
+  assert.equal(PlatformStore.switchTo(PlatformStore.YOUTUBE),false);
+  assert.equal(PlatformStore.toggle(),true);
+  assert.equal(PlatformStore.current(),'bili');
+
+  // 非白名单取值一律回落到哔哩哔哩，避免脏持久化值渲染出空白外壳。
+  PlatformStore.switchTo('netflix');
+  assert.equal(PlatformStore.current(),'bili');
+});
+
+test('Platform: the main dock owns only Bilibili tabs and Index dispatches on platform', () => {
+  // 回归背景：YouTube 曾是底部 Dock 的第 4 个 Tab，使 `currentTab !== 3` 这类魔数
+  // 在主框架里出现两次。提升为平台状态后，Dock 只归哔哩哔哩所有。
+  const source=fs.readFileSync(path.join(root,'pages/Index.ets'),'utf8').replace(/\r\n/g,'\n');
+  assert.doesNotMatch(source,/ic_youtube_tab/);
+  assert.doesNotMatch(source,/currentTab\s*!==\s*3/);
+  // 平台分叉必须由 PlatformStore 驱动，而不是裸字符串或下标魔数：
+  // 一处渲染对应外壳，一处让哔哩哔哩侧 Tab 广播在 YouTube 激活时闭嘴。
+  assert.match(source,/if \(this\.platform === PlatformStore\.YOUTUBE\) \{/);
+  assert.doesNotMatch(source,/platform === 'youtube'/);
+  assert.doesNotMatch(source,/platform === "youtube"/);
+});
+

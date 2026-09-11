@@ -5,12 +5,54 @@ const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '../../entry/src/main/ets');
 const sourceOverride = process.env.ARKTS_TEST_SOURCE_ROOT;
+// 源码缓存：methodHarness 会反复切片同一个大文件（VideoDetail 3k+ 行），
+// 每次用例都重新读盘是纯浪费；测试期间源码不会变化。
+const sourceCache = new Map();
 function readSource(filename) {
   const override = sourceOverride && path.join(sourceOverride, path.relative(root, filename));
-  return fs.readFileSync(override && fs.existsSync(override) ? override : filename, 'utf8');
+  const target = override && fs.existsSync(override) ? override : filename;
+  if (!sourceCache.has(target)) {
+    // 锚点里的多行字符串用 \n 书写，但仓库 .ets 是 CRLF 检出（core.autocrlf）。
+    // 不规范化则任何跨行锚点都会静默失配——这正是此前 6 个用例集体失效的根因。
+    // 统一归一为 LF，让锚点只依赖内容、不依赖检出时的行尾。
+    sourceCache.set(target, fs.readFileSync(target, 'utf8').replace(/\r\n/g, '\n'));
+  }
+  return sourceCache.get(target);
 }
 const ts = require(process.env.ARKTS_TEST_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript');
+
+// ---------------------------------------------------------------------------
+// 生产方法切片锚点（methodHarness 的 start/end）
+//
+// 这些字符串必须逐字存在于入口源码中，一旦重构改动签名或注释就会匹配失败，
+// 报成 `assert.ok(begin >= 0 && finish > begin)`——看起来像功能回归，实际是夹具失效。
+// 历史上已因此整批静默失效过（`private` 被去掉、注释改名、参数补类型注解）。
+//
+// 因此：锚点集中在此处，不得内联在用例里；改动锚点指向的方法签名/注释时，
+// 必须同步更新这里，并在同一个提交里跑一遍 lifecycle.test.cjs。
+//
+// 选取原则：start 用方法签名行（含缩进），end 用下一个成员的签名或注释首行——
+// 必须唯一、且不会在方法体内提前出现，否则切片会截断。
+// ---------------------------------------------------------------------------
+const ANCHOR = {
+  /** DynamicView：动态分类切换后必须让在途 feed 失效。 */
+  dynChangeTypeStart: '  private changeDynType(type: string): void {',
+  dynChipStart: '  @Builder\n  DynTypeChip(label: string, type: string) {',
+  dynLoadFeedStart: '  async loadFeed(reset: boolean): Promise<void> {',
+  /** 关注 UP 横滑栏拉取，紧跟在 loadFeed 之后的成员。 */
+  dynLoadFeedEnd: '  /** 并行拉取',
+  /** VideoDetail：视频页评论换根。签名无 private，end 是 mutateReplyItem 的文档注释。 */
+  videoLoadRepliesStart: '  async loadReplies(reset: boolean): Promise<void> {',
+  /** VideoDetail：紧随 loadReplies 的合并去重成员，用于只切评论加载逻辑本身。 */
+  videoLoadRepliesEnd: '  mergeUniqueReplies',
+  /** BangumiDetail / DynamicDetail：PGC 与动态详情评论换根，均为 private。 */
+  privateLoadRepliesStart: '  private async loadReplies(reset: boolean): Promise<void> {',
+  /** 三个页面共用的 mutateReplyItem 文档注释首行。 */
+  replyMutationComment: '  /**\n   * 评论项状态修改统一入口：',
+  /** DynamicDetail：紧随 loadReplies 之后的排序切换成员。 */
+  changeReplySortStart: '  private changeReplySort(mode: number): void {',
+};
 
 function deferred() {
   let resolve, reject;
@@ -55,7 +97,9 @@ function environment(mocks = {}) {
     const source = readSource(path.join(root, file + '.ets'));
     const begin = source.indexOf(start);
     const finish = source.indexOf(end, begin);
-    assert.ok(begin >= 0 && finish > begin);
+    // 失败时直接指出是哪个锚点漂了：旧消息只有一个裸断言，定位全靠猜。
+    assert.ok(begin >= 0, `锚点未命中 start（${file}.ets）：${JSON.stringify(start)}`);
+    assert.ok(finish > begin, `锚点未命中 end（${file}.ets）：${JSON.stringify(end)}`);
     return compile(imports + '\nexport class Harness {\n' + source.slice(begin, finish) + '\n}',
       path.join(root, file + '.ets')).Harness;
   }
@@ -263,8 +307,8 @@ test('dynamic category change supersedes an inflight feed', async () => {
   const env=environment({'api/DynamicApi':{DynamicApi:{getDynamicFeed:(offset,type)=>{
     calls.push(type);return calls.length===1?old.promise:latest.promise;
   }}}});
-  const Change=env.methodHarness('views/DynamicView','  private changeDynType(','  @Builder\n  DynTypeChip(');
-  const Load=env.methodHarness('views/DynamicView','  async loadFeed(','  /** 并行拉取',
+  const Change=env.methodHarness('views/DynamicView',ANCHOR.dynChangeTypeStart,ANCHOR.dynChipStart);
+  const Load=env.methodHarness('views/DynamicView',ANCHOR.dynLoadFeedStart,ANCHOR.dynLoadFeedEnd,
     "import { DynamicApi } from '../api/DynamicApi';");
   const p=new Change();p.loadFeed=Load.prototype.loadFeed;
   Object.assign(p,{feedEpoch:epoch(env),dynType:'all',feedLoading:false,dynTab:0,hostMid:0,
@@ -525,7 +569,7 @@ test('dynamic detail: failed continuation preserves comments and retries the sam
     if (calls.length === 1) throw new Error('offline');
     return {replies: [{rpid: 2}], cursor: '3', hasMore: false};
   }}}});
-  const Harness = env.methodHarness('pages/DynamicDetail', '  private async loadReplies(', '  private changeReplySort(',
+  const Harness = env.methodHarness('pages/DynamicDetail', ANCHOR.privateLoadRepliesStart, ANCHOR.changeReplySortStart,
     "import { CommentApi } from '../api/CommentApi';");
   const page = new Harness();
   Object.assign(page, {destroyed: false, repliesLoading: false, repliesFailed: false,
@@ -669,8 +713,8 @@ test('timeline: year boundary stays chronological and episode numbers use the pu
 
 function bangumiRepliesHarness(api) {
   const env = environment({'api/CommentApi': {CommentApi: api}});
-  const Harness = env.methodHarness('pages/BangumiDetail', '  private async loadReplies(',
-    '  /**\n   * 评论项状态修改', "import { CommentApi } from '../api/CommentApi';");
+  const Harness = env.methodHarness('pages/BangumiDetail', ANCHOR.privateLoadRepliesStart,
+    ANCHOR.replyMutationComment, "import { CommentApi } from '../api/CommentApi';");
   const p = new Harness();
   Object.assign(p, {destroyed:false, repliesEpoch:epoch(env), replies:[], repliesLoading:false,
     repliesFailed:false, repliesMoreFailed:false, repliesHasMore:true, replyCursor:'', replySortMode:3,
@@ -710,7 +754,7 @@ test('PGC failed pagination preserves comments and cursor for same-page retry', 
 
 function videoRepliesHarness(api) {
   const env=environment({'api/CommentApi':{CommentApi:api}});
-  const Harness=env.methodHarness('pages/VideoDetail','  async loadReplies(', '  mergeUniqueReplies',
+  const Harness=env.methodHarness('pages/VideoDetail',ANCHOR.videoLoadRepliesStart,ANCHOR.videoLoadRepliesEnd,
     "import { CommentApi } from '../api/CommentApi'; const CommentLog={info(){},warn(){},error(){},elapsed(){return 0},errorText(){return ''}};");
   const p=new Harness();
   Object.assign(p,{destroyed:false,repliesEpoch:epoch(env),detail:{aid:1},replyLoading:false,
@@ -794,7 +838,7 @@ test('article spacing: drops styled empty paragraphs but retains text and inline
 test('dynamic comments: sorting during loading drops the old response',async()=>{
   const old=deferred(),latest=deferred();let calls=0;
   const env=environment({'api/CommentApi':{CommentApi:{getReplies:()=>++calls===1?old.promise:latest.promise}}});
-  const Harness=env.methodHarness('pages/DynamicDetail','  private async loadReplies(', '  /**\n   * 评论项状态修改',
+  const Harness=env.methodHarness('pages/DynamicDetail',ANCHOR.privateLoadRepliesStart,ANCHOR.replyMutationComment,
     "import { CommentApi } from '../api/CommentApi';");
   const p=new Harness();Object.assign(p,{destroyed:false,repliesEpoch:epoch(env),repliesLoading:false,
     item:{commentId:1,commentType:11},repliesHasMore:true,replies:[],replyCursor:'',replySortMode:3,param:{}});
@@ -810,7 +854,7 @@ test('dynamic comments: changing sort keeps visible rows until replacement and p
   const env=environment({'api/CommentApi':{CommentApi:{getReplies:(id,type,cursor,mode)=>{
     calls.push({cursor,mode});return calls.length===1?failed.promise:retry.promise;
   }}}});
-  const Harness=env.methodHarness('pages/DynamicDetail','  private async loadReplies(', '  /**\n   * 评论项状态修改',
+  const Harness=env.methodHarness('pages/DynamicDetail',ANCHOR.privateLoadRepliesStart,ANCHOR.replyMutationComment,
     "import { CommentApi } from '../api/CommentApi';");
   const p=new Harness();Object.assign(p,{destroyed:false,repliesEpoch:epoch(env),repliesLoading:false,
     item:{commentId:1,commentType:11},repliesHasMore:false,replies:[{rpid:9}],replyCursor:'old',replySortMode:3,param:{}});
@@ -827,7 +871,7 @@ test('dynamic feed: failed continuation keeps cards and offset, then retries the
   let calls=0;const offsets=[];const env=environment({'api/DynamicApi':{DynamicApi:{getDynamicFeed:async off=>{
     offsets.push(off);if(++calls===1)throw Error('offline');return {items:[{dynId:'2'}],offset:'end',hasMore:false};
   }}}});
-  const Harness=env.methodHarness('views/DynamicView','  async loadFeed(', '  /** 并行拉取',
+  const Harness=env.methodHarness('views/DynamicView',ANCHOR.dynLoadFeedStart,ANCHOR.dynLoadFeedEnd,
     "import { DynamicApi } from '../api/DynamicApi';");
   const p=new Harness();Object.assign(p,{feedEpoch:epoch(env),feedLoading:false,dynHasMore:true,
     dynOffset:'next',dynSource:source(env,[{dynId:'1'}]),hostMid:0,dynType:'all'});
