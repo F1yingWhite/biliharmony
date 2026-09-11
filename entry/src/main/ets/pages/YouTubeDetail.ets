@@ -10,6 +10,7 @@ import { youtubeFullscreenProbeHtml, youtubePlayerHtml, youtubePlaybackError,
 import { AppTheme } from '../common/AppTheme';
 import { MotionTokens } from '../common/MotionTokens';
 import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
+import { YouTubeWatchLaterStore } from '../common/YouTubeWatchLaterStore';
 import { systemShare } from '@kit.ShareKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 
@@ -48,6 +49,8 @@ export struct YouTubeDetailPage {
   @State commentsError: string = '';
   @State commentsMoreLoading: boolean = false;
   @State commentMoreError: string = '';
+  /** 本地稍后观看状态（不需要账号）。 */
+  @State saved: boolean = false;
   /** 远程图片（相关推荐封面、频道头像、评论头像）→ 本地文件；Image() 不读应用代理。 */
   @State imageLocal: Map<string, string> = new Map<string, string>();
   private controller: webview.WebviewController = new webview.WebviewController();
@@ -63,6 +66,7 @@ export struct YouTubeDetailPage {
   aboutToAppear(): void {
     AppStorage.setOrCreate<boolean>('youtubePlayerFullscreen', false);
     this.video = this.param;
+    this.saved = YouTubeWatchLaterStore.contains(this.param.id);
     this.primeCover();
     this.loadDetail();
   }
@@ -304,6 +308,12 @@ export struct YouTubeDetailPage {
     });
   }
 
+  /** 保存/取消保存到本地稍后观看；按钮文案与提示都跟着状态走。 */
+  private toggleSaved(): void {
+    this.saved = YouTubeWatchLaterStore.toggle(this.video);
+    this.toast(this.saved ? '已加入稍后观看' : '已从稍后观看移除');
+  }
+
   private copyLink(): void {
     const url: string = YouTubeApi.watchUrl(this.param.id);
     if (url.length === 0) {
@@ -502,7 +512,9 @@ export struct YouTubeDetailPage {
           .fontSize(12).fontColor('#9499A0').width('100%')
 
         // 只放能闭环的动作：分享与复制链接。点赞/投币/收藏/发评论需要账号，不摆空按钮。
+        // 稍后观看是本地列表：不需要账号，因此按钮必须有真实反馈（已保存/已移除）。
         Row({ space: 10 }) {
+          this.QuietAction(this.saved ? '已保存' : '稍后观看', () => this.toggleSaved())
           this.QuietAction('分享', () => this.shareVideo())
           this.QuietAction('复制链接', () => this.copyLink())
         }

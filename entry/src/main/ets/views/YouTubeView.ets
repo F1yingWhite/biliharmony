@@ -1,7 +1,7 @@
 import { inputMethod } from '@kit.IMEKit';
 import { curves } from '@kit.ArkUI';
 import { YouTubeApi, YouTubeSearchPage, YouTubeVideo } from '../api/YouTubeApi';
-import { AppNavStack, NAV_YOUTUBE_DETAIL } from '../common/AppRouter';
+import { AppNavStack, NAV_YOUTUBE_DETAIL, NAV_YOUTUBE_SAVED } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { RequestEpoch } from '../common/RequestEpoch';
 import { PlatformStore } from '../common/PlatformStore';
@@ -50,6 +50,8 @@ export struct YouTubeView {
   /** 已解码完成的封面；用于淡入，避免图片在卡片上突然出现。 */
   @State coversReady: Map<string, boolean> = new Map<string, boolean>();
   @State accountSheet: boolean = false;
+  /** 本地稍后观看数量：由 YouTubeWatchLaterStore 广播，返回本页时不会读到旧值。 */
+  @StorageProp('youtubeWatchLaterCount') savedCount: number = 0;
   /** 输入联想（防抖后取回）与本地搜索历史；两者都与哔哩哔哩搜索页对等。 */
   @State suggestions: Array<string> = [];
   @State history: Array<string> = [];
@@ -757,7 +759,7 @@ export struct YouTubeView {
               Text('Google 账号未连接').fontSize(12).fontColor('#9499A0')
             }.alignItems(HorizontalAlign.Start).layoutWeight(1)
           }.width('100%').alignItems(VerticalAlign.Center)
-          Text('当前可用的是游客探索与搜索；观看历史、订阅与播放列表需要账号，暂未开放。')
+          Text('当前可用的是游客探索、搜索与本机稍后观看；观看历史、订阅与播放列表需要账号，暂未开放。')
             .fontSize(12).lineHeight(18).fontColor('#9499A0').width('100%')
           // 说明入口沿用哔哩哔哩「我的」页的胶囊按钮规格（圆角 18）。
           Text('了解如何连接')
@@ -772,7 +774,22 @@ export struct YouTubeView {
         .alignItems(HorizontalAlign.Start)
 
         Column() {
-          ForEach(['观看历史', '稍后观看', '订阅内容', '播放列表'], (label: string, index: number) => {
+          // 稍后观看是本地列表，不需要账号，所以这里是真入口，不是「未解锁」。
+          Column() {
+            Row({ space: 14 }) {
+              Text('稍后观看').fontSize(15).fontColor(AppTheme.onSurface()).layoutWeight(1)
+              Text(this.savedCount > 0 ? String(this.savedCount) : '本机')
+                .fontSize(12).fontColor('#9499A0')
+              Image($r('app.media.ic_arrow_right')).width(18).height(18).fillColor('#C1C2C5')
+            }
+            .width('100%').height(48).padding({ left: 14, right: 14 })
+            .alignItems(VerticalAlign.Center)
+            .onClick(() => { AppNavStack.pushPathByName(NAV_YOUTUBE_SAVED, null); })
+            Divider().strokeWidth(0.5)
+              .color(this.isDark ? '#1FFFFFFF' : '#0F000000')
+              .margin({ left: 48, right: 14 })
+          }.width('100%')
+          ForEach(['观看历史', '订阅内容', '播放列表'], (label: string, index: number) => {
             Column() {
               Row({ space: 14 }) {
                 Text(label).fontSize(15).fontColor('#9499A0').layoutWeight(1)
@@ -782,7 +799,7 @@ export struct YouTubeView {
               .width('100%').height(48).padding({ left: 14, right: 14 })
               .alignItems(VerticalAlign.Center)
               .onClick(() => { this.toast('连接 YouTube 账号后可用'); })
-              if (index < 3) {
+              if (index < 2) {
                 Divider().strokeWidth(0.5)
                   .color(this.isDark ? '#1FFFFFFF' : '#0F000000')
                   .margin({ left: 48, right: 14 })

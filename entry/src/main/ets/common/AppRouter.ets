@@ -109,6 +109,8 @@ export interface ArticlePageParam {
 
 /** NavDestination 路由名 */
 export const NAV_YOUTUBE_DETAIL: string = 'YouTubeDetail';
+/** 本地稍后观看列表（不需要账号，纯本机存储）。 */
+export const NAV_YOUTUBE_SAVED: string = 'YouTubeSaved';
 export const NAV_SEARCH: string = 'Search';
 export const NAV_VIDEO_DETAIL: string = 'VideoDetail';
 export const NAV_LOGIN: string = 'Login';

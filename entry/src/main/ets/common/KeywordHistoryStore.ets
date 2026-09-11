@@ -33,7 +33,9 @@ export class KeywordHistoryStore {
       this.store = store;
       const diskRaw: string = store.getSync(this.storageKey, '') as string;
       const effectiveRaw: string = diskRaw.length > 0 ? diskRaw : legacyRaw;
-      this.cache = this.parse(effectiveRaw);
+      // 恢复是异步的：用户可能在它完成前就搜了一次。内存里的新词优先，
+      // 磁盘只补缺失项，避免刚记下的搜索词被旧内容顶掉。
+      this.cache = this.merge(this.cache, this.parse(effectiveRaw));
       AppStorage.setOrCreate<string>(this.storageKey, JSON.stringify(this.cache));
       if (diskRaw.length === 0 && this.cache.length > 0) {
         store.putSync(this.storageKey, JSON.stringify(this.cache));
@@ -91,6 +93,18 @@ export class KeywordHistoryStore {
     if (this.store === null) return;
     this.store.putSync(this.storageKey, raw);
     await this.store.flush();
+  }
+
+  /** 内存优先、磁盘补缺，最多 20 条。 */
+  private merge(memory: Array<string>, disk: Array<string>): Array<string> {
+    const merged: Array<string> = [];
+    for (const item of memory) {
+      if (item.length > 0 && merged.indexOf(item) < 0) merged.push(item);
+    }
+    for (const item of disk) {
+      if (item.length > 0 && merged.indexOf(item) < 0 && merged.length < 20) merged.push(item);
+    }
+    return merged.slice(0, 20);
   }
 
   private parse(raw: string): Array<string> {
