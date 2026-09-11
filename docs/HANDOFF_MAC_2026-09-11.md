@@ -11,6 +11,10 @@ Windows 侧已完成并提交（4 个本地提交，**未 push**）：
 
 先 `git log --oneline -5` 核对，再按下面继续。
 
+> **Mac 侧回执（2026-09-11 同日晚）**：第一节的播放器问题已定位并修复，而且原诊断有误——
+> `applyProxyOverride` 不在 `ProxyConfig` 上；`about:blank` 的直接原因是导航竞态，不是网络。
+> 详见文末「Mac 侧工作回执」。下面正文保留 Windows 侧当时的判断，便于对照。
+
 ---
 
 ## 一、最高优先级：播放器画面尚未验收
@@ -141,3 +145,61 @@ node --test --test-timeout=20000 \
   请在 Mac 上补一次：探索页点「音乐」→ 确认渲染 6 张卡片。
 - `View` 规格、`Tabs` 参数、卡片几何都是**静态对齐**（读源码逐参数对照）+
   部分节点几何实测，不是全量视觉回归。
+
+---
+
+## 七、Mac 侧工作回执（2026-09-11 同日晚）
+
+### 7.1 纠正第一节的两处结论
+
+1. **`applyProxyOverride` 的位置写错了。** 它是 `webview.ProxyController` 的静态方法
+   （API 15+），`ProxyConfig` 只是承载规则的参数对象，自己没有这个方法。Windows 侧看到的
+   `Property 'applyProxyOverride' does not exist on type 'typeof ProxyConfig'` 正是**类名写错**
+   的报错，不是「本机 SDK 类型索引取不到」。改用 `ProxyController` 后，同一份 API 26 SDK 上
+   **编译通过、运行成功**。
+2. **`about:blank` 不是网络不可达的表现。** ArkWeb 日志显示：初始 `about:blank` 导航把
+   `onControllerAttached` 里刚发出的 `loadData` 文档 abort 掉了
+   （`OnLoadError ERR_ABORTED(-3) ... url:data:text/***`，`loadData` 内部就是一次 `data:` 导航）。
+   而 `onPageEnd` 的恢复分支被 `playerLoaded` 去重标记挡住，成了空操作。两个问题同时存在：
+   **只修网络仍然是空白**。
+
+### 7.2 本轮改动（本地提交，未 push）
+
+| 文件 | 改动 |
+| --- | --- |
+| `entry/src/main/ets/services/network/WebProxy.ets` | 新增：把 `netProxy` 归一为 `scheme://host:port` 后下发给 ArkWeb；默认空值零调用 |
+| `entry/src/main/ets/entryability/EntryAbility.ets` | `netProxy` 同时下发给 `HttpClient` 与 `WebProxy` |
+| `entry/src/main/ets/pages/YouTubeDetail.ets` | `onPageEnd(about:blank)` 分支复位 `playerLoaded` 后重发 `loadData` |
+| `tool/qa/regression.test.cjs` | 新增 2 项：ArkWeb 代理规则归一/默认零调用；播放器文档不被初始导航顶掉 |
+
+### 7.3 Mac 验证结果
+
+环境：Mac 模拟器 `127.0.0.1:5555` + 本机 Clash `127.0.0.1:7890` +
+`hdc rport tcp:7890 tcp:7890` + `--ps netProxy http://127.0.0.1:7890`。
+（模拟器 DNS 被污染，两条 ping 都 100% 丢包——**按第一节的排查法会误判成网络不通**。）
+
+| 验收项 | 结果 |
+| --- | --- |
+| 离线回归 | **128/128 通过** |
+| API 26 构建 | 成功，新增代码 0 error |
+| 第六节待补的「探索 → 音乐」 | ✅ 6 张真实卡片 |
+| 播放器画面 | ✅ 已渲染（海报帧 + 标题浮层 + YouTube 原生控件 + `在 YouTube 上观看`） |
+| 代理下发 | ✅ 启动日志 `ArkWeb proxy override applied`；不传参数冷启动零调用 |
+| 实际播放 | ❌ 两个视频点播放均被 YouTube「请登录，以便我们确认你不是聊天机器人」拦截（出口 IP 风控，无 `onError`，非应用缺陷） |
+
+### 7.4 仍在清单上的未完成项
+
+1. **真实音视频解码/音画同步未验收**：被上述风控挡住。若要继续，需要换一个未被标记的代理
+   出口（本机 Clash 选其他节点）再试，这属于改动本机代理配置，需先确认。
+2. 搜索分页（`continuationCommand`）未接入。
+3. `lifecycle.test.cjs` 约 20 处内联锚点未迁入 `ANCHOR` 常量（不建议删用例）。
+4. 两条消息为 "1" 的提交（`c4b1f6a`、`61607ae`）未补 CHANGELOG。
+
+### 7.5 给下一轮的提醒
+
+- `docs/ArkUI易错清单.md` 第 18 条已改写：18a 代理（含正确类名）、18c 导航竞态、18d 播放层风控。
+- `tool/qa/README.md` 的「模拟器验收 YouTube」小节已同步：`netProxy` 现在同时覆盖两条网络栈。
+- Mac 上构建曾因缺 `DEVECO_SDK_HOME` 失败（hvigor 报 `Invalid value of 'DEVECO_SDK_HOME'`，
+  而输出目录里上一轮的 HAP 会让人误以为成功）。`tool/qa/qa_build.py` 现在会在 macOS 上
+  自动指向 DevEco 自带 SDK 根目录；已显式设置的环境变量优先。
+  直接 `python3 tool/qa/qa_build.py [--install]` 即可。

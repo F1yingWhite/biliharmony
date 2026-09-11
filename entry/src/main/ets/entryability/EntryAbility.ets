@@ -11,6 +11,7 @@ import { EmoteResolver } from '../common/EmoteResolver';
 import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
 import { SponsorBlockStore } from '../common/SponsorBlock';
 import { HttpClient } from '../services/network/HttpClient';
+import { WebProxy } from '../services/network/WebProxy';
 
 const DOMAIN: number = 0x0000;
 const TAG: string = 'BiliHarmony';
@@ -43,10 +44,15 @@ export default class EntryAbility extends UIAbility {
    * 可选 HTTP 代理：仅当启动参数带 `netProxy` 时启用（如
    * `aa start -a EntryAbility -b <bundle> --ps netProxy http://127.0.0.1:7897`）。
    * 不传时保持空值，HttpClient 不设置 usingProxy，行为与历史版本一致。
+   * ArkWeb 播放器使用独立网络栈，同一取值必须单独下发（见 WebProxy）。
    */
   private applyLaunchProxy(want: Want): void {
     const value: string = want.parameters === undefined ? '' : String(want.parameters['netProxy'] ?? '');
-    if (value.length > 0) HttpClient.setProxy(value);
+    if (value.length === 0) return;
+    HttpClient.setProxy(value);
+    if (WebProxy.apply(value)) {
+      if (DEBUG) hilog.info(DOMAIN, TAG, '%{public}s', 'ArkWeb proxy override applied');
+    }
   }
 
   private applyNativeThemeMode(mode: string): void {

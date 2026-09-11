@@ -63,6 +63,12 @@ def main():
     if sys.platform == 'darwin' and (java_home / 'bin/java').is_file():
         env['JAVA_HOME'] = str(java_home)
         env['PATH'] = str(java_home / 'bin') + os.pathsep + env.get('PATH', '')
+    # hvigor 还要求 DEVECO_SDK_HOME 指向 SDK 根目录：缺失时它直接以
+    # "Invalid value of 'DEVECO_SDK_HOME' in the system environment path." 失败，
+    # 而输出目录里上一轮的 HAP 会让人误以为构建成功。已显式设置时不覆盖。
+    sdk_home = Path('/Applications/DevEco-Studio.app/Contents/sdk')
+    if sys.platform == 'darwin' and sdk_home.is_dir() and not env.get('DEVECO_SDK_HOME'):
+        env['DEVECO_SDK_HOME'] = str(sdk_home)
     proc = subprocess.run(cmd, cwd=ROOT, env=env)
     unsigned = ROOT / 'entry/build/default/outputs/default/entry-default-unsigned.hap'
     if proc.returncode != 0:
