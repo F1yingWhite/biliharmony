@@ -146,9 +146,12 @@ export struct YouTubeDetailPage {
         .backgroundColor('#000000')
         .onControllerAttached(() => { this.attached = true; this.loadPlayer(); })
         .onPageEnd((event) => {
-          // 初始 about:blank 导航可能晚于 onControllerAttached，不能让它覆盖播放器文档。
+          // 初始 about:blank 导航会晚于 onControllerAttached 到达，并把已经开始的
+          // loadData 文档 abort 掉（ArkWeb 日志：ERR_ABORTED url:data:text/***）。
+          // 因此这里必须复位去重标记后重新导航，否则播放器永远停在 about:blank。
           if (event.url === 'about:blank' && !this.initialPageLoaded) {
             this.initialPageLoaded = true;
+            this.playerLoaded = false;
             this.loadPlayer();
           }
         })

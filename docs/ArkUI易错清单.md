@@ -218,7 +218,7 @@ assert.ok(finish > begin, `锚点未命中 end（${file}.ets）：${JSON.stringi
 
 ## 18. ArkWeb 不共享应用的网络代理；外部页面还可能按 UA 返回不同结构 ★曾导致播放器空白
 
-两个独立的坑，都在 YouTube 侧踩到，且都会**表现为"功能坏了"而其实不是**。
+三个独立的坑，都在 YouTube 侧踩到，且都会**表现为"功能坏了"而其实不是**。
 
 ### 18a. `usingProxy` / 系统代理对 Web 组件无效
 
@@ -227,24 +227,35 @@ assert.ok(finish > begin, `锚点未命中 end（${file}.ets）：${JSON.stringi
 
 - 它默认走**系统代理**，而模拟器/设备上可能根本没有系统代理参数
   （本环境 `persist.net.http.proxy`、`persist.net.proxy.host` 都不存在）；
-- SDK 里确有 `webview.ProxyConfig.applyProxyOverride(proxyConfig, callback)`（API 15+，静态方法）
-  可以给 ArkWeb 单独下发代理，但**并非所有 SDK 的类型索引都能取到**：本机 API 26 SDK
-  编译报 `Property 'applyProxyOverride' does not exist on type 'typeof ProxyConfig'`，
-  尽管它在 `.d.ts` 的 `class ProxyConfig` 内。
+- 给 ArkWeb 单独下发代理，要调 `webview.ProxyController.applyProxyOverride(config, callback)`
+  ——`static` 方法挂在 **`ProxyController`** 上（API 15+）。`ProxyConfig` 只是承载规则集的
+  参数对象，自己**没有**这个方法；写成 `webview.ProxyConfig.applyProxyOverride(...)` 必然编译报
+  `Property 'applyProxyOverride' does not exist on type 'typeof ProxyConfig'`。
 
-**症状**：应用侧搜索/详情一切正常，播放器页面永远停在 `about:blank`，且**没有任何错误回调**
-（脚本加载不到 ⇒ `document.title` 信号通道不发火 ⇒ 只能靠超时兜底）。很容易误判成
-`loadData` 用法错误或 origin 配置错误。
+  2026-09-11 这个类名在两个平台各坑了一次：Windows 侧据此误判为"本机 SDK 类型索引取不到该
+  API"并放弃合入；Mac 侧改用 `ProxyController` 后，同一个 API 26 SDK 上**编译与运行都成功**
+  （日志 `ArkWeb proxy override applied`）。
 
-**排查第一步**：先确认设备到目标域名的可达性，而不是先怀疑代码。
+实现见 `services/network/WebProxy.ets`：把 `netProxy` 启动参数归一成 `scheme://host:port`
+后 `insertProxyRule`；**默认空值完全不调用任何 ArkWeb 接口**，默认路径与历史版本一致。
+
+**症状**：应用侧搜索/详情一切正常，播放器停在 `about:blank` 且**没有任何错误回调**
+（脚本加载不到 ⇒ `document.title` 信号通道不发火 ⇒ 只能靠超时兜底）。
+但 `about:blank` **同样可能是 18c 的导航竞态**，必须先看导航日志再下结论。
+
+**排查第一步**：先确认设备到目标域名的可达性，再怀疑代码。
 
 ```bash
-hdc shell ping -c 2 -W 3 www.youtube.com   # 100% 丢包 ⇒ 网络不通，不是导航问题
-hdc shell ping -c 2 -W 3 www.baidu.com     # 正常 ⇒ 设备整体出网没问题
+hdc shell ping -c 2 -W 3 www.youtube.com   # 本环境 100% 丢包
+hdc shell ping -c 2 -W 3 www.baidu.com     # 本环境同样 100% 丢包
 ```
 
-**规则**：给 Web 组件接代理必须用 ArkWeb 自己的代理 API，且要**编译期验证该 API 在目标
-SDK 上可用**；不可用时不要合入，并如实记录"播放器画面未验收"。
+⚠ 这条 ping 判据**不充分**：本例两个域名都丢包（ICMP 被整体屏蔽），按旧结论会直接误判成
+"网络不通"。可达性要用真能出网的路径验证（同一 `netProxy` 下应用侧搜索是否成功），
+而"播放器为什么空白"要看 ArkWeb 自己的导航日志（18c）。
+
+**规则**：给 Web 组件接代理必须用 ArkWeb 自己的代理 API（`ProxyController`），
+并**编译 + 运行期各验证一次**；默认参数下不得触碰该 API。
 
 ### 18b. 公开网页按 User-Agent 返回不同结构
 
@@ -262,8 +273,39 @@ SDK 上可用**；不可用时不要合入，并如实记录"播放器画面未�
 （`regression.test.cjs` 的 `YouTube: public pages are requested as a desktop client...`），
 否则将来有人"顺手清理掉看起来没用的 header"，功能会静默失效。
 
+### 18c. 初始 `about:blank` 导航会 abort 掉刚发起的 `loadData` ★曾导致播放器停在 about:blank
+
+`Web({ src: 'about:blank' })` 的初始导航是异步的。若在 `onControllerAttached` 里紧接着
+`loadData(...)`，两者会赛跑：初始 `about:blank` 常然后到，并把**已经开始的那个文档中止**。
+ArkWeb 日志里就是这条——注意它不是网络错误：
+
+```
+[WebNavigation] LoadUrl url:about:blank
+[WebNavigation] OnLoadError errorCode:ERR_ABORTED(-3) mainFrame:1 url:data:text/***
+```
+
+`loadData` 在 ArkWeb 内部就是一次 `data:` 导航，被 abort 的正是播放器文档。此时若
+`onPageEnd` 的恢复分支被"已经加载过"的去重标记挡住（`if (this.playerLoaded) return`），
+恢复就是**空操作**，播放器永远停在 `about:blank`——**与网络无关，网络通也一样**。
+
+**规则**：`loadData` 应当等初始 `about:blank` 的 `onPageEnd` 之后再发；为抢时间提前发的话，
+必须在该回调里**复位去重标记再重发**。回归测试
+`YouTube: the player document survives the initial about:blank navigation` 锁定该分支。
+
+### 18d. 播放器渲染出来了 ≠ 播放能验收；还要分清播放层风控
+
+播放器文档加载成功后，YouTube 仍可能对**被标记的出口 IP** 返回
+「请登录，以便我们确认你不是聊天机器人」。这是播放层风控，表现为：
+嵌入外壳、海报帧、标题浮层、YouTube 自己的控件都正常渲染，**点播放才弹出该面板**，
+而且**没有 `onError` 事件**（所以 `youtubePlaybackError()` 不命中、应用也不该谎报错误）。
+
+不要把它记成应用缺陷，也不要因为它没出现就宣称播放验收通过——两者是独立结论。
+
+判断顺序：停在 `about:blank` / 无错误回调 ⇒ 先查 18c 与 18a；播放器 UI 已渲染但点播放被拦 ⇒ 18d。
+
 **案例**：`entry/src/main/ets/api/YouTubeApi.ets`（`DESKTOP_UA`）、
-`entry/src/main/ets/pages/YouTubeDetail.ets`、`services/network/HttpClient.ets`（可选代理）。
+`entry/src/main/ets/pages/YouTubeDetail.ets`、`services/network/HttpClient.ets`（应用侧可选代理）、
+`services/network/WebProxy.ets`（ArkWeb 侧可选代理）。
 
 ---
 

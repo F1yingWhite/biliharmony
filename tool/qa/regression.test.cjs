@@ -609,3 +609,49 @@ test('Platform: the main dock owns only Bilibili tabs and Index dispatches on pl
   assert.doesNotMatch(source,/platform === "youtube"/);
 });
 
+test('WebProxy: ArkWeb receives a normalized proxy rule only when the launch parameter asks for one', () => {
+  // 回归背景：ArkWeb 是独立网络栈，@ohos.net.http 的 usingProxy 不会作用于它。
+  // applyProxyOverride 在 webview.ProxyController 上（不在 ProxyConfig 上），且默认必须完全不下发。
+  const applied=[];
+  class FakeProxyConfig {
+    constructor(){ this.rules=[]; }
+    insertProxyRule(rule,filter){ this.rules.push({rule,filter}); }
+  }
+  const webview={ProxyConfig:FakeProxyConfig,ProxySchemeFilter:{MATCH_ALL_SCHEMES:0},
+    ProxyController:{applyProxyOverride:(config,callback)=>{applied.push(config);callback();}}};
+  const {WebProxy}=environment({'@kit.ArkWeb':{webview}}).load('services/network/WebProxy');
+
+  // 默认（无启动参数）不得触碰 ArkWeb，否则默认路径与历史版本不一致。
+  assert.equal(WebProxy.apply(''),false);
+  assert.equal(WebProxy.apply('   '),false);
+  assert.equal(applied.length,0);
+
+  // ArkWeb 规则格式是 scheme://host:port，不能塞整串 URL，缺省端口与 HttpClient 保持一致。
+  assert.equal(WebProxy.rule('http://127.0.0.1:7890'),'http://127.0.0.1:7890');
+  assert.equal(WebProxy.rule('127.0.0.1:7890'),'http://127.0.0.1:7890');
+  assert.equal(WebProxy.rule('127.0.0.1'),'http://127.0.0.1:8080');
+  assert.equal(WebProxy.rule('http://127.0.0.1:7890/'),'http://127.0.0.1:7890');
+  assert.equal(WebProxy.rule('socks5://127.0.0.1:1080'),'socks://127.0.0.1:1080');
+  // 不支持的协议宁可不下发，也不能猜一个协议把流量发到错误的地方。
+  assert.equal(WebProxy.rule('ftp://127.0.0.1:21'),'');
+  assert.equal(WebProxy.rule('http://'),'');
+
+  assert.equal(WebProxy.apply('http://127.0.0.1:7890'),true);
+  assert.equal(applied.length,1);
+  assert.deepEqual(applied[0].rules,[{rule:'http://127.0.0.1:7890',filter:0}]);
+
+  // 平台接口抛错不能把启动流程带崩，只报失败。
+  const failing=environment({'@kit.ArkWeb':{webview:{...webview,
+    ProxyController:{applyProxyOverride:()=>{throw {code:17100001};}}}}}).load('services/network/WebProxy');
+  assert.equal(failing.WebProxy.apply('http://127.0.0.1:7890'),false);
+});
+
+test('YouTube: the player document survives the initial about:blank navigation', () => {
+  // 回归背景：ArkWeb 会先提交 Web 组件的初始 about:blank，并把 onControllerAttached 里
+  // 已经开始的 loadData 文档 abort 掉（实测日志 ERR_ABORTED url:data:text/***）。
+  // 去重标记若不在 onPageEnd 分支里复位，重试分支就是空操作，播放器会永远停在 about:blank。
+  const source=fs.readFileSync(path.join(root,'pages/YouTubeDetail.ets'),'utf8').replace(/\r\n/g,'\n');
+  assert.match(source,
+    /if \(event\.url === 'about:blank' && !this\.initialPageLoaded\) \{[\s\S]{0,200}this\.playerLoaded = false;[\s\S]{0,120}this\.loadPlayer\(\);/);
+});
+

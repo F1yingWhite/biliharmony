@@ -25,7 +25,7 @@ $env:ARKTS_TEST_TYPESCRIPT = 'D:\DevEco Studio\tools\hvigor\hvigor\node_modules\
   tool/qa/regression.test.cjs tool/qa/lifecycle.test.cjs tool/qa/danmaku.test.cjs tool/qa/parity.test.cjs
 ```
 
-预期 **126 项全部通过**。这两组命令在 Windows 的受限沙箱下会因 `spawn EPERM` 失败
+预期 **128 项全部通过**。这两组命令在 Windows 的受限沙箱下会因 `spawn EPERM` 失败
 （Node `--test` 需要管道捕获子进程输出），需在允许管道/完整访问的终端里运行。
 
 > **锚点维护**：`methodHarness` 按源码文本切片抽取生产方法，锚点集中在
@@ -81,13 +81,21 @@ hdc rport tcp:7897 tcp:7897
 hdc shell aa start -a EntryAbility -b com.piliplus.harmony --ps netProxy http://127.0.0.1:7897
 ```
 
-注意两点：
+注意三点：
 
-- 该代理**只覆盖应用自身的 HTTP 请求**（搜索、详情元数据）。ArkWeb 播放器是独立网络栈，
-  不走这个代理，其画面需要在设备本身能直达 YouTube 时才能验收——详见
-  `docs/ArkUI易错清单.md` 第 18 条。
+- 该参数**同时覆盖两条网络栈**：应用侧 HTTP 走 `HttpClient` 的 `usingProxy`，
+  ArkWeb 播放器走 `WebProxy` 的 `ProxyController.applyProxyOverride`（API 15+）。
+  **默认空值两条路径都不下发任何配置**，与历史版本一致。
+  `applyProxyOverride` 是 `webview.ProxyController` 的静态方法，**不在 `ProxyConfig` 上**
+  ——`docs/ArkUI易错清单.md` 第 18a 条记录了写错类名导致的误判。
+- 播放器空白不要先归因于网络：初始 `about:blank` 导航会 abort 掉 `loadData` 文档，
+  只看网络日志会得到相反结论（第 18c 条）。
 - 公开搜索页必须声明桌面版 UA。不带 UA 时 YouTube 返回验证页/移动版页面，
   `ytInitialData` 里没有 `videoRenderer`，搜索会整体失败。该行为已由回归测试锁定。
+
+播放器画面渲染出来后，点播放仍可能被 YouTube 的「请登录，以便我们确认你不是聊天机器人」
+拦截（出口 IP 风控，第 18d 条）——它没有 `onError` 事件，既不能记成应用缺陷，
+也不能当作播放验收通过。
 
 ## 产物
 
