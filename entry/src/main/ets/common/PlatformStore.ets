@@ -1,4 +1,5 @@
 import { RequestEpoch } from './RequestEpoch';
+import { AppTheme } from './AppTheme';
 
 /**
  * 顶层「平台」状态：哔哩哔哩与 YouTube 是同级内容源，而不是主 Tab 里的一个频道。
@@ -31,6 +32,14 @@ export class PlatformStore {
     PersistentStorage.persistProp<string>(PlatformStore.KEY_PLATFORM, PlatformStore.BILI);
   }
 
+  /**
+   * 冷启动时按当前平台定强调色。必须在 AppTheme.init 之后调用：
+   * 那边负责把持久化的生效值读回来，这里只负责按平台纠正它。
+   */
+  static syncAccent(): void {
+    AppTheme.applyPlatformAccent(PlatformStore.isYouTube());
+  }
+
   static current(): string {
     const value: string = AppStorage.get<string>(PlatformStore.KEY_PLATFORM) ?? PlatformStore.BILI;
     return value === PlatformStore.YOUTUBE ? PlatformStore.YOUTUBE : PlatformStore.BILI;
@@ -50,6 +59,8 @@ export class PlatformStore {
     PlatformStore.epoch.invalidate();
     // 先失效在途请求，再广播平台变化。
     AppStorage.setOrCreate<string>(PlatformStore.KEY_PLATFORM, next);
+    // 强调色跟着平台走：YouTube 红 / 哔哩哔哩用户自选色。
+    AppTheme.applyPlatformAccent(next === PlatformStore.YOUTUBE);
     return true;
   }
 
