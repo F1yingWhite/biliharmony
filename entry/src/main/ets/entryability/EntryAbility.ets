@@ -47,6 +47,9 @@ export default class EntryAbility extends UIAbility {
    * ArkWeb 播放器使用独立网络栈，同一取值必须单独下发（见 WebProxy）。
    */
   private applyLaunchProxy(want: Want): void {
+    // QA 探针开关（默认关）：仅用于在播放层被风控挡住时验证 ArkWeb 全屏/返回联动。
+    const probe: string = want.parameters === undefined ? '' : String(want.parameters['ytPlayerProbe'] ?? '');
+    if (probe === '1') AppStorage.setOrCreate<boolean>('ytPlayerProbe', true);
     const value: string = want.parameters === undefined ? '' : String(want.parameters['netProxy'] ?? '');
     if (value.length === 0) return;
     HttpClient.setProxy(value);
