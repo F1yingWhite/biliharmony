@@ -580,6 +580,88 @@ test('YouTube: the fullscreen probe stays offline and never interpolates page da
   assert.doesNotMatch(html,/https?:\/\//);
   assert.doesNotMatch(html,/videoId|ytimg|youtube\.com/);
 });
+test('YouTube: the watch page yields related videos and a comment entry', () => {
+  // 回归背景：相关推荐已从 compactVideoRenderer 换成 lockupViewModel；评论入口是 watch 页
+  // 里一个 continuation token（正文要再请求一次）。两者都与 B 站数据模型无关，单独解析。
+  const lockup={lockupViewModel:{contentId:'xOXolSQcEb4',
+    metadata:{lockupMetadataViewModel:{title:{content:'SNOW BEAR'},
+      metadata:{contentMetadataViewModel:{metadataRows:[
+        {metadataParts:[{text:{content:'The Art of Aaron Blaise'}}]},
+        {metadataParts:[{text:{content:'741万次观看'}},{text:{content:'9个月前'}}]}]}}}},
+    contentImage:{thumbnailViewModel:{overlays:[{thumbnailBottomOverlayViewModel:
+      {badges:[{thumbnailBadgeViewModel:{text:'11:46'}}]}}]}}}};
+  const initial={contents:{twoColumnWatchNextResults:{
+    results:{results:{contents:[{itemSectionRenderer:{sectionIdentifier:'comment-item-section',
+      contents:[{continuationItemRenderer:{continuationEndpoint:{continuationCommand:{token:'CMT_TOKEN'}}}}]}}]}},
+    secondaryResults:{secondaryResults:{results:[{itemSectionRenderer:{contents:[lockup]}}]}}}}};
+  const html='var ytInitialPlayerResponse = '+JSON.stringify({videoDetails:{title:'Big Buck Bunny',
+    author:'Blender',viewCount:'23416129',lengthSeconds:'635'}})+';'+
+    'var ytInitialData = '+JSON.stringify(initial)+';';
+  const {YouTubeApi}=environment({'services/network/HttpClient':{}}).load('api/YouTubeApi');
+  const page=YouTubeApi.parseDetailPage(html,'aqz-KE-bpKQ');
+  assert.equal(page.video.title,'Big Buck Bunny');
+  assert.equal(page.video.duration,'10:35');
+  assert.equal(page.related.length,1);
+  const item=page.related[0];
+  assert.equal(item.id,'xOXolSQcEb4');
+  assert.equal(item.title,'SNOW BEAR');
+  assert.equal(item.channel,'The Art of Aaron Blaise');
+  assert.equal(item.views,'741万次观看');assert.equal(item.published,'9个月前');
+  assert.equal(item.duration,'11:46');
+  assert.equal(item.thumbnail,'https://i.ytimg.com/vi/xOXolSQcEb4/hqdefault.jpg');
+  assert.equal(page.commentToken,'CMT_TOKEN');
+});
+
+test('YouTube: comments resolve through frameworkUpdates and keep the next token', () => {
+  // 评论正文不在 commentThreadRenderer 里，而在 frameworkUpdates 的 commentEntityPayload，
+  // 两边靠 commentKey/key 对应；对不上的那一条必须跳过，不能猜内容。
+  const json={onResponseReceivedEndpoints:[{appendContinuationItemsAction:{continuationItems:[
+    {commentsHeaderRenderer:{countText:{runs:[{text:'1,234'}]}}},
+    {commentThreadRenderer:{commentViewModel:{commentViewModel:{commentKey:'K1'}}}},
+    {commentThreadRenderer:{commentViewModel:{commentViewModel:{commentKey:'MISSING'}}}},
+    {continuationItemRenderer:{continuationEndpoint:{continuationCommand:{token:'NEXT_CMT'}}}},
+  ]}}],frameworkUpdates:{entityBatchUpdate:{mutations:[{payload:{commentEntityPayload:{key:'K1',
+    properties:{commentId:'C1',content:{content:'第一条评论'},publishedTime:'7年前'},
+    author:{displayName:'@BergsArt',avatarThumbnailUrl:'https://yt3.ggpht.com/a.jpg'},
+    toolbar:{likeCountNotliked:'2663'}}}}]}}};
+  const {YouTubeApi}=environment({'services/network/HttpClient':{}}).load('api/YouTubeApi');
+  const page=YouTubeApi.parseComments(JSON.stringify(json));
+  assert.equal(page.comments.length,1);
+  assert.equal(page.comments[0].id,'C1');
+  assert.equal(page.comments[0].text,'第一条评论');
+  assert.equal(page.comments[0].author,'@BergsArt');
+  assert.equal(page.comments[0].likes,'2663');assert.equal(page.comments[0].published,'7年前');
+  assert.equal(page.total,'1,234');
+  assert.equal(page.continuation,'NEXT_CMT');
+  assert.equal(YouTubeApi.parseComments('{}').comments.length,0);
+  assert.throws(()=>YouTubeApi.parseComments('<html>'),/评论数据/);
+});
+
+test('YouTube: comment requests reuse the page InnerTube config and send no credentials', async () => {
+  const calls=[];
+  const initial={contents:{twoColumnWatchNextResults:{
+    results:{results:{contents:[{itemSectionRenderer:{sectionIdentifier:'comment-item-section',
+      contents:[{continuationItemRenderer:{continuationEndpoint:{continuationCommand:{token:'CMT_TOKEN'}}}}]}}]}}}}};
+  const html='var ytInitialPlayerResponse = '+JSON.stringify({videoDetails:{title:'Bunny'}})+';'+
+    'var ytInitialData = '+JSON.stringify(initial)+';'+
+    '"INNERTUBE_API_KEY":"KEY123","INNERTUBE_CLIENT_VERSION":"2.2026.01.00"';
+  const {YouTubeApi}=environment({'services/network/HttpClient':{HttpClient:{
+    get:async()=>({ok:true,body:html}),
+    post:async(...args)=>{calls.push(args);return {ok:true,body:JSON.stringify({onResponseReceivedEndpoints:[],
+      frameworkUpdates:{entityBatchUpdate:{mutations:[]}}})};},
+  }}}).load('api/YouTubeApi');
+  const detail=await YouTubeApi.detailPage('aqz-KE-bpKQ');
+  assert.equal(detail.commentToken,'CMT_TOKEN');
+  const page=await YouTubeApi.comments(detail.commentToken);
+  assert.equal(page.comments.length,0);assert.equal(page.continuation,'');
+  const [url,body,headers]=calls[0];
+  assert.match(url,/youtubei\/v1\/next\?key=KEY123/);
+  assert.equal(JSON.parse(body).continuation,'CMT_TOKEN');
+  assert.equal(JSON.parse(body).context.client.clientVersion,'2.2026.01.00');
+  assert.equal(headers['Content-Type'],'application/json');
+  assert.match(headers['User-Agent'],/Mozilla\/5\.0/);
+  assert.equal(headers.Cookie,undefined);assert.equal(headers.Referer,undefined);
+});
 test('YouTube: public pages are requested as a desktop client or the page has no parseable results', async () => {
   // 回归背景：不带 User-Agent 时 YouTube 返回验证页/移动版页面，ytInitialData 里
   // 没有 videoRenderer，搜索会整体失败。实测同一 URL：桌面 UA 可解析 22 条，移动 UA 直接抛错。
