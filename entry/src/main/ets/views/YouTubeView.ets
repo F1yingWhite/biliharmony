@@ -10,6 +10,7 @@ import { Haptic } from '../common/Haptic';
 import { MotionTokens } from '../common/MotionTokens';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
+import { YouTubeSearchHistoryStore } from '../common/YouTubeSearchHistoryStore';
 
 /**
  * YouTube 平台外壳：与哔哩哔哩同级，而不是底部 Dock 的第 4 个 Tab。
@@ -49,16 +50,81 @@ export struct YouTubeView {
   /** 已解码完成的封面；用于淡入，避免图片在卡片上突然出现。 */
   @State coversReady: Map<string, boolean> = new Map<string, boolean>();
   @State accountSheet: boolean = false;
+  /** 输入联想（防抖后取回）与本地搜索历史；两者都与哔哩哔哩搜索页对等。 */
+  @State suggestions: Array<string> = [];
+  @State history: Array<string> = [];
   /** 双列/多列与左右内缩都随屏宽变化，与哔哩哔哩首页同一套 LayoutTokens 断点。 */
   @State viewportWidth: number = 360;
   /** Dock 激活色与弹跳比例：与主框架 FloatingTabs 取同一来源。 */
   @StorageProp('accentColor') accent: string = '#FB7299';
   @State tabScale: Array<number> = [1, 1, 1];
   private request: RequestEpoch = new RequestEpoch();
+  private suggestEpoch: RequestEpoch = new RequestEpoch();
+  private suggestTimer: number = -1;
   private scroller: Scroller = new Scroller();
 
+  aboutToAppear(): void {
+    YouTubeSearchHistoryStore.ensureLoaded().then((items: Array<string>) => {
+      this.history = items;
+    }).catch(() => {
+      // 历史读不出来不影响搜索本身。
+    });
+  }
+
   aboutToDisappear(): void {
+    if (this.suggestTimer >= 0) clearTimeout(this.suggestTimer);
+    this.suggestTimer = -1;
+    this.suggestEpoch.invalidate();
     this.request.invalidate();
+  }
+
+  /**
+   * 输入联想：防抖 250ms 后请求，与哔哩哔哩搜索同一手感。
+   * 每次输入都换一个代际号，回来晚了的旧建议不会覆盖新输入的结果。
+   */
+  private scheduleSuggest(value: string): void {
+    if (this.suggestTimer >= 0) clearTimeout(this.suggestTimer);
+    this.suggestTimer = -1;
+    const term: string = value.trim();
+    if (term.length === 0) {
+      this.suggestEpoch.invalidate();
+      this.suggestions = [];
+      return;
+    }
+    const request: number = this.suggestEpoch.next();
+    this.suggestTimer = setTimeout(() => {
+      this.suggestTimer = -1;
+      YouTubeApi.suggest(term).then((items: Array<string>) => {
+        if (!this.suggestEpoch.isCurrent(request)) return;
+        // 点建议会程序化改写输入框文本，平台随后仍会回调一次 onChange；
+        // 对「正在展示结果的同一个词」不再弹联想，列表才不会点完立刻又冒出来。
+        this.suggestions = term === this.searched ? [] : items;
+      }).catch(() => {
+        if (this.suggestEpoch.isCurrent(request)) this.suggestions = [];
+      });
+    }, 250);
+  }
+
+  private clearSuggestions(): void {
+    if (this.suggestTimer >= 0) clearTimeout(this.suggestTimer);
+    this.suggestTimer = -1;
+    this.suggestEpoch.invalidate();
+    this.suggestions = [];
+  }
+
+  /** 清空输入即回到首页态：结果与游标一起复位，历史 chips 重新可见。 */
+  private resetResults(): void {
+    if (this.searched.length === 0 && this.videos.length === 0) return;
+    this.request.next();
+    this.searched = '';
+    this.videos = [];
+    this.continuation = '';
+    this.error = '';
+    this.moreError = '';
+    this.loading = false;
+    this.loadingMore = false;
+    this.thumbLocal = new Map<string, string>();
+    this.coversReady = new Map<string, boolean>();
   }
 
   /** 平台切换：先让在途请求失效，再广播，避免旧结果写进新平台状态。 */
@@ -76,6 +142,7 @@ export struct YouTubeView {
   private submitSearch(): void {
     const query: string = this.query.trim();
     if (query.length === 0) return;
+    this.clearSuggestions();
     try { inputMethod.getController().hideTextInput().catch(() => {}); } catch (_) {}
     try { this.getUIContext().getFocusController().clearFocus(); } catch (_) {}
     const id: string = YouTubeApi.videoId(query);
@@ -85,6 +152,8 @@ export struct YouTubeView {
       this.open(video);
       return;
     }
+    // 只有真正发起的搜索词才进历史：粘链接直接进详情不算搜索。
+    this.history = YouTubeSearchHistoryStore.add(query);
     this.runSearch(query);
   }
 
@@ -450,7 +519,12 @@ export struct YouTubeView {
           .placeholderColor(this.isDark ? '#B4B6BE' : '#777B85')
           .fontSize(13).fontColor(this.isDark ? '#E6E6E6' : '#18191C')
           .maxLength(500).enterKeyType(EnterKeyType.Search)
-          .onChange((value: string) => { this.query = value; })
+          .onChange((value: string) => {
+            this.query = value;
+            // 清空输入回到"历史/探索"首页：与哔哩哔哩搜索页一致，否则历史再也进不去。
+            if (value.trim().length === 0) this.resetResults();
+            this.scheduleSuggest(value);
+          })
           .onSubmit(() => { this.submitSearch(); })
       }
       .height(36).layoutWeight(1).padding({ left: 12, right: 12 })
@@ -470,11 +544,91 @@ export struct YouTubeView {
     }.width('100%')
   }
 
+  /**
+   * 输入联想：与哔哩哔哩搜索页一样，只做"帮用户把词写完"，不做远端脚本。
+   * 联想列表出现时占位在结果区上方，提交搜索立即收起。
+   */
+  @Builder
+  Suggestions() {
+    if (this.suggestions.length > 0) {
+      Column() {
+        ForEach(this.suggestions, (word: string, index: number) => {
+          Row({ space: 8 }) {
+            Image($r('app.media.ic_search'))
+              .width(14).height(14).renderMode(ImageRenderMode.Template)
+              .fillColor(this.isDark ? '#B4B6BE' : '#777B85')
+            Text(word)
+              .fontSize(14).maxLines(1).layoutWeight(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+          }
+          .width('100%').height(44).padding({ left: 12, right: 12 })
+          .alignItems(VerticalAlign.Center)
+          .onClick(() => {
+            this.query = word;
+            this.submitSearch();
+          })
+          if (index < this.suggestions.length - 1) {
+            Divider().strokeWidth(0.5).margin({ left: 34 })
+              .color(this.isDark ? '#1FFFFFFF' : '#0F000000')
+          }
+        }, (word: string) => word)
+      }
+      .width('100%').borderRadius(12).clip(true)
+      .backgroundColor(this.mineCardBg())
+    }
+  }
+
+  /** 搜索历史：规格与哔哩哔哩搜索页 chips 一致（含单条删除与清空）。 */
+  @Builder
+  HistoryChips() {
+    if (this.history.length > 0) {
+      Column({ space: 8 }) {
+        Row() {
+          Text('搜索历史').fontSize(15).fontWeight(FontWeight.Bold)
+            .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
+          Blank()
+          Text('清空').fontSize(12).fontColor('#9499A0')
+            .onClick(() => {
+              YouTubeSearchHistoryStore.clear();
+              this.history = [];
+            })
+        }.width('100%')
+        Flex({ wrap: FlexWrap.Wrap }) {
+          ForEach(this.history, (word: string) => {
+            Row({ space: 5 }) {
+              Text(word)
+                .fontSize(12).maxLines(1)
+                .constraintSize({ maxWidth: 150 })
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .fontColor(this.isDark ? '#E6E6E6' : '#454A50')
+                .onClick(() => {
+                  this.query = word;
+                  this.submitSearch();
+                })
+              Image($r('app.media.ic_close'))
+                .width(10).height(10).fillColor('#9499A0')
+                .onClick(() => {
+                  this.history = YouTubeSearchHistoryStore.remove(word);
+                })
+            }
+            .padding({ left: 10, right: 8, top: 6, bottom: 6 })
+            .margin({ right: 7, bottom: 7 })
+            .borderRadius(15)
+            .backgroundColor(this.isDark ? '#2E3136' : '#E9EBEE')
+          }, (word: string) => word)
+        }.width('100%')
+      }
+      .width('100%').alignItems(HorizontalAlign.Start)
+    }
+  }
+
   /** 探索：分类 chips + 空态说明；有结果时与搜索 Tab 共用同一份结果。 */
   @Builder
   ExploreTab() {
     Column({ space: 14 }) {
       this.SearchField('explore')
+      this.Suggestions()
       Text('热门分类').fontSize(13).fontWeight(FontWeight.Medium).width('100%')
         .fontColor(this.isDark ? '#C8C8CC' : '#5A5F66')
       Flex({ wrap: FlexWrap.Wrap }) {
@@ -576,6 +730,11 @@ export struct YouTubeView {
   SearchTab() {
     Column({ space: 14 }) {
       this.SearchField('search')
+      this.Suggestions()
+      // 输入为空（首页态）时给历史；一有输入就交给联想与结果。
+      if (this.query.trim().length === 0 && this.suggestions.length === 0) {
+        this.HistoryChips()
+      }
       this.ResultArea()
     }.width('100%').layoutWeight(1)
     .padding({ left: LayoutTokens.horizontalPadding(this.viewportWidth),
