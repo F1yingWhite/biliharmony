@@ -54,6 +54,11 @@
       },
       {
         "name": "ohos.permission.KEEP_BACKGROUND_RUNNING"
+      },
+      // 智感握姿（操作手识别）：底部搜索入口据此贴到当前操作手一侧。
+      // system_grant + normal 级权限，安装即授予、不弹权限框；能力缺失时 Handedness 静默降级。
+      {
+        "name": "ohos.permission.DETECT_GESTURE"
       }
     ]
   }

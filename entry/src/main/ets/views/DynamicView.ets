@@ -24,6 +24,7 @@ import { BasicDataSource } from '../common/BasicDataSource';
 import { DecoratedAvatar, UserDecorationBanner } from '../components/UserDecorations';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { Haptic } from '../common/Haptic';
+import { HeaderBackdrop } from '../components/GlassHeaderBar';
 import { DynamicApi } from '../api/DynamicApi';
 import { EmoteResolver } from '../common/EmoteResolver';
 import { EmoteImageCache } from '../common/EmoteImageCache';
@@ -1273,12 +1274,13 @@ export struct DynamicView {
       Text(label)
         .fontSize(14)
         .fontWeight(this.dynType === type ? FontWeight.Bold : FontWeight.Normal)
-        .fontColor(this.dynType === type ? this.accent : (this.isDark ? '#A8A8AC' : '#767B82'))
+        .fontColor(this.dynType === type ? this.accent :
+          (this.isDark ? '#C4C6CC' : '#494D54'))
     }
     .width(62)
     .height(30)
     .borderRadius(15)
-    .backgroundColor(this.dynType === type ? (this.isDark ? '#33FB7299' : '#1FFB7299') : '#00000000')
+    .backgroundColor(this.dynType === type ? (this.isDark ? '#34363C' : '#FFFFFF') : Color.Transparent)
     .animation({ duration: 180, curve: Curve.EaseOut })
     .onClick(() => {
       this.tapVibrate();
@@ -1370,12 +1372,8 @@ export struct DynamicView {
     .padding(3)
     .borderRadius(18)
     .backgroundColor(this.glassOn ? '#00000000' : (this.isDark ? '#D9202125' : '#E8FFFFFF'))
-    .systemMaterial(AppTheme.floatMaterial(this.glassOn))
-    .margin({ top: this.embedded ? 4 : Immersive.statusBarHeight() + 50 })
-    .opacity(1 - this.fade)
-    .translate({ y: -12 * this.fade })
-    .animation({ duration: 160, curve: Curve.EaseOut })
-    .hitTestBehavior(this.fade > 0.9 ? HitTestMode.None : HitTestMode.Default)
+    .margin({ top: this.embedded ? 4 : Immersive.statusBarHeight() + 54 * (1 - this.fade),
+      right: this.embedded ? 0 : 44 * this.fade })
   }
 
   @Builder
@@ -1591,6 +1589,10 @@ export struct DynamicView {
         const type: string | undefined = this.dynTypes[index];
         if (type !== undefined && type !== this.dynType) this.changeDynType(type);
       })
+
+      if (!this.embedded && this.hostMid <= 0) {
+        HeaderBackdrop()
+      }
 
       this.DynRefreshIndicator()
 

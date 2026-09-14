@@ -17,6 +17,7 @@ import { MineView } from '../views/MineView';
 import { Immersive } from '../common/Immersive';
 import { AppTheme } from '../common/AppTheme';
 import { GlassHeaderBar } from '../components/GlassHeaderBar';
+import { ImmersiveEdgeMask } from '../components/ImmersiveSurfaces';
 import { AppNavStack, APP_ROOT_SNAPSHOT_ID, NAV_SEARCH, NAV_VIDEO_DETAIL, NAV_LOGIN, NAV_USER_SPACE, NAV_MESSAGES,
   NAV_HISTORY, NAV_FAVORITES,
   NAV_WATCH_LATER, NAV_LIVE_ROOM, NAV_IMAGE_VIEWER, NAV_DYNAMIC_DETAIL, VideoDetailParam, UserSpaceParam, LiveRoomParam,
@@ -50,7 +51,16 @@ import { ArticlePage } from './ArticlePage';
 import { UserStore } from '../services/auth/UserStore';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
 import { Haptic } from '../common/Haptic';
-import { curves } from '@kit.ArkUI';
+import { Handedness } from '../common/Handedness';
+import { DockSearchButton, DOCK_SEARCH_SIZE, DOCK_SEARCH_HEIGHT } from '../components/DockSearchButton';
+import { curves, display } from '@kit.ArkUI';
+import { HdsTabs, DividerMode, hdsMaterial } from '@kit.UIDesignKit';
+
+/**
+ * 底部搜索入口的落位参数：与原生悬浮 Dock 同处一行。
+ * - 边距 16 与 Dock 的 barBottomMargin 同源（实测 Dock 胶囊底边距屏幕底 16vp）；
+ * - 搜索与 Dock 都高 56vp，底边和中线对齐。
+ */
 
 /** NavDestination 公共修饰：隐藏标题栏 + 页面显示/消失回调（各页面回调体不变，消除 8 分支重复）。 */
 @Extend(NavDestination)
@@ -67,12 +77,10 @@ function stdDestination(onShownCb: () => void, onWillDisappearCb: () => void) {
 @Entry
 @Component
 struct Index {
-  @StorageProp('windowStatusBarHeight') statusBarInset: number = 0;
   @State @Watch('onCurrentTabChanged') currentTab: number = 0;
   @StorageProp('accentColor') @Watch('onThemeChanged') accent: string = '#FB7299';
   @StorageProp('isDarkMode') @Watch('onThemeChanged') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
-  @StorageProp('headerFade') fade: number = 0;
   /** 顶层平台：哔哩哔哩 / YouTube 同级切换。切换时整块外壳替换，底栏各归其平台。 */
   @StorageProp(PlatformStore.KEY_PLATFORM) @Watch('onPlatformChanged') platform: string = PlatformStore.BILI;
   @State heroTransitionInputLocked: boolean = false;
@@ -81,11 +89,41 @@ struct Index {
   heroTransitionFinishRequest: number = 0;
   private heroTransitionProxy: NavigationTransitionProxy | null = null;
   private heroTransitionToken: number = 0;
+  @StorageProp('appInBackground') @Watch('onAppBackgroundChanged') appInBackground: boolean = false;
+  /** 底部搜索入口落位：握持/操作手识别或用户长按定边写这个键。 */
+  @StorageProp(Handedness.KEY_SIDE) @Watch('onSearchSideChanged') searchSide: string = Handedness.RIGHT;
+  /** 底部一行实测宽度（vp）：搜索入口按它算贴左/贴右的位移，窗口变化时由 onAreaChange 校准。 */
+  @State dockRowWidth: number = 0;
+  @State dockSide: string = Handedness.RIGHT;
+  private dockMounted: boolean = false;
+
+  /** 两个胶囊在同一水平线上同步平移，连续换手直接转向最新落点。 */
+  onSearchSideChanged(): void {
+    if (!this.dockMounted || this.dockSide === this.searchSide) return;
+    this.getUIContext().animateTo({ duration: 320, curve: Curve.EaseInOut }, () => {
+      this.dockSide = this.searchSide;
+    });
+  }
 
   aboutToAppear(): void {
     this.reapplyBarColors();
     UserStore.ensureLoaded();
     PlatformStore.init();
+    Handedness.init();
+    Handedness.setActive(!this.appInBackground);
+    // 首帧就要贴对边，先按显示宽度给位移一个初值，随后由 onAreaChange 用实测宽度校准。
+    this.dockRowWidth = Index.displayWidthVp();
+    this.dockSide = this.searchSide;
+    this.dockMounted = true;
+  }
+
+  onAppBackgroundChanged(): void {
+    Handedness.setActive(!this.appInBackground);
+  }
+
+  aboutToDisappear(): void {
+    this.dockMounted = false;
+    Handedness.setActive(false);
   }
 
   onPageShow(): void {
@@ -553,12 +591,14 @@ struct Index {
       Image(this.currentTab === index ? activeIcon : icon)
         .width(24)
         .height(24)
-        .fillColor(this.currentTab === index ? this.accent : (this.isDark ? '#8A8A8E' : '#9499A0'))
+        .fillColor(this.currentTab === index ? this.accent :
+          (this.isDark ? '#B5B8BE' : '#62676D'))
         .scale({ x: this.tabScale[index], y: this.tabScale[index] })
         .animation({ duration: 260, curve: curves.springMotion(0.35, 0.7) })
       Text(label)
         .fontSize(10)
-        .fontColor(this.currentTab === index ? this.accent : (this.isDark ? '#8A8A8E' : '#9499A0'))
+        .fontColor(this.currentTab === index ? this.accent :
+          (this.isDark ? '#B5B8BE' : '#62676D'))
     }
     .width('100%')
     .height('100%')
@@ -570,42 +610,34 @@ struct Index {
 
   @Builder
   FloatingTabs() {
+    // 原生 Tabs 保持三页生命周期与滚动位置，底栏独立渲染。
     Tabs({ barPosition: BarPosition.End, index: $$this.currentTab }) {
       TabContent() {
-        HomeView()
+        HomeView().direction(Direction.Ltr)
       }
       .tabBar(this.TabBarItem(0, '首页', $r('app.media.ic_tab_home'), $r('app.media.ic_tab_home_fill')))
       .clip(false)
 
       TabContent() {
-        DynamicView()
+        DynamicView().direction(Direction.Ltr)
       }
       .tabBar(this.TabBarItem(1, '动态', $r('app.media.ic_tab_dynamic'), $r('app.media.ic_tab_dynamic_fill')))
       .clip(false)
 
       TabContent() {
-        MineView()
+        MineView().direction(Direction.Ltr)
       }
       .tabBar(this.TabBarItem(2, '我的', $r('app.media.ic_tab_mine'), $r('app.media.ic_tab_mine_fill')))
       .clip(false)
     }
-    .barHeight(52)
+    .width('100%')
+    .height('100%')
+    .barHeight(0)
     .barOverlap(true)
-    // 顶层首页/动态/我的只通过底部 Dock 切换，不响应左右滑动；
-    // 左右滑动留给各页面内部的频道 Tabs（首页推荐/热门/直播，动态全部/视频/番剧）。
     .scrollable(false)
-    // 原生悬浮式 Dock 底栏 + 沉浸光感材质（API 26+；低版本时退化为实底背板）
-    .barFloatingStyle({
-      barSideMargin: 16,
-      barBottomMargin: 16,
-      systemMaterial: AppTheme.floatMaterial(this.glassOn),
-    })
-    // 深色模式给原生玻璃叠一层深色吸收底：透明度必须足够高才能压住
-    // 系统材质在深色下的白雾（实测 ~70% 仍泛白，Dock 整条变浅灰）。
-    .barBackgroundColor(this.glassOn ? (this.isDark ? '#EA15161A' : '#00000000') : AppTheme.floatBg(this.isDark, false))
     .animationDuration(MotionTokens.navigation)
-    .animationMode(AnimationMode.CONTENT_FIRST)
-    .onChange(() => {
+    .onChange((index: number): void => {
+      this.currentTab = index;
       AppTheme.resetHeaderFade();
     })
   }
@@ -644,75 +676,134 @@ struct Index {
     })
   }
 
-  @Builder
-  SearchFloat() {
-    Row() {
-      Blank()
-      Stack({ alignContent: Alignment.Center }) {
-        if (!this.glassOn) {
-          Column()
-            .width('100%')
-            .height('100%')
-            .borderRadius(20)
-            .backgroundColor(AppTheme.floatBg(this.isDark, false))
-            .hitTestBehavior(HitTestMode.None)
-        }
-        Image($r('app.media.ic_search'))
-          .width(18)
-          .height(18)
-          .fillColor(this.accent)
-      }
-      .width(40)
-      .height(40)
-      .borderRadius(20)
-      .systemMaterial(AppTheme.floatMaterial(this.glassOn))
-      .opacity(Math.min(1, Math.max(0, (this.fade - 0.6) / 0.4)))
-      .hitTestBehavior(this.fade > 0.85 ? HitTestMode.Default : HitTestMode.None)
-      .scale({
-        x: 0.9 + 0.1 * Math.min(1, Math.max(0, (this.fade - 0.6) / 0.4)),
-        y: 0.9 + 0.1 * Math.min(1, Math.max(0, (this.fade - 0.6) / 0.4)),
-      })
-      .onClick(() => {
-        AppNavStack.pushPathByName(NAV_SEARCH, null);
-      })
+  /** 显示宽度（vp）：Dock 一行的位移初值，避免首帧把搜索入口贴到错误一侧。 */
+  private static displayWidthVp(): number {
+    try {
+      const info: display.Display = display.getDefaultDisplaySync();
+      return info.densityPixels > 0 ? info.width / info.densityPixels : 0;
+    } catch (e) {
+      return 0;
     }
-    .width('100%')
-    .height(40)
-    .padding({ right: 14 })
-    .margin({ top: this.statusBarInset + 6 })
-    .hitTestBehavior(HitTestMode.Transparent)
-    .zIndex(4)
+  }
+
+  private dockGroupWidth(): number {
+    return Math.min(444, Math.max(0, this.dockRowWidth - 32));
+  }
+
+  private dockGroupStart(): number {
+    return Math.max(16, (this.dockRowWidth - this.dockGroupWidth()) / 2);
+  }
+
+  private dockBarWidth(): number {
+    return Math.max(0, this.dockGroupWidth() - DOCK_SEARCH_SIZE - 8);
+  }
+
+  private dockSearchOffset(): number {
+    return this.dockGroupStart() + (this.dockSide === Handedness.LEFT ? 0 : this.dockBarWidth() + 8);
+  }
+
+  private dockNavigationOffset(): number {
+    return this.dockGroupStart() + (this.dockSide === Handedness.LEFT ? DOCK_SEARCH_SIZE + 8 : 0);
   }
 
   @Builder
-  SearchPlain() {
-    Row() {
-      Blank()
-      Stack({ alignContent: Alignment.Center }) {
-        Image($r('app.media.ic_search'))
-          .width(18)
-          .height(18)
-          .fillColor(this.accent)
+  DockNavigation() {
+    HdsTabs({ barPosition: BarPosition.End, index: this.currentTab }) {
+      TabContent() {}.tabBar(this.TabBarItem(0, '首页', $r('app.media.ic_tab_home'), $r('app.media.ic_tab_home_fill')))
+      TabContent() {}.tabBar(this.TabBarItem(1, '动态', $r('app.media.ic_tab_dynamic'), $r('app.media.ic_tab_dynamic_fill')))
+      TabContent() {}.tabBar(this.TabBarItem(2, '我的', $r('app.media.ic_tab_mine'), $r('app.media.ic_tab_mine_fill')))
+    }
+    .width(this.dockBarWidth())
+    .height(DOCK_SEARCH_HEIGHT)
+    .clip(false)
+    .barHeight(DOCK_SEARCH_HEIGHT)
+    .divider({ mode: DividerMode.NONE })
+    .barOverlap(true)
+    .scrollable(false)
+    .barFloatingStyle({
+      barWidth: { smallWidth: this.dockBarWidth(), mediumWidth: this.dockBarWidth(), largeWidth: this.dockBarWidth() },
+      barSideMargin: 0,
+      barBottomMargin: 0,
+      gradientMask: { maskColor: Color.Transparent, maskHeight: 0 },
+      systemMaterialEffect: {
+        materialType: this.glassOn ? hdsMaterial.MaterialType.IMMERSIVE : hdsMaterial.MaterialType.NONE,
+        materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE,
+      },
+    })
+    .barBackgroundColor(this.glassOn ? Color.Transparent : AppTheme.floatBg(this.isDark, false))
+    .onChange((index: number): void => { this.currentTab = index; })
+    .translate({ x: this.dockNavigationOffset() })
+  }
+
+  /** 长按选择自动或固定，避免一次手动换边后永远退出自动识别。 */
+  private pinDockSearchSide(): void {
+    try {
+      const color: string = this.isDark ? '#F2F3F5' : '#171A20';
+      this.getUIContext().getPromptAction().showActionMenu({
+        title: '搜索位置',
+        buttons: [
+          { text: '自动跟随操作手', color },
+          { text: '固定在左侧', color },
+          { text: '固定在右侧', color },
+        ],
+      }).then((result) => {
+        if (result.index === 0) Handedness.useAutomatic();
+        else if (result.index === 1) Handedness.pin(Handedness.LEFT);
+        else if (result.index === 2) Handedness.pin(Handedness.RIGHT);
+      }).catch(() => {});
+    } catch (e) {
+      // 页面已经销毁时不弹出菜单。
+    }
+  }
+
+  /** 与材质独立的渐变模糊遮罩，覆盖手势区并向内容连续衰减。 */
+  @Builder
+  DockBackdrop() {
+    ImmersiveEdgeMask({ maskHeight: 120 })
+  }
+
+  /**
+   * 底部搜索入口：与原生悬浮 Dock 同处底部一行，落在操作手一侧。
+   * 长导航胶囊 + 短搜索胶囊整体居中，换边同步左右平移，不镜像导航顺序。
+   */
+  @Builder
+  DockSearchEntry() {
+    Stack({ alignContent: Alignment.BottomStart }) {
+      this.DockBackdrop()
+      Column() {
+      Stack({ alignContent: Alignment.TopStart }) {
+        if (AppTheme.isImmersiveUiSupported()) {
+          this.DockNavigation()
+        }
+        DockSearchButton({
+          onTap: (): void => {
+            AppNavStack.pushPathByName(NAV_SEARCH, null);
+          },
+          onLongPress: (): void => {
+            this.pinDockSearchSide();
+          },
+        })
+          .translate({ x: this.dockSearchOffset() })
       }
-      .width(40)
-      .height(40)
-      .borderRadius(20)
-      .backgroundColor(AppTheme.floatBg(this.isDark, this.glassOn))
-      .shadow({ radius: 8, color: this.isDark ? '#59000000' : '#1A000000', offsetX: 0, offsetY: 2 })
-      .opacity(Math.min(1, Math.max(0, (this.fade - 0.6) / 0.4)))
-      .hitTestBehavior(this.fade > 0.85 ? HitTestMode.Default : HitTestMode.None)
-      .scale({
-        x: 0.9 + 0.1 * Math.min(1, Math.max(0, (this.fade - 0.6) / 0.4)),
-        y: 0.9 + 0.1 * Math.min(1, Math.max(0, (this.fade - 0.6) / 0.4)),
-      })
-      .onClick(() => {
-        AppNavStack.pushPathByName(NAV_SEARCH, null);
+      .width('100%')
+      .height(DOCK_SEARCH_HEIGHT)
+      .clip(false)
+      .margin({ bottom: 28 })
+      // 只有按钮本身吃触摸，整行其余区域把事件透给下层 Dock 与列表。
+      .hitTestBehavior(HitTestMode.Transparent)
+      .onAreaChange((_oldValue: Area, newValue: Area): void => {
+        const width: number = Number(newValue.width);
+        if (!Number.isNaN(width) && width > 0 && width !== this.dockRowWidth) {
+          this.dockRowWidth = width;
+        }
       })
     }
     .width('100%')
-    .height(40)
-    .padding({ right: 14 })
-    .margin({ top: this.statusBarInset + 6 })
+    .height('100%')
+    .justifyContent(FlexAlign.End)
+    .hitTestBehavior(HitTestMode.Transparent)
+    }
+    .width('100%').height('100%')
     .hitTestBehavior(HitTestMode.Transparent)
     .zIndex(4)
   }
@@ -734,21 +825,16 @@ struct Index {
 
         // 玻璃头栏（上滑渐隐）
         GlassHeaderBar({
+          backdropInContent: this.currentTab !== 2,
           onAvatarTap: () => {
             this.switchTab(2);
           },
         })
         .zIndex(3)
 
-        // 头栏收起后的悬浮搜索球（右上角，对齐华为设置的折叠形态：头栏淡出 → 搜索球淡入）
-        // 只有真正开始显示时才创建节点；透明度为 0 的可点击节点会抢走消息按钮的事件。
-        if (this.fade > 0.6) {
-          if (AppTheme.isImmersiveUiSupported()) {
-            this.SearchFloat()
-          } else {
-            this.SearchPlain()
-          }
-        }
+        // 底部搜索入口：常驻 Dock 同一行（顶部搜索胶囊仍是首页主入口，这里补的是
+        // 滚动后头栏收起、以及动态/我的页都够得着的底部入口，对齐 pilihos 的迷你栏落位）。
+        this.DockSearchEntry()
         }
         }
         .width('100%')

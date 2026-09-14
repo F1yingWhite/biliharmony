@@ -21,8 +21,9 @@ import { AppNavStack, NAV_RANK, NAV_ZONE, NAV_BANGUMI_INDEX, NAV_LIVE_ZONE } fro
 import { FeedApi } from '../api/FeedApi';
 import { LiveApi } from '../api/LiveApi';
 import { Haptic } from '../common/Haptic';
+import { HeaderBackdrop } from '../components/GlassHeaderBar';
 
-/** 悬浮频道切换条：单独订阅 headerFade，滚动逐帧淡出时不再带动整个 HomeView 重建。 */
+/** 频道保持可见，搜索收起时上移；单独订阅滚动值，避免重建信息流。 */
 @Component
 struct FloatingSubTabs {
   @StorageProp('windowStatusBarHeight') statusBarInset: number = 0;
@@ -35,11 +36,8 @@ struct FloatingSubTabs {
     }
     .width('100%')
     .justifyContent(FlexAlign.Center)
-    .padding({ left: 16, right: 16 })
-    .margin({ top: this.statusBarInset + 54 })
-    .opacity(1 - this.fade)
-    .translate({ y: -12 * this.fade })
-    .hitTestBehavior(this.fade > 0.9 ? HitTestMode.None : HitTestMode.Default)
+    .padding({ left: 20, right: 20 + 44 * this.fade })
+    .margin({ top: this.statusBarInset + 54 * (1 - this.fade) })
   }
 }
 
@@ -320,12 +318,13 @@ export struct HomeView {
       Text(label)
         .fontSize(17)
         .fontWeight(this.visualTab === index ? FontWeight.Bold : FontWeight.Normal)
-        .fontColor(this.visualTab === index ? this.accent : (this.isDark ? '#A8A8AC' : '#767B82'))
+        .fontColor(this.visualTab === index ? this.accent :
+          (this.isDark ? '#C4C6CC' : '#494D54'))
     }
-    .width(68)
-    .height(40)
-    .borderRadius(20)
-    .backgroundColor(this.visualTab === index ? this.accentBg() : '#00000000')
+    .width(60)
+    .height(35)
+    .borderRadius(18)
+    .backgroundColor(this.visualTab === index ? (this.isDark ? '#EE34363C' : '#F2FFFFFF') : Color.Transparent)
     .accessibilityText(label)
     .accessibilitySelected(this.visualTab === index)
     .animation({ duration: 180, curve: Curve.EaseOut })
@@ -333,11 +332,6 @@ export struct HomeView {
       Haptic.light();
       this.switchTab(index);
     })
-  }
-
-  private accentBg(): string {
-    // 选中项胶囊底色：用当前主题强调色加透明度，替代原来的硬编码品牌粉。
-    return this.isDark ? '#33' + this.accent.substring(1) : '#1F' + this.accent.substring(1);
   }
 
   private switchTab(index: number): void {
@@ -678,9 +672,11 @@ export struct HomeView {
         }
       })
 
+      HeaderBackdrop()
+
       this.RefreshIndicator()
 
-      // 频道导航随滚动淡出，右侧分区入口保持独立点击区域。
+      // 频道导航随搜索收起上移，右侧给常驻头像保留空间。
       // fade 订阅收敛在 FloatingSubTabs 内，滚动不触发 HomeView 本体重建。
       FloatingSubTabs() {
         this.SubTabs()
