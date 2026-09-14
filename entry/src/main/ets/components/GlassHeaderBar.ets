@@ -1,5 +1,5 @@
 /**
- * 玻璃拟态头栏（头像 + 搜索胶囊 + 消息入口），布局对齐 B 站官方首页
+ * 玻璃头栏：左侧长搜索胶囊，右侧消息与头像圆形入口。
  * 随列表上滑逐渐淡出，消失进状态栏；仅本组件订阅滚动淡出值，避免列表重渲染。
  */
 import { Immersive } from '../common/Immersive';
@@ -10,9 +10,30 @@ import { HotSearchStore } from '../common/HotSearchStore';
 import { Haptic } from '../common/Haptic';
 import { MsgUnreadStore } from '../services/message/MsgUnreadStore';
 import { DecoratedAvatar } from './UserDecorations';
+import { GlassCapsuleSurface, ImmersiveEdgeMask } from './ImmersiveSurfaces';
+
+/** 遮罩放在频道导航下方，让背景化开，文字与按钮保持清晰。 */
+@Component
+export struct HeaderBackdrop {
+  @StorageProp('windowStatusBarHeight') statusBarInset: number = 0;
+  @StorageProp('isDarkMode') isDark: boolean = false;
+  @StorageProp('glassEnabled') glassOn: boolean = true;
+
+  @StorageProp('headerFade') fade: number = 0;
+  @Prop withChannels: boolean = true;
+
+  build() {
+    ImmersiveEdgeMask({
+      maskHeight: this.statusBarInset + (this.withChannels ? 114 : 70) -
+        (this.withChannels ? 54 : 26) * Math.min(1, Math.max(0, this.fade)),
+      topEdge: true,
+    })
+  }
+}
 
 @Component
 export struct GlassHeaderBar {
+  @Prop backdropInContent: boolean = false;
   @StorageProp('windowStatusBarHeight') statusBarInset: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') @Watch('onThemeChanged') isDark: boolean = false;
@@ -55,88 +76,62 @@ export struct GlassHeaderBar {
     this.destroyed = true;
   }
 
-  /** 头像图源：已登录用响应式缓存的 face，未登录用默认 noface。 */
-  private avatarSource(): string | Resource {
-    if (this.userAvatar.length > 0) {
-      return this.userAvatar;
-    }
-    return $r('app.media.placeholder_avatar_noface');
+  private headerContentOpacity(): number {
+    return 1 - Math.min(1, Math.max(0, this.fade / 0.65));
   }
 
-  private headerContentOpacity(): number {
-    return 1 - Math.min(1, Math.max(0, this.fade / 0.85));
+  private openSearch(): void {
+    Haptic.light();
+    AppStorage.setOrCreate<string>('searchSuggestedKeyword', this.hotSearch);
+    AppNavStack.pushPathByName(NAV_SEARCH, null);
   }
 
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
-      // 顶部沉浸光感：状态栏处最强，向内容区连续衰减。只保留这一层纵向光感，
-      // 不叠加主题色光晕、搜索栏边框或额外阴影。
-      Column()
-        .width('100%')
-        .height(this.statusBarInset + 68)
-        .linearGradient({
-          angle: 180,
-          colors: this.isDark ?
-            [['#B8141418', 0.0], ['#66141418', 0.5], ['#00141418', 1.0]] :
-            [['#B8FFFFFF', 0.0], ['#66FFFFFF', 0.5], ['#00FFFFFF', 1.0]],
-        })
-        .linearGradientBlur(28, {
-          fractionStops: [[1.0, 0.0], [0.5, 0.5], [0.0, 1.0]],
-          direction: GradientDirection.Bottom,
-        })
-        .hitTestBehavior(HitTestMode.None)
-
-      // 可折叠的搜索/消息头栏。左侧留出头像位，头像本身由下方独立渲染。
-      Row({ space: 8 }) {
-        Row()
-          .width(32)
-          .height(32)
-
-        Row({ space: 8 }) {
-          Image($r('app.media.ic_search'))
-            .width(16).height(16).renderMode(ImageRenderMode.Template)
-            .fillColor(this.isDark ? '#B4B6BE' : '#777B85')
-          Text(this.hotSearch.length > 0 ? this.hotSearch : '搜索你感兴趣的内容')
-            .fontSize(13).fontWeight(FontWeight.Normal)
-            .fontColor(this.isDark ? '#B4B6BE' : '#777B85')
-            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            .layoutWeight(1)
+      if (!this.backdropInContent) {
+        HeaderBackdrop({ withChannels: false })
+      }
+      Row({ space: 5 }) {
+        Stack() {
+          GlassCapsuleSurface({ surfaceHeight: 35 })
+          Row({ space: 7 }) {
+            Image($r('app.media.ic_search'))
+              .width(18).height(18).renderMode(ImageRenderMode.Template)
+              .fillColor(this.isDark ? '#C3C5CD' : '#777D82')
+            Text(this.hotSearch.length > 0 ? this.hotSearch : '搜索')
+              .fontSize(14).fontWeight(FontWeight.Normal)
+              .fontColor(this.isDark ? '#C3C5CD' : '#777D82')
+              .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+              .layoutWeight(1)
+          }
+          .width('100%').height('100%').padding({ left: 13, right: 13 })
+          .hitTestBehavior(HitTestMode.None)
         }
-        .height(36).layoutWeight(1).padding({ left: 12, right: 12 })
-        .borderRadius(18)
-        .backgroundColor(this.glassOn ? (this.isDark ? '#AA292D36' : '#CCFFFFFF') :
-          (this.isDark ? '#292B32' : '#EDEFF2'))
-        .systemMaterial(AppTheme.floatMaterial(this.glassOn))
-        .border({ width: 0.7, color: this.isDark ? '#22FFFFFF' : '#0D242833' })
+        .height(35).layoutWeight(1).margin({ right: 5 })
         .opacity(this.headerContentOpacity())
-        .translate({ y: -8 * this.fade })
-        .accessibilityText('搜索：' + (this.hotSearch || '搜索你感兴趣的内容'))
+        .translate({ y: -54 * this.fade })
+        .hitTestBehavior(this.fade >= 0.65 ? HitTestMode.None : HitTestMode.Default)
+        .accessibilityText('搜索：' + (this.hotSearch || '搜索'))
         .id('home-search-entry')
-        .onClick(() => {
-          Haptic.light();
-          AppStorage.setOrCreate<string>('searchSuggestedKeyword', this.hotSearch);
-          AppNavStack.pushPathByName(NAV_SEARCH, null);
-        })
+        .onClick(() => this.openSearch())
 
-        Stack({ alignContent: Alignment.Center }) {
+        Stack() {
           Image($r('app.media.ic_message'))
-            .width(22)
-            .height(22)
-            .renderMode(ImageRenderMode.Template)
-            .fillColor(this.isDark ? '#E6E6E6' : '#333333')
+            .width(22).height(22).renderMode(ImageRenderMode.Template)
+            .fillColor(this.accent)
           if (this.msgUnread > 0) {
             Text(this.msgUnread > 99 ? '99+' : String(this.msgUnread))
               .fontSize(9).fontColor('#FFFFFF').backgroundColor(AppTheme.DANGER)
               .padding({ left: 4, right: 4, top: 1, bottom: 1 }).borderRadius(8)
-              .position({ right: 0, top: 0 })
+              .position({ right: -2, top: -2 })
           }
         }
-        // 图形保持 22vp，实际触发区扩大为 40vp，避免只能点到图标笔画才生效。
-        .width(40)
-        .height(40)
-        .accessibilityText('消息')
+        .width(32).height(32).borderRadius(16)
+        .backgroundColor(this.isDark ? '#34363C' : '#FFFFFF')
         .opacity(this.headerContentOpacity())
-        .translate({ y: -8 * this.fade })
+        .translate({ y: -54 * this.fade })
+        .hitTestBehavior(this.fade >= 0.65 ? HitTestMode.None : HitTestMode.Default)
+        .id('home-message-entry').accessibilityText('消息')
         .onClick(() => {
           Haptic.light();
           if (UserStore.isLogin) {
@@ -146,32 +141,26 @@ export struct GlassHeaderBar {
             AppNavStack.pushPathByName(NAV_LOGIN, null);
           }
         })
-      }
-      .width('100%')
-      .padding({
-        left: 12,
-        right: 12,
-        top: this.statusBarInset + 4,
-        bottom: 8,
-      })
-      .hitTestBehavior(this.fade > 0.85 ? HitTestMode.None : HitTestMode.Default)
 
-      // 头像不跟随头栏淡出：列表下滑到顶部后仍然可见、可点击。
-      DecoratedAvatar({
-        face: this.userAvatar,
-        pendant: this.userPendant,
-        avatarSize: 32,
-        containerSize: 42,
-        pendantScale: 1.38,
-      })
-        .margin({ left: 7, top: this.statusBarInset - 1 })
-        .onClick(() => {
-          Haptic.light();
-          this.onAvatarTap();
-        })
+        // 与消息共用中线；收起后留在频道行右侧，继续提供个人页入口。
+        Stack() {
+          DecoratedAvatar({ face: this.userAvatar, pendant: this.userPendant,
+            avatarSize: 26, containerSize: 32, pendantScale: 1.22 })
+        }
+        .width(32).height(32).borderRadius(16)
+        .backgroundColor(this.isDark ? '#34363C' : '#FFFFFF')
+        .translate({ y: -9 * this.fade })
+        .accessibilityText('个人中心').id('home-avatar-entry')
+        .onClick(() => { Haptic.light(); this.onAvatarTap(); })
+      }
+      .width('100%').height(35)
+      .alignItems(VerticalAlign.Center)
+      .padding({ left: 20, right: 20 })
+      .margin({ top: this.statusBarInset + 10 })
+      .hitTestBehavior(HitTestMode.Transparent)
     }
-    .width('100%')
-    .height(this.statusBarInset + 44)
+    .width('100%').height(this.statusBarInset + 46)
     .clip(false)
+    .hitTestBehavior(HitTestMode.Transparent)
   }
 }
