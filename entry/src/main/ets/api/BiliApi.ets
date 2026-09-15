@@ -163,7 +163,7 @@ export class BiliApi {
 
   // ===== 播放地址（DASH 分离音视频可提供 1080P+；aid 与 bvid 二选一） =====
   static async getPlayUrl(aid: number, bvid: string, cid: number, qn: number = 127,
-    epId: number = 0): Promise<PlayUrlInfo | null> {
+    epId: number = 0, allowQualityRetry: boolean = true): Promise<PlayUrlInfo | null> {
     if (epId > 0) return BangumiApi.getPlayUrl(epId, cid, qn);
     const params: Record<string, string> = {
       'cid': String(cid),
@@ -215,6 +215,24 @@ export class BiliApi {
       return null;
     }
     const info: PlayUrlInfo = PlayUrlInfo.fromPlayUrl(data, qn);
+    // 请求的档位不存在时接口可能只下发普通 1080P，菜单却仍列出 1080P60。
+    // 对不高于用户偏好的最高候选补请求一次；权限仍由服务端判断，失败保留原可播放源。
+    if (allowQualityRetry && info.quality < qn) {
+      let fallbackQuality: number = info.quality;
+      for (let i: number = 0; i < info.qualities.length; i++) {
+        const candidate: number = info.qualities[i].qn;
+        if (candidate < qn && candidate > fallbackQuality) fallbackQuality = candidate;
+      }
+      if (fallbackQuality > info.quality) {
+        try {
+          const fallback: PlayUrlInfo | null = await BiliApi.getPlayUrl(aid, bvid, cid, fallbackQuality, 0, false);
+          if (fallback !== null && fallback.url.length > 0 && fallback.quality >= info.quality) return fallback;
+        } catch (e) {
+          // 无权限或请求失败时使用已有源，不覆盖用户保存的画质。
+        }
+      }
+    }
+
     // ≤1080P 补发 MP4 单流请求（fnval=1）换用单轨地址：单 AVPlayer 内部音画同步、
     // seek 只需单文件 Range 请求。菜单/字幕/续播位仍取自上面的 DASH 响应（其画质列表是全量的）；
     // 高画质（>80，仅 DASH 提供）不换，保持双轨。

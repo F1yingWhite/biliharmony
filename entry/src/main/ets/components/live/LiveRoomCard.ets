@@ -1,3 +1,4 @@
+import { KeywordSpans } from '../KeywordSpans';
 import { MotionTokens } from '../../common/MotionTokens';
 import { LiveRoomItem } from '../../model/LiveModels';
 import { AppNavStack, LiveRoomParam, NAV_LIVE_ROOM } from '../../common/AppRouter';
@@ -6,6 +7,7 @@ import { FeedCardTitle, FeedCoverImage, FeedGradientMask } from '../FeedCardPart
 @Reusable
 @Component
 export struct LiveRoomCard {
+  @Prop highlightKeyword: string = '';
   @Prop room: LiveRoomItem = new LiveRoomItem();
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
@@ -52,7 +54,7 @@ export struct LiveRoomCard {
         offsetY: 4,
       })
 
-      FeedCardTitle({ title: this.room.title, isDark: this.isDark })
+      FeedCardTitle({ title: this.room.title, isDark: this.isDark, highlightKeyword: this.highlightKeyword })
       Row({ space: 6 }) {
         if (this.room.face.length > 0) {
           Image(this.room.face)
@@ -61,7 +63,7 @@ export struct LiveRoomCard {
             .borderRadius(9)
             .objectFit(ImageFit.Cover)
         }
-        Text(this.room.uname)
+        Text() { KeywordSpans(this.room.uname, this.highlightKeyword, this.isDark) }
           .fontSize(11)
           .fontColor(this.isDark ? '#8A8A8E' : '#9499A0')
           .maxLines(1)

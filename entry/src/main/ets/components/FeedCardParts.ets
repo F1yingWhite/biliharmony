@@ -1,3 +1,4 @@
+import { KeywordSpans } from './KeywordSpans';
 /**
  * 信息流卡片（VideoCard / LiveRoomCard）的公共视觉件：
  * 封面图、底部渐变遮罩、标题文本。参数按引用（$$）传递，
@@ -16,6 +17,7 @@ export interface FeedMaskParam {
 }
 
 export interface FeedTitleParam {
+  highlightKeyword?: string;
   title: string;
   isDark: boolean;
 }
@@ -53,7 +55,7 @@ export function FeedGradientMask($$: FeedMaskParam) {
 /** 卡片标题（14 号中粗，两行截断） */
 @Builder
 export function FeedCardTitle($$: FeedTitleParam) {
-  Text($$.title)
+  Text() { KeywordSpans($$.title, $$.highlightKeyword ?? '', $$.isDark) }
     .width('100%')
     .fontSize(14)
     .lineHeight(19)

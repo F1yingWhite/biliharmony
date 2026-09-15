@@ -21,11 +21,31 @@ import { AppNavStack, NAV_RANK, NAV_ZONE, NAV_BANGUMI_INDEX, NAV_LIVE_ZONE } fro
 import { FeedApi } from '../api/FeedApi';
 import { LiveApi } from '../api/LiveApi';
 import { Haptic } from '../common/Haptic';
+import { Handedness } from '../common/Handedness';
 import { HeaderBackdrop } from '../components/GlassHeaderBar';
 
 /** 频道保持可见，搜索收起时上移；单独订阅滚动值，避免重建信息流。 */
 @Component
 struct FloatingSubTabs {
+  @StorageProp(Handedness.KEY_SIDE) @Watch('onHandSideChanged') handSide: string = Handedness.RIGHT;
+  @State handPosition: number = 0;
+  private handLayoutMounted: boolean = false;
+
+  aboutToAppear(): void {
+    this.handPosition = this.handSide === Handedness.LEFT ? 1 : 0;
+    this.handLayoutMounted = true;
+  }
+
+  aboutToDisappear(): void {
+    this.handLayoutMounted = false;
+  }
+
+  onHandSideChanged(): void {
+    if (!this.handLayoutMounted) return;
+    this.getUIContext().animateTo({ duration: 320, curve: Curve.EaseInOut }, () => {
+      this.handPosition = this.handSide === Handedness.LEFT ? 1 : 0;
+    });
+  }
   @StorageProp('windowStatusBarHeight') statusBarInset: number = 0;
   @StorageProp('headerFade') fade: number = 0;
   @BuilderParam content: () => void;
@@ -36,7 +56,8 @@ struct FloatingSubTabs {
     }
     .width('100%')
     .justifyContent(FlexAlign.Center)
-    .padding({ left: 20, right: 20 + 44 * this.fade })
+    .padding({ left: 20 + 44 * this.fade * this.handPosition,
+      right: 20 + 44 * this.fade * (1 - this.handPosition) })
     .margin({ top: this.statusBarInset + 54 * (1 - this.fade) })
   }
 }
@@ -676,7 +697,7 @@ export struct HomeView {
 
       this.RefreshIndicator()
 
-      // 频道导航随搜索收起上移，右侧给常驻头像保留空间。
+      // 频道导航随搜索收起上移，在惯用手一侧给常驻头像保留空间。
       // fade 订阅收敛在 FloatingSubTabs 内，滚动不触发 HomeView 本体重建。
       FloatingSubTabs() {
         this.SubTabs()

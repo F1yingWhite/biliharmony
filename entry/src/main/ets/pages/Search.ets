@@ -1,3 +1,4 @@
+import { KeywordSpans } from '../components/KeywordSpans';
 /**
  * 搜索页：热搜榜 / 搜索建议 / 搜索结果
  * 结果态：综合 | 视频 | 番剧 | 影视 | 直播 | 专栏 | 用户 二级 Tab
@@ -34,6 +35,7 @@ import { SearchApi } from '../api/SearchApi';
 @Component
 export struct SearchPage {
   @State keyword: string = '';
+  @State resultKeyword: string = '';
   @State hotList: Array<HotSearchItem> = [];
   @State trendingList: Array<HotSearchItem> = [];
   @State suggests: Array<string> = [];
@@ -189,6 +191,7 @@ export struct SearchPage {
     }
     if (this.destroyed || (!reset && (this.searchInflight || this.hasMoreResults === false))) return;
     const request: number = this.searchRequests.next();
+    this.resultKeyword = kw;
     this.searchInflight = true;
     this.searchError = '';
     this.moreError = '';
@@ -884,7 +887,7 @@ export struct SearchPage {
       .onClick(() => this.openUserLive(item))
       Column({ space: 4 }) {
         Row({ space: 6 }) {
-          Text(item.uname)
+          Text() { KeywordSpans(item.uname, this.resultKeyword, this.isDark) }
             .fontSize(14)
             .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
             .maxLines(1)
@@ -908,7 +911,7 @@ export struct SearchPage {
           .fontSize(11)
           .fontColor('#9499A0')
         if (item.usign.length > 0) {
-          Text(item.usign)
+          Text() { KeywordSpans(item.usign, this.resultKeyword, this.isDark) }
             .fontSize(11)
             .fontColor('#9499A0')
             .maxLines(1)
@@ -1023,7 +1026,7 @@ export struct SearchPage {
       .clip(true)
       .borderRadius(6)
       Column({ space: 5 }) {
-        Text(item.title)
+        Text() { KeywordSpans(item.title, this.resultKeyword, this.isDark) }
           .fontSize(14)
           .fontWeight(FontWeight.Medium)
           .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
@@ -1053,7 +1056,7 @@ export struct SearchPage {
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
         if (item.desc.length > 0) {
-          Text(item.desc)
+          Text() { KeywordSpans(item.desc, this.resultKeyword, this.isDark) }
             .fontSize(11)
             .fontColor('#B0B3B8')
             .maxLines(2)
@@ -1127,7 +1130,7 @@ export struct SearchPage {
   LiveListContent() {
     LazyForEach(this.liveSource, (item: LiveRoomItem) => {
       ListItem() {
-        LiveRoomCard({ room: item })
+        LiveRoomCard({ room: item, highlightKeyword: this.resultKeyword })
       }
     }, (item: LiveRoomItem) => String(item.roomId))
   }
@@ -1173,14 +1176,14 @@ export struct SearchPage {
   ArticleRow(item: ArticleSearchItem) {
     Row({ space: 10 }) {
       Column({ space: 5 }) {
-        Text(item.title)
+        Text() { KeywordSpans(item.title, this.resultKeyword, this.isDark) }
           .fontSize(13)
           .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .lineHeight(17)
         if (item.desc.length > 0) {
-          Text(item.desc)
+          Text() { KeywordSpans(item.desc, this.resultKeyword, this.isDark) }
             .fontSize(11)
             .fontColor('#9499A0')
             .maxLines(2)
@@ -1294,7 +1297,7 @@ export struct SearchPage {
       .aspectRatio(1.6)
       .clip(true)
       .borderRadius(5)
-      Text(item.title)
+      Text() { KeywordSpans(item.title, this.resultKeyword, this.isDark) }
         .width('100%')
         .fontSize(12)
         .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
@@ -1333,7 +1336,7 @@ export struct SearchPage {
         .onClick(() => this.openUserLive(user))
         Column({ space: 4 }) {
           Row({ space: 5 }) {
-            Text(user.uname)
+            Text() { KeywordSpans(user.uname, this.resultKeyword, this.isDark) }
               .fontSize(15)
               .fontWeight(FontWeight.Medium)
               .fontColor(this.accent)
@@ -1405,7 +1408,7 @@ export struct SearchPage {
   // 综合与视频分类使用相同的横向结果行，保留整卡入场过渡。
   @Builder
   SearchVideoRow(item: VideoItem, prefix: string) {
-    VideoCard({ video: item, horizontal: true, idPrefix: prefix, wholeCardTransition: true })
+    VideoCard({ video: item, highlightKeyword: this.resultKeyword, horizontal: true, idPrefix: prefix, wholeCardTransition: true })
   }
 
   @Builder

@@ -9,6 +9,7 @@ export struct PlayerFullscreenHeader {
   @Prop favorited: boolean = false;
   @Prop accent: string = '#FB7299';
   onBack: () => void = () => {};
+  onHome: () => void = () => {};
   onLike: () => void = () => {};
   onCoin: () => void = () => {};
   onFavorite: () => void = () => {};
@@ -31,6 +32,11 @@ export struct PlayerFullscreenHeader {
   build() {
     Row({ space: 10 }) {
       this.IconButton($r('app.media.ic_back'), 24, '#FFFFFF', () => this.onBack())
+      Image($r('app.media.ic_tab_home'))
+        .width(42).height(42).padding(10)
+        .renderMode(ImageRenderMode.Template).fillColor('#FFFFFF')
+        .accessibilityText('返回主页').id('player-home-entry')
+        .onClick(() => this.onHome())
       if (this.ownerFace.length > 0) {
         Image(this.ownerFace).width(30).height(30).borderRadius(15).objectFit(ImageFit.Cover)
       }

@@ -94,6 +94,7 @@ export struct PlayerView {
   @Prop @Watch('onLocalDanmakuRequested') localDanmakuToken: number = 0;
   @Prop @Watch('onCompactModeChanged') compactMode: boolean = false;
   onBack: () => void = () => {};
+  onHome: () => void = () => {};
   /** AVPlayer 回报的真实画幅：全屏时判断竖屏视频保持竖屏。 */
   private realVideoWidth: number = 0;
   private realVideoHeight: number = 0;
@@ -244,7 +245,8 @@ export struct PlayerView {
   private runtimeSources: Array<string> = [];
   private runtimeAudioSources: Array<string> = [];
   private audioSourceIndex: number = 0;
-  private lastAudioSyncBucket: number = -1;
+  private lastAudioSyncAtMs: number = -1;
+  private audioDriftSamples: number = 0;
   /** 每 15 秒同步一次系统媒体进度。 */
   private lastSystemPlaybackBucket: number = -1;
   @State sponsorSegments: Array<SponsorBlockSegment> = [];
@@ -387,8 +389,9 @@ export struct PlayerView {
               const actualTargetMs: number = video.currentTime >= 0 ? video.currentTime : targetMs;
               this.armFirstFrameMute(actualTargetMs, 1800);
               if (video.state !== 'playing') video.play();
-              // 音频仍按首帧对齐节奏启动（若已播放则幂等无副作用）。
-              this.gateAudioStart();
+              // 两轨已经在暂停态对齐，直接成对启动；再次门控 seek 会让音频落后视频一个定位耗时。
+              const audio: media.AVPlayer | null = this.audioPlayer;
+              if (audio !== null && this.audioPrepared) audio.play();
             } catch (e) {
             }
           } else {
@@ -611,7 +614,7 @@ if (this.runtimeSources.length === 0) {
     this.playheadSec = targetSec;
     this.curTime = targetSec;
     this.onProgress(targetSec);
-    this.lastAudioSyncBucket = -1;
+    this.lastAudioSyncAtMs = -1;
     this.seekLocked = true;
     // 让统一 seek 状态机暂停并校准双轨；播放中的会话在 seekDone 后恢复视频与音频。
     this.playing = false;
@@ -885,6 +888,7 @@ if (this.runtimeSources.length === 0) {
     this.clearSponsorNoticeTimer();
     this.resumeAfterPrepare = this.playheadSec;
     this.shouldPlayAfterPrepare = false;
+    if (this.seekCtl !== null) this.seekCtl.seekResumePlaying = false;
     this.muteImmediately();
     this.release();
     Immersive.restoreWindowBrightness();
@@ -913,6 +917,7 @@ if (this.runtimeSources.length === 0) {
     const video: media.AVPlayer | null = this.player;
     const audio: media.AVPlayer | null = this.audioPlayer;
     this.shouldPlayAfterPrepare = false;
+    if (this.seekCtl !== null) this.seekCtl.seekResumePlaying = false;
     this.muteImmediately();
     // 取消首帧门控，避免暂停期间的 seekDone 再把音频轨单独放出来。
     this.audioStartPending = false;
@@ -967,6 +972,7 @@ if (this.runtimeSources.length === 0) {
   private preparePlayersForSeek(targetMs: number, resumePlaying: boolean): void {
     this.cancelFirstFrameMute(false);
     this.cancelAudioGate();
+    this.audioDriftSamples = 0;
     this.audioStartPending = false;
     this.seekRecoveryActive = resumePlaying;
     this.seekRecoveryCoverVisible = false;
@@ -1580,7 +1586,7 @@ if (this.runtimeSources.length === 0) {
         this.onVideoSeekDone(p, position);
       });
       p.on('timeUpdate', (t: number) => {
-        if (this.player !== p) return;
+        if (this.player !== p || this.seekLocked) return;
         // 起播/seek 静音恢复点：seek 后必须等播放头落到目标附近，不能让旧位置回调提前放声。
         if (this.canReleaseFrameMute(t)) this.disarmFirstFrameMute();
         // AVPlayer 上报毫秒，播放器 UI/弹幕内部统一使用秒。
@@ -1612,26 +1618,34 @@ if (this.runtimeSources.length === 0) {
         // 弹幕分段预取：进入新段或逼近段尾时拉取下一段（XML 兜底模式下为空操作）。
         this.prefetchDanmakuSegments(nextTime);
         if (this.maybeSkipSponsor(nextTime)) return;
-        const audio: media.AVPlayer | null = this.audioPlayer;
-        // 双 DASH 轨只在明显失步时兜底校时；原先每 5 秒、220ms 阈值会制造周期性顿挫。
-        const syncBucket: number = Math.floor(nextTime / 30);
-        if (!this.audioStartPending && (this.seekCtl?.seekInFlight ?? true) === false && audio !== null && this.audioPrepared && syncBucket !== this.lastAudioSyncBucket &&
-          Math.abs(audio.currentTime - t) > 900) {
-          this.lastAudioSyncBucket = syncBucket;
-          // 音频 seek 不使用视频关键帧模式。
-          audio.seek(t);
-        }
+        this.checkAudioSync(t);
       });
       p.on('durationUpdate', (d: number) => {
         this.duration = d / 1000;
         this.updateAVSessionMetadata();
       });
+      let bufferingAudioPause: Promise<void> | null = null;
       p.on('bufferingUpdate', (infoType: media.BufferingInfoType, value: number) => {
+        if (this.player !== p || this.backgroundAudioOnly) return;
         if (infoType === media.BufferingInfoType.BUFFERING_START) {
           // seek 的短暂缓冲由延迟提示管理，快速定位不闪 loading。
           if ((this.seekCtl?.seekInFlight ?? true) === false) this.buffering = true;
           this.pauseDmLoop();
+          const audio: media.AVPlayer | null = this.audioPlayer;
+          if (audio !== null && this.audioPrepared && audio.state === 'playing' &&
+            !(this.seekCtl?.seekInFlight ?? true) && bufferingAudioPause === null) {
+            audio.setVolume(0);
+            bufferingAudioPause = audio.pause().catch(() => {});
+          }
         } else if (infoType === media.BufferingInfoType.BUFFERING_END) {
+          const paused: Promise<void> | null = bufferingAudioPause;
+          bufferingAudioPause = null;
+          if (paused !== null) {
+            paused.then(() => {
+              if (this.player !== p || !this.playing || this.backgroundAudioOnly || this.seekLocked) return;
+              this.seekTo(Math.max(0, p.currentTime) / 1000, true);
+            });
+          }
           // seek 尚未完成音轨对齐时不能提前隐藏 loading 或恢复弹幕时钟。
           if ((this.seekCtl?.seekInFlight ?? true) === false && !this.seekRecoveryActive) {
             this.buffering = false;
@@ -1772,6 +1786,25 @@ if (this.runtimeSources.length === 0) {
     await audio.setMediaSource(source, this.audioPlaybackStrategy());
   }
 
+  private checkAudioSync(videoTimeMs: number): void {
+    const audio: media.AVPlayer | null = this.audioPlayer;
+    // 连续三个采样失步才校准，过滤回调调度抖动；使用墙钟限频，反复跳回同一时间段仍能恢复。
+    if (!this.playing || this.backgroundAudioOnly || this.buffering || this.firstFrameMuteArmed ||
+      this.audioStartPending || this.audioGateSeekPending || this.seekLocked ||
+      (this.seekCtl?.seekInFlight ?? true) || audio === null || !this.audioPrepared || audio.state !== 'playing' ||
+      Math.abs(audio.currentTime - videoTimeMs) <= 350) {
+      this.audioDriftSamples = 0;
+      return;
+    }
+    this.audioDriftSamples++;
+    const nowMs: number = Date.now();
+    if (this.audioDriftSamples < 3 || nowMs - this.lastAudioSyncAtMs < 3000) return;
+    this.audioDriftSamples = 0;
+    // 校时走双轨暂停定位，禁止边播边单独 seek 音轨。
+    this.seekTo(videoTimeMs / 1000, true);
+    this.lastAudioSyncAtMs = nowMs;
+  }
+
   private invalidatePlayerCreation(): void {
     this.playerCreateGeneration++;
     this.playerCreating = false;
@@ -1821,27 +1854,13 @@ if (this.runtimeSources.length === 0) {
     const audio: media.AVPlayer | null = this.audioPlayer;
     if (video === null || !this.prepared || audio === null || !this.audioPrepared) return;
     const targetMs: number = Math.max(0, video.currentTime);
-    try {
-      if (Math.abs(audio.currentTime - targetMs) > 80) {
-        this.audioGateSeekPending = true;
-        this.audioGateSeekTargetMs = targetMs;
-        // 音频 seek 不传视频关键帧模式；丢回调时看门狗仍会放行，避免永久无声。
-        audio.seek(targetMs);
-        if (this.audioGateTimer >= 0) clearTimeout(this.audioGateTimer);
-        this.audioGateTimer = setTimeout(() => {
-          this.audioGateTimer = -1;
-          if (this.audioPlayer === audio && this.audioGateSeekPending &&
-            this.audioGateSeekTargetMs === targetMs) {
-            if (DEBUG) hilog.warn(0x0000, 'BiliPlayback', 'audioGate.timeout target=%{public}d', targetMs);
-            this.finishGatedAudioStart(audio);
-          }
-        }, 1500);
-      } else {
-        this.finishGatedAudioStart(audio);
-      }
-    } catch (e) {
-      this.finishGatedAudioStart(audio);
+    if (Math.abs(audio.currentTime - targetMs) > 80) {
+      // 首帧等待期间两轨可能已错开；用统一状态机冻结视频再校准，避免追逐持续移动的播放头。
+      this.cancelAudioGate();
+      this.seekTo(targetMs / 1000, true);
+      return;
     }
+    this.finishGatedAudioStart(audio);
   }
 
   private finishGatedAudioStart(audio: media.AVPlayer): void {
@@ -2254,6 +2273,8 @@ if (this.runtimeSources.length === 0) {
       return;
     }
     if (this.playing) {
+      if (this.seekCtl !== null) this.seekCtl.seekResumePlaying = false;
+      this.seekRecoveryActive = false;
       this.audioStartPending = false;
       this.cancelAudioGate();
       this.cancelFirstFrameMute(true);
@@ -2316,7 +2337,7 @@ if (this.runtimeSources.length === 0) {
       this.resetDanmakuAt(0);
       this.playheadSec = 0;
       this.curTime = 0;
-      this.lastAudioSyncBucket = -1;
+      this.lastAudioSyncAtMs = -1;
       // resetDanmakuAt 已把游标同步到开头；保留已加载列表，避免单集循环/手动重播后
       // dmLoadedCid 仍命中去重逻辑、却因为列表被清空而整轮都没有弹幕。
       // seek 恢复播放：seek 到 0 后由 onSeekDone 回调自动 play。
@@ -2350,7 +2371,7 @@ if (this.runtimeSources.length === 0) {
     this.onProgress(clamped);
     this.updateSubtitle(clamped);
     this.updateAVSessionPlaybackState();
-    this.lastAudioSyncBucket = -1;
+    this.lastAudioSyncAtMs = -1;
     // seek 期间 AVPlayer 的 timeUpdate 仍会上报旧位置，若直接写回 curTime 会让进度条
     // 从目标值弹回旧位置再跳过去（视觉上"抖动"）。用 seek 锁让进度显示钉住目标值，
     // 等 seekDone 解锁后再跟随正常 timeUpdate。
@@ -3377,6 +3398,7 @@ if (this.runtimeSources.length === 0) {
               sponsorSegments: this.visibleSponsorSegments(),
               titleColor: this.sheetTitleColor(),
               onBack: () => this.handlePlayerBack(),
+              onHome: () => this.onHome(),
               onPlay: () => this.togglePlay(),
               onMore: () => this.toggleMoreMenu(),
               onFullscreen: () => this.toggleFullscreen(),
@@ -3394,6 +3416,7 @@ if (this.runtimeSources.length === 0) {
                 favorited: this.favorited,
                 accent: this.accent,
                 onBack: () => this.handlePlayerBack(),
+              onHome: () => this.onHome(),
                 onLike: () => this.onLike(),
                 onCoin: () => this.onCoin(),
                 onFavorite: () => this.onFavorite(),
@@ -3408,6 +3431,11 @@ if (this.runtimeSources.length === 0) {
                 this.IconButton($r('app.media.ic_back'), 20, 36, 36, '#FFFFFF', false, () => {
                   this.handlePlayerBack();
                 })
+                Image($r('app.media.ic_tab_home'))
+                  .width(36).height(36).padding(8)
+                  .renderMode(ImageRenderMode.Template).fillColor('#FFFFFF')
+                  .accessibilityText('返回主页').id('player-home-entry')
+                  .onClick(() => this.onHome())
                 Blank()
                 this.IconButton($r('app.media.ic_more'), 20, 36, 36, '#FFFFFF', false, () => {
                   this.toggleMoreMenu();
@@ -3479,6 +3507,7 @@ if (this.runtimeSources.length === 0) {
           favorited: this.favorited,
           onClose: () => this.closeEndScreen(),
           onBack: () => this.handlePlayerBack(),
+              onHome: () => this.onHome(),
           onReplay: () => this.endReplay(),
           onPlayNow: () => {
             this.endScreenOpen = false;

@@ -413,7 +413,8 @@ test('MP4 optimization cannot downgrade an available DASH stream', async () => {
   const dash={quality:80,dash:{video:[{id:80,base_url:'https://example.com/1080.m4s',codecs:'avc1'}],audio:[{base_url:'https://example.com/audio.m4s'}]}};
   const mp4={quality:64,durl:[{url:'https://example.com/720.mp4'}]};
   const env=environment({
-    'services/network/HttpClient':{HttpClient:{getCookie:()=>'',merge:(a,b)=>({...a,...b}),buildQuery:()=>'',get:async()=>++count===1?dash:mp4}},
+    'services/network/HttpClient':{RequestPriority:{CRITICAL:0},HttpClient:{getCookie:()=>'',merge:(a,b)=>({...a,...b}),
+      buildQuery:p=>new URLSearchParams(p).toString(),get:async url=>{count++;return new URL(url).searchParams.get('fnval')==='1'?mp4:dash;}}},
     'common/WbiSign':{WbiSign:{}},
     'common/AppSign':{appSign:()=>{}},
     'common/CommentLog':{CommentLog:{}},
@@ -425,4 +426,99 @@ test('MP4 optimization cannot downgrade an available DASH stream', async () => {
   assert.equal(count,2);assert.equal(result.quality,80);assert.equal(result.isDash,true);
   assert.equal(result.url,'https://example.com/1080.m4s');
   assert.deepEqual(result.audioUrls,['https://example.com/audio.m4s']);
+});
+
+function qualityResponse(ids, mixed = false) {
+  return {quality:80, ...(mixed ? {durl:[{url:'https://example.com/1080.mp4'}]} : {}),
+    support_formats:[120,116,112,80,64].map(quality=>({quality})),
+    dash:{video:ids.map(id=>({id,base_url:`https://example.com/${id}.m4s`,codecs:'avc1'})),
+      audio:[{base_url:'https://example.com/audio.m4s'}]}};
+}
+test('4K preference selects 1080P60 over ordinary MP4 and remains saved across fallback', () => {
+  const env=environment(); const {PlayUrlInfo}=env.load('model/Models');
+  const {PlayerQualityPreference:pref}=env.load('common/PlayerQualityPreference');
+  pref.remember(120);
+  const fallback=PlayUrlInfo.fromPlayUrl(qualityResponse([80,116,112],true),pref.requested());
+  assert.equal(fallback.quality,116); assert.equal(fallback.isDash,true);
+  assert.equal(fallback.url,'https://example.com/116.m4s'); assert.equal(pref.requested(),120);
+  assert.equal(PlayUrlInfo.fromPlayUrl(qualityResponse([120,116,80]),pref.requested()).quality,120);
+});
+test('quality selection honors explicit lower preference and keeps same-quality MP4', () => {
+  const {PlayUrlInfo}=environment().load('model/Models');
+  assert.equal(PlayUrlInfo.fromPlayUrl(qualityResponse([116,112,80]),112).quality,112);
+  const info=PlayUrlInfo.fromPlayUrl(qualityResponse([116,80],true),80);
+  assert.equal(info.quality,80);assert.equal(info.isDash,false);
+});
+function qualityApi(handler) {
+  const calls=[];
+  const env=environment({
+    'services/network/HttpClient':{RequestPriority:{CRITICAL:0},HttpClient:{getCookie:()=>'',
+      merge:(a,b)=>({...a,...b}),buildQuery:p=>new URLSearchParams(p).toString(),get:async url=>{
+        const params=new URL(url).searchParams;
+        calls.push([Number(params.get('qn')),params.get('fnval')]); return handler(params);
+      }}},
+    'common/WbiSign':{WbiSign:{}},'common/AppSign':{appSign:()=>{}},
+    'common/CommentLog':{CommentLog:{}},'common/DanmakuProto':{parseDanmakuSegment:()=>[]},
+    'api/internal/ApiCommon':{getData:x=>x},
+  });
+  return {calls,api:env.load('api/BiliApi').BiliApi};
+}
+test('missing 4K requests advertised 1080P60 once before accepting server 1080P fallback', async () => {
+  const e=qualityApi(p=>qualityResponse(p.get('qn')==='116'?[116,80]:[80]));
+  const result=await e.api.getPlayUrl(1,'BVtest',2,120);
+  assert.equal(result.quality,116);assert.equal(result.isDash,true);
+  assert.deepEqual(e.calls,[[120,'4048'],[116,'4048']]);
+});
+test('denied quality retry is bounded and preserves an existing playable source', async () => {
+  const e=qualityApi(p=>p.get('fnval')==='1'?null:qualityResponse([80]));
+  const result=await e.api.getPlayUrl(1,'BVtest',2,120);
+  assert.equal(result.quality,80);assert.ok(result.url.length>0);
+  assert.deepEqual(e.calls.filter(x=>x[1]==='4048'),[[120,'4048'],[116,'4048']]);
+  assert.equal(e.calls.filter(x=>x[1]==='1').length,1);
+});
+test('a failed higher-quality retry does not prevent playback', async () => {
+  const e=qualityApi(p=>{
+    if(p.get('qn')==='116') throw new Error('network unavailable');
+    return p.get('fnval')==='1'?null:qualityResponse([80]);
+  });
+  const result=await e.api.getPlayUrl(1,'BVtest',2,120);
+  assert.equal(result.quality,80);assert.ok(result.url.length>0);
+});
+
+
+test('return home clears a deep video stack once, stops playback and selects the root home tab', () => {
+  const calls=[];
+  const stack=['Search','VideoDetail','VideoDetail','VideoDetail'];
+  const env=environment({
+    'common/AppRouter':{AppNavStack:{clear:animated=>{calls.push(['clear',animated]);stack.length=0;}},
+      HERO_NAV_TRANSITION_ACTIVE_KEY:'heroNavTransitionActive'},
+    'common/PlayerCommandBus':{PlayerCommandBus:{stop:()=>calls.push(['stop'])}},
+    'common/Immersive':{Immersive:{setFullscreen:value=>calls.push(['fullscreen',value])}},
+  });
+  const Harness=env.methodHarness('pages/Index','  private returnToHome(): void {','  switchTab(index:',
+    "import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY } from '../common/AppRouter';\n"+
+    "import { PlayerCommandBus } from '../common/PlayerCommandBus';\n"+
+    "import { Immersive } from '../common/Immersive';");
+  const h=new Harness();h.currentTab=2;
+  h.finishHeroNavTransition=()=>calls.push(['finishTransition']);
+  h.switchTab=index=>{h.currentTab=index;};h.syncBarColors=()=>{};
+  h.returnToHome();
+  assert.deepEqual(stack,[]);assert.equal(h.currentTab,0);
+  assert.deepEqual(calls,[['stop'],['fullscreen',false],['finishTransition'],['clear',false]]);
+  assert.equal(env.storage.get('heroNavTransitionActive'),false);
+});
+
+
+test('keyword highlighting preserves text and emphasizes every literal Chinese match', () => {
+  const {KeywordHighlight:h}=environment().load('common/KeywordHighlight');
+  const parts=h.split('明日方舟：期待明日','明日');
+  assert.equal(parts.map(p=>p.text).join(''),'明日方舟：期待明日');
+  assert.deepEqual(parts.filter(p=>p.matched).map(p=>p.text),['明日','明日']);
+  assert.deepEqual(h.split('明日明日','明日').map(p=>p.matched),[true,true]);
+});
+test('keyword highlighting handles empty, missing and regex-like input literally', () => {
+  const {KeywordHighlight:h}=environment().load('common/KeywordHighlight');
+  for(const kw of ['', '  ', '后天']) assert.equal(h.split('明日',kw).some(p=>p.matched),false);
+  assert.deepEqual(h.split('a+b 与 aab','a+b').filter(p=>p.matched).map(p=>p.text),['a+b']);
+  assert.equal(h.split('🌅明日','明日').map(p=>p.text).join(''),'🌅明日');
 });

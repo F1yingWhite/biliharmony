@@ -12,6 +12,7 @@ export struct PlayerCompactControls {
   @Prop sponsorSegments: Array<SponsorBlockSegment> = [];
   @Prop titleColor: string = '#FFFFFF';
   onBack: () => void = () => {};
+  onHome: () => void = () => {};
   onPlay: () => void = () => {};
   onMore: () => void = () => {};
   onFullscreen: () => void = () => {};
@@ -41,6 +42,11 @@ export struct PlayerCompactControls {
         Column().width('100%').height('100%').backgroundColor('#CC0B0C10')
         Row() {
           this.IconButton($r('app.media.ic_back'), 24, 42, false, () => this.onBack())
+          Image($r('app.media.ic_tab_home'))
+            .width(42).height(42).padding(10)
+            .renderMode(ImageRenderMode.Template).fillColor('#FFFFFF')
+            .accessibilityText('返回主页').id('player-home-entry')
+            .onClick(() => this.onHome())
           Blank()
           Row({ space: 9 }) {
             Image($r('app.media.ic_video_replay'))
