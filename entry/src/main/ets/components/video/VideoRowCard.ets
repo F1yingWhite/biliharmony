@@ -1,3 +1,4 @@
+import { KeywordSpans } from '../KeywordSpans';
 import { MotionTokens } from '../../common/MotionTokens';
 /**
  * 横向视频行卡片：封面（可带右下角徽标）+ 标题 + UP 主 + 可选第三行灰字。
@@ -10,6 +11,7 @@ import { MotionTokens } from '../../common/MotionTokens';
 @Reusable
 @Component
 export struct VideoRowCard {
+  @Prop highlightKeyword: string = '';
   @Prop cover: string = '';
   @Prop coverId: string = '';
   @Prop title: string = '';
@@ -62,20 +64,20 @@ export struct VideoRowCard {
       .clip(true)
       Column({ space: this.compact ? 5 : this.contentSpace }) {
         if (this.compact) {
-          Text(this.title)
+          Text() { KeywordSpans(this.title, this.highlightKeyword, this.isDark) }
             .fontSize(14)
             .fontColor(this.isDark ? this.titleDarkColor : '#18191C')
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .lineHeight(19)
         } else {
-          Text(this.title)
+          Text() { KeywordSpans(this.title, this.highlightKeyword, this.isDark) }
             .fontSize(14)
             .fontColor(this.isDark ? this.titleDarkColor : '#18191C')
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
-        Text(this.upName)
+        Text() { KeywordSpans(this.upName, this.highlightKeyword, this.isDark) }
           .fontSize(11)
           .fontColor('#9499A0')
           .maxLines(1)

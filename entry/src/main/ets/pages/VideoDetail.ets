@@ -71,6 +71,7 @@ class VideoHeroFrameCallback extends FrameCallback {
 
 @Component
 export struct VideoDetailPage {
+  onHome: () => void = () => {};
   @State loading: boolean = true;
   @State errorText: string = '';
   @State detail: VideoDetail = new VideoDetail();
@@ -2822,6 +2823,11 @@ export struct VideoDetailPage {
                onBack: () => {
                  this.goBack();
                },
+              onHome: () => {
+                if (this.closing) return;
+                this.closing = true;
+                this.onHome();
+              },
               onFullscreenChange: (fullscreen: boolean) => {
                 if (fullscreen) {
                   this.playerFullscreenRestoreHeight = this.visiblePlayerHeight();

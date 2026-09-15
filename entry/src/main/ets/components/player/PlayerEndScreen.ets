@@ -19,6 +19,7 @@ export struct PlayerEndScreen {
   @Prop favorited: boolean = false;
   onClose: () => void = () => {};
   onBack: () => void = () => {};
+  onHome: () => void = () => {};
   onReplay: () => void = () => {};
   onPlayNow: () => void = () => {};
   onFollow: () => void = () => {};
@@ -140,6 +141,10 @@ export struct PlayerEndScreen {
       Row() {
         Image($r('app.media.ic_back')).width(24).height(24)
           .renderMode(ImageRenderMode.Template).fillColor('#FFFFFF').onClick(this.onBack)
+        Image($r('app.media.ic_tab_home')).width(40).height(40).padding(9)
+          .renderMode(ImageRenderMode.Template).fillColor('#FFFFFF')
+          .accessibilityText('返回主页').id('player-home-entry')
+          .onClick(() => this.onHome())
         if (this.upFace.length > 0) {
           Image(this.upFace).width(80).height(80).borderRadius(40)
         }

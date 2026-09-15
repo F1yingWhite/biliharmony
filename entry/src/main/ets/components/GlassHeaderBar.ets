@@ -1,5 +1,5 @@
 /**
- * 玻璃头栏：左侧长搜索胶囊，右侧消息与头像圆形入口。
+ * 玻璃头栏：搜索、消息与头像随惯用手调整排列，头像靠惯用手一侧。
  * 随列表上滑逐渐淡出，消失进状态栏；仅本组件订阅滚动淡出值，避免列表重渲染。
  */
 import { Immersive } from '../common/Immersive';
@@ -8,6 +8,7 @@ import { UserStore } from '../services/auth/UserStore';
 import { AppTheme } from '../common/AppTheme';
 import { HotSearchStore } from '../common/HotSearchStore';
 import { Haptic } from '../common/Haptic';
+import { Handedness } from '../common/Handedness';
 import { MsgUnreadStore } from '../services/message/MsgUnreadStore';
 import { DecoratedAvatar } from './UserDecorations';
 import { GlassCapsuleSurface, ImmersiveEdgeMask } from './ImmersiveSurfaces';
@@ -33,6 +34,17 @@ export struct HeaderBackdrop {
 
 @Component
 export struct GlassHeaderBar {
+  @StorageProp(Handedness.KEY_SIDE) @Watch('onHandSideChanged') handSide: string = Handedness.RIGHT;
+  @State handPosition: number = 0;
+  @State headerRowWidth: number = 0;
+  private handLayoutMounted: boolean = false;
+
+  onHandSideChanged(): void {
+    if (!this.handLayoutMounted) return;
+    this.getUIContext().animateTo({ duration: 320, curve: Curve.EaseInOut }, () => {
+      this.handPosition = this.handSide === Handedness.LEFT ? 1 : 0;
+    });
+  }
   @Prop backdropInContent: boolean = false;
   @StorageProp('windowStatusBarHeight') statusBarInset: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
@@ -62,6 +74,8 @@ export struct GlassHeaderBar {
 
   aboutToAppear(): void {
     this.destroyed = false;
+    this.handPosition = this.handSide === Handedness.LEFT ? 1 : 0;
+    this.handLayoutMounted = true;
     HotSearchStore.load().then(() => {
       if (!this.destroyed) HotSearchStore.publish(0);
     }).catch(() => {
@@ -74,6 +88,7 @@ export struct GlassHeaderBar {
 
   aboutToDisappear(): void {
     this.destroyed = true;
+    this.handLayoutMounted = false;
   }
 
   private headerContentOpacity(): number {
@@ -107,9 +122,10 @@ export struct GlassHeaderBar {
           .width('100%').height('100%').padding({ left: 13, right: 13 })
           .hitTestBehavior(HitTestMode.None)
         }
-        .height(35).layoutWeight(1).margin({ right: 5 })
+        .height(35).layoutWeight(1)
+        .margin({ right: 5 })
         .opacity(this.headerContentOpacity())
-        .translate({ y: -54 * this.fade })
+        .translate({ x: 79 * this.handPosition, y: -54 * this.fade })
         .hitTestBehavior(this.fade >= 0.65 ? HitTestMode.None : HitTestMode.Default)
         .accessibilityText('搜索：' + (this.hotSearch || '搜索'))
         .id('home-search-entry')
@@ -129,7 +145,8 @@ export struct GlassHeaderBar {
         .width(32).height(32).borderRadius(16)
         .backgroundColor(this.isDark ? '#34363C' : '#FFFFFF')
         .opacity(this.headerContentOpacity())
-        .translate({ y: -54 * this.fade })
+        .translate({ x: (106 - Math.max(106, this.headerRowWidth - 40)) * this.handPosition,
+          y: -54 * this.fade })
         .hitTestBehavior(this.fade >= 0.65 ? HitTestMode.None : HitTestMode.Default)
         .id('home-message-entry').accessibilityText('消息')
         .onClick(() => {
@@ -142,18 +159,24 @@ export struct GlassHeaderBar {
           }
         })
 
-        // 与消息共用中线；收起后留在频道行右侧，继续提供个人页入口。
+        // 展开中线为 10 + 35/2 = 27.5vp；收起频道行高 44vp，中线为 22vp。
+        // 头像仅上移 5.5vp，保证与推荐/热门气泡居中，而非旧值 9vp 导致偏高 3.5vp。
         Stack() {
           DecoratedAvatar({ face: this.userAvatar, pendant: this.userPendant,
             avatarSize: 26, containerSize: 32, pendantScale: 1.22 })
         }
         .width(32).height(32).borderRadius(16)
         .backgroundColor(this.isDark ? '#34363C' : '#FFFFFF')
-        .translate({ y: -9 * this.fade })
+        .translate({ x: (32 - Math.max(106, this.headerRowWidth - 40)) * this.handPosition,
+          y: -5.5 * this.fade })
         .accessibilityText('个人中心').id('home-avatar-entry')
         .onClick(() => { Haptic.light(); this.onAvatarTap(); })
       }
       .width('100%').height(35)
+      // 保留节点顺序，以可插值的位移换边；文字、头像与点击区域随节点一起移动。
+      .onAreaChange((_old: Area, area: Area) => {
+        this.headerRowWidth = Number(area.width);
+      })
       .alignItems(VerticalAlign.Center)
       .padding({ left: 20, right: 20 })
       .margin({ top: this.statusBarInset + 10 })

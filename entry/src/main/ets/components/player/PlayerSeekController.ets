@@ -14,6 +14,8 @@ export class PlayerSeekController {
   audioSeekDone: boolean = true;
   seekResumePlaying: boolean = false;
 
+  private generation: number = 0;
+  private activePrecise: boolean = true;
   private dispatchTimer: number = -1;
   private seekSpinnerTimer: number = -1;
   private seekWatchdogTimer: number = -1;
@@ -64,6 +66,7 @@ export class PlayerSeekController {
   }
 
   cancel(): void {
+    this.generation++;
     if (this.dispatchTimer >= 0) clearTimeout(this.dispatchTimer);
     this.dispatchTimer = -1;
     this.clearSeekSpinner();
@@ -81,11 +84,12 @@ export class PlayerSeekController {
     this.seekResumePlaying = false;
   }
 
-  private dispatchPendingSeek(): void {
+  private async dispatchPendingSeek(): Promise<void> {
     const video: media.AVPlayer | null = this.getVideo();
     if (video === null || !this.isPrepared() || this.pendingSeekMs < 0) return;
-    const targetMs: number = this.pendingSeekMs;
-    const precise: boolean = this.pendingSeekPrecise;
+    let targetMs: number = this.pendingSeekMs;
+    const generation: number = ++this.generation;
+    let precise: boolean = this.pendingSeekPrecise;
     this.pendingSeekMs = -1;
     this.activeSeekMs = targetMs;
     this.activeAudioSeekMs = -1;
@@ -95,36 +99,49 @@ export class PlayerSeekController {
     this.activeAudio = audio;
     this.audioSeekDone = audio === null || !this.isAudioPrepared();
     this.seekInFlight = true;
-    // 用户快进/后退和拖动必须落到请求位置；仅 seek 超时重建后的恢复请求使用关键帧模式兜底。
-    const mode: media.SeekMode = precise ? media.SeekMode.SEEK_CLOSEST :
-      (targetMs < video.currentTime ? media.SeekMode.SEEK_NEXT_SYNC : media.SeekMode.SEEK_PREV_SYNC);
     this.onBeforeDispatch(targetMs, this.seekResumePlaying);
-    // 播放中先暂停两条轨，再做一次成对定位。这样旧位置的音频不会在视频重新取帧时继续输出，
-    // Surface 也能保留最后一帧，而不是让解码和 seek 同时争抢状态机。
-    if (this.seekResumePlaying) {
-      try {
-        if (video.state === 'playing') video.pause();
-      } catch (e) {
-      }
+    // pause 是异步操作；两轨均暂停后才能定位，避免迟到的 pause 把恢复播放再次打断。
+    this.armWatchdog(video, targetMs);
+    try {
+      const pauses: Array<Promise<void>> = [];
+      if (video.state === 'playing') pauses.push(video.pause());
+      if (audio !== null && this.isAudioPrepared() && audio.state === 'playing') pauses.push(audio.pause());
+      await Promise.all(pauses);
+    } catch (e) {
+      if (generation === this.generation && this.seekInFlight) this.onStall(video, targetMs);
+      return;
     }
+    if (generation !== this.generation || !this.seekInFlight || this.getVideo() !== video) return;
+    // 暂停期间到达的新手势直接替换目标，不必先解码已经过期的位置。
+    if (this.pendingSeekMs >= 0) {
+      targetMs = this.pendingSeekMs;
+      precise = this.pendingSeekPrecise;
+      this.pendingSeekMs = -1;
+      this.activeSeekMs = targetMs;
+      this.onBeforeDispatch(targetMs, this.seekResumePlaying);
+    }
+    this.activePrecise = precise;
+    const mode: media.SeekMode = precise ? media.SeekMode.SEEK_CLOSEST : media.SeekMode.SEEK_PREV_SYNC;
     if (audio !== null && this.isAudioPrepared()) {
       try {
-        if (audio.state === 'playing') audio.pause();
         this.activeAudioSeekMs = targetMs;
         this.audioSeekDone = false;
         // Media Kit 的 SeekMode 只用于视频关键帧；音频传 mode 会在部分设备上导致 seekDone 丢失。
         audio.seek(targetMs);
-        // 个别设备的独立音轨不会稳定回调 seekDone。音频超时只降级为后续首帧门控再校时，
-        // 不应因此拖住视频 4 秒并触发整套播放器重建。
+        // 个别设备丢失音轨 seekDone 时用播放头补充验证；仍未到达则继续等待看门狗恢复。
         this.audioSettleTimer = setTimeout(() => {
           this.audioSettleTimer = -1;
           if (this.activeAudio === audio && this.seekInFlight && !this.audioSeekDone) {
-            this.audioSeekDone = true;
-            this.finishSeek();
+            // 无回调时必须以播放头验证，不能将仍在旧位置的音轨视为定位完成。
+            if (Math.abs(audio.currentTime - this.activeAudioSeekMs) <= 150) {
+              this.audioSeekDone = true;
+              this.finishSeek();
+            }
           }
         }, 900);
       } catch (e) {
-        this.audioSeekDone = true;
+        this.onStall(video, targetMs);
+        return;
       }
     }
     try {
@@ -145,7 +162,19 @@ export class PlayerSeekController {
   onVideoSeekDone(video: media.AVPlayer, positionMs: number): void {
     if (this.activeVideo !== video || !this.seekInFlight) return;
     // seekDone 回报的是本次请求位置。过滤同一 AVPlayer 上延迟到达的旧回调，避免提前恢复。
-    if (this.activeSeekMs >= 0 && Math.abs(positionMs - this.activeSeekMs) > 500) return;
+    if (this.activePrecise && this.activeSeekMs >= 0 && Math.abs(positionMs - this.activeSeekMs) > 500) return;
+    // 关键帧恢复的实际落点可能偏离请求数秒；音频必须跟随实际视频位置。
+    if (!this.activePrecise && this.activeAudio !== null && Math.abs(positionMs - this.activeAudioSeekMs) > 150) {
+      this.activeAudioSeekMs = positionMs;
+      this.audioSeekDone = false;
+      try {
+        this.activeAudio.seek(positionMs);
+      } catch (e) {
+        this.onStall(video, positionMs);
+        return;
+      }
+    }
+    this.activeSeekMs = positionMs;
     this.videoSeekDone = true;
     this.finishSeek();
   }
@@ -164,6 +193,7 @@ export class PlayerSeekController {
     this.clearSeekSpinner();
     this.clearAudioSettleTimer();
     const completedTargetMs: number = this.activeSeekMs;
+    this.generation++;
     this.seekInFlight = false;
     this.activeSeekMs = -1;
     this.activeAudioSeekMs = -1;

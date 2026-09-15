@@ -25,6 +25,7 @@ import { DecoratedAvatar, UserDecorationBanner } from '../components/UserDecorat
 import { LayoutTokens } from '../common/LayoutTokens';
 import { Haptic } from '../common/Haptic';
 import { HeaderBackdrop } from '../components/GlassHeaderBar';
+import { DynamicComposeBubble } from '../components/DynamicComposeBubble';
 import { DynamicApi } from '../api/DynamicApi';
 import { EmoteResolver } from '../common/EmoteResolver';
 import { EmoteImageCache } from '../common/EmoteImageCache';
@@ -1600,36 +1601,10 @@ export struct DynamicView {
         this.DynTypeFilter()
       }
 
-      // 发布动态 FAB：主页动态流右下角悬浮（非内嵌、已登录时显示）。
-      // align(Middle/BottomEnd) 锚定在悬浮 Dock 上方，不再用百分比 position 避免随屏高漂移。
-      // 发布动态 FAB：不依赖子组件 .align()（在该布局下会错位到顶部），
-      // 用独立全屏容器 + alignContent(BottomEnd) 直接锚定右下角，避开悬浮 Dock。
+      // 发布入口随惯用手平滑换边，保持位于 Dock 上方。
       if (this.login && this.hostMid <= 0 && this.embedded === false) {
-        Stack({ alignContent: Alignment.BottomEnd }) {
-          Stack({ alignContent: Alignment.Center }) {
-            Image($r('app.media.ic_comment'))
-              .width(22)
-              .height(22)
-              .fillColor('#FFFFFF')
-          }
-          .width(48)
-          .height(48)
-          .borderRadius(24)
-          .backgroundColor(this.accent)
-          .shadow({ radius: 12, color: '#66FB7299', offsetY: 3 })
-          .onClick(() => {
-            this.showComposer = true;
-          })
-          .stateStyles({
-            pressed: { opacity: 0.85 },
-            normal: { opacity: 1 },
-          })
-        }
-        .width('100%')
-        .height('100%')
-        .padding({ right: 16, bottom: Immersive.bottomInset() + 88 })
-        .hitTestBehavior(HitTestMode.Transparent)
-        .zIndex(50)
+        DynamicComposeBubble({ onCompose: () => { this.showComposer = true; } })
+          .zIndex(50)
       }
     }
     .width('100%')

@@ -30,6 +30,7 @@ export struct VideoCard {
   /** 首页采用更舒展的圆角和文字留白。 */
   @Prop homeStyle: boolean = false;
   @Prop horizontal: boolean = false;
+  @Prop highlightKeyword: string = '';
   /**
    * 卡片 id 前缀：同一窗口内可能有多个常驻容器渲染同一视频（首页推荐/热门 Tabs、
    * 搜索页与用户空间叠在首页之上），裸 bvid 会让 getRectangleById 命中离屏卡片，
@@ -51,6 +52,7 @@ export struct VideoCard {
     this.compact = params.compact === true;
     this.homeStyle = params.homeStyle === true;
     this.horizontal = params.horizontal === true;
+    this.highlightKeyword = params.highlightKeyword === undefined ? '' : params.highlightKeyword as string;
     this.idPrefix = params.idPrefix === undefined ? '' : params.idPrefix as string;
     this.wholeCardTransition = params.wholeCardTransition === true;
     // showMore 现为 @Prop（框架自动同步）；两个回调是普通属性，复用必须按新调用方重置。
@@ -76,6 +78,7 @@ export struct VideoCard {
         cover: biliImageThumbnail(this.video.cover, 900),
         coverId: this.coverId(),
         title: this.video.title,
+        highlightKeyword: this.highlightKeyword,
         upName: this.video.upName,
         overlayText: this.video.duration > 0 ? formatDuration(this.video.duration) : '',
         extraText: (this.video.playText || formatCount(this.video.play)) + ' 播放 · ' +

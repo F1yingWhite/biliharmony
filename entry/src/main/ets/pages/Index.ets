@@ -157,6 +157,17 @@ struct Index {
     this.syncBarColors();
   }
 
+  private returnToHome(): void {
+    PlayerCommandBus.stop();
+    Immersive.setFullscreen(false);
+    this.finishHeroNavTransition();
+    AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, false);
+    this.switchTab(0);
+    // 根页位于 Navigation 内容区，不在路径栈中；一次清空避免中间视频页依次恢复播放。
+    AppNavStack.clear(false);
+    this.syncBarColors();
+  }
+
   switchTab(index: number): void {
     this.currentTab = index;
     AppTheme.resetHeaderFade();
@@ -356,7 +367,7 @@ struct Index {
     } else if (name === NAV_VIDEO_DETAIL) {
       NavDestination() {
         if (Index.asVideoDetailParam(param) !== null) {
-          VideoDetailPage({ param: param as VideoDetailParam })
+          VideoDetailPage({ param: param as VideoDetailParam, onHome: () => this.returnToHome() })
         } else {
           this.InvalidParamContent()
         }

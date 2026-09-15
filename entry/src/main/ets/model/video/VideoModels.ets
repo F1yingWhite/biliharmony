@@ -442,10 +442,16 @@ export class PlayUrlInfo {
       if (id > 0 && dashAvailable.indexOf(id) < 0) dashAvailable.push(id);
     }
     dashAvailable.sort((a: number, b: number) => b - a);
-    // ≤1080P（qn 80）优先 durl 单路 MP4：单 AVPlayer 内部完成音画同步，彻底避开双轨
-    // 门控/校时的一类 bug；seek/快进只需对单文件发 Range 请求，缓冲明显更快。
-    // 高画质（1080P 高码率/4K/HDR，仅 DASH 提供）仍走双轨。
-    if (durl.length > 0 && info.quality <= 80) {
+    // 先按用户偏好确定实际可用档位，再选择传输格式；普通 MP4 不能遮住更高档 DASH。
+    let selectedQuality: number = dashAvailable.length > 0 ? dashAvailable[dashAvailable.length - 1] : info.quality;
+    for (let i: number = 0; i < dashAvailable.length; i++) {
+      if (dashAvailable[i] <= requestedQuality) {
+        selectedQuality = dashAvailable[i];
+        break;
+      }
+    }
+    if (durl.length > 0 && info.quality <= 80 &&
+      (dashAvailable.length === 0 || info.quality === selectedQuality)) {
       const first: Record<string, Object> = asObject(durl[0]);
       const candidates: Array<string> = [];
       const primary: string = toHttps(str(first, 'url', ''));
@@ -470,13 +476,6 @@ export class PlayUrlInfo {
     } else if (dashVideo.length > 0) {
       info.isDash = true;
       info.format = 'dash';
-      let selectedQuality: number = dashAvailable.length > 0 ? dashAvailable[0] : info.quality;
-      for (let i: number = 0; i < dashAvailable.length; i++) {
-        if (dashAvailable[i] <= requestedQuality) {
-          selectedQuality = dashAvailable[i];
-          break;
-        }
-      }
       info.quality = selectedQuality;
 
       // 对齐 PiliPlus：support_formats 全部展示，未返回实际 DASH 轨的会员画质标灰并说明原因。
