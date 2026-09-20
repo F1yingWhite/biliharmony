@@ -574,15 +574,16 @@ test('dynamic detail: failed continuation preserves comments and retries the sam
   const page = new Harness();
   Object.assign(page, {destroyed: false, repliesLoading: false, repliesFailed: false,
     repliesMoreFailed: false, repliesEpoch: epoch(env), item: {commentId: 1, commentType: 11},
-    repliesHasMore: true, replies: [{rpid: 1}], replyCursor: '2', replySortMode: 3, param: {}});
+    repliesHasMore: true, replySource: source(env, [{rpid: 1}]), repliesCount: 1,
+    replyCursor: '2', replySortMode: 3, param: {}});
   await page.loadReplies(false);
   assert.equal(page.repliesMoreFailed, true);
   assert.equal(page.repliesFailed, false);
   assert.equal(page.replyCursor, '2');
-  assert.deepEqual(page.replies, [{rpid: 1}]);
+  assert.deepEqual(page.replySource.getAll(), [{rpid: 1}]);
   await page.loadReplies(false);
   assert.deepEqual(calls, ['2', '2']);
-  assert.deepEqual(page.replies, [{rpid: 1}, {rpid: 2}]);
+  assert.deepEqual(page.replySource.getAll(), [{rpid: 1}, {rpid: 2}]);
   assert.equal(page.repliesMoreFailed, false);
   assert.equal(page.repliesHasMore, false);
   await page.loadReplies(false);
@@ -716,9 +717,9 @@ function bangumiRepliesHarness(api) {
   const Harness = env.methodHarness('pages/BangumiDetail', ANCHOR.privateLoadRepliesStart,
     ANCHOR.replyMutationComment, "import { CommentApi } from '../api/CommentApi';");
   const p = new Harness();
-  Object.assign(p, {destroyed:false, repliesEpoch:epoch(env), replies:[], repliesLoading:false,
-    repliesFailed:false, repliesMoreFailed:false, repliesHasMore:true, replyCursor:'', replySortMode:3,
-    oid:1, replyOid() {return this.oid;}});
+  Object.assign(p, {destroyed:false, repliesEpoch:epoch(env), replySource:source(env), repliesCount:0,
+    repliesLoading:false, repliesFailed:false, repliesMoreFailed:false, repliesHasMore:true,
+    replyCursor:'', replySortMode:3, oid:1, replyOid() {return this.oid;}});
   return p;
 }
 
@@ -731,9 +732,9 @@ test('PGC episode and sort changes supersede pending comments without old loadin
   p.oid=2; p.changeReplySort(2);
   assert.deepEqual(calls,[{oid:1,mode:3},{oid:2,mode:2}]);
   old.resolve({replies:[{rpid:1}],cursor:'old',hasMore:false}); await first;
-  assert.deepEqual(p.replies,[]); assert.equal(p.repliesLoading,true);
+  assert.deepEqual(p.replySource.getAll(),[]); assert.equal(p.repliesLoading,true);
   latest.resolve({replies:[{rpid:2}],cursor:'new',hasMore:true}); await tick();
-  assert.deepEqual(p.replies,[{rpid:2}]); assert.equal(p.replyCursor,'new');
+  assert.deepEqual(p.replySource.getAll(),[{rpid:2}]); assert.equal(p.replyCursor,'new');
   assert.equal(p.repliesLoading,false);
 });
 
@@ -743,12 +744,12 @@ test('PGC failed pagination preserves comments and cursor for same-page retry', 
     cursors.push(cursor); if(cursors.length===1) throw Error('offline');
     return {replies:[{rpid:2}],cursor:'end',hasMore:false};
   }});
-  p.replies=[{rpid:1}]; p.replyCursor='next';
+  p.replySource.reset([{rpid:1}]); p.repliesCount=1; p.replyCursor='next';
   await p.loadReplies(false);
-  assert.deepEqual(p.replies,[{rpid:1}]); assert.equal(p.repliesMoreFailed,true);
+  assert.deepEqual(p.replySource.getAll(),[{rpid:1}]); assert.equal(p.repliesMoreFailed,true);
   assert.equal(p.repliesFailed,false); assert.equal(p.replyCursor,'next');
   await p.loadReplies(false);
-  assert.deepEqual(cursors,['next','next']); assert.deepEqual(p.replies,[{rpid:1},{rpid:2}]);
+  assert.deepEqual(cursors,['next','next']); assert.deepEqual(p.replySource.getAll(),[{rpid:1},{rpid:2}]);
   assert.equal(p.repliesMoreFailed,false); assert.equal(p.repliesHasMore,false);
 });
 
@@ -841,12 +842,13 @@ test('dynamic comments: sorting during loading drops the old response',async()=>
   const Harness=env.methodHarness('pages/DynamicDetail',ANCHOR.privateLoadRepliesStart,ANCHOR.replyMutationComment,
     "import { CommentApi } from '../api/CommentApi';");
   const p=new Harness();Object.assign(p,{destroyed:false,repliesEpoch:epoch(env),repliesLoading:false,
-    item:{commentId:1,commentType:11},repliesHasMore:true,replies:[],replyCursor:'',replySortMode:3,param:{}});
+    item:{commentId:1,commentType:11},repliesHasMore:true,replySource:source(env),repliesCount:0,
+    replyCursor:'',replySortMode:3,param:{}});
   const pending=p.loadReplies(true);p.changeReplySort(2);
   old.resolve({replies:[{rpid:1}],cursor:'old',hasMore:false});await pending;
-  assert.equal(calls,2);assert.deepEqual(p.replies,[]);assert.equal(p.repliesLoading,true);
+  assert.equal(calls,2);assert.deepEqual(p.replySource.getAll(),[]);assert.equal(p.repliesLoading,true);
   latest.resolve({replies:[{rpid:2}],cursor:'new',hasMore:false});await tick();
-  assert.deepEqual(p.replies,[{rpid:2}]);assert.equal(p.replyCursor,'new');assert.equal(p.repliesLoading,false);
+  assert.deepEqual(p.replySource.getAll(),[{rpid:2}]);assert.equal(p.replyCursor,'new');assert.equal(p.repliesLoading,false);
 });
 
 test('dynamic comments: changing sort keeps visible rows until replacement and preserves them on failure',async()=>{
@@ -857,14 +859,15 @@ test('dynamic comments: changing sort keeps visible rows until replacement and p
   const Harness=env.methodHarness('pages/DynamicDetail',ANCHOR.privateLoadRepliesStart,ANCHOR.replyMutationComment,
     "import { CommentApi } from '../api/CommentApi';");
   const p=new Harness();Object.assign(p,{destroyed:false,repliesEpoch:epoch(env),repliesLoading:false,
-    item:{commentId:1,commentType:11},repliesHasMore:false,replies:[{rpid:9}],replyCursor:'old',replySortMode:3,param:{}});
-  p.changeReplySort(2);assert.deepEqual(p.replies,[{rpid:9}]);assert.equal(p.repliesLoading,true);
+    item:{commentId:1,commentType:11},repliesHasMore:false,replySource:source(env,[{rpid:9}]),repliesCount:1,
+    replyCursor:'old',replySortMode:3,param:{}});
+  p.changeReplySort(2);assert.deepEqual(p.replySource.getAll(),[{rpid:9}]);assert.equal(p.repliesLoading,true);
   failed.reject(Error('offline'));await tick();
-  assert.deepEqual(p.replies,[{rpid:9}]);assert.equal(p.replyCursor,'old');
+  assert.deepEqual(p.replySource.getAll(),[{rpid:9}]);assert.equal(p.replyCursor,'old');
   assert.equal(p.repliesMoreFailed,true);assert.equal(p.repliesRetryReset,true);
   const pending=p.loadReplies(p.repliesMoreFailed&&p.repliesRetryReset);
   retry.resolve({replies:[{rpid:10}],cursor:'new',hasMore:true});await pending;
-  assert.deepEqual(calls,[{cursor:'',mode:2},{cursor:'',mode:2}]);assert.deepEqual(p.replies,[{rpid:10}]);
+  assert.deepEqual(calls,[{cursor:'',mode:2},{cursor:'',mode:2}]);assert.deepEqual(p.replySource.getAll(),[{rpid:10}]);
 });
 
 test('dynamic feed: failed continuation keeps cards and offset, then retries the same page',async()=>{

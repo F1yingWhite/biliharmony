@@ -1,4 +1,5 @@
 import { RequestEpoch } from '../common/RequestEpoch';
+import { BasicDataSource } from '../common/BasicDataSource';
 /**
  * 番剧/影视（PGC）详情页：封面氛围头部（海报 + 评分 + 追番）+ 选集 + 简介 + 评论。
  * 入口：动态流 PGC 卡片。评论区复用动态详情的组装方式（type=1，oid 为当前集 aid）。
@@ -38,7 +39,10 @@ export struct BangumiDetailPage {
   @State followBusy: boolean = false;
   @State viewportWidth: number = 360;
   // ===== 评论（挂在当前集 aid 上，type=1） =====
-  @State replies: Array<ReplyItem> = [];
+  /** 评论懒加载数据源（无限翻页必须虚拟化；主列表统一从这里读写）。 */
+  private replySource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();
+  /** 评论行数（数据源为普通属性，空态/加载态分支需要响应式计数）。 */
+  @State repliesCount: number = 0;
   @State repliesLoading: boolean = false;
   @State repliesFailed: boolean = false;
   @State repliesMoreFailed: boolean = false;
@@ -84,6 +88,7 @@ export struct BangumiDetailPage {
     this.threadEpoch.invalidate();
     this.threadLoading = false;
     this.destroyed = true;
+    this.releaseShareCardQr();
   }
 
   /** 统一 toast：用 UIContext 版 PromptAction，避开全局 promptAction 的废弃告警。 */
@@ -174,7 +179,8 @@ export struct BangumiDetailPage {
       this.currentEpId = ep.epId;
       this.replyCursor = '';
       this.repliesHasMore = true;
-      this.replies = [];
+      this.replySource.clear();
+      this.repliesCount = 0;
       this.loadReplies(true).catch(() => {
       });
     }
@@ -222,12 +228,14 @@ export struct BangumiDetailPage {
     try {
       const data: ReplyData = await CommentApi.getReplies(oid, 1, reset ? '' : this.replyCursor, this.replySortMode);
       if (this.destroyed || !this.repliesEpoch.isCurrent(request)) return;
-      this.replies = reset ? data.replies : this.replies.concat(data.replies);
+      if (reset) this.replySource.reset(data.replies);
+      else this.replySource.append(data.replies);
+      this.repliesCount = this.replySource.totalCount();
       this.replyCursor = data.cursor;
       this.repliesHasMore = data.hasMore;
     } catch (e) {
       if (this.destroyed || !this.repliesEpoch.isCurrent(request)) return;
-      if (this.replies.length === 0) this.repliesFailed = true;
+      if (this.repliesCount === 0) this.repliesFailed = true;
       else this.repliesMoreFailed = true;
     } finally {
       if (!this.destroyed && this.repliesEpoch.isCurrent(request)) this.repliesLoading = false;
@@ -240,7 +248,8 @@ export struct BangumiDetailPage {
     this.replySortMode = mode;
     this.replyCursor = '';
     this.repliesHasMore = true;
-    this.replies = [];
+    this.replySource.clear();
+    this.repliesCount = 0;
     this.loadReplies(true).catch(() => {
     });
   }
@@ -251,14 +260,14 @@ export struct BangumiDetailPage {
    */
   private mutateReplyItem(rpid: number, mutate: (target: ReplyItem) => void): ReplyItem | null {
     let found: ReplyItem | null = null;
-    for (let i = 0; i < this.replies.length; i++) {
-      if (this.replies[i].rpid === rpid) {
-        found = this.replies[i];
-        mutate(this.replies[i]);
-        const next: ReplyItem = this.replies[i].clone();
-        next.rev = this.replies[i].rev + 1;
-        this.replies[i] = next;
-        this.replies = this.replies.slice();
+    const current: Array<ReplyItem> = this.replySource.getAll();
+    for (let i = 0; i < current.length; i++) {
+      if (current[i].rpid === rpid) {
+        found = current[i];
+        mutate(current[i]);
+        const next: ReplyItem = current[i].clone();
+        next.rev = current[i].rev + 1;
+        this.replySource.updateItem(i, next);
         break;
       }
     }
@@ -320,9 +329,10 @@ export struct BangumiDetailPage {
 
   private openReplyThread(root: ReplyItem): void {
     let latest: ReplyItem = root;
-    for (let i: number = 0; i < this.replies.length; i++) {
-      if (this.replies[i].rpid === root.rpid) {
-        latest = this.replies[i];
+    const current: Array<ReplyItem> = this.replySource.getAll();
+    for (let i: number = 0; i < current.length; i++) {
+      if (current[i].rpid === root.rpid) {
+        latest = current[i];
         break;
       }
     }
@@ -406,10 +416,13 @@ export struct BangumiDetailPage {
         root.count++;
         root.replies = [sent].concat(root.replies.filter((item: ReplyItem) => item.rpid !== sent.rpid));
         this.threadRoot = root;
-        for (let i: number = 0; i < this.replies.length; i++) {
-          if (this.replies[i].rpid === root.rpid) this.replies[i] = root;
+        const current: Array<ReplyItem> = this.replySource.getAll();
+        for (let i: number = 0; i < current.length; i++) {
+          if (current[i].rpid === root.rpid) {
+            this.replySource.updateItem(i, root);
+            break;
+          }
         }
-        this.replies = this.replies.slice();
         this.threadTargetRpid = root.rpid;
         this.threadTargetName = root.uname;
         this.toast('回复成功');
@@ -418,6 +431,15 @@ export struct BangumiDetailPage {
       }
     } finally {
       if (!this.destroyed) this.threadSending = false;
+    }
+  }
+
+  /** 删除评论成功后的本地移除：数据源重建 + 计数同步。 */
+  private removeReply(rpid: number): void {
+    const kept: Array<ReplyItem> = this.replySource.getAll().filter((x: ReplyItem) => x.rpid !== rpid);
+    if (kept.length !== this.replySource.totalCount()) {
+      this.replySource.reset(kept);
+      this.repliesCount = kept.length;
     }
   }
 
@@ -452,8 +474,22 @@ export struct BangumiDetailPage {
     })().catch(() => {
       this.toast('分享图片生成失败，请稍后重试');
     }).finally(() => {
+      // 截图已在 sharePixelMapAsImage 内释放；二维码只服务本次渲染，一并回收。
+      this.releaseShareCardQr();
       this.shareCardBusy = false;
     });
+  }
+
+  /** 释放分享卡二维码并复位；分享流程结束/页面销毁时调用，防止 PixelMap 滞留。 */
+  private releaseShareCardQr(): void {
+    if (this.shareCardQr !== null) {
+      try {
+        this.shareCardQr.release();
+      } catch (e) {
+        // 已释放的二维码忽略。
+      }
+      this.shareCardQr = null;
+    }
   }
 
   /** 离屏分享卡内容；字段在截图前一次性赋值，渲染期间不变化。 */
@@ -928,7 +964,7 @@ export struct BangumiDetailPage {
           .fontSize(12)
           .fontColor('#9499A0')
           .padding(18)
-      } else if (this.repliesLoading && this.replies.length === 0) {
+      } else if (this.repliesLoading && this.repliesCount === 0) {
         LoadingView({ loading: true, skeleton: 'comments' })
       } else if (this.repliesFailed) {
         Text('评论加载失败，点击重试')
@@ -937,40 +973,11 @@ export struct BangumiDetailPage {
           .padding(18)
           .onClick(() => this.loadReplies(true).catch(() => {
           }))
-      } else if (this.replies.length === 0) {
+      } else if (this.repliesCount === 0) {
         Text('暂时还没有评论')
           .fontSize(12)
           .fontColor('#9499A0')
           .padding(18)
-      } else {
-        ForEach(this.replies, (reply: ReplyItem) => {
-          ReplyCard({
-            item: reply,
-            showPreview: true,
-            version: this.replyVersion,
-            upMid: 0,
-            onLike: (item: ReplyItem) => this.likeReply(item).catch(() => {
-            }),
-            onDislike: (item: ReplyItem) => this.dislikeReply(item).catch(() => {
-            }),
-            onShare: (item: ReplyItem) => this.shareReplyAsImage(item),
-            onOpenThread: (item: ReplyItem) => this.openReplyThread(item),
-            // 主评论列表："回复"按钮 = 打开该评论的楼中楼面板（与 B 站一致）
-            onSelectReply: (item: ReplyItem) => this.openReplyThread(item),
-            onDeleted: (item: ReplyItem) => {
-              this.replies = this.replies.filter((x: ReplyItem) => x.rpid !== item.rpid);
-            },
-          })
-        // 稳定 key：点赞视觉态由 ReplyCard 的 @State 镜像原地刷新，避免整卡重建闪烁。
-        }, (reply: ReplyItem) => String(reply.rpid))
-        LoadMoreFooter({
-          loading: this.repliesLoading,
-          hasMore: this.repliesHasMore || this.repliesMoreFailed,
-          moreText: this.repliesMoreFailed ? '加载失败，点击重试' : '加载更多评论',
-          endText: '没有更多评论了',
-          fixedHeight: 46,
-          onLoadMore: () => this.loadReplies(this.repliesMoreFailed && this.repliesRetryReset).catch(() => {}),
-        })
       }
     }
     .width('100%')
@@ -995,23 +1002,60 @@ export struct BangumiDetailPage {
           },
         })
       } else {
-        Scroll(this.scroller) {
-          Column() {
-            this.Header()
-            this.EpisodeSection()
-            this.RelatedSection()
-            this.IntroSection()
-            this.CommentSection()
+        List({ scroller: this.scroller }) {
+          ListItem() {
+            Column() {
+              this.Header()
+              this.EpisodeSection()
+              this.RelatedSection()
+              this.IntroSection()
+              this.CommentSection()
+            }
+            .width('100%')
           }
-          .width('100%')
-          .padding({ bottom: Immersive.bottomInset() + 18 })
+          if (this.replyOid() > 0 && this.repliesCount > 0) {
+            LazyForEach(this.replySource, (reply: ReplyItem) => {
+              ListItem() {
+                ReplyCard({
+                  item: reply,
+                  showPreview: true,
+                  version: this.replyVersion,
+                  upMid: 0,
+                  onLike: (item: ReplyItem) => this.likeReply(item).catch(() => {
+                  }),
+                  onDislike: (item: ReplyItem) => this.dislikeReply(item).catch(() => {
+                  }),
+                  onShare: (item: ReplyItem) => this.shareReplyAsImage(item),
+                  onOpenThread: (item: ReplyItem) => this.openReplyThread(item),
+                  // 主评论列表："回复"按钮 = 打开该评论的楼中楼面板（与 B 站一致）
+                  onSelectReply: (item: ReplyItem) => this.openReplyThread(item),
+                  onDeleted: (item: ReplyItem) => this.removeReply(item.rpid),
+                })
+              }.padding({ left: 14, right: 14 })
+            // 稳定 key：点赞视觉态由 ReplyCard 的 @State 镜像原地刷新，避免整卡重建闪烁。
+            }, (reply: ReplyItem) => String(reply.rpid))
+            ListItem() {
+              LoadMoreFooter({
+                loading: this.repliesLoading,
+                hasMore: this.repliesHasMore || this.repliesMoreFailed,
+                moreText: this.repliesMoreFailed ? '加载失败，点击重试' : '加载更多评论',
+                endText: '没有更多评论了',
+                fixedHeight: 46,
+                onLoadMore: () => this.loadReplies(this.repliesMoreFailed && this.repliesRetryReset).catch(() => {}),
+              })
+            }.padding({ left: 14, right: 14 })
+          }
+          // 尾部留白：替代原 Scroll 内容底部内边距。
+          ListItem() {
+            Column().width('100%').height(Immersive.bottomInset() + 18)
+          }
         }
         .width('100%')
         .layoutWeight(1)
         .constraintSize({ maxWidth: LayoutTokens.pageMaxWidth })
         .alignSelf(ItemAlign.Center)
-        // Scroll 内容不足一屏时默认居中，内容应从顶部开始排。
-        .align(Alignment.TopStart)
+        .edgeEffect(EdgeEffect.None)
+        .cachedCount(4)
         .scrollBar(BarState.Off)
         if (this.replyOid() > 0) {
           ReplyComposer({

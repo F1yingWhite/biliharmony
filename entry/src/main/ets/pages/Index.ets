@@ -1,3 +1,5 @@
+import { PreferencesPage } from './PreferencesPage';
+import { NAV_APPEARANCE, NAV_PLAYBACK_SETTINGS } from '../common/AppRouter';
 import { YouTubeView } from '../views/YouTubeView';
 import { YouTubeDetailPage } from './YouTubeDetail';
 import { YouTubeSavedPage } from './YouTubeSaved';
@@ -218,9 +220,11 @@ struct Index {
     const duration: number = AppStorage.get<number>(HERO_NAV_TRANSITION_DURATION_KEY) ?? 360;
     // push 后目标页本身会阻断输入；pop 开始时来源页立即重新获得手势，必须额外冻结。
     this.heroTransitionInputLocked = operation === NavigationOperation.POP;
+    let transitionToken: number = -1;
     return {
       timeout: duration + 240,
       onTransitionEnd: (_success: boolean): void => {
+        if (transitionToken !== this.heroTransitionToken) return;
         this.heroTransitionProxy = null;
         this.heroTransitionToken++;
         AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, false);
@@ -230,6 +234,7 @@ struct Index {
       transition: (proxy: NavigationTransitionProxy): void => {
         this.heroTransitionProxy = proxy;
         const token: number = ++this.heroTransitionToken;
+        transitionToken = token;
         this.heroTransitionClock = 0;
         // POP 时透明阻断层实际参与这段 UI 动画。即使页面自己的 onFinish 丢失，
         // UI 动画时钟仍会提交转场，不依赖单一 JS 定时器。
@@ -325,7 +330,12 @@ struct Index {
 
   @Builder
   PageMap(name: string, param: Object) {
-    if (name === NAV_SEARCH) {
+    if (name === NAV_APPEARANCE || name === NAV_PLAYBACK_SETTINGS) {
+      NavDestination() {
+        PreferencesPage({ playback: name === NAV_PLAYBACK_SETTINGS })
+      }
+      .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
+    } else if (name === NAV_SEARCH) {
       NavDestination() {
         SearchPage()
       }
@@ -403,6 +413,7 @@ struct Index {
         const videoParam = Index.asVideoDetailParam(param);
         if (videoParam !== null && videoParam.mirrorHeroReturn !== false &&
           (videoParam.srcRect !== undefined || videoParam.cardRect !== undefined)) {
+          AppStorage.setOrCreate<number>('videoDetailCloseTargetIndex', AppNavStack.size() - 1);
           const request: number = AppStorage.get<number>('videoDetailCloseRequest') ?? 0;
           AppStorage.setOrCreate<number>('videoDetailCloseRequest', request + 1);
           return true;
@@ -857,6 +868,7 @@ struct Index {
       }
       .width('100%')
       .height('100%')
+      .id('bili_main_navigation')
       .hideTitleBar(true)
       .mode(NavigationMode.Stack)
       .navDestination(this.PageMap)

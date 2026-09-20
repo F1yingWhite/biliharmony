@@ -5,13 +5,13 @@ import { RequestEpoch } from '../common/RequestEpoch';
  */
 import { DynamicItem, DynamicPageData, DynamicRichNode, BiliEmote, RelationUserItem,
   RelationUserPageData } from '../model/Models';
-import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
+import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   NAV_DYNAMIC_DETAIL,
   NAV_IMAGE_VIEWER,
   NAV_LIVE_ROOM, NAV_LOGIN,
   NAV_VIDEO_DETAIL,
   NAV_USER_SPACE, DynamicDetailParam, ImageViewerParam, ImageViewerSrcRect, LiveRoomParam, VideoDetailParam,
-    UserSpaceParam, NAV_BANGUMI_DETAIL, BangumiDetailParam } from '../common/AppRouter';
+    UserSpaceParam, NAV_BANGUMI_DETAIL, BangumiDetailParam, setHeroBgSnapshot } from '../common/AppRouter';
 import { ActionResult } from '../api/BiliApi';
 import { UserStore } from '../services/auth/UserStore';
 import { LoadingView } from '../components/LoadingView';
@@ -25,7 +25,7 @@ import { DecoratedAvatar, UserDecorationBanner } from '../components/UserDecorat
 import { LayoutTokens } from '../common/LayoutTokens';
 import { Haptic } from '../common/Haptic';
 import { HeaderBackdrop } from '../components/GlassHeaderBar';
-import { DynamicComposeBubble } from '../components/DynamicComposeBubble';
+import { Handedness } from '../common/Handedness';
 import { DynamicApi } from '../api/DynamicApi';
 import { EmoteResolver } from '../common/EmoteResolver';
 import { EmoteImageCache } from '../common/EmoteImageCache';
@@ -183,6 +183,11 @@ export struct DynCard {
    * 看图入场便从错误的矩形（常是相邻页签方向）放大。各容器传唯一前缀区分。
    */
   @Prop idPrefix: string = '';
+  /**
+   * 点赞成功回调：@Prop item 是深拷贝快照，卡片上的乐观更新不会进入数据源；
+   * 必须把结果回传给持有数据源的父级（按 dynId 定位，不捕获索引，复用场景不串卡）。
+   */
+  onLikeResult: (dynId: string, liked: boolean, count: number) => void = () => {};
   @State liked: boolean = false;
   @State likeCount: number = 0;
   @State forwardCount: number = 0;
@@ -213,6 +218,10 @@ export struct DynCard {
       this.item = next;
     }
     this.idPrefix = params.idPrefix === undefined ? '' : params.idPrefix as string;
+    // 普通成员变量复用时不会自动同步：数据源不变则各次创建传入的是同一父级回调，兜底重取一次。
+    const likeCb: ((dynId: string, liked: boolean, count: number) => void) | undefined =
+      params.onLikeResult as ((dynId: string, liked: boolean, count: number) => void) | undefined;
+    if (likeCb !== undefined) this.onLikeResult = likeCb;
     this.actionBusy = false;
     this.syncFromItem();
   }
@@ -294,11 +303,13 @@ export struct DynCard {
     }
   }
 
-  /** 表情图渲染源：已缓存用本地路径，否则用网络 URL。 */
+  /** 表情图渲染源：只使用本地路径，等待统一下载器完成。 */
   private emoteSrc(image: string): string {
     if (image.length === 0) return '';
     const local: string | undefined = this.emoteLocal.get(image);
-    return local !== undefined && local.length > 0 ? local : image;
+    if (local !== undefined && local.length > 0) return local;
+    const cached: string = EmoteImageCache.localPathOf(image);
+    return cached !== image ? cached : '';
   }
 
   private toast(message: string): void {
@@ -327,30 +338,42 @@ export struct DynCard {
       return;
     }
     if (this.item.dynId.length === 0) return;
+    // 点赞期间卡片可能被复用成另一条动态：本地状态只允许写回同一 dynId 的卡片，跨卡写入会串卡。
+    const dynId: string = this.item.dynId;
     const next: boolean = this.liked ? false : true;
     const prevLiked: boolean = this.liked;
     const prevCount: number = this.likeCount;
+    const nextCount: number = Math.max(0, prevCount + (next ? 1 : -1));
+    // 乐观更新只写本卡 UI（@Prop 深拷贝），权威值由 onLikeResult 回写父级数据源。
     this.liked = next;
-    this.likeCount = Math.max(0, this.likeCount + (next ? 1 : -1));
+    this.likeCount = nextCount;
     this.item.liked = next;
-    this.item.like = this.likeCount;
+    this.item.like = nextCount;
     this.actionBusy = true;
     try {
-      const result: ActionResult = await DynamicApi.likeDynamic(this.item.dynId, next);
+      const result: ActionResult = await DynamicApi.likeDynamic(dynId, next);
+      const sameItem: boolean = this.item.dynId === dynId;
       if (result.ok === false) {
+        if (sameItem) {
+          this.liked = prevLiked;
+          this.likeCount = prevCount;
+          this.item.liked = prevLiked;
+          this.item.like = prevCount;
+        }
+        this.toast(result.message);
+      } else {
+        // 接口成功才回写数据源真身：卡片复用重建（aboutToReuse → syncFromItem）从数据源回读，
+        // 不回写则点赞态会随回收滚动回退。回调按 dynId 定位，卡片即使已复用也不受影响。
+        this.onLikeResult(dynId, next, nextCount);
+        this.toast(next ? '点赞成功' : '已取消点赞');
+      }
+    } catch (e) {
+      if (this.item.dynId === dynId) {
         this.liked = prevLiked;
         this.likeCount = prevCount;
         this.item.liked = prevLiked;
         this.item.like = prevCount;
-        this.toast(result.message);
-      } else {
-        this.toast(next ? '点赞成功' : '已取消点赞');
       }
-    } catch (e) {
-      this.liked = prevLiked;
-      this.likeCount = prevCount;
-      this.item.liked = prevLiked;
-      this.item.like = prevCount;
       this.toast('网络异常，请稍后重试');
     } finally {
       this.actionBusy = false;
@@ -574,7 +597,7 @@ export struct DynCard {
           w: this.getUIContext().px2vp(cardArea.size.width),
           h: this.getUIContext().px2vp(cardArea.size.height),
         };
-        AppStorage.setOrCreate<image.PixelMap>(HERO_BG_SNAPSHOT_KEY, snapshot);
+        setHeroBgSnapshot(snapshot);
         AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
         AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
         AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
@@ -1014,6 +1037,11 @@ export struct DynamicView {
   @State showComposer: boolean = false;
   @State composerText: string = '';
   @State composing: boolean = false;
+  // 发布气泡（悬浮入口）：随惯用手换边。必须是本页 @Builder 而非自定义组件——
+  // 自定义组件的包装节点是 HitTestMode.Default，全屏容器会拦截整个动态列表的滑动与点击。
+  @StorageProp(Handedness.KEY_SIDE) @Watch('onComposeHandSideChanged') composeHandSide: string = Handedness.RIGHT;
+  @State composeHandPosition: number = 0;
+  @State composeContainerWidth: number = 0;
   // 顶部「关注 UP 主」横滑栏：登录后拉取关注列表第一页，不阻塞动态流加载。
   @State followed: Array<RelationUserItem> = [];
   /** uid -> 直播间 roomId（仅直播中的 UP；由批量开播状态接口异步补充，失败不影响横滑条）。 */
@@ -1061,7 +1089,15 @@ export struct DynamicView {
     EmoteResolver.ensureLoaded();
     // 切到动态 Tab 时强制回到顶部状态，避免残留 fade 导致搜索栏和搜索球同时出现。
     AppTheme.resetHeaderFade();
+    this.composeHandPosition = this.composeHandSide === Handedness.LEFT ? 1 : 0;
     this.init().catch(() => {
+    });
+  }
+
+  /** 惯用手切换：只驱动气泡位移动画，不触发动态列表刷新。 */
+  private onComposeHandSideChanged(): void {
+    this.getUIContext().animateTo({ duration: 320, curve: Curve.EaseInOut }, () => {
+      this.composeHandPosition = this.composeHandSide === Handedness.LEFT ? 1 : 0;
     });
   }
 
@@ -1138,6 +1174,23 @@ export struct DynamicView {
       this.init();
     } else {
       this.loadFeed(this.feedMoreFailed && this.feedRetryReset);
+    }
+  }
+
+  /**
+   * 点赞结果回写数据源真身：DynCard 的 @Prop item 是深拷贝，卡片内改动不进入 dynSource，
+   * 卡片被回收再复用时 syncFromItem 会从数据源回读旧值导致点赞态回退。这里按 dynId 找到
+   * 真身原地重赋值字段即可——触发点赞的卡片保持乐观 UI，无需 notifyItemChanged 重绑
+   * （四个分类页签共用同一 dynSource，原地修改对全部页签的后续复用生效）。
+   */
+  private handleLikeResult(dynId: string, liked: boolean, count: number): void {
+    const items: Array<DynamicItem> = this.dynSource.getAll();
+    for (let i: number = 0; i < items.length; i++) {
+      if (items[i].dynId === dynId) {
+        items[i].liked = liked;
+        items[i].like = count;
+        return;
+      }
     }
   }
 
@@ -1401,6 +1454,41 @@ export struct DynamicView {
     .justifyContent(FlexAlign.Center)
   }
 
+  /**
+   * 发布动态悬浮入口。外层容器 hitTestBehavior(None)：自身不参与命中测试、不阻塞列表，
+   * 仅按钮子节点可点击（与 HeaderBackdrop 同款覆盖层语义）。
+   */
+  @Builder
+  ComposeOverlay() {
+    Stack({ alignContent: Alignment.BottomEnd }) {
+      Stack({ alignContent: Alignment.Center }) {
+        Image($r('app.media.ic_comment'))
+          .width(22).height(22).fillColor('#FFFFFF')
+      }
+      .width(48).height(48).borderRadius(24)
+      .backgroundColor(this.accent)
+      .shadow({ radius: 12, color: '#66FB7299', offsetY: 3 })
+      // 48vp 按钮，两侧各留 16vp；保持同一节点，点击区域随位移一起移动。
+      .translate({ x: -Math.max(0, this.composeContainerWidth - 80) * this.composeHandPosition })
+      .id('dynamic-compose-entry')
+      .accessibilityText('发布动态')
+      .onClick(() => {
+        this.showComposer = true;
+      })
+      .stateStyles({
+        pressed: { opacity: 0.85 },
+        normal: { opacity: 1 },
+      })
+    }
+    .width('100%').height('100%')
+    .padding({ left: 16, right: 16, bottom: Immersive.bottomInset() + 88 })
+    .onAreaChange((_old: Area, area: Area) => {
+      this.composeContainerWidth = Number(area.width);
+    })
+    .hitTestBehavior(HitTestMode.None)
+    .zIndex(50)
+  }
+
   /** 动态图片 id 前缀基座：主页动态 tab 与用户空间内嵌实例可能同屏共存，按场景+hostMid 区分。 */
   private cardIdPrefix(tabIdx: number): string {
     return (this.embedded ? 'dyn-e' + String(this.hostMid) : 'dyn-h') + '-' + String(tabIdx) + '-';
@@ -1450,8 +1538,12 @@ export struct DynamicView {
           LazyForEach(this.dynSource, (item: DynamicItem) => {
             ListItem() {
               // 主页底部 Tabs 里的动态流（Navigation 根页面）走 push + srcRect 矩形放大看图。
+              // onLikeResult 闭包只引用父级 this，按 dynId 回写数据源，复用不捕获过期索引。
               DynCard({ item: item, embedded: this.embedded, sharedImageTransition: this.embedded,
-                idPrefix: this.cardIdPrefix(tabIdx) })
+                idPrefix: this.cardIdPrefix(tabIdx),
+                onLikeResult: (dynId: string, liked: boolean, count: number) => {
+                  this.handleLikeResult(dynId, liked, count);
+                } })
             }
           }, (item: DynamicItem) => item.dynId)
           ListItem() {
@@ -1603,8 +1695,7 @@ export struct DynamicView {
 
       // 发布入口随惯用手平滑换边，保持位于 Dock 上方。
       if (this.login && this.hostMid <= 0 && this.embedded === false) {
-        DynamicComposeBubble({ onCompose: () => { this.showComposer = true; } })
-          .zIndex(50)
+        this.ComposeOverlay()
       }
     }
     .width('100%')

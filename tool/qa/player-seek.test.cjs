@@ -62,7 +62,7 @@ test('user pause during seek prevents automatic playback restoration', async () 
 });
 function syncHarness() {
   const source = fs.readFileSync('entry/src/main/ets/components/player/PlayerView.ets', 'utf8');
-  const start = source.indexOf('  private checkAudioSync(');
+  const start = source.indexOf('  private audioSyncRate:');
   const end = source.indexOf('  private invalidatePlayerCreation()', start);
   assert.ok(start >= 0 && end > start);
   const module = {exports: {}};
@@ -71,16 +71,19 @@ function syncHarness() {
   }).outputText)(module, module.exports);
   const h = new module.exports.Harness();
   Object.assign(h, {playing: true, audioPrepared: true, audioDriftSamples: 0, lastAudioSyncAtMs: -1,
-    seekCtl: {seekInFlight: false}, audioPlayer: {state: 'playing', currentTime: 12000}, calls: [],
-    seekTo(time) {this.calls.push(time);}});
+    playbackRate: 1, seekCtl: {seekInFlight: false}, calls: [],
+    audioPlayer: {state: 'playing', currentTime: 12000, setPlaybackRate(rate) {h.calls.push(rate);},
+      pause() {assert.fail('continuous audio must not pause');}, seek() {assert.fail('continuous audio must not seek');}},
+    seekTo() {assert.fail('automatic correction must not seek video');},
+    gateAudioStart() {assert.fail('continuous audio must not enter pause/seek gate');}});
   return h;
 }
-test('sustained drift uses a paired correction and respects cooldown', () => {
+test('sustained drift smoothly adjusts audio without pause or seek and respects cooldown', () => {
   const h = syncHarness();
   h.checkAudioSync(10000); h.checkAudioSync(10000); assert.deepEqual(h.calls, []);
-  h.checkAudioSync(10000); assert.deepEqual(h.calls, [10]);
+  h.checkAudioSync(10000); assert.deepEqual(h.calls, [0.97]);
   for (let i = 0; i < 10; i++) h.checkAudioSync(10000);
-  assert.deepEqual(h.calls, [10]);
+  assert.deepEqual(h.calls, [0.97]);
 });
 test('a transient clock difference does not interrupt playback', () => {
   const h = syncHarness(); h.checkAudioSync(10000); h.checkAudioSync(12000);
@@ -92,4 +95,69 @@ test('buffering, background playback and active seek do not trigger drift correc
     for (let i = 0; i < 10; i++) h.checkAudioSync(10000);
     assert.deepEqual(h.calls, [], flag);
   }
+});
+
+test('delayed timeUpdate does not look like drift when live player clocks agree', () => {
+  const h = syncHarness();
+  h.player = {currentTime: 12000};
+  for (let i = 0; i < 10; i++) h.checkAudioSync(10000);
+  assert.deepEqual(h.calls, []);
+});
+
+test('audio correction converges and restores the selected playback rate', () => {
+  const h = syncHarness();
+  for (let i = 0; i < 3; i++) h.checkAudioSync(10000);
+  h.checkAudioSync(11950);
+  assert.deepEqual(h.calls, [0.97, 1]);
+  h.checkAudioSync(12000);
+  assert.deepEqual(h.calls, [0.97, 1], 'do not resend the same rate every frame');
+});
+test('lagging audio speeds up and temporary speed is never overwritten', () => {
+  const h = syncHarness(); h.playbackRate = 2;
+  for (let i = 0; i < 3; i++) h.checkAudioSync(13000);
+  assert.deepEqual(h.calls, [2.06]);
+  h.holdSpeedActive = true;
+  h.checkAudioSync(13000);
+  assert.deepEqual(h.calls, [2.06]);
+});
+test('unsupported fine rate adjustment never falls back to interrupting audio', () => {
+  const h = syncHarness(); h.audioPlayer.setPlaybackRate = () => {throw new Error('unsupported');};
+  for (let i = 0; i < 9; i++) h.checkAudioSync(10000);
+  assert.equal(h.audioSyncRate, -1);
+});
+
+test('speed transition suppresses transient drift without changing audio rate', () => {
+  const h = syncHarness();
+  h.speedTransitionUntilMs = Date.now() + 1500;
+  for (let i = 0; i < 10; i++) h.checkAudioSync(10000);
+  assert.deepEqual(h.calls, []);
+  h.speedTransitionUntilMs = 0;
+  for (let i = 0; i < 3; i++) h.checkAudioSync(10000);
+  assert.deepEqual(h.calls, [0.97]);
+});
+
+test('short speed-change buffering does not pause audio, sustained buffering still does', () => {
+  const source = fs.readFileSync('entry/src/main/ets/components/player/PlayerView.ets', 'utf8');
+  const a = source.indexOf('      let bufferingAudioPause:');
+  const b = source.indexOf("      p.on('videoSizeChange'", a);
+  assert.ok(a >= 0 && b > a);
+  const code = ts.transpileModule(source.slice(a, b), {
+    compilerOptions: {target: ts.ScriptTarget.ES2020}
+  }).outputText;
+  let handler, timer, pauses = 0;
+  const p = {on(name, callback) {handler = callback;}};
+  const h = {player: p, playing: true, audioPrepared: true, speedTransitionUntilMs: Date.now() + 1500,
+    seekCtl: {seekInFlight: false}, pauseDmLoop() {}, startDmLoop() {}, cancelAudioGate() {},
+    audioPlayer: {state: 'playing', setVolume() {}, pause() {pauses++; return Promise.resolve();}}};
+  new Function('p', 'media', 'setTimeout', 'clearTimeout', code).call(h, p,
+    {BufferingInfoType: {BUFFERING_START: 0, BUFFERING_END: 1}},
+    callback => {timer = callback; return 1;}, () => {timer = null;});
+  handler(0, 0);
+  assert.equal(pauses, 0);
+  handler(1, 0);
+  assert.equal(timer, null);
+  assert.equal(pauses, 0);
+  handler(0, 0);
+  timer();
+  assert.equal(pauses, 1);
 });

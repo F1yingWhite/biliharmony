@@ -1,14 +1,14 @@
 /**
  * 用户域 API：当前登录用户 / 用户统计 / 关系 / 用户空间信息 / 投稿列表。
  */
-import { HttpClient, HttpResponse } from '../services/network/HttpClient';
-import { WbiSign } from '../common/WbiSign';
+import { HttpClient, HttpResponse, RequestPriority } from '../services/network/HttpClient';
 import { appSign } from '../common/AppSign';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber, asString, str, toHttps } from '../common/Utils';
 import { RelationUserItem, RelationUserPageData, SpaceArcData, UserInfo, UserSpaceHeaderItem, UserSpaceInfo,
   UserStat, VideoItem, FollowTagItem } from '../model/Models';
-import { ActionResult, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
+import { ActionResult, getData, postVideoAction, webGet, webGetSigned, webGetWithPriority,
+  webPost } from './internal/ApiCommon';
 
 class SpaceDecorationInfo {
   light: string = '';
@@ -32,7 +32,7 @@ export class UserApi {
     // acc/info 已移除 stat 字段；/x/web-interface/card 的 data 根直接带 follower/following/like_num。
     try {
       const params: Record<string, string> = { 'mid': String(mid), 'photo': 'false' };
-      const resp: HttpResponse = await webGet(Api.memberCardInfo, params);
+      const resp: HttpResponse = await webGetWithPriority(Api.memberCardInfo, params, '', RequestPriority.LOW);
       if (!resp.ok) {
         return new UserStat();
       }
@@ -80,8 +80,7 @@ export class UserApi {
   static async getUserSpaceInfo(mid: number): Promise<UserSpaceInfo | null> {
     const decorationPromise: Promise<SpaceDecorationInfo> = UserApi.getUserSpaceDecoration(mid);
     const params: Record<string, string> = { 'mid': String(mid) };
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.memberInfo, params);
+    const resp: HttpResponse = await webGetSigned(Api.memberInfo, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return null;
@@ -182,8 +181,8 @@ export class UserApi {
       'ps': '30',
       'order': order,
     };
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.memberArcSearch, params);
+    const resp: HttpResponse = await webGetSigned(Api.memberArcSearch, params, '', undefined,
+      RequestPriority.LOW);
     const result: SpaceArcData = new SpaceArcData();
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
@@ -201,7 +200,8 @@ export class UserApi {
 
   static async getRelation(mid: number): Promise<number | null> {
     if (mid <= 0) return null;
-    const resp: HttpResponse = await webGet(Api.userRelation, { 'fid': String(mid) });
+    const resp: HttpResponse = await webGetWithPriority(Api.userRelation, { 'fid': String(mid) },
+      '', RequestPriority.HIGH);
     const data: Record<string, Object> | null = getData(resp);
     return data === null ? null : asNumber(data['attribute'], 0);
   }

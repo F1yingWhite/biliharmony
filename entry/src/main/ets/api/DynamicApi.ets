@@ -2,11 +2,11 @@
  * 动态域 API：单条详情 / 关注动态 feed / 点赞 / 转发 / 用户空间动态。
  */
 import { HttpClient, HttpResponse } from '../services/network/HttpClient';
-import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asBool, asNumber, str, randomString } from '../common/Utils';
 import { DynamicItem, DynamicPageData } from '../model/Models';
-import { ActionResult, actionWithCsrf, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
+import { ActionResult, actionWithCsrf, getData, postVideoAction, webGet, webGetSigned,
+  webPost } from './internal/ApiCommon';
 
 export class DynamicApi {
   static async getDynamicDetail(id: string): Promise<DynamicItem | null> {
@@ -129,8 +129,7 @@ export class DynamicApi {
       'dm_img_inter': '{"ds":[],"wh":[0,0,0],"of":[0,0,0]}',
       'x-bili-device-req-json': '{"platform":"web","device":"pc","spmid":"333.1387"}',
     };
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.memberDynamic, params,
+    const resp: HttpResponse = await webGetSigned(Api.memberDynamic, params,
       'https://space.bilibili.com/' + String(mid) + '/dynamic',
       { 'Origin': 'https://space.bilibili.com' });
     return DynamicApi.parseDynamicPage(resp);

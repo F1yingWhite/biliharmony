@@ -6,6 +6,7 @@ import { VideoItem } from '../../model/Models';
 import { formatCount, formatDuration } from '../../common/Utils';
 import { Haptic } from '../../common/Haptic';
 
+@Reusable
 @Component
 export struct RelatedVideoRow {
   @Prop item: VideoItem = new VideoItem();
@@ -14,6 +15,10 @@ export struct RelatedVideoRow {
   onOpen: (item: VideoItem) => void = () => {};
   onReport: (item: VideoItem) => void = () => {};
   onHide: (item: VideoItem) => void = () => {};
+
+  aboutToReuse(params: Record<string, Object>): void {
+    this.item = params['item'] as VideoItem;
+  }
 
   build() {
     Row({ space: 10 }) {

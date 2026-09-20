@@ -1,6 +1,7 @@
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { LoadingView } from '../components/LoadingView';
 import { RequestEpoch } from '../common/RequestEpoch';
+import { BasicDataSource } from '../common/BasicDataSource';
 /** 动态详情：首屏复用 feed 对象，随后从 detail 接口补齐正文、表情和评论 subject。 */
 import { AppNavStack, DynamicDetailParam, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   ImageViewerSrcRect, NAV_LOGIN } from '../common/AppRouter';
@@ -48,7 +49,10 @@ export struct DynamicDetailPage {
   @State item: DynamicItem = new DynamicItem();
   @State loading: boolean = false;
   @State loadFailed: boolean = false;
-  @State replies: Array<ReplyItem> = [];
+  /** 评论懒加载数据源（无限翻页必须虚拟化；主列表统一从这里读写）。 */
+  private replySource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();
+  /** 评论行数（数据源为普通属性，空态/加载态分支需要响应式计数）。 */
+  @State repliesCount: number = 0;
   @State repliesLoading: boolean = false;
   private repliesEpoch: RequestEpoch = new RequestEpoch();
   private repliesRetryReset: boolean = false;
@@ -230,6 +234,7 @@ export struct DynamicDetailPage {
     this.threadEpoch.invalidate();
     this.threadLoading = false;
     this.destroyed = true;
+    this.releaseShareCardQr();
   }
 
   private async loadDetail(): Promise<void> {
@@ -240,7 +245,7 @@ export struct DynamicDetailPage {
       const detail: DynamicItem | null = await DynamicApi.getDynamicDetail(this.item.dynId);
       if (!this.destroyed && detail !== null) {
         this.item = detail;
-        if (this.replies.length === 0 && !this.repliesLoading) await this.loadReplies(true);
+        if (this.repliesCount === 0 && !this.repliesLoading) await this.loadReplies(true);
       }
       if (!this.destroyed && detail === null) this.loadFailed = true;
     } catch (e) {
@@ -262,7 +267,9 @@ export struct DynamicDetailPage {
       const data: ReplyData = await CommentApi.getReplies(this.item.commentId, this.item.commentType,
         reset ? '' : this.replyCursor, this.replySortMode);
       if (this.destroyed || !this.repliesEpoch.isCurrent(request)) return;
-      this.replies = reset ? data.replies : this.replies.concat(data.replies);
+      if (reset) this.replySource.reset(data.replies);
+      else this.replySource.append(data.replies);
+      this.repliesCount = this.replySource.totalCount();
       this.replyCursor = data.cursor;
       this.repliesHasMore = data.hasMore;
       if (this.param.focusComments === true && !this.focusPerformed) {
@@ -273,7 +280,7 @@ export struct DynamicDetailPage {
       }
     } catch (e) {
       if (!this.destroyed && this.repliesEpoch.isCurrent(request)) {
-        if (this.replies.length === 0) this.repliesFailed = true;
+        if (this.repliesCount === 0) this.repliesFailed = true;
         else this.repliesMoreFailed = true;
       }
     } finally {
@@ -296,11 +303,10 @@ export struct DynamicDetailPage {
    */
   private mutateReplyItem(rpid: number, mutate: (target: ReplyItem) => void): ReplyItem | null {
     let found: ReplyItem | null = null;
-    const main: ReplyCloneResult | null = mutateReplyInArray(this.replies, rpid, mutate);
+    const main: ReplyCloneResult | null = mutateReplyInArray(this.replySource.getAll(), rpid, mutate);
     if (main !== null) {
       found = main.clone;
-      this.replies[main.index] = main.clone;
-      this.replies = this.replies.slice();
+      this.replySource.updateItem(main.index, main.clone);
     }
     const thread: ReplyCloneResult | null = mutateReplyInArray(this.threadReplies, rpid, mutate);
     if (thread !== null) {
@@ -315,6 +321,15 @@ export struct DynamicDetailPage {
     }
     this.replyVersion++;
     return found;
+  }
+
+  /** 删除评论成功后的本地移除：数据源重建 + 计数同步。 */
+  private removeReply(rpid: number): void {
+    const kept: Array<ReplyItem> = this.replySource.getAll().filter((x: ReplyItem) => x.rpid !== rpid);
+    if (kept.length !== this.replySource.totalCount()) {
+      this.replySource.reset(kept);
+      this.repliesCount = kept.length;
+    }
   }
 
   private ensureReplyLogin(isLike: boolean): boolean {
@@ -355,9 +370,10 @@ export struct DynamicDetailPage {
 
   private openReplyThread(root: ReplyItem): void {
     let latest: ReplyItem = root;
-    for (let i: number = 0; i < this.replies.length; i++) {
-      if (this.replies[i].rpid === root.rpid) {
-        latest = this.replies[i];
+    const current: Array<ReplyItem> = this.replySource.getAll();
+    for (let i: number = 0; i < current.length; i++) {
+      if (current[i].rpid === root.rpid) {
+        latest = current[i];
         break;
       }
     }
@@ -441,10 +457,13 @@ export struct DynamicDetailPage {
         root.count++;
         root.replies = [sent].concat(root.replies.filter((item: ReplyItem) => item.rpid !== sent.rpid));
         this.threadRoot = root;
-        for (let i: number = 0; i < this.replies.length; i++) {
-          if (this.replies[i].rpid === root.rpid) this.replies[i] = root;
+        const current: Array<ReplyItem> = this.replySource.getAll();
+        for (let i: number = 0; i < current.length; i++) {
+          if (current[i].rpid === root.rpid) {
+            this.replySource.updateItem(i, root);
+            break;
+          }
         }
-        this.replies = this.replies.slice();
         this.threadTargetRpid = root.rpid;
         this.threadTargetName = root.uname;
         this.toast('回复成功');
@@ -480,8 +499,22 @@ export struct DynamicDetailPage {
     })().catch(() => {
       this.toast('分享图片生成失败，请稍后重试');
     }).finally(() => {
+      // 截图已在 sharePixelMapAsImage 内释放；二维码只服务本次渲染，一并回收。
+      this.releaseShareCardQr();
       this.shareCardBusy = false;
     });
+  }
+
+  /** 释放分享卡二维码并复位；分享流程结束/页面销毁时调用，防止 PixelMap 滞留。 */
+  private releaseShareCardQr(): void {
+    if (this.shareCardQr !== null) {
+      try {
+        this.shareCardQr.release();
+      } catch (e) {
+        // 已释放的二维码忽略。
+      }
+      this.shareCardQr = null;
+    }
   }
 
   /** 离屏分享卡内容；字段在截图前一次性赋值，渲染期间不变化。 */
@@ -568,61 +601,67 @@ export struct DynamicDetailPage {
     Stack({ alignContent: Alignment.TopStart }) {
       Column() {
       PageHeader({ title: '动态详情', onBack: () => this.goBack() })
-      Scroll(this.scroller) {
-        Column({ space: 12 }) {
-          DynCard({ item: this.item, embedded: true, detailMode: true, idPrefix: 'dyndetail-' })
-          if (this.loading) {
-            Row({ space: 8 }) {
-              LoadingProgress().width(18).height(18).color(this.accent)
-              Text('正在补全动态内容…').fontSize(12).fontColor('#9499A0')
+      List({ space: 12, scroller: this.scroller }) {
+        ListItem() {
+          Column({ space: 12 }) {
+            DynCard({ item: this.item, embedded: true, detailMode: true, idPrefix: 'dyndetail-' })
+            if (this.loading) {
+              Row({ space: 8 }) {
+                LoadingProgress().width(18).height(18).color(this.accent)
+                Text('正在补全动态内容…').fontSize(12).fontColor('#9499A0')
+              }
+              .width('100%')
+              .justifyContent(FlexAlign.Center)
+            } else if (this.loadFailed) {
+              Text('完整内容加载失败，点击重试')
+                .fontSize(12)
+                .fontColor('#9499A0')
+                .padding(12)
+                .onClick(() => this.loadDetail().catch(() => {
+                }))
+            }
+            Row() {
+              Text('相关回复共 ' + this.item.comment + ' 条')
+                .fontSize(13)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.isDark ? '#D8D8DC' : '#61666D')
+              Blank()
+              if (this.repliesLoading && this.repliesCount > 0) {
+                LoadingProgress().width(16).height(16).color(this.accent).margin({ right: 8 })
+              }
+              ReplySortChips({
+                mode: this.replySortMode,
+                onChange: (mode: number) => {
+                  this.changeReplySort(mode);
+                },
+              })
             }
             .width('100%')
-            .justifyContent(FlexAlign.Center)
-          } else if (this.loadFailed) {
-            Text('完整内容加载失败，点击重试')
-              .fontSize(12)
-              .fontColor('#9499A0')
-              .padding(12)
-              .onClick(() => this.loadDetail().catch(() => {
-              }))
-          }
-          Row() {
-            Text('相关回复共 ' + this.item.comment + ' 条')
-              .fontSize(13)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.isDark ? '#D8D8DC' : '#61666D')
-            Blank()
-            if (this.repliesLoading && this.replies.length > 0) {
-              LoadingProgress().width(16).height(16).color(this.accent).margin({ right: 8 })
-            }
-            ReplySortChips({
-              mode: this.replySortMode,
-              onChange: (mode: number) => {
-                this.changeReplySort(mode);
-              },
+            .padding({ top: 10, bottom: 10 })
+            .border({ width: { top: 0.5 }, color: this.isDark ? '#36383D' : '#E7E9EC' })
+            .onAreaChange((_oldArea, area) => {
+              this.commentsOffset = Math.max(0, Number(area.position.y));
             })
+            if (this.repliesMoreFailed && this.repliesRetryReset && this.repliesCount > 0) {
+              Text('排序加载失败，当前保留原评论 · 点击重试')
+                .fontSize(12).fontColor(this.accent).padding(8)
+                .onClick(() => this.loadReplies(true).catch(() => {}))
+            }
+            if (this.repliesLoading && this.repliesCount === 0) {
+              LoadingView({ loading: true, skeleton: 'comments' })
+            } else if (this.repliesFailed) {
+              Text('评论加载失败，点击重试').fontSize(12).fontColor('#9499A0').padding(18)
+                .onClick(() => this.loadReplies(true).catch(() => {
+                }))
+            } else if (this.repliesCount === 0) {
+              Text('暂时还没有评论').fontSize(12).fontColor('#9499A0').padding(18)
+            }
           }
           .width('100%')
-          .padding({ top: 10, bottom: 10 })
-          .border({ width: { top: 0.5 }, color: this.isDark ? '#36383D' : '#E7E9EC' })
-          .onAreaChange((_oldArea, area) => {
-            this.commentsOffset = Math.max(0, Number(area.position.y));
-          })
-          if (this.repliesMoreFailed && this.repliesRetryReset && this.replies.length > 0) {
-            Text('排序加载失败，当前保留原评论 · 点击重试')
-              .fontSize(12).fontColor(this.accent).padding(8)
-              .onClick(() => this.loadReplies(true).catch(() => {}))
-          }
-          if (this.repliesLoading && this.replies.length === 0) {
-            LoadingView({ loading: true, skeleton: 'comments' })
-          } else if (this.repliesFailed) {
-            Text('评论加载失败，点击重试').fontSize(12).fontColor('#9499A0').padding(18)
-              .onClick(() => this.loadReplies(true).catch(() => {
-              }))
-          } else if (this.replies.length === 0) {
-            Text('暂时还没有评论').fontSize(12).fontColor('#9499A0').padding(18)
-          } else {
-            ForEach(this.replies, (reply: ReplyItem) => {
+        }
+        if (this.repliesCount > 0) {
+          LazyForEach(this.replySource, (reply: ReplyItem) => {
+            ListItem() {
               ReplyCard({
                 item: reply,
                 showPreview: true,
@@ -636,12 +675,12 @@ export struct DynamicDetailPage {
                 onOpenThread: (item: ReplyItem) => this.openReplyThread(item),
                 // 主评论列表："回复"按钮 = 打开该评论的楼中楼面板（与 B 站一致）
                 onSelectReply: (item: ReplyItem) => this.openReplyThread(item),
-                onDeleted: (item: ReplyItem) => {
-                  this.replies = this.replies.filter((x: ReplyItem) => x.rpid !== item.rpid);
-                },
+                onDeleted: (item: ReplyItem) => this.removeReply(item.rpid),
               })
-            // 稳定 key：点赞视觉态由 ReplyCard 的 @State 镜像原地刷新，避免整卡重建闪烁。
-            }, (reply: ReplyItem) => String(reply.rpid))
+            }
+          // 稳定 key：点赞视觉态由 ReplyCard 的 @State 镜像原地刷新，避免整卡重建闪烁。
+          }, (reply: ReplyItem) => String(reply.rpid))
+          ListItem() {
             LoadMoreFooter({
               loading: this.repliesLoading,
               hasMore: this.repliesHasMore || this.repliesMoreFailed,
@@ -652,15 +691,18 @@ export struct DynamicDetailPage {
             })
           }
         }
-        .width('100%')
-        .padding({ left: 10, right: 10, bottom: Immersive.bottomInset() + 18 })
+        // 尾部留白：替代原 Scroll 内容底部内边距，最后一条评论可滚到输入栏上方。
+        ListItem() {
+          Column().width('100%').height(Immersive.bottomInset() + 18)
+        }
       }
       .width('100%')
       .layoutWeight(1)
       .constraintSize({ maxWidth: LayoutTokens.readingMaxWidth })
       .alignSelf(ItemAlign.Center)
-      // Scroll 内容不足一屏时默认垂直居中（官方默认 Center），详情内容应从顶部开始排。
-      .align(Alignment.TopStart)
+      .padding({ left: 10, right: 10 })
+      .edgeEffect(EdgeEffect.None)
+      .cachedCount(4)
       .scrollBar(BarState.Off)
       ReplyComposer({
         text: this.replyDraft,

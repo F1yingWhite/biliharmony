@@ -5,6 +5,7 @@ import { PageHeader } from '../components/PageHeader';
 import { AppNavStack, NAV_YOUTUBE_DETAIL } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { RequestEpoch } from '../common/RequestEpoch';
+import { BasicDataSource } from '../common/BasicDataSource';
 import { youtubeFullscreenProbeHtml, youtubePlayerHtml, youtubePlaybackError,
   YOUTUBE_PLAYER_ORIGIN } from '../common/YouTubePlayerHtml';
 import { AppTheme } from '../common/AppTheme';
@@ -44,7 +45,10 @@ export struct YouTubeDetailPage {
   @State tab: number = 0;
   @State commentToken: string = '';
   @State commentTotal: string = '';
-  @State comments: Array<YouTubeComment> = [];
+  /** 评论懒加载数据源（翻页去重后增量追加；列表已虚拟化）。 */
+  private commentSource: BasicDataSource<YouTubeComment> = new BasicDataSource<YouTubeComment>();
+  /** 评论行数（数据源为普通属性，空态/加载态分支需要响应式计数）。 */
+  @State commentsCount: number = 0;
   @State commentsLoading: boolean = false;
   @State commentsLoaded: boolean = false;
   @State commentsError: string = '';
@@ -210,10 +214,12 @@ export struct YouTubeDetailPage {
     const token: number = this.commentRequest.next();
     this.commentsLoading = true;
     this.commentsError = '';
-    this.comments = [];
+    this.commentSource.clear();
+    this.commentsCount = 0;
     YouTubeApi.comments(this.commentToken).then((page: YouTubeCommentPage) => {
       if (!this.commentRequest.isCurrent(token)) return;
-      this.comments = page.comments;
+      this.commentSource.reset(page.comments);
+      this.commentsCount = page.comments.length;
       this.commentToken = page.continuation;
       if (page.total.length > 0) this.commentTotal = page.total;
       this.commentsLoaded = true;
@@ -238,17 +244,15 @@ export struct YouTubeDetailPage {
     YouTubeApi.comments(token).then((page: YouTubeCommentPage) => {
       if (!this.commentRequest.isCurrent(request)) return;
       const seen: Set<string> = new Set<string>();
-      const merged: Array<YouTubeComment> = [];
-      for (const comment of this.comments) {
-        seen.add(comment.id);
-        merged.push(comment);
-      }
+      for (const comment of this.commentSource.getAll()) seen.add(comment.id);
+      const fresh: Array<YouTubeComment> = [];
       for (const comment of page.comments) {
         if (seen.has(comment.id)) continue;
         seen.add(comment.id);
-        merged.push(comment);
+        fresh.push(comment);
       }
-      this.comments = merged;
+      this.commentSource.append(fresh);
+      this.commentsCount = this.commentSource.totalCount();
       this.commentToken = page.continuation;
       const urls: Array<string> = [];
       for (const comment of page.comments) urls.push(comment.avatar);
@@ -632,7 +636,7 @@ export struct YouTubeDetailPage {
             this.commentMoreError = '';
             this.loadMoreComments();
           })
-      } else if (this.commentToken.length === 0 && this.comments.length > 0) {
+      } else if (this.commentToken.length === 0 && this.commentsCount > 0) {
         Text('—— 到底啦 ——').fontSize(12).fontColor('#9499A0')
       }
     }
@@ -664,14 +668,14 @@ export struct YouTubeDetailPage {
             .stateStyles({ pressed: { opacity: 0.9 }, normal: { opacity: 1 } })
             .onClick(() => this.loadComments())
         }.width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
-      } else if (this.comments.length === 0) {
+      } else if (this.commentsCount === 0) {
         Column({ space: 8 }) {
           Text('还没有评论').fontSize(14).fontColor('#9499A0')
         }.width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
       } else {
         List({ space: 0, scroller: this.commentScroller }) {
           ListItemGroup({ footer: this.CommentFooter() }) {
-            ForEach(this.comments, (comment: YouTubeComment) => {
+            LazyForEach(this.commentSource, (comment: YouTubeComment) => {
               ListItem() { this.CommentRow(comment) }
             }, (comment: YouTubeComment) => comment.id.length > 0 ? comment.id :
               comment.author + comment.published + comment.text.substring(0, 12))

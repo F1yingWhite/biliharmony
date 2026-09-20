@@ -73,6 +73,13 @@ export class AuthApi {
     await appSign(params);
     const resp: HttpResponse = await HttpClient.post(Api.qrcodePoll, HttpClient.buildQuery(params),
       HttpClient.merge(Constants.appHeaders, {}));
+    if (!resp.ok) {
+      const result: TVPollResult = new TVPollResult();
+      // code 默认 0 会被调用方（Login.poll 以 code===0 判定登录成功）误判，网络失败必须置非 0。
+      result.code = resp.status < 0 ? -1 : resp.status;
+      result.message = resp.status < 0 ? resp.transportMessage : '网络请求失败 (' + String(resp.status) + ')';
+      return result;
+    }
     const json: Record<string, Object> = resp.json();
     const result: TVPollResult = new TVPollResult();
     result.code = asNumber(json['code'], -1);
@@ -141,6 +148,11 @@ export class AuthApi {
     };
     await appSign(params);
     const resp: HttpResponse = await HttpClient.post(Api.smsSend, HttpClient.buildQuery(params), AuthApi.loginHeaders());
+    if (!resp.ok) {
+      // 网络失败时 resp.json() 静默返回 {}，必须先行拦截给出可读文案（code 保持默认 -1 即失败）。
+      result.message = resp.status < 0 ? resp.transportMessage : '网络请求失败 (' + String(resp.status) + ')';
+      return result;
+    }
     const json: Record<string, Object> = resp.json();
     result.code = asNumber(json['code'], -1);
     result.message = asString(json['message'], '');
@@ -189,6 +201,11 @@ async function getLoginDeviceId(): Promise<string> {
 }
 
 function parseLoginResult(resp: HttpResponse, result: LoginResult): LoginResult {
+  if (!resp.ok) {
+    // 网络失败时 resp.json() 静默返回 {}，会表现为“空白错误”；拦截后透出真实原因（code 保持默认 -1）。
+    result.message = resp.status < 0 ? resp.transportMessage : '网络请求失败 (' + String(resp.status) + ')';
+    return result;
+  }
   const json: Record<string, Object> = resp.json();
   result.code = asNumber(json['code'], -1);
   result.message = asString(json['message'], '');

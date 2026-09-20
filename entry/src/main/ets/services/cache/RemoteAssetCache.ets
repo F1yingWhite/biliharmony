@@ -3,6 +3,9 @@
  *
  * 图片与短视频按业务目录落到 cacheDir，命中时直接返回本地路径；同一资源的并发请求
  * 共用一个 Promise。下载结果必须通过文件头校验，CDN 错误页不会被当成永久缓存。
+ *
+ * 查询入口 cached() 只读内存、不做任何同步文件 IO，可安全用于 UI build 路径
+ * （列表每帧都会重查）；磁盘存在性与文件头校验全部走异步重验与 ensure()。
  */
 import { common } from '@kit.AbilityKit';
 import { fileIo as fs, fileUri } from '@kit.CoreFileKit';
@@ -18,6 +21,8 @@ const DIR_COLLECTION_MEDIA: string = 'collection_media';
 const DIR_THUMBNAILS: string = 'thumbnails';
 const MAX_IMAGE_BYTES: number = 32 * 1024 * 1024;
 const MAX_MEDIA_BYTES: number = 80 * 1024 * 1024;
+/** 已验证记录的有效期；过期后乐观复用并触发一次后台重验，重验完成前不重复触发。 */
+const VERIFIED_TTL_MS: number = 5000;
 
 let assetCacheDir: string = '';
 
@@ -29,7 +34,10 @@ class VerifiedAsset {
 
 export class RemoteAssetCache {
   private static inFlight: Map<string, Promise<string>> = new Map<string, Promise<string>>();
+  /** path → 已验证记录：TTL 内零 IO 命中；过期后乐观复用并单飞重验。 */
   private static verifiedPaths: Map<string, VerifiedAsset> = new Map<string, VerifiedAsset>();
+  /** 正在后台重验的本地路径：同一文件同时最多一次在途重验，避免每次渲染都建 Promise。 */
+  private static revalidatingPaths: Set<string> = new Set<string>();
   private static legacyAvatarPurgeScheduled: boolean = false;
   private static legacyReplySharePurgeScheduled: boolean = false;
 
@@ -88,31 +96,39 @@ export class RemoteAssetCache {
     return RemoteAssetCache.ensure(url, DIR_THUMBNAILS, false);
   }
 
+  /**
+   * build 路径专用查询：只读内存，绝不发起同步文件 IO。
+   * - 有效期内命中：直接返回本地 uri（现状，零 IO）；
+   * - 过期命中：乐观返回本地 uri，同时触发一次后台单飞重验（stat + 读文件头均为
+   *   异步）；重验失败会删除文件并移除记录，下次调用走未命中路径重新下载；
+   * - 未命中：返回远程 url，不阻塞；磁盘恢复与下载由调用方配对的 ensure() 异步完成。
+   */
   private static cached(url: string, subdir: string, media: boolean): string {
     if (!url.startsWith('http')) return url;
     const path: string = RemoteAssetCache.localPath(url, subdir, media);
     if (path === url) return url;
     const verified: VerifiedAsset | undefined = RemoteAssetCache.verifiedPaths.get(path);
-    if (verified !== undefined && Date.now() - verified.at < 5000) return verified.uri;
-    RemoteAssetCache.verifiedPaths.delete(path);
-    try {
-      fs.statSync(path);
-      if (RemoteAssetCache.isValidFile(path, media)) return RemoteAssetCache.remember(path, url);
-      try {
-        fs.unlinkSync(path);
-      } catch (e) {
-      }
-    } catch (e) {
-      // 未命中。
-    }
-    return url;
+    if (verified === undefined) return url;
+    if (Date.now() - verified.at < VERIFIED_TTL_MS) return verified.uri;
+    RemoteAssetCache.scheduleRevalidate(path, url, subdir, media);
+    return verified.uri;
   }
 
   private static async ensure(url: string, subdir: string, media: boolean): Promise<string> {
-    const cached: string = RemoteAssetCache.cached(url, subdir, media);
-    if (cached !== url || !url.startsWith('http')) return cached;
+    if (!url.startsWith('http')) return url;
     const path: string = RemoteAssetCache.localPath(url, subdir, media);
     if (path === url) return url;
+    const verified: VerifiedAsset | undefined = RemoteAssetCache.verifiedPaths.get(path);
+    if (verified !== undefined) {
+      // 含过期乐观项：记录由后台重验兜底，这里不再重复校验。
+      if (Date.now() - verified.at >= VERIFIED_TTL_MS) {
+        RemoteAssetCache.scheduleRevalidate(path, url, subdir, media);
+      }
+      return verified.uri;
+    }
+    // 冷启动磁盘恢复：记录是内存态，进程重启后为空，但上次下载的文件可能仍在。
+    // 先异步校验文件头，命中直接复用，避免把整份缓存重新下载一遍。
+    if (await RemoteAssetCache.validateFile(path, media)) return RemoteAssetCache.remember(path, url);
     const key: string = subdir + '\n' + url;
     const running: Promise<string> | undefined = RemoteAssetCache.inFlight.get(key);
     if (running !== undefined) return running;
@@ -125,9 +141,37 @@ export class RemoteAssetCache {
     }
   }
 
+  /** 过期记录的单飞重验入口：同一文件同时最多一次在途；下载在途时交给下载结果刷新。 */
+  private static scheduleRevalidate(path: string, url: string, subdir: string, media: boolean): void {
+    if (RemoteAssetCache.revalidatingPaths.has(path)) return;
+    if (RemoteAssetCache.inFlight.has(subdir + '\n' + url)) return;
+    RemoteAssetCache.revalidatingPaths.add(path);
+    RemoteAssetCache.revalidate(path, url, media).catch((): void => {
+      // 重验内部已兜底所有文件错误；这里只为保证 finally 一定执行。
+    }).finally(() => {
+      RemoteAssetCache.revalidatingPaths.delete(path);
+    });
+  }
+
+  private static async revalidate(path: string, url: string, media: boolean): Promise<void> {
+    // 重验期间记录可能已被下载刷新或容量清理（512 上限）移除，以最新状态为准。
+    if (RemoteAssetCache.verifiedPaths.get(path) === undefined) return;
+    if (await RemoteAssetCache.validateFile(path, media)) {
+      // 校验通过：刷新时间戳，本窗口内不再重复重验。
+      RemoteAssetCache.remember(path, url);
+      return;
+    }
+    RemoteAssetCache.verifiedPaths.delete(path);
+    try {
+      await fs.unlink(path);
+    } catch (e) {
+      // 文件可能已被系统先行回收，忽略。
+    }
+  }
+
   private static remember(path: string, fallback: string): string {
     const uri: string = RemoteAssetCache.uriOf(path, fallback);
-    // 短期记住已验证的命中；5 秒后重查，允许系统回收缓存文件。
+    // 短期记住已验证的命中；过期后由后台异步重验刷新，允许系统回收缓存文件。
     if (RemoteAssetCache.verifiedPaths.size >= 512) RemoteAssetCache.verifiedPaths.clear();
     RemoteAssetCache.verifiedPaths.set(path, new VerifiedAsset(uri));
     return uri;
@@ -146,19 +190,20 @@ export class RemoteAssetCache {
     }
   }
 
-  private static isValidFile(path: string, media: boolean): boolean {
+  /** 异步校验缓存文件确实存在且文件头是受支持的图片/媒体格式。 */
+  private static async validateFile(path: string, media: boolean): Promise<boolean> {
     let file: fs.File | null = null;
     try {
-      file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      file = await fs.open(path, fs.OpenMode.READ_ONLY);
       const buffer: ArrayBuffer = new ArrayBuffer(16);
-      const length: number = fs.readSync(file.fd, buffer, { offset: 0 });
+      const length: number = await fs.read(file.fd, buffer, { offset: 0 });
       return length >= 12 && RemoteAssetCache.matchesMagic(new Uint8Array(buffer, 0, length), media);
     } catch (e) {
       return false;
     } finally {
       if (file !== null) {
         try {
-          fs.closeSync(file);
+          await fs.close(file);
         } catch (e) {
         }
       }

@@ -2,8 +2,9 @@
  * API 层共享基础设施：统一响应解析（code/data）与 CSRF 互动骨架。
  * 仅允许被 api/ 下的域模块与 BiliApi facade 依赖，禁止反向依赖任何域模块。
  */
-import { HttpClient, HttpResponse } from '../../services/network/HttpClient';
+import { HttpClient, HttpResponse, RequestPriority } from '../../services/network/HttpClient';
 import { Constants } from '../../common/Constants';
+import { WbiSign } from '../../common/WbiSign';
 import { asNumber, asObject, str } from '../../common/Utils';
 import { ApiResult, ApiErrorKind } from '../../services/network/ApiResult';
 
@@ -136,13 +137,39 @@ function withQuery(url: string, params?: Record<string, string>): string {
 
 /** Web 域 GET：params 拼 query，headers = webHeaders + 可选 Referer/extra。 */
 export function webGet(url: string, params?: Record<string, string>, referer?: string,
-  extra?: Record<string, string>): Promise<HttpResponse> {
-  return HttpClient.get(withQuery(url, params), webHeaders(referer, extra));
+  extra?: Record<string, string>, priority: number = RequestPriority.NORMAL): Promise<HttpResponse> {
+  return HttpClient.get(withQuery(url, params), webHeaders(referer, extra), priority);
+}
+
+/**
+ * 只改并发优先级的 GET：首屏关键接口（稿件详情、播放地址）与增强能力
+ * （统计、推荐流、拖动预览）用同一份脚手架，避免每个调用点补三个 undefined。
+ */
+export function webGetWithPriority(url: string, params: Record<string, string> | undefined,
+  referer: string, priority: number): Promise<HttpResponse> {
+  return webGet(url, params, referer, undefined, priority);
+}
+
+/**
+ * 带 WBI 签名的 Web GET：签名与 -403 恢复都收在脚手架内，调用方不再手写
+ * `await WbiSign.encWbi(params)` + buildQuery 样板。
+ * 服务端 mixinKey 轮换后旧签名会返回 -403：作废缓存重签并重试一次。
+ */
+export async function webGetSigned(url: string, params: Record<string, string>, referer?: string,
+  extra?: Record<string, string>, priority: number = RequestPriority.NORMAL): Promise<HttpResponse> {
+  await WbiSign.encWbi(params);
+  let resp: HttpResponse = await webGet(url, params, referer, extra, priority);
+  if (resp.ok && asNumber(resp.json()['code'], 0) === -403) {
+    WbiSign.invalidate();
+    await WbiSign.encWbi(params);
+    resp = await webGet(url, params, referer, extra, priority);
+  }
+  return resp;
 }
 
 /** Web 域 POST（x-www-form-urlencoded）：body 由 params 构造；headers 同 webGet。 */
 export function webPost(url: string, params?: Record<string, string>, referer?: string,
-  extra?: Record<string, string>): Promise<HttpResponse> {
+  extra?: Record<string, string>, priority: number = RequestPriority.NORMAL): Promise<HttpResponse> {
   const body: string = params === undefined ? '' : HttpClient.buildQuery(params);
-  return HttpClient.post(url, body, webHeaders(referer, extra));
+  return HttpClient.post(url, body, webHeaders(referer, extra), priority);
 }

@@ -21,29 +21,6 @@ export struct PlayerGestureOverlay {
   @Prop gestureAdjustPercent: number = -1;
   @Prop panStartTime: number = 0;
   @Prop duration: number = 0;
-  /** 长按倍速：三个右向小三角逐个亮起的循环动画步（0/1/2）。 */
-  @State holdAnimStep: number = 0;
-  private holdAnimTimer: number = -1;
-
-  private startHoldAnimation(): void {
-    if (this.holdAnimTimer >= 0) return;
-    this.holdAnimTimer = setInterval(() => {
-      if (!this.holdSpeedActive) {
-        this.stopHoldAnimation();
-        return;
-      }
-      this.holdAnimStep = (this.holdAnimStep + 1) % 3;
-    }, 160);
-  }
-
-  private stopHoldAnimation(): void {
-    if (this.holdAnimTimer >= 0) {
-      clearInterval(this.holdAnimTimer);
-      this.holdAnimTimer = -1;
-    }
-    this.holdAnimStep = 0;
-  }
-
   build() {
     Stack({ alignContent: Alignment.Center }) {
       // 竖屏不再悬浮显示在线人数（已移到详情页"播放量"信息行的时间后面），横屏全屏保留。
@@ -155,23 +132,7 @@ export struct PlayerGestureOverlay {
   HintBubble() {
     Row({ space: 10 }) {
       if (this.holdSpeedActive) {
-        Row({ space: 0 }) {
-          Image($r('app.media.ic_play'))
-            .width(13)
-            .height(16)
-            .fillColor(this.holdAnimStep === 0 ? '#FFFFFF' : '#70FFFFFF')
-            .animation({ duration: 120, curve: Curve.EaseOut })
-          Image($r('app.media.ic_play'))
-            .width(13)
-            .height(16)
-            .fillColor(this.holdAnimStep === 1 ? '#FFFFFF' : '#70FFFFFF')
-            .animation({ duration: 120, curve: Curve.EaseOut })
-          Image($r('app.media.ic_play'))
-            .width(13)
-            .height(16)
-            .fillColor(this.holdAnimStep === 2 ? '#FFFFFF' : '#70FFFFFF')
-            .animation({ duration: 120, curve: Curve.EaseOut })
-        }
+        HoldSpeedArrows()
         Text('倍速播放中')
           .fontSize(16)
           .fontWeight(FontWeight.Medium)
@@ -186,16 +147,31 @@ export struct PlayerGestureOverlay {
     .padding({ left: 18, right: 18, top: 10, bottom: 10 })
     .borderRadius(8)
     .backgroundColor('#A6000000')
-    .backdropBlur(12)
     // 顶部居中：位置 x 用百分比锚左侧，translate 回移一半实现水平居中。
     .position({ x: '50%', y: this.fullscreen ? 18 : 12 })
     .translate({ x: '-50%' })
-    // 进入倍速态时启动动画；退出时停止并复位。
-    .onAppear(() => {
-      if (this.holdSpeedActive) this.startHoldAnimation();
-    })
-    .onDisAppear(() => {
-      this.stopHoldAnimation();
-    })
+
+  }
+}
+
+
+/** 小范围原生透明度动画，不用 JS 定时器刷新整个视频手势叠层。 */
+@Component
+struct HoldSpeedArrows {
+  @State shining: boolean = false;
+
+  build() {
+    Row({ space: 0 }) {
+      ForEach([0, 1, 2], (index: number) => {
+        Image($r('app.media.ic_play'))
+          .width(13)
+          .height(16)
+          .fillColor('#FFFFFF')
+          .opacity(this.shining ? 1 : 0.44)
+          .animation({ duration: 480, delay: index * 160, iterations: -1,
+            playMode: PlayMode.Alternate, curve: Curve.EaseInOut })
+      }, (index: number) => String(index))
+    }
+    .onAppear(() => { this.shining = true; })
   }
 }

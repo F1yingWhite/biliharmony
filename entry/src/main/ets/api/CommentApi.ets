@@ -1,12 +1,14 @@
 /**
  * 评论域 API：主评论列表 / 发布 / 点赞 / 点踩 / 表情包 / 楼中楼。
  */
-import { HttpClient, HttpResponse } from '../services/network/HttpClient';
+import { HttpClient, HttpResponse, RequestPriority } from '../services/network/HttpClient';
 import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
 import { asArray, asObject } from '../common/Utils';
 import { BiliEmotePackage, ReplyData, ReplyItem } from '../model/Models';
-import { ActionResult, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
+import { ActionResult, getData, postVideoAction, webGet, webGetWithPriority,
+  webPost } from './internal/ApiCommon';
+import { EmotePackageCache } from '../common/EmotePackageCache';
 import { CommentLog } from '../common/CommentLog';
 
 export class CommentApi {
@@ -70,7 +72,8 @@ export class CommentApi {
           'oid': String(oid), 'type': String(type), 'pn': String(pageNumber), 'ps': '20',
           'sort': mode === 3 ? '1' : '0',
         };
-        const legacyResp: HttpResponse = await webGet(Api.replyList, legacyParams, 'https://www.bilibili.com/');
+        const legacyResp: HttpResponse = await webGetWithPriority(Api.replyList, legacyParams,
+          'https://www.bilibili.com/', RequestPriority.HIGH);
         const legacyData: Record<string, Object> | null = getData(legacyResp);
         CommentLog.info('api.replies.transport', 'req=' + String(requestId) + ' path=legacy page=' +
           String(pageNumber) + ' status=' + String(legacyResp.status) + ' code=' +
@@ -89,7 +92,8 @@ export class CommentApi {
         'pagination_str': JSON.stringify({ 'offset': cursor }),
       };
       // 对齐当前 PiliPlus：游客/通用评论流使用 /main 与 next_offset，不对该端点追加 WBI 参数。
-      const resp: HttpResponse = await webGet(Api.replyList + '/main', params, 'https://www.bilibili.com/');
+      const resp: HttpResponse = await webGetWithPriority(Api.replyList + '/main', params,
+        'https://www.bilibili.com/', RequestPriority.HIGH);
       let data: Record<string, Object> | null = getData(resp);
       let path: string = 'main';
       let failureStatus: number = resp.status;
@@ -104,7 +108,8 @@ export class CommentApi {
           'pagination_str': JSON.stringify({ 'offset': cursor }), 'web_location': '1315875',
         };
         await WbiSign.encWbi(fallback);
-        const fallbackResp: HttpResponse = await webGet(Api.replyList + '/wbi/main', fallback, 'https://www.bilibili.com/');
+        const fallbackResp: HttpResponse = await webGetWithPriority(Api.replyList + '/wbi/main', fallback,
+          'https://www.bilibili.com/', RequestPriority.HIGH);
         data = getData(fallbackResp);
         path = 'wbi-main';
         failureStatus = fallbackResp.status;
@@ -121,8 +126,8 @@ export class CommentApi {
           'pagination_str': JSON.stringify({ 'offset': cursor }), 'web_location': '1315875',
         };
         await WbiSign.encWbi(retryParams);
-        const retryResp: HttpResponse = await webGet(Api.replyList + '/wbi/main', retryParams,
-          'https://www.bilibili.com/');
+        const retryResp: HttpResponse = await webGetWithPriority(Api.replyList + '/wbi/main', retryParams,
+          'https://www.bilibili.com/', RequestPriority.HIGH);
         data = getData(retryResp);
         path = 'wbi-main-retry';
         failureStatus = retryResp.status;
@@ -247,22 +252,36 @@ export class CommentApi {
 
   // ===== 当前账号可用的 B 站表情包（评论/动态共用官方素材 URL） =====
   static async getUserEmotes(business: string = 'reply'): Promise<Array<BiliEmotePackage>> {
+    const account: string = HttpClient.getCookie('DedeUserID') || 'guest';
+    // 缓存返回已解析并校验过的目录（JSON.parse 只在缓存层做一次）。
+    const packages: Array<Object> = await EmotePackageCache.get('packages_' + account + '_' + business,
+      () => CommentApi.fetchUserEmotes(business));
+    const result: Array<BiliEmotePackage> = [];
+    for (const value of packages) {
+      const pkg: BiliEmotePackage = BiliEmotePackage.from(value);
+      if (pkg.emotes.length > 0) result.push(pkg);
+    }
+    return result;
+  }
+
+  private static async fetchUserEmotes(business: string): Promise<string> {
     const params: Record<string, string> = {
       'business': business,
       'web_location': '333.1245',
     };
-    const resp: HttpResponse = await webGet(Api.userEmotes, params, 'https://www.bilibili.com/');
+    const resp: HttpResponse = await webGetWithPriority(Api.userEmotes, params,
+      'https://www.bilibili.com/', RequestPriority.LOW);
     if (!resp.ok) {
       // 诊断日志：区分"网络/HTTP 失败"与"业务 code 失败"，此前失败全静默无法排查。
       CommentLog.warn('api.emotes.http', 'business=' + business + ' status=' + String(resp.status));
-      return [];
+      return '';
     }
     const json: Record<string, Object> = resp.json();
     const code: number = Number(json['code'] ?? -1);
     if (code !== 0) {
       CommentLog.warn('api.emotes.biz', 'business=' + business + ' code=' + String(code) +
         ' message=' + String(json['message'] ?? ''));
-      return [];
+      return '';
     }
     const data: Record<string, Object> = asObject(json['data']);
     const packages: Array<Object> = asArray(data['packages']);
@@ -278,7 +297,7 @@ export class CommentApi {
     }
     CommentLog.info('api.emotes.done', 'business=' + business + ' packages=' + String(packages.length) +
       ' kept=' + String(result.length) + ' droppedEmpty=' + String(droppedEmpty));
-    return result;
+    return result.length > 0 ? JSON.stringify(packages) : '';
   }
 
   // ===== 单条评论的完整回复列表（楼中楼） =====

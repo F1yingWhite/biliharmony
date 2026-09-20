@@ -30,6 +30,66 @@ interface ReportButtonItem {
 }
 
 /**
+ * 评论附图单元：先铺骨架底色，解码完成后淡入，失败时保留底色并提示。
+ * 骨架必须是 Image 之外独立的一层，才能覆盖"Image 还没有位图"的空白期；
+ * 底色同时保证图片被 LazyForEach 重建时不会出现瞬间空洞。
+ */
+@Component
+struct ReplyPictureCell {
+  @Prop cellId: string = '';
+  @Prop @Watch('onSourceChanged') source: string = '';
+  @Prop cellWidth: number = 92;
+  @Prop cellHeight: number = 92;
+  @StorageProp('isDarkMode') isDark: boolean = false;
+  @State shown: boolean = false;
+  @State failed: boolean = false;
+  onOpen: () => void = () => {};
+
+  private onSourceChanged(): void {
+    // 换图先回到骨架态：旧位图不能留在新图位置上。
+    this.shown = false;
+    this.failed = false;
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.Center }) {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor(this.isDark ? '#2A2C31' : '#E5E7EB')
+      Image(this.source)
+        .width('100%')
+        .height('100%')
+        .objectFit(ImageFit.Cover)
+        // 评论附图异步解码，长列表滚动不卡。
+        .syncLoad(false)
+        .opacity(this.shown ? 1 : 0)
+        .animation({ duration: 180, curve: Curve.EaseOut })
+        .onComplete(() => {
+          if (!this.shown) this.shown = true;
+        })
+        .onError(() => {
+          if (!this.failed) this.failed = true;
+        })
+      if (this.failed) {
+        Text('图片加载失败')
+          .fontSize(10)
+          .fontColor('#9499A0')
+      }
+    }
+    .width(this.cellWidth)
+    .height(this.cellHeight)
+    .borderRadius(6)
+    .clip(true)
+    .margin({ right: 5, bottom: 5 })
+    .id(this.cellId)
+    .priorityGesture(TapGesture().onAction(() => {
+      this.onOpen();
+    }))
+  }
+}
+
+/**
  * 视频评论、动态详情与回复列表共用的完整评论卡片。
  * 头像装扮、富文本、图片、@/空降/BV 跳转和点赞态都只能在这里实现，
  * 避免不同页面的评论能力与视觉继续分叉。
@@ -573,16 +633,13 @@ export struct ReplyCard {
         if (this.item.pictures.length > 0) {
           Flex({ wrap: FlexWrap.Wrap }) {
             ForEach(this.item.pictures, (picture: string, index: number) => {
-              Image(biliImageThumbnail(picture, this.item.pictures.length === 1 ? 640 : 320))
-                .width(this.item.pictures.length === 1 ? 190 : 92)
-                .height(this.item.pictures.length === 1 ? 150 : 92)
-                .objectFit(ImageFit.Cover)
-                .borderRadius(6)
-                .margin({ right: 5, bottom: 5 })
-                .id(this.pictureId(index))
-                // 评论附图异步解码，长列表滚动不卡。
-                .syncLoad(false)
-                .priorityGesture(TapGesture().onAction(() => this.openPicture(index)))
+              ReplyPictureCell({
+                cellId: this.pictureId(index),
+                source: biliImageThumbnail(picture, this.item.pictures.length === 1 ? 640 : 320),
+                cellWidth: this.item.pictures.length === 1 ? 190 : 92,
+                cellHeight: this.item.pictures.length === 1 ? 150 : 92,
+                onOpen: (): void => this.openPicture(index),
+              })
             }, (picture: string, index: number) => picture + String(index))
           }
           .width('100%')

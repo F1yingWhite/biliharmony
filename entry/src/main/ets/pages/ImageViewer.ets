@@ -312,7 +312,7 @@ export struct ImageViewerPage {
     this.heroExitTarget = undefined;
     this.heroVisible = false;
     this.heroOpacity = 1;
-    this.heroFrame = null;
+    this.clearHeroFrame();
     this.naturalSizes.clear();
     this.interactionReady = true;
     this.viewerOpacity = 1;
@@ -717,9 +717,22 @@ export struct ImageViewerPage {
     return clean.endsWith('.gif') || clean.indexOf('.gif@') >= 0;
   }
 
+  /** 释放并清空冻结帧；hero 复用/重截/页面销毁路径统一走这里，防止快照 PixelMap 滞留。 */
+  private clearHeroFrame(): void {
+    const frame: image.PixelMap | null = this.heroFrame;
+    this.heroFrame = null;
+    if (frame !== null) {
+      try {
+        frame.release();
+      } catch (e) {
+        // 已释放的冻结帧忽略。
+      }
+    }
+  }
+
   /** 截取 GIF 当前已经渲染完成的画面区域，退出 hero 不再切换到另一时间轴的 GIF 节点。 */
   private freezeCurrentGifFrame(rect: ImageViewerSrcRect): void {
-    this.heroFrame = null;
+    this.clearHeroFrame();
     if (!this.isCurrentGif()) return;
     try {
       const left: number = Math.max(0, Math.round(this.getUIContext().vp2px(rect.x)));
@@ -732,7 +745,7 @@ export struct ImageViewerPage {
       });
     } catch (e) {
       // 快照失败时沿用已验证的普通图片 hero 路径，返回操作不能被截图异常阻断。
-      this.heroFrame = null;
+      this.clearHeroFrame();
     }
   }
 
@@ -930,6 +943,7 @@ export struct ImageViewerPage {
       clearTimeout(this.heroExitTimer);
       this.heroExitTimer = -1;
     }
+    this.clearHeroFrame();
   }
 
   build() {

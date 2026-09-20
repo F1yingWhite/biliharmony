@@ -63,7 +63,7 @@ export struct LiveRoomCard {
             .borderRadius(9)
             .objectFit(ImageFit.Cover)
         }
-        Text() { KeywordSpans(this.room.uname, this.highlightKeyword, this.isDark) }
+        Text() { KeywordSpans({ text: this.room.uname, keyword: this.highlightKeyword, isDark: this.isDark }) }
           .fontSize(11)
           .fontColor(this.isDark ? '#8A8A8E' : '#9499A0')
           .maxLines(1)

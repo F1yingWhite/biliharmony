@@ -94,6 +94,8 @@ export struct PlayerSettingsContent {
   onTimerChange: (minutes: number) => void = () => {};
   onMirrorChange: (next: boolean) => void = () => {};
   onSubtitleToggle: (next: boolean) => void = () => {};
+  onPictureInPicture: () => void = () => {};
+  onReportVideo: () => void = () => {};
   onBackgroundPlaybackChange: (next: boolean) => void = () => {};
   onSponsorToggle: (next: boolean) => void = () => {};
   onSponsorModeChange: (category: string, mode: number) => void = () => {};
@@ -304,6 +306,8 @@ export struct PlayerSettingsContent {
           onDmSettings: () => this.onOpenPage('dm'),
           onChapters: () => this.onOpenPage('chapters'),
           onSubtitleToggle: (next: boolean) => this.onSubtitleToggle(next),
+          onPictureInPicture: () => this.onPictureInPicture(),
+          onReportVideo: () => this.onReportVideo(),
           onBackgroundPlaybackChange: (next: boolean) => this.onBackgroundPlaybackChange(next),
           onSponsorToggle: (next: boolean) => this.onSponsorToggle(next),
           onSponsorSettings: () => this.onOpenPage('sponsor'),

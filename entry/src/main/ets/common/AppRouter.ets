@@ -3,6 +3,7 @@
  * 全应用统一通过 AppNavStack 跳转（替代旧版 @kit.ArkUI router）。
  */
 import { FavoriteFolderItem } from '../model/Models';
+import { image } from '@kit.ImageKit';
 
 /** Index 根 Stack 的组件 id：需要整页过渡底衬时可截取该组件。 */
 export const APP_ROOT_SNAPSHOT_ID: string = 'bili-app-root';
@@ -10,6 +11,30 @@ export const APP_ROOT_SNAPSHOT_ID: string = 'bili-app-root';
 /** AppStorage 键：整卡一镜到底的临时 PixelMap。走 AppStorage 而非路由参数——NavPathStack 会克隆
  *  参数对象，原生 PixelMap 传不过去；push 前写入，目标页 aboutToAppear 读取并删除键。 */
 export const HERO_BG_SNAPSHOT_KEY: string = 'heroBgSnapshot';
+
+/** 存入整卡转场快照。被覆盖的旧快照（上次 push 被拦截/消费方未出现）先释放，防止全屏 PixelMap 滞留泄漏。 */
+export function setHeroBgSnapshot(snapshot: image.PixelMap): void {
+  const stale: image.PixelMap | undefined = AppStorage.get<image.PixelMap>(HERO_BG_SNAPSHOT_KEY);
+  if (stale !== undefined && stale !== snapshot) {
+    try {
+      stale.release();
+    } catch (e) {
+      // 已释放的快照忽略。
+    }
+  }
+  AppStorage.setOrCreate<image.PixelMap>(HERO_BG_SNAPSHOT_KEY, snapshot);
+}
+
+/** 静默释放 PixelMap（统一兜底：release 对已回收对象会抛错，此处吞掉）。 */
+export function releasePixelMap(pm: image.PixelMap | null): void {
+  if (pm !== null) {
+    try {
+      pm.release();
+    } catch (e) {
+      // 已释放的快照忽略。
+    }
+  }
+}
 /** 使用 Navigation 官方自定义内容转场保活来源页，供独立 hero 在两页之上完成飞行。 */
 export const HERO_NAV_TRANSITION_ACTIVE_KEY: string = 'heroNavTransitionActive';
 export const HERO_NAV_TRANSITION_DURATION_KEY: string = 'heroNavTransitionDuration';
@@ -136,3 +161,6 @@ export const NAV_BANGUMI_TIMELINE: string = 'BangumiTimeline';
 
 /** 全局唯一导航栈，由 Index 页的 Navigation 挂载 */
 export const AppNavStack: NavPathStack = new NavPathStack();
+
+export const NAV_APPEARANCE: string = 'Appearance';
+export const NAV_PLAYBACK_SETTINGS: string = 'PlaybackSettings';

@@ -3,11 +3,10 @@
  * 移植自 PiliPlus lib/http/*.dart
  */
 import { HttpClient, HttpResponse } from '../services/network/HttpClient';
-import { WbiSign } from '../common/WbiSign';
 import { Api, Constants, RecommendParams } from '../common/Constants';
 import { asObject, asArray, asString, asNumber } from '../common/Utils';
 import { VideoItem } from '../model/Models';
-import { getData, webGet } from './internal/ApiCommon';
+import { getData, webGet, webGetSigned } from './internal/ApiCommon';
 
 export class FeedApi {
   /** 登录用户优先请求 Web 个性化推荐；接口失败时再回退到 App 公共推荐流。 */
@@ -35,8 +34,7 @@ export class FeedApi {
       'brush': String(idx),
       'fresh_type': '4',
     };
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.recommendListWeb, params);
+    const resp: HttpResponse = await webGetSigned(Api.recommendListWeb, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return [];
     const source: Array<Object> = asArray(data['item']);

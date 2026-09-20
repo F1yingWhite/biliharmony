@@ -1,11 +1,17 @@
 import { KeywordHighlight, KeywordPart } from '../common/KeywordHighlight';
 
-/** Text 内的局部强调；普通片段继承外层字号、颜色和字重。深色模式用亮色维持对比度。 */
+export interface KeywordSpansParam {
+  text: string;
+  keyword: string;
+  isDark: boolean;
+}
+
+/** Text 内的局部强调；按引用接收数据，让复用卡片的标题与封面同步更新。普通片段继承外层样式。深色模式用亮色维持对比度。 */
 @Builder
-export function KeywordSpans(text: string, keyword: string, isDark: boolean) {
-  ForEach(KeywordHighlight.split(text, keyword), (part: KeywordPart) => {
+export function KeywordSpans($$: KeywordSpansParam) {
+  ForEach(KeywordHighlight.split($$.text, $$.keyword), (part: KeywordPart) => {
     if (part.matched) {
-      Span(part.text).fontWeight(FontWeight.Bold).fontColor(isDark ? '#FFFFFF' : '#000000')
+      Span(part.text).fontWeight(FontWeight.Bold).fontColor($$.isDark ? '#FFFFFF' : '#000000')
     } else {
       Span(part.text)
     }

@@ -9,7 +9,8 @@ import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber, asBool, str, toHttps, randomString } from '../common/Utils';
 import { MessageSessionItem, MessageSessionPageData, PrivateMessageItem, PrivateMessagePageData,
   MsgFeedUnread, MsgNotifyItem, MsgNotifyPageData } from '../model/Models';
-import { ActionResult, actionWithCsrf, getData, webGet, webPost, failureText } from './internal/ApiCommon';
+import { ActionResult, actionWithCsrf, getData, webGet, webGetSigned, webPost,
+  failureText } from './internal/ApiCommon';
 
 export class MessageApi {
   static async getMessageSessions(beginTs: number = 0): Promise<MessageSessionPageData> {
@@ -19,8 +20,7 @@ export class MessageApi {
       'size': '30', 'build': '0', 'mobi_app': 'web',
     };
     if (beginTs > 0) params['begin_ts'] = String(beginTs);
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.sessionList, params, 'https://message.bilibili.com/');
+    const resp: HttpResponse = await webGetSigned(Api.sessionList, params, 'https://message.bilibili.com/');
     const data: Record<string, Object> | null = getData(resp);
     const result: MessageSessionPageData = new MessageSessionPageData();
     if (data === null) {
@@ -121,8 +121,7 @@ export class MessageApi {
       'build': '0', 'mobi_app': 'web', 'web_location': '333.1296',
     };
     if (beginSeqno > 0) params['begin_seqno'] = String(beginSeqno);
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.sessionMessages, params, 'https://message.bilibili.com/');
+    const resp: HttpResponse = await webGetSigned(Api.sessionMessages, params, 'https://message.bilibili.com/');
     const data: Record<string, Object> | null = getData(resp);
     const result: PrivateMessagePageData = new PrivateMessagePageData();
     if (data === null) {
@@ -256,13 +255,25 @@ export class MessageApi {
       result.items.push(item);
     }
     result.hasMore = !asBool(cursorObj['is_end'], true) && rawItems.length > 0;
-    MessageApi.fillMsgFeedCursor(resp.body, result);
+    // like 报文同时含 latest/total 两段 cursor，翻页游标取 total 段，扫描时需锚定 total 偏移。
+    MessageApi.fillMsgFeedCursor(resp.body, result, kind === 'like');
     return result;
   }
 
-  /** cursor.id/time 为 int64，从原始报文按字符串截取，避免 JSON.parse 丢失精度。 */
-  private static fillMsgFeedCursor(body: string, result: MsgNotifyPageData): void {
-    const idx: number = body.indexOf('"cursor"');
+  /**
+   * cursor.id/time 为 int64，从原始报文按字符串截取，避免 JSON.parse 丢失精度（故不用结构化解析取值）。
+   * 「收到的赞」报文里 latest 与 total 两段都带 "cursor"：先定位 "total" 键的偏移再在其后匹配，
+   * 否则 latest 在前时会取到最新一屏的游标，翻页重复读同一屏导致漏读；
+   * 锚定失败（旧格式无 total 段等）回退“第一个 cursor”的旧行为，reply/at 不受影响。
+   * 报文字符串值内的引号必然转义为 \"，因此带引号的 "total"/"cursor" 只可能是键名，不会误匹配正文。
+   */
+  private static fillMsgFeedCursor(body: string, result: MsgNotifyPageData, fromTotal: boolean = false): void {
+    let idx: number = body.indexOf('"cursor"');
+    if (fromTotal) {
+      const totalIdx: number = body.indexOf('"total"');
+      const totalCursorIdx: number = totalIdx >= 0 ? body.indexOf('"cursor"', totalIdx) : -1;
+      if (totalCursorIdx >= 0) idx = totalCursorIdx;
+    }
     if (idx < 0) return;
     const block: string = body.substring(idx, idx + 160);
     const idMatch: RegExpMatchArray | null = block.match(/"id":(\d+)/);

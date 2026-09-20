@@ -8,7 +8,8 @@ import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber, str, toHttps } from '../common/Utils';
 import { LiveChatMessage, LiveDanmakuInfo, LiveDanmakuServer, LiveEmoteItem, LiveEmotePackage, LivePlayInfo,
   FollowedLivePage, LiveQualityOption, LiveRoomInfo, LiveRoomItem, LiveStatusItem, LiveZone } from '../model/LiveModels';
-import { ActionResult, actionWithCsrf, failureText, getData, webGet, webPost } from './internal/ApiCommon';
+import { ActionResult, actionWithCsrf, failureText, getData, webGet, webGetSigned,
+  webPost } from './internal/ApiCommon';
 
 export class LiveApi {
   static async getFollowedLiveRooms(page: number): Promise<FollowedLivePage> {
@@ -203,8 +204,8 @@ export class LiveApi {
   static async getLiveDanmakuInfo(roomId: number): Promise<LiveDanmakuInfo | null> {
     // 当前接口已启用 WBI 风控；对齐 PiliPlus，必须携带 web_location 并签名。
     const params: Record<string, string> = { 'id': String(roomId), 'web_location': '444.8' };
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.liveDanmakuInfo, params, 'https://live.bilibili.com/' + String(roomId));
+    const resp: HttpResponse = await webGetSigned(Api.liveDanmakuInfo, params,
+      'https://live.bilibili.com/' + String(roomId));
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return null;
     const info: LiveDanmakuInfo = new LiveDanmakuInfo();
@@ -291,7 +292,10 @@ export class LiveApi {
           body['reply_type'] = '0';
           body['reply_uname'] = '';
         }
-        return webPost(Api.liveSendDanmaku, query, 'https://live.bilibili.com/' + String(roomId));
+        // WBI 签名参数（wts/w_rid）必须拼在 URL query 上（对齐 MessageApi.sendPrivateMessage），
+        // 放进 form body 服务端不识别；弹幕内容等业务字段走 form body。
+        return webPost(Api.liveSendDanmaku + '?' + HttpClient.buildQuery(query), body,
+          'https://live.bilibili.com/' + String(roomId));
       });
   }
 

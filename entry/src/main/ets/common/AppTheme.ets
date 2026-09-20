@@ -3,6 +3,7 @@
  * 对应 PiliPlus 的 Material You 动态色彩与明暗主题
  */
 import { tonalPalette, isDarkColor } from './ColorUtil';
+import { PlayerQualityPreference } from './PlayerQualityPreference';
 import { Constants } from './Constants';
 import { uiMaterial } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
@@ -47,6 +48,8 @@ export class AppTheme {
   static readonly KEY_AUTO_DARK: string = 'autoDarkEnabled';
   static readonly KEY_AUTO_DARK_START: string = 'autoDarkStart';
   static readonly KEY_AUTO_DARK_END: string = 'autoDarkEnd';
+  /** 自选主题色一次性迁移标记：防止第二次启动起把平台生效色误当自选色（语义见 init 内迁移说明）。 */
+  private static readonly KEY_USER_ACCENT_MIGRATED: string = 'userAccentMigrated';
   private static readonly KEY_DM_ENABLED: string = 'danmakuEnabled';
   private static readonly KEY_DM_FRAME_RATE: string = 'danmakuFrameRate';
   private static readonly KEY_DM_OPACITY: string = 'danmakuOpacity';
@@ -72,16 +75,31 @@ export class AppTheme {
     PersistentStorage.persistProp<string>(AppTheme.KEY_THEME_MODE, AppTheme.MODE_SYSTEM);
     PersistentStorage.persistProp<string>(AppTheme.KEY_ACCENT, Constants.brandPink);
     PersistentStorage.persistProp<string>(AppTheme.KEY_USER_ACCENT, Constants.brandPink);
+    // 迁移标记同样持久化：persistProp 三步初始化后 AppStorage 里必有值（磁盘值或 false）。
+    PersistentStorage.persistProp<boolean>(AppTheme.KEY_USER_ACCENT_MIGRATED, false);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_DARK, false);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_GLASS_ENABLED, true);
+    PersistentStorage.persistProp<boolean>('playerDoubleTapEnabled', true);
+    PersistentStorage.persistProp<boolean>('playerPanEnabled', true);
+    PersistentStorage.persistProp<boolean>('playerHoldEnabled', true);
+    AppTheme.ensureBool('playerDoubleTapEnabled', true);
+    AppTheme.ensureBool('playerPanEnabled', true);
+    AppTheme.ensureBool('playerHoldEnabled', true);
     PersistentStorage.persistProp<number>('videoQualityPref', 0);
     PersistentStorage.persistProp<number>('videoManualQuality', 0);
     AppTheme.ensureString(AppTheme.KEY_THEME_MODE, AppTheme.MODE_SYSTEM);
     AppTheme.ensureString(AppTheme.KEY_ACCENT, Constants.brandPink);
-    // 迁移：老版本只持久化过 accentColor（那就是用户自选值），首次升级时把它迁到新键，
-    // 之后平台强调色只改生效值，不再动自选值。
-    AppTheme.ensureString(AppTheme.KEY_USER_ACCENT,
-      AppStorage.get<string>(AppTheme.KEY_ACCENT) ?? Constants.brandPink);
+    // 一次性迁移：老版本只有 accentColor（当时 setAccent 是它唯一写入方，落盘的就是用户自选值），
+    // 首次升级把它搬进自选键。不能再用 ensure* 判断——上面两个 persistProp 已保证键必有值
+    // （磁盘值或默认粉），undefined 判断恒为假，旧写法是死代码。改为持久化迁移标记：
+    // 仅标记为 false 的首次启动执行迁移；此后 applyPlatformAccent 会把平台生效色（YouTube 红）
+    // 回写进持久化的 accentColor，第二次启动起必须跳过，否则生效色会污染自选色。
+    if ((AppStorage.get<boolean>(AppTheme.KEY_USER_ACCENT_MIGRATED) ?? false) === false) {
+      AppStorage.setOrCreate<string>(AppTheme.KEY_USER_ACCENT,
+        AppStorage.get<string>(AppTheme.KEY_ACCENT) ?? Constants.brandPink);
+      // persistProp 过的键写入 AppStorage 即自动持久化，下次启动读到 true 即跳过。
+      AppStorage.setOrCreate<boolean>(AppTheme.KEY_USER_ACCENT_MIGRATED, true);
+    }
     AppTheme.ensureBool(AppTheme.KEY_DARK, false);
     AppTheme.ensureBool(AppTheme.KEY_SYSTEM_DARK, false);
     AppTheme.ensureNumber(AppTheme.KEY_HEADER_FADE, 0);
@@ -122,7 +140,7 @@ export class AppTheme {
   /** 显式 Preferences 落盘（与 UserStore 同机制，绕开 PersistentStorage 的启动竞态）。 */
   static async initThemeStore(context: common.UIAbilityContext): Promise<void> {
     try {
-      AppTheme.themePreferences = await preferences.getPreferences(context, { name: 'bili_theme_state' });
+      AppTheme.themePreferences = preferences.getPreferencesSync(context, { name: 'bili_theme_state' });
       const mode: string = AppTheme.themePreferences.getSync(AppTheme.KEY_THEME_MODE, '') as string;
       const dark: string = AppTheme.themePreferences.getSync(AppTheme.KEY_DARK, '') as string;
       if (mode.length > 0) {
@@ -143,6 +161,18 @@ export class AppTheme {
       if (sponsor.length > 0) AppStorage.setOrCreate<boolean>('sponsorSkipEnabled', sponsor === 'true');
       const background: string = AppTheme.themePreferences.getSync('backgroundPlaybackEnabled', '') as string;
       if (background.length > 0) AppStorage.setOrCreate<boolean>('backgroundPlaybackEnabled', background === 'true');
+      const store: preferences.Preferences = AppTheme.themePreferences;
+      PlayerQualityPreference.restore(Number(store.getSync('videoManualQuality',
+        AppStorage.get<number>('videoManualQuality') ?? 0)), Number(store.getSync('videoQualityPref',
+        AppStorage.get<number>('videoQualityPref') ?? 0)), (manual: number, qualityMode: number) => {
+        store.putSync('videoManualQuality', manual);
+        store.putSync('videoQualityPref', qualityMode);
+        store.flush().catch(() => {});
+      });
+      for (const key of ['playerDoubleTapEnabled', 'playerPanEnabled', 'playerHoldEnabled']) {
+        const saved: string = store.getSync(key, '') as string;
+        if (saved.length > 0) AppStorage.setOrCreate<boolean>(key, saved === 'true');
+      }
       AppTheme.applyCurrentMode();
     } catch (e) {
       // 恢复失败保留默认态，不影响启动。
@@ -159,6 +189,11 @@ export class AppTheme {
     } catch (e) {
       // 写盘失败只丢最后一次偏好。
     }
+  }
+
+  static setPlayerGesture(key: string, enabled: boolean): void {
+    AppStorage.setOrCreate<boolean>(key, enabled);
+    AppTheme.syncBooleanPref(key, enabled);
   }
 
   /** 自动连播开关写 Preferences。 */
@@ -399,8 +434,8 @@ export class AppTheme {
 
   static setAutoDarkEnabled(on: boolean): void {
     AppStorage.setOrCreate<boolean>(AppTheme.KEY_AUTO_DARK, on);
-    if (on && AppTheme.getMode() === AppTheme.MODE_SYSTEM) {
-      AppTheme.applyAutoDark();
+    if (AppTheme.getMode() === AppTheme.MODE_SYSTEM) {
+      AppTheme.applyCurrentMode();
     }
   }
 
@@ -449,9 +484,27 @@ export class AppTheme {
     AppTheme.setDark(AppTheme.inAutoDarkWindow(new Date()));
   }
 
-  /** 生成当前模式下的色调板 */
+  /** palette 记忆化三元组：结果仅由 (accent, isDark) 决定，入参不变则直接复用上次结果。 */
+  private static lastPaletteAccent: string = '';
+  private static lastPaletteDark: boolean = false;
+  private static lastPalette: Record<string, string> = {};
+
+  /**
+   * 生成当前模式下的色调板（按 accent + 明暗记忆化）。
+   * 调用点遍布 build（background/surface/onSurface 等取色最终都汇到这里），每次全量重算
+   * hexToRgb + luminance + 10 次 mixWith 纯属浪费。UI 的响应式刷新由调用方的
+   * @StorageProp('accentColor') / @StorageProp('isDarkMode') 驱动：入参一变必然触发重算，
+   * 记忆化不影响正确性。返回共享引用，所有调用方只读键值、不改写 Record。
+   */
   static palette(): Record<string, string> {
-    return tonalPalette(AppTheme.getAccent(), AppTheme.isDark());
+    const accent: string = AppTheme.getAccent();
+    const dark: boolean = AppTheme.isDark();
+    if (accent !== AppTheme.lastPaletteAccent || dark !== AppTheme.lastPaletteDark) {
+      AppTheme.lastPalette = tonalPalette(accent, dark);
+      AppTheme.lastPaletteAccent = accent;
+      AppTheme.lastPaletteDark = dark;
+    }
+    return AppTheme.lastPalette;
   }
 
   /** 背景色（主题氛围背景） */

@@ -443,14 +443,14 @@ export class PlayUrlInfo {
     }
     dashAvailable.sort((a: number, b: number) => b - a);
     // 先按用户偏好确定实际可用档位，再选择传输格式；普通 MP4 不能遮住更高档 DASH。
-    let selectedQuality: number = dashAvailable.length > 0 ? dashAvailable[dashAvailable.length - 1] : info.quality;
+    let selectedQuality: number = 0;
     for (let i: number = 0; i < dashAvailable.length; i++) {
       if (dashAvailable[i] <= requestedQuality) {
         selectedQuality = dashAvailable[i];
         break;
       }
     }
-    if (durl.length > 0 && info.quality <= 80 &&
+    if (durl.length > 0 && info.quality <= requestedQuality && info.quality <= 80 &&
       (dashAvailable.length === 0 || info.quality === selectedQuality)) {
       const first: Record<string, Object> = asObject(durl[0]);
       const candidates: Array<string> = [];

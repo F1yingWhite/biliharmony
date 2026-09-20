@@ -1,7 +1,7 @@
 import { AbilityConstant, Configuration, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { DEBUG } from 'BuildProfile';
-import { KeyboardAvoidMode, window } from '@kit.ArkUI';
+import { App, KeyboardAvoidMode, window } from '@kit.ArkUI';
 import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
 import { UserStore } from '../services/auth/UserStore';
@@ -21,6 +21,7 @@ const TAG: string = 'BiliHarmony';
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    EntryAbility.enableImageCaches();
     AppStorage.setOrCreate<boolean>('appInBackground', false);
     UserStore.initPersistence(this.context);
     SearchHistoryStore.init(this.context);
@@ -49,6 +50,26 @@ export default class EntryAbility extends UIAbility {
     AppTheme.bindNativeModeApplier((mode: string) => this.applyNativeThemeMode(mode));
     AppTheme.applyCurrentMode();
     if (DEBUG) hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onCreate');
+  }
+
+  /**
+   * 开启 ArkUI 图片缓存。SDK 明确写着"setImageCacheCount 未设置时应用不缓存任何已解码图片"，
+   * 因此默认配置下同一张评论图/头像滚出视口再回来必须重新下载并重新解码；
+   * 这里在 onCreate（任何图片加载之前、UI 线程上）一次性打开三级缓存。
+   * 必须在 loadContent 之前调用：图片缓存容量只在首次加载图片前生效。
+   */
+  private static enableImageCaches(): void {
+    try {
+      // 已解码图片（内存）：评论流 + 信息流滚动回来直接复用，不再重新解码。
+      App.setImageCacheCount(256);
+      // 解码前原始数据（内存）：同图复用不同尺寸时省掉一次磁盘读。
+      App.setImageRawDataCacheSize(48 * 1024 * 1024);
+      // 磁盘缓存（默认 100MB）：视频页反复进出的封面与评论图不再重新下载。
+      App.setImageFileCacheSize(256 * 1024 * 1024);
+    } catch (e) {
+      // 缓存属于增强能力：机型不支持时只记录，绝不影响启动。
+      if (DEBUG) hilog.warn(DOMAIN, TAG, 'Enable image caches failed: %{public}s', JSON.stringify(e));
+    }
   }
 
   /**

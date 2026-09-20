@@ -93,4 +93,18 @@ export class BasicDataSource<T> implements IDataSource {
   public clear(): void {
     this.reset([]);
   }
+
+  /**
+   * 从头部裁剪最多 count 条。直播聊天等“窗口上限”列表追加后调用：
+   * 逐条 onDataDelete 通知 LazyForEach，位移动画与命中检测保持正确。
+   */
+  public trimHead(count: number): void {
+    const remove: number = Math.min(Math.max(0, count), this.items.length);
+    for (let i: number = 0; i < remove; i++) {
+      this.items.shift();
+      this.listeners.forEach((listener: DataChangeListener) => {
+        listener.onDataDelete(0);
+      });
+    }
+  }
 }

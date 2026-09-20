@@ -29,6 +29,8 @@ export struct PlayerMoreSheet {
   onBackgroundPlaybackChange: (next: boolean) => void = () => {};
   onSponsorToggle: (next: boolean) => void = () => {};
   onSponsorSettings: () => void = () => {};
+  onReportVideo: () => void = () => {};
+  onPictureInPicture: () => void = () => {};
   onShare: () => void = () => {};
   onWatchLater: () => void = () => {};
   onCopyLink: () => void = () => {};
@@ -229,7 +231,7 @@ export struct PlayerMoreSheet {
               this.ShareSquare($r('app.media.ic_share_cache'), this.downloadLabel(), (): void => {
                 if (!this.downloadBusy) this.onDownload();
               })
-              this.ShareSquare($r('app.media.ic_share_pip'), '小窗播放', (): void => this.onStub('功能暂未开放'))
+              this.ShareSquare($r('app.media.ic_share_pip'), '小窗播放', (): void => this.onPictureInPicture())
               this.ShareSquare($r('app.media.ic_share_cast'), '投屏', (): void => this.onStub('功能暂未开放'))
             }
             .width('100%')
@@ -421,7 +423,7 @@ export struct PlayerMoreSheet {
             }
             .width('100%')
             .padding({ left: 16, right: 16, top: 15, bottom: 15 })
-            .onClick(() => this.onStub('功能暂未开放'))
+            .onClick(() => this.onReportVideo())
 
             Divider().strokeWidth(0.6).color(this.dividerColor())
 

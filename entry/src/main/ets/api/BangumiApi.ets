@@ -1,12 +1,12 @@
 /**
  * 番剧与影视（PGC）API：详情、追番、索引和时间表。
  */
-import { HttpClient, HttpResponse } from '../services/network/HttpClient';
+import { HttpClient, HttpResponse, RequestPriority } from '../services/network/HttpClient';
 import { Api, Constants } from '../common/Constants';
 import { asArray, asBool, asNumber, asObject, str } from '../common/Utils';
 import { BangumiIndexItem, BangumiIndexPageData, BangumiSeason, TimeLineDay, TimeLineEpisode,
   WatchLaterSeasonItem, VideoDetail, VideoPage, PlayUrlInfo } from '../model/Models';
-import { ActionResult, getData, postVideoAction, webGet } from './internal/ApiCommon';
+import { ActionResult, getData, postVideoAction, webGet, webGetWithPriority } from './internal/ApiCommon';
 
 export class BangumiApi {
   /** 以服务端集信息恢复播放身份，不依赖普通投稿详情是否对 PGC 开放。 */
@@ -36,10 +36,10 @@ export class BangumiApi {
   /** 使用当前账号的官方 PGC 权限；只处理服务端返回的可播放源。 */
   static async getPlayUrl(epId: number, cid: number, qn: number): Promise<PlayUrlInfo | null> {
     if (epId <= 0 || cid <= 0) return null;
-    const resp: HttpResponse = await webGet('https://api.bilibili.com/pgc/player/web/playurl', {
+    const resp: HttpResponse = await webGetWithPriority('https://api.bilibili.com/pgc/player/web/playurl', {
       'ep_id': String(epId), 'cid': String(cid), 'qn': String(qn),
       'fnval': '4048', 'fnver': '0', 'fourk': '1', 'https_url_req': '1',
-    }, 'https://www.bilibili.com/bangumi/play/ep' + String(epId));
+    }, 'https://www.bilibili.com/bangumi/play/ep' + String(epId), RequestPriority.CRITICAL);
     if (!resp.ok) throw new Error(resp.status < 0 ? resp.transportMessage : '番剧播放请求失败，请稍后重试');
     const json: Record<string, Object> = resp.json();
     const code: number = asNumber(json['code'], -1);
@@ -64,7 +64,8 @@ export class BangumiApi {
     const params: Record<string, string> = {};
     if (seasonId > 0) params['season_id'] = String(seasonId);
     else params['ep_id'] = String(epId);
-    const resp: HttpResponse = await webGet(Api.bangumiSeason + '?' + HttpClient.buildQuery(params));
+    const resp: HttpResponse = await webGetWithPriority(Api.bangumiSeason + '?' + HttpClient.buildQuery(params),
+      undefined, '', RequestPriority.CRITICAL);
     if (!resp.ok) return null;
     const json: Record<string, Object> = resp.json();
     if (asNumber(json['code'], -1) !== 0) return null;

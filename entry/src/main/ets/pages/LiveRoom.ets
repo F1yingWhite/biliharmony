@@ -2,6 +2,7 @@
 
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { AppNavStack, LiveRoomParam, NAV_LOGIN } from '../common/AppRouter';
+import { BasicDataSource } from '../common/BasicDataSource';
 import { Immersive } from '../common/Immersive';
 import { LiveDanmakuClient } from '../common/LiveDanmakuClient';
 import { LiveSuperChatShelf } from '../components/live/LiveSuperChatShelf';
@@ -18,9 +19,10 @@ export struct LiveRoomPage {
   param: LiveRoomParam = { roomId: 0, uid: 0, title: '', uname: '', face: '', cover: '' };
   @State roomInfo: LiveRoomInfo = new LiveRoomInfo();
   @State playInfo: LivePlayInfo = new LivePlayInfo();
-  // messages 保持时间正序（LivePlayerView 弹幕浮层取尾部 N 条）；chatList 同为正序（新消息在底部，自动贴底）
+  // messages 保持时间正序（LivePlayerView 弹幕浮层取尾部 N 条）；chatSource 同为正序（新消息在底部，自动贴底）
   @State messages: Array<LiveChatMessage> = [];
-  @State chatList: Array<LiveChatMessage> = [];
+  /** 聊天列表懒加载数据源：220ms 合帧批次只做增量追加/头部裁剪，避免整组 @State 数组换引用全量 diff。 */
+  private chatSource: BasicDataSource<LiveChatMessage> = new BasicDataSource<LiveChatMessage>();
   private chatScroller: Scroller = new Scroller();
   /** 用户是否停留在弹幕列表底部附近（在底部新消息才自动跟滚）。 */
   private chatAtBottom: boolean = true;
@@ -36,6 +38,8 @@ export struct LiveRoomPage {
   @State emotePackages: Array<LiveEmotePackage> = [];
   @State emotePackageIndex: number = 0;
   @State connected: boolean = false;
+  /** 弹幕连接自动重连放弃后为 true：徽标改为「点击重连」，恢复由用户触发。 */
+  @State danmakuGaveUp: boolean = false;
   @State fullscreen: boolean = false;
   @State chatTab: number = 0;
   @State errorText: string = '';
@@ -65,7 +69,11 @@ export struct LiveRoomPage {
     this.roomInfo.face = this.param.face;
     this.roomInfo.cover = this.param.cover;
     this.client.onMessage = (message: LiveChatMessage) => this.appendMessage(message);
-    this.client.onConnected = (value: boolean) => this.connected = value;
+    this.client.onConnected = (value: boolean) => {
+      this.connected = value;
+      if (value) this.danmakuGaveUp = false;
+    };
+    this.client.onGiveUp = () => this.danmakuGaveUp = true;
     this.loadRoom().catch(() => {
     });
     this.loadEmoticons().catch(() => {
@@ -107,7 +115,7 @@ export struct LiveRoomPage {
       this.knownMessageIds.clear();
       for (let i: number = 0; i < history.length; i++) this.knownMessageIds.add(history[i].id);
       this.messages = history;
-      this.chatList = history.slice(-200);
+      this.chatSource.reset(history.slice(-200));
       this.chatAtBottom = true;
       this.scrollChatToEnd(true);
       this.lastLiveMessageAt = Date.now();
@@ -176,7 +184,7 @@ export struct LiveRoomPage {
       this.knownMessageIds.clear();
       for (let i: number = 0; i < history.length; i++) this.knownMessageIds.add(history[i].id);
       this.messages = history;
-      this.chatList = history.slice(-200);
+      this.chatSource.reset(history.slice(-200));
       this.chatAtBottom = true;
       this.lastLiveMessageAt = Date.now();
       this.playInfo = play;
@@ -237,7 +245,7 @@ export struct LiveRoomPage {
       if (emote !== null) local.emotes.push(emote);
       this.knownMessageIds.add(local.id);
       this.messages = this.messages.concat([local]);
-      this.chatList = this.chatList.concat([local]).slice(-200);
+      this.appendChatMessages([local]);
       this.chatAtBottom = true;
       this.scrollChatToEnd();
       this.draft = '';
@@ -320,7 +328,15 @@ export struct LiveRoomPage {
     }
   }
 
-  /** 合帧落盘：正序 messages 供播放器浮层；chatList 同为正序，新消息追加在底部。 */
+  /** 追加聊天消息并维持 200 条窗口：增量通知数据源，避免整组数组换引用。 */
+  private appendChatMessages(batch: Array<LiveChatMessage>): void {
+    if (batch.length === 0) return;
+    this.chatSource.append(batch);
+    const overflow: number = this.chatSource.totalCount() - 200;
+    if (overflow > 0) this.chatSource.trimHead(overflow);
+  }
+
+  /** 合帧落盘：正序 messages 供播放器浮层；chatSource 同为正序，新消息追加在底部。 */
   private flushMessages(): void {
     if (this.destroyed || this.pendingMsgs.length === 0) {
       return;
@@ -329,7 +345,7 @@ export struct LiveRoomPage {
     this.pendingMsgs = [];
     const next: Array<LiveChatMessage> = this.messages.concat(batch);
     this.messages = next.length > 240 ? next.slice(next.length - 200) : next;
-    this.chatList = this.chatList.concat(batch).slice(-200);
+    this.appendChatMessages(batch);
     // 用户本就在底部时才跟滚；翻上去读历史不打断。
     if (this.chatAtBottom) this.scrollChatToEnd();
   }
@@ -339,9 +355,9 @@ export struct LiveRoomPage {
     const delays: Array<number> = settleLayout ? [80, 220, 500] : [40, 140];
     for (let i: number = 0; i < delays.length; i++) {
       setTimeout(() => {
-        if (this.destroyed || this.chatList.length === 0) return;
+        if (this.destroyed || this.chatSource.totalCount() === 0) return;
         this.chatAtBottom = true;
-        this.chatScroller.scrollToIndex(this.chatList.length - 1, false, ScrollAlign.END);
+        this.chatScroller.scrollToIndex(this.chatSource.totalCount() - 1, false, ScrollAlign.END);
         this.chatScroller.scrollEdge(Edge.End);
       }, delays[i]);
     }
@@ -401,10 +417,16 @@ export struct LiveRoomPage {
         .fontColor(this.chatTab === 1 ? this.accent : (this.isDark ? '#9A9A9E' : '#777B82'))
         .onClick(() => this.chatTab = 1)
       Blank()
-      Text(this.connected ? '实时' : '重连中')
+      Text(this.connected ? '实时' : (this.danmakuGaveUp ? '点击重连' : '重连中'))
         .fontSize(10).fontColor(this.connected ? '#45D483' : (this.isDark ? '#77777C' : '#A0A3A8'))
         .padding({ left: 7, right: 7, top: 3, bottom: 3 })
         .borderRadius(9).backgroundColor(this.isDark ? '#26272C' : '#EEF0F2')
+        .onClick(() => {
+          if (this.danmakuGaveUp && !this.connected) {
+            this.danmakuGaveUp = false;
+            this.client.manualReconnect();
+          }
+        })
     }
     .width('100%').height(42).padding({ left: 14, right: 14 })
     .alignItems(VerticalAlign.Center)
@@ -460,16 +482,17 @@ export struct LiveRoomPage {
   @Builder
   DanmakuList() {
     List({ space: 8, scroller: this.chatScroller }) {
-      ForEach(this.chatList, (msg: LiveChatMessage) => {
+      LazyForEach(this.chatSource, (msg: LiveChatMessage) => {
         ListItem() {
           this.ChatBadgeRow(msg)
         }
       }, (msg: LiveChatMessage) => msg.id)
     }
     .width('100%').layoutWeight(1).scrollBar(BarState.Off)
+    .cachedCount(4)
     .contentEndOffset(Immersive.bottomInset() + 18)
     .onScrollIndex((first: number, last: number) => {
-      this.chatAtBottom = last >= this.chatList.length - 2;
+      this.chatAtBottom = last >= this.chatSource.totalCount() - 2;
     })
   }
 

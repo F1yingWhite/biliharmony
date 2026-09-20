@@ -3,9 +3,10 @@
  * 用于"沉浸光感"动态主题（视频详情、播放页背景氛围色）
  */
 import { image } from '@kit.ImageKit';
-import { HttpClient } from '../services/network/HttpClient';
+import { HttpClient, RequestPriority } from '../services/network/HttpClient';
 import { RGB, rgbToHex, withSaturation } from './ColorUtil';
 import { Constants } from './Constants';
+import { biliImageThumbnail } from './ImageUrl';
 
 export class ImagePalette {
   dominant: string = '#FB7299';   // 主色（出现频率最高）
@@ -61,10 +62,14 @@ export class ImageColor {
     let source: image.ImageSource | null = null;
     let pixelMap: image.PixelMap | null = null;
     try {
-      const bytes: ArrayBuffer = await HttpClient.getBytes(url, {
+      // 采样只要 40×40：B 站图床直接请求 120w 缩略图（原图动辄几百 KB~数 MB，
+      // 且会与封面、播放地址抢首屏带宽）。非图床地址原样使用。
+      const thumbs: string = biliImageThumbnail(url, 120);
+      // 取色只影响氛围光，永远排在首屏关键请求之后。
+      const bytes: ArrayBuffer = await HttpClient.getBytes(thumbs, {
         'User-Agent': Constants.browserUa,
         'Referer': 'https://www.bilibili.com/',
-      });
+      }, RequestPriority.LOW);
       if (bytes.byteLength === 0) {
         return fallback;
       }

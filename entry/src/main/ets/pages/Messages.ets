@@ -4,9 +4,9 @@ import { AppTheme } from '../common/AppTheme';
 import { display } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { Immersive } from '../common/Immersive';
-import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
+import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   ImageViewerParam, ImageViewerSrcRect, NAV_IMAGE_VIEWER, NAV_LOGIN, NAV_VIDEO_DETAIL,
-  VideoDetailParam } from '../common/AppRouter';
+  VideoDetailParam, setHeroBgSnapshot } from '../common/AppRouter';
 import { BiliApi, ActionResult } from '../api/BiliApi';
 import { MessageSessionItem, MessageSessionPageData, PrivateMessageItem, PrivateMessagePageData } from '../model/Models';
 import { UserStore } from '../services/auth/UserStore';
@@ -440,7 +440,7 @@ export struct MessagesPage {
           waitUntilRenderFinished: true,
         });
         param.cardRect = cardRect;
-        AppStorage.setOrCreate<image.PixelMap>(HERO_BG_SNAPSHOT_KEY, snapshot);
+        setHeroBgSnapshot(snapshot);
         AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
         AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
         AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);

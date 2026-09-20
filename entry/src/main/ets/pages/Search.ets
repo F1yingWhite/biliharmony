@@ -73,7 +73,8 @@ export struct SearchPage {
   @State tmpTids: number = 0;
   @State showSuggest: boolean = false;
   @State history: Array<string> = [];
-  // 综合 Tab 分区列表（all/v2 聚合结果，整体替换触发刷新）
+  // 综合 Tab 分区列表（all/v2 聚合结果）：保留视频分区用于 hasMore 计数与空态判断，
+  // 视频行渲染改由 allVideoSource 懒加载驱动；非视频分区仍按 ForEach 渲染。
   @State allSections: Array<SearchAllSection> = [];
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
@@ -85,6 +86,8 @@ export struct SearchPage {
   private ftSource: BasicDataSource<PgcSearchItem> = new BasicDataSource<PgcSearchItem>();
   private liveSource: BasicDataSource<LiveRoomItem> = new BasicDataSource<LiveRoomItem>();
   private articleSource: BasicDataSource<ArticleSearchItem> = new BasicDataSource<ArticleSearchItem>();
+  // 综合 Tab 视频分区懒加载数据源：翻页只 append 新增行，历史卡片不随分区 key 变化而全量重建。
+  private allVideoSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
   // 搜索建议：300ms 防抖 + 请求序号（慢响应乱序到达时丢弃旧结果）
   private suggestTimer: number = -1;
   private suggestSeq: number = 0;
@@ -216,8 +219,14 @@ export struct SearchPage {
         }
         if (reset) {
           this.allSections = res.sections;
+          // 整体重置（新关键词/切 Tab/改排序筛选）：onDataReloaded 全量换行。
+          this.allVideoSource.reset(this.videosOfSections(res.sections));
         } else {
+          const loadedBefore: number = this.allVideoSource.totalCount();
           this.allSections = this.mergeAllSections(this.allSections, res.sections);
+          // 触底翻页：只把去重后的新增行 append 进数据源，LazyForEach 收 onDataAdd
+          // 逐行插入，历史卡片不销毁重建（修复原 length-key 触发的全量重建）。
+          this.allVideoSource.append(this.videosOfSections(this.allSections).slice(loadedBefore));
         }
         this.applyAllTotals(res.totals);
         const incomingVideos: number = res.sections.reduce((count: number, section: SearchAllSection) =>
@@ -351,6 +360,17 @@ export struct SearchPage {
     }
   }
 
+  /** 收集分区数组中视频分区的全部稿件（综合 Tab 视频懒加载数据源的数据来源）。 */
+  private videosOfSections(sections: Array<SearchAllSection>): Array<VideoItem> {
+    let out: Array<VideoItem> = [];
+    for (let i: number = 0; i < sections.length; i++) {
+      if (sections[i].type === SearchTypes.video) {
+        out = out.concat(sections[i].videos);
+      }
+    }
+    return out;
+  }
+
   /** 综合搜索翻页合并：后续页只含视频分区，并入现有视频分区（新建数组触发 @State 刷新）。 */
   private mergeAllSections(current: Array<SearchAllSection>,
     incoming: Array<SearchAllSection>): Array<SearchAllSection> {
@@ -441,6 +461,7 @@ export struct SearchPage {
     this.liveSource.clear();
     this.articleSource.clear();
     this.allSections = [];
+    this.allVideoSource.clear();
     this.videoTotal = -1;
     this.userTotal = -1;
     this.bangumiTotal = -1;
@@ -887,7 +908,7 @@ export struct SearchPage {
       .onClick(() => this.openUserLive(item))
       Column({ space: 4 }) {
         Row({ space: 6 }) {
-          Text() { KeywordSpans(item.uname, this.resultKeyword, this.isDark) }
+          Text() { KeywordSpans({ text: item.uname, keyword: this.resultKeyword, isDark: this.isDark }) }
             .fontSize(14)
             .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
             .maxLines(1)
@@ -911,7 +932,7 @@ export struct SearchPage {
           .fontSize(11)
           .fontColor('#9499A0')
         if (item.usign.length > 0) {
-          Text() { KeywordSpans(item.usign, this.resultKeyword, this.isDark) }
+          Text() { KeywordSpans({ text: item.usign, keyword: this.resultKeyword, isDark: this.isDark }) }
             .fontSize(11)
             .fontColor('#9499A0')
             .maxLines(1)
@@ -1026,7 +1047,7 @@ export struct SearchPage {
       .clip(true)
       .borderRadius(6)
       Column({ space: 5 }) {
-        Text() { KeywordSpans(item.title, this.resultKeyword, this.isDark) }
+        Text() { KeywordSpans({ text: item.title, keyword: this.resultKeyword, isDark: this.isDark }) }
           .fontSize(14)
           .fontWeight(FontWeight.Medium)
           .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
@@ -1056,7 +1077,7 @@ export struct SearchPage {
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
         if (item.desc.length > 0) {
-          Text() { KeywordSpans(item.desc, this.resultKeyword, this.isDark) }
+          Text() { KeywordSpans({ text: item.desc, keyword: this.resultKeyword, isDark: this.isDark }) }
             .fontSize(11)
             .fontColor('#B0B3B8')
             .maxLines(2)
@@ -1176,14 +1197,14 @@ export struct SearchPage {
   ArticleRow(item: ArticleSearchItem) {
     Row({ space: 10 }) {
       Column({ space: 5 }) {
-        Text() { KeywordSpans(item.title, this.resultKeyword, this.isDark) }
+        Text() { KeywordSpans({ text: item.title, keyword: this.resultKeyword, isDark: this.isDark }) }
           .fontSize(13)
           .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .lineHeight(17)
         if (item.desc.length > 0) {
-          Text() { KeywordSpans(item.desc, this.resultKeyword, this.isDark) }
+          Text() { KeywordSpans({ text: item.desc, keyword: this.resultKeyword, isDark: this.isDark }) }
             .fontSize(11)
             .fontColor('#9499A0')
             .maxLines(2)
@@ -1297,7 +1318,7 @@ export struct SearchPage {
       .aspectRatio(1.6)
       .clip(true)
       .borderRadius(5)
-      Text() { KeywordSpans(item.title, this.resultKeyword, this.isDark) }
+      Text() { KeywordSpans({ text: item.title, keyword: this.resultKeyword, isDark: this.isDark }) }
         .width('100%')
         .fontSize(12)
         .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
@@ -1336,7 +1357,7 @@ export struct SearchPage {
         .onClick(() => this.openUserLive(user))
         Column({ space: 4 }) {
           Row({ space: 5 }) {
-            Text() { KeywordSpans(user.uname, this.resultKeyword, this.isDark) }
+            Text() { KeywordSpans({ text: user.uname, keyword: this.resultKeyword, isDark: this.isDark }) }
               .fontSize(15)
               .fontWeight(FontWeight.Medium)
               .fontColor(this.accent)
@@ -1431,44 +1452,52 @@ export struct SearchPage {
         })
       } else {
         List() {
+          // 视频分区置顶：标题与行直接作为 List 子节点，由 allVideoSource 懒加载驱动。
+          // LazyForEach 必须直接挂在滚动容器下，故视频分区不再包 ListItemGroup。
+          if (!this.allVideoSource.isEmpty()) {
+            ListItem() {
+              this.AllSectionHeader(SearchTypes.video)
+            }
+          }
+          LazyForEach(this.allVideoSource, (item: VideoItem) => {
+            ListItem() {
+              this.SearchVideoRow(item, 'search-all-')
+            }
+          }, (item: VideoItem) => item.bvid + String(item.aid))
+          // 非视频分区（用户/番剧/影视/图文）只在第一页返回，key 用分区类型、不含条目数，
+          // 翻页合并不会触发这些分区重建；视频分区已在上方由 LazyForEach 渲染，此处跳过。
           ForEach(this.allSections, (section: SearchAllSection) => {
-            ListItemGroup({ header: this.AllSectionHeader(section.type) }) {
-              if (section.type === SearchTypes.biliUser) {
-                ListItem() {
-                  this.AllUserRow(section)
-                }
-                .margin({ left: 12, right: 12, bottom: 8 })
-                .borderRadius(7)
-                .backgroundColor(this.isDark ? '#24262B' : '#FFFFFF')
-                .clip(true)
-              } else if (section.type === SearchTypes.mediaBangumi || section.type === SearchTypes.mediaFt) {
-                ForEach(section.pgc, (item: PgcSearchItem) => {
+            if (section.type !== SearchTypes.video) {
+              ListItemGroup({ header: this.AllSectionHeader(section.type) }) {
+                if (section.type === SearchTypes.biliUser) {
                   ListItem() {
-                    this.PgcRow(item)
+                    this.AllUserRow(section)
                   }
                   .margin({ left: 12, right: 12, bottom: 8 })
                   .borderRadius(7)
                   .backgroundColor(this.isDark ? '#24262B' : '#FFFFFF')
                   .clip(true)
-                }, (item: PgcSearchItem) => String(item.seasonId))
-              } else if (section.type === SearchTypes.article) {
-                ForEach(section.articles, (item: ArticleSearchItem) => {
-                  ListItem() {
-                    this.ArticleRow(item)
-                  }
-                }, (item: ArticleSearchItem) => String(item.id))
-              } else if (section.type === SearchTypes.video) {
-                ForEach(section.videos, (item: VideoItem, index: number) => {
-                  ListItem() {
-                    this.SearchVideoRow(item, 'search-all-')
-                  }
-                }, (item: VideoItem) => item.bvid + String(item.aid))
+                } else if (section.type === SearchTypes.mediaBangumi || section.type === SearchTypes.mediaFt) {
+                  ForEach(section.pgc, (item: PgcSearchItem) => {
+                    ListItem() {
+                      this.PgcRow(item)
+                    }
+                    .margin({ left: 12, right: 12, bottom: 8 })
+                    .borderRadius(7)
+                    .backgroundColor(this.isDark ? '#24262B' : '#FFFFFF')
+                    .clip(true)
+                  }, (item: PgcSearchItem) => String(item.seasonId))
+                } else if (section.type === SearchTypes.article) {
+                  ForEach(section.articles, (item: ArticleSearchItem) => {
+                    ListItem() {
+                      this.ArticleRow(item)
+                    }
+                  }, (item: ArticleSearchItem) => String(item.id))
+                }
               }
+              .margin({ bottom: 8 })
             }
-            .margin({ bottom: 8 })
-          // 综合翻页只扩充 video 分区；把条目数纳入该分区 key，确保 ForEach 重新发现新增行。
-          }, (section: SearchAllSection) => section.type === SearchTypes.video ?
-            section.type + '-' + String(section.videos.length) : section.type)
+          }, (section: SearchAllSection) => section.type)
           ListItem() {
             LoadMoreFooter({
               loading: this.loadingMore,

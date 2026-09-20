@@ -12,17 +12,32 @@ import { asObject, asString, asNumber } from './Utils';
 import { LiveApi } from '../api/LiveApi';
 
 export class LiveDanmakuClient {
+  /** 重连退避基数 / 上限与连续失败上限：弱网下固定 2.5s 无限重试既耗电又易被服务端限流。 */
+  private static readonly RETRY_BASE_DELAY_MS: number = 2500;
+  private static readonly RETY_MAX_DELAY_MS: number = 60000;
+  private static readonly MAX_RETRY_ATTEMPTS: number = 10;
+  /** 心跳连续失败上限：达到即判定链路异常，主动放弃当前连接走重连。 */
+  private static readonly MAX_HEARTBEAT_FAILURES: number = 2;
+  /** 半开连接判定阈值：应为连接状态但超过该时长无任何入站消息（含 op=3 心跳回应）即主动重连。 */
+  private static readonly INBOUND_STALE_MS: number = 90000;
   private roomId: number = 0;
   private generation: number = 0;
   private socket: webSocket.WebSocket | null = null;
   private heartbeatTimer: number = -1;
   private retryTimer: number = -1;
+  private retryAttempts: number = 0;
   private closed: boolean = true;
   private messageSeq: number = 0;
+  /** 最近一次收到任何入站消息的毫秒时间戳；半开连接看门狗据此判断链路是否名存实亡。 */
+  private lastInboundAtMs: number = 0;
+  /** 心跳连续失败次数；鉴权成功（op=8）或收到任何入站消息时清零。 */
+  private heartbeatFailures: number = 0;
   /** 压缩包必须按 WebSocket 到达顺序解码，避免异步解压导致消息乱序。 */
   private decodeQueue: Promise<void> = Promise.resolve();
   onMessage: (message: LiveChatMessage) => void = () => {};
   onConnected: (connected: boolean) => void = () => {};
+  /** 连续失败达到上限放弃自动重连时回调一次，UI 可据此展示"点击重连"。 */
+  onGiveUp: () => void = () => {};
 
   async connect(roomId: number): Promise<void> {
     this.close();
@@ -56,6 +71,9 @@ export class LiveDanmakuClient {
       });
       ws.on('message', (err: BusinessError, value: string | ArrayBuffer) => {
         if (err || this.socket !== ws || this.closed) return;
+        // 任何入站消息都证明链路仍活跃：刷新活跃时间并清零心跳连续失败计数。
+        this.lastInboundAtMs = Date.now();
+        this.heartbeatFailures = 0;
         if (typeof value === 'string') {
           this.parseJson(value as string);
         } else {
@@ -136,23 +154,79 @@ export class LiveDanmakuClient {
     }
   }
 
+  /** 用户手动重连：清空失败计数后立即重试（自动重连已因连续失败放弃时使用）。 */
+  manualReconnect(): void {
+    this.retryAttempts = 0;
+    if (this.roomId > 0) this.connect(this.roomId);
+  }
+
   private scheduleReconnect(): void {
     if (this.closed || this.retryTimer >= 0 || this.roomId <= 0) return;
+    if (this.retryAttempts >= LiveDanmakuClient.MAX_RETRY_ATTEMPTS) {
+      this.onGiveUp();
+      return;
+    }
+    const delay: number = Math.min(
+      LiveDanmakuClient.RETRY_BASE_DELAY_MS * Math.pow(2, this.retryAttempts),
+      LiveDanmakuClient.RETY_MAX_DELAY_MS);
+    this.retryAttempts++;
     this.retryTimer = setTimeout(() => {
       this.retryTimer = -1;
       if (!this.closed) this.connect(this.roomId);
-    }, 2500);
+    }, delay);
   }
 
   private sendHeartbeat(): void {
     const ws: webSocket.WebSocket | null = this.socket;
-    if (ws !== null && !this.closed) {
-      try {
-        ws.send(this.packet(2, '[object Object]'));
-      } catch (e) {
-        // 下一次网络状态回调会更新连接状态。
-      }
+    if (ws === null || this.closed) return;
+    // 看门狗：服务端会回应每次心跳（op=3），若应为连接状态却超过 90s 无任何入站消息，
+    // 说明链路大概率已半开（close/error 事件不会到来），主动走异常关闭路径借重连机制恢复。
+    const now: number = Date.now();
+    if (this.lastInboundAtMs > 0 && now - this.lastInboundAtMs > LiveDanmakuClient.INBOUND_STALE_MS) {
+      this.abandonSocketForReconnect();
+      return;
     }
+    try {
+      const result: Promise<boolean> = ws.send(this.packet(2, '[object Object]'));
+      result.then((ok: boolean): void => {
+        // 半开连接上 send 失败也可能仅以返回 false 呈现，与拒绝同样计入连续失败。
+        if (!ok) this.onHeartbeatSendFailed(ws);
+      }).catch((): void => {
+        this.onHeartbeatSendFailed(ws);
+      });
+    } catch (e) {
+      // 同步抛错与异步失败等价处理，不再静默吞掉。
+      this.onHeartbeatSendFailed(ws);
+    }
+  }
+
+  /** 心跳单次发送失败（同步抛错 / Promise 拒绝 / 返回 false）：连续达到上限即主动放弃半开连接。 */
+  private onHeartbeatSendFailed(ws: webSocket.WebSocket): void {
+    if (this.socket !== ws || this.closed) return;
+    this.heartbeatFailures++;
+    if (this.heartbeatFailures >= LiveDanmakuClient.MAX_HEARTBEAT_FAILURES) {
+      this.abandonSocketForReconnect();
+    }
+  }
+
+  /**
+   * 主动健康关闭：TCP 半开（NAT 超时、弱网切基站）时 close/error 事件都不会到达，只能由本地发起断开。
+   * 与 close()（用户退出直播间）的区别：不清 closed 标志、不清重连定时器，让 scheduleReconnect 照常调度。
+   * 先把 socket 置空再 ws.close()，旧连接迟到的 close/error/message 回调会因 this.socket !== ws 全部失效，
+   * 不会重复触发重连或污染新连接的活跃时间戳。
+   */
+  private abandonSocketForReconnect(): void {
+    const ws: webSocket.WebSocket | null = this.socket;
+    if (ws === null || this.closed) return;
+    this.socket = null;
+    this.stopHeartbeat();
+    this.onConnected(false);
+    try {
+      ws.close();
+    } catch (e) {
+      // 半开连接上 close 同样可能失败，重连不依赖它成功，底层资源由系统回收。
+    }
+    this.scheduleReconnect();
   }
 
   private packet(operation: number, bodyText: string): ArrayBuffer {
@@ -179,6 +253,9 @@ export class LiveDanmakuClient {
       if (headerLength < 16 || packetLength < headerLength || packetLength <= 0 || offset + packetLength > buffer.byteLength) break;
       if (operation === 8) {
         // WebSocket open 只代表 TCP/TLS 建立；收到 op=8 才是直播弹幕鉴权成功。
+        this.retryAttempts = 0;
+        this.heartbeatFailures = 0;
+        this.lastInboundAtMs = Date.now();
         this.onConnected(true);
         this.startHeartbeat();
       } else if (operation === 5 && (protocol === 0 || protocol === 1)) {

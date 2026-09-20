@@ -9,8 +9,8 @@ import { display } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { VideoItem } from '../../model/Models';
 import { formatCount, formatDuration } from '../../common/Utils';
-import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
-  NAV_VIDEO_DETAIL, VideoDetailParam, ImageViewerSrcRect } from '../../common/AppRouter';
+import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
+  NAV_VIDEO_DETAIL, VideoDetailParam, ImageViewerSrcRect, setHeroBgSnapshot } from '../../common/AppRouter';
 import { Haptic } from '../../common/Haptic';
 import { UserStore } from '../../services/auth/UserStore';
 import { FeedCardTitle, FeedCoverImage, FeedGradientMask } from '../FeedCardParts';
@@ -388,7 +388,8 @@ export struct VideoCard {
               h: this.getUIContext().px2vp(rect.size.height),
             };
             // PixelMap 不能放进 NavPathStack 参数；官方示例同样通过页外存储把快照交给目标页。
-            AppStorage.setOrCreate<image.PixelMap>(HERO_BG_SNAPSHOT_KEY, snapshot);
+            // setHeroBgSnapshot 会释放被覆盖的滞留快照（push 被拦截时上次的全屏快照不会泄漏）。
+            setHeroBgSnapshot(snapshot);
             this.pushDetail(param, undefined);
             return;
           }

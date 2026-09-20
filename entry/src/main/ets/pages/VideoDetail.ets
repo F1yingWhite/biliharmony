@@ -1,12 +1,15 @@
+import { VideoReportDialog } from '../components/VideoReportDialog';
 import { PlayerQualityPreference } from '../common/PlayerQualityPreference';
 /**
  * 视频详情页：沉浸式播放器 + 封面取色动态主题 + 简介/评论/相关。
  * 大区块已按职责拆到组件：评论 Tab（VideoReplyTab）、相关推荐行（RelatedVideoRow）、
  * 投币弹窗（CoinSheetView）、收藏夹多选（FavPickSheetView）、楼中楼面板（ReplyThreadPanel）。
+ * hero 转场（VideoHeroTransitionController）与互动动作（VideoActionController）抽到
+ * components/video/ 下的控制器：@State 留在本页，方法体经注入闭包访问页面状态。
  */
 import { PlaybackSourceCoordinator, PlaybackSelection } from '../services/media/PlaybackSourceCoordinator';
 import { RequestEpoch } from '../common/RequestEpoch';
-import { display, FrameCallback, UIContext } from '@kit.ArkUI';
+import { display, UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
 import { systemShare } from '@kit.ShareKit';
@@ -16,7 +19,7 @@ import { Immersive } from '../common/Immersive';
 import { Haptic } from '../common/Haptic';
 import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   HERO_NAV_TRANSITION_FINISH_REQUEST_KEY, ImageViewerSrcRect, NAV_LOGIN, NAV_VIDEO_DETAIL, NAV_USER_SPACE,
-  VideoDetailParam, UserSpaceParam } from '../common/AppRouter';
+  VideoDetailParam, UserSpaceParam, releasePixelMap } from '../common/AppRouter';
 import { VideoDetail, VideoItem, ReplyItem, PlayUrlInfo, VideoPage, VideoQualityOption, VideoRelationState,
   BiliEmote, BiliEmotePackage, FavoriteFolderItem, UserStat, SpaceArcData, SubtitleTrack, UgcSeasonEpisode } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
@@ -47,26 +50,15 @@ import { HistoryApi } from '../api/HistoryApi';
 import { UserApi } from '../api/UserApi';
 import { CommentLog } from '../common/CommentLog';
 import { VideoDetailGeometry } from '../common/VideoDetailGeometry';
+import { biliImageThumbnail } from '../common/ImageUrl';
 import { VideoIntroSection } from '../components/video/VideoIntroSection';
+import { VideoHeroTransitionController } from '../components/video/VideoHeroTransitionController';
+import { VideoActionController } from '../components/video/VideoActionController';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface ReportButtonItem {
   text: string;
   color: string;
-}
-
-/** 等下一次 VSync 已提交源矩形后再开始 hero，避免用固定延时猜首帧时机。 */
-class VideoHeroFrameCallback extends FrameCallback {
-  private task: () => void;
-
-  constructor(task: () => void) {
-    super();
-    this.task = task;
-  }
-
-  onFrame(_frameTimeInNano: number): void {
-    this.task();
-  }
 }
 
 @Component
@@ -89,9 +81,14 @@ export struct VideoDetailPage {
   @State pageSwitchingCid: number = 0;
   @State playerSourceVersion: number = 0;
   @State initialSeekSeconds: number = 0;
+  /** 全视频空降标签（如「商业推广」）：播放器解析后回调，显示在标题前，不盖画面。 */
+  @State sponsorFullLabel: string = '';
+  @State sponsorFullColor: string = '#008A5C';
+  @StorageProp('sponsorSkipEnabled') sponsorSkipEnabled: boolean = true;
   @State ugcCount: number = 0;
   @State ugcPanelOpen: boolean = false;
-  @State related: Array<VideoItem> = [];
+  /** 相关推荐行数（relatedSource 为普通属性，空态/尾 footer 需要响应式计数驱动）。 */
+  @State relatedCount: number = 0;
   @State relatedLoading: boolean = false;
   @State relatedLoadError: string = '';
   // 相关推荐卡 ⋮ 菜单（举报/不想看）改用文末 RelatedMoreDot 组件：
@@ -215,6 +212,120 @@ export struct VideoDetailPage {
   private pendingVideoNavigation: VideoDetailParam | null = null;
   private pendingVideoReplace: boolean = false;
   private initStarted: boolean = false;
+  /**
+   * 入场动画闸门与 hero 转场动画都在 VideoHeroTransitionController；@State 仍在本页，
+   * 经下方闭包读写。转场键/动画时长/测量函数全部显式注入，数值与抽取前逐项一致。
+   */
+  private hero: VideoHeroTransitionController = new VideoHeroTransitionController(
+    {
+      snapshotKey: HERO_BG_SNAPSHOT_KEY,
+      activeKey: HERO_NAV_TRANSITION_ACTIVE_KEY,
+      durationKey: HERO_NAV_TRANSITION_DURATION_KEY,
+      finishRequestKey: HERO_NAV_TRANSITION_FINISH_REQUEST_KEY,
+    },
+    {
+      gateFallbackMs: 600,
+      wholeCardExpandMs: 350,
+      wholeCardContentMs: 100,
+      wholeCardSnapshotFadeMs: 100,
+      wholeCardSnapshotFadeDelayMs: 50,
+      cardFlightMs: 320,
+      cardContentMs: 190,
+      cardContentDelayMs: 100,
+      cardCoverRadius: 10,
+      popDurationMs: 360,
+      wholeCardCollapseMs: 350,
+      exitSnapshotInMs: 50,
+      exitSnapshotInDelayMs: 150,
+      exitContentOutMs: 50,
+      exitContentOutDelayMs: 200,
+      cardExitContentMs: 170,
+      cardExitFlightMs: 320,
+      cardCornerVp: 6,
+    },
+    {
+      setContentOpacity: (value: number): void => {
+        this.entryContentOpacity = value;
+      },
+      setHeroVisible: (value: boolean): void => {
+        this.heroVisible = value;
+      },
+      setHeroSource: (value: string): void => {
+        this.heroSource = value;
+      },
+      setHeroX: (value: number): void => {
+        this.heroX = value;
+      },
+      setHeroY: (value: number): void => {
+        this.heroY = value;
+      },
+      setHeroWidth: (value: number): void => {
+        this.heroWidth = value;
+      },
+      setHeroHeight: (value: number): void => {
+        this.heroHeight = value;
+      },
+      setHeroRadius: (value: number): void => {
+        this.heroRadius = value;
+      },
+      setHeroOpacity: (value: number): void => {
+        this.heroOpacity = value;
+      },
+      setWholeCardAnimating: (value: boolean): void => {
+        this.wholeCardAnimating = value;
+      },
+      getWholeCardSnapshot: (): image.PixelMap | null => this.wholeCardSnapshot,
+      setWholeCardSnapshot: (value: image.PixelMap | null): void => {
+        this.wholeCardSnapshot = value;
+      },
+      setWholeCardSnapshotOpacity: (value: number): void => {
+        this.wholeCardSnapshotOpacity = value;
+      },
+      setWholeCardScale: (value: number): void => {
+        this.wholeCardScale = value;
+      },
+      setWholeCardTranslateX: (value: number): void => {
+        this.wholeCardTranslateX = value;
+      },
+      setWholeCardTranslateY: (value: number): void => {
+        this.wholeCardTranslateY = value;
+      },
+      setWholeCardClipHeight: (value: number): void => {
+        this.wholeCardClipHeight = value;
+      },
+      setWholeCardRadius: (value: number): void => {
+        this.wholeCardRadius = value;
+      },
+      setWholeCardSnapshotHeight: (value: number): void => {
+        this.wholeCardSnapshotHeight = value;
+      },
+      setFromWholeCard: (value: boolean): void => {
+        this.entryFromWholeCard = value;
+      },
+      isFromWholeCard: (): boolean => this.entryFromWholeCard,
+      setFromRect: (value: boolean): void => {
+        this.entryFromRect = value;
+      },
+      isFromRect: (): boolean => this.entryFromRect,
+      isEntranceArmed: (): boolean => this.entranceArmed,
+      setEntranceArmed: (value: boolean): void => {
+        this.entranceArmed = value;
+      },
+    },
+    (): ImageViewerSrcRect | undefined => this.playerHeroRect(),
+    (): string => this.entryCoverUrl(),
+    (): number => this.screenWidthVp,
+    (): number => this.screenHeightVp,
+    (): ImageViewerSrcRect | undefined => this.param.cardRect,
+    (): ImageViewerSrcRect | undefined => this.param.srcRect,
+    (): boolean => this.param.mirrorHeroReturn === false,
+    (): boolean => this.destroyed,
+    (): boolean => this.closing,
+    (): UIContext => this.getUIContext(),
+    (callback: () => void, delayMs: number): void => {
+      this.scheduleTimeout(callback, delayMs);
+    },
+  );
   private closing: boolean = false;
   /** 系统返回/侧滑经 Index NavDestination 拦截后置位，页面内执行收合动画。 */
   @StorageProp('videoDetailCloseRequest') @Watch('onCloseRequested') closeRequest: number = 0;
@@ -240,6 +351,71 @@ export struct VideoDetailPage {
   private likeActionVersion: number = 0;
   private coinActionVersion: number = 0;
   private favoriteActionVersion: number = 0;
+  /** 互动动作控制器：乐观更新与失败回滚都在这里；@State 仍在本页，经下方闭包读写。 */
+  private actions: VideoActionController = new VideoActionController({
+    isDestroyed: (): boolean => this.destroyed,
+    ensureLogin: (): boolean => this.ensureLogin(),
+    toast: (message: string): void => this.toast(message),
+    isActionBusy: (): boolean => this.actionBusy,
+    setActionBusy: (value: boolean): void => {
+      this.actionBusy = value;
+    },
+    bumpLikeVersion: (): void => {
+      this.likeActionVersion++;
+    },
+    bumpCoinVersion: (): void => {
+      this.coinActionVersion++;
+    },
+    bumpFavoriteVersion: (): void => {
+      this.favoriteActionVersion++;
+    },
+    getAid: (): number => this.detail.aid,
+    getBvid: (): string => this.detail.bvid,
+    getUpMid: (): number => this.detail.upMid,
+    getLiked: (): boolean => this.liked,
+    setLiked: (value: boolean): void => {
+      this.liked = value;
+    },
+    getDisliked: (): boolean => this.disliked,
+    setDisliked: (value: boolean): void => {
+      this.disliked = value;
+    },
+    getLikeCount: (): number => this.likeCount,
+    setLikeCount: (value: number): void => {
+      this.likeCount = value;
+    },
+    getCoinCountByMe: (): number => this.coinCountByMe,
+    setCoinCountByMe: (value: number): void => {
+      this.coinCountByMe = value;
+    },
+    getCoinCount: (): number => this.coinCount,
+    setCoinCount: (value: number): void => {
+      this.coinCount = value;
+    },
+    getCoinChoice: (): number => this.coinChoice,
+    getCoinWithLike: (): boolean => this.coinWithLike,
+    setCoinSheetOpen: (value: boolean): void => {
+      this.coinSheetOpen = value;
+    },
+    getFavorited: (): boolean => this.favorited,
+    setFavorited: (value: boolean): void => {
+      this.favorited = value;
+    },
+    getFavoriteCount: (): number => this.favoriteCount,
+    setFavoriteCount: (value: number): void => {
+      this.favoriteCount = value;
+    },
+    getFollowing: (): boolean => this.following,
+    setFollowing: (value: boolean): void => {
+      this.following = value;
+    },
+    getFollowLoading: (): boolean => this.followLoading,
+    setFollowLoading: (value: boolean): void => {
+      this.followLoading = value;
+    },
+    getAccent: (): string => this.accent,
+    getUIContext: (): UIContext => this.getUIContext(),
+  });
   // 屏幕尺寸只在出现/布局变化时同步一次，避免滚动帧回调里反复 getDefaultDisplaySync。
   private screenWidthVp: number = 0;
   private screenHeightVp: number = 0;
@@ -252,10 +428,11 @@ export struct VideoDetailPage {
   private dmEngineRef: PlayerDanmakuEngine | null = null;
   // playerCollapse 的精确手势累计值；视觉态仅过滤不足半个 vp 的亚像素抖动。
   private playerCollapseRaw: number = 0;
-  private replySource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();
-  /** 已发布但评论列表接口尚未索引到的本地楼层；刷新/切排序时仍保留。 */
+  private replySource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();  /** 已发布但评论列表接口尚未索引到的本地楼层；刷新/切排序时仍保留。 */
   private localSentReplies: Array<ReplyItem> = [];
   private ugcSource: BasicDataSource<UgcSeasonEpisode> = new BasicDataSource<UgcSeasonEpisode>();
+  /** 相关推荐懒加载数据源（无限追加必须虚拟化；AutoPlay 取相关第一条也从这里读）。 */
+  private relatedSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
   @State threadAllReplies: Array<ReplyItem> = [];
   // 评论分享卡离屏渲染用的待截内容；只在生成分享图期间短暂赋值。
   private shareCardItem: ReplyItem = new ReplyItem();
@@ -650,83 +827,23 @@ export struct VideoDetailPage {
     this.entryCoverSource = this.param.cover ?? '';
     this.entryFromRect = false;
     this.entryFromWholeCard = false;
-    this.wholeCardAnimating = false;
-    this.wholeCardSnapshot = null;
-    this.wholeCardSnapshotOpacity = 0;
-    this.wholeCardScale = 1;
-    this.wholeCardTranslateX = 0;
-    this.wholeCardTranslateY = 0;
-    this.wholeCardClipHeight = 0;
-    this.wholeCardRadius = 0;
-    this.wholeCardSnapshotHeight = 0;
-    this.entranceArmed = false;
+    // 页面复用（返回再进）时上一实例的整卡快照已不再渲染，先释放再置空（含 hero 可见层复位）。
+    this.hero.resetForReuse();
     this.initStarted = false;
     this.closing = false;
-    this.entryContentOpacity = 1;
-    this.heroVisible = false;
-    this.heroOpacity = 1;
     this.startupCoverVisible = true;
     this.refreshScreenSize();
-    if (!this.prepareWholeCardEntrance()) this.prepareCardEntrance();
-    // 首次 VSync 后立即移动封面；有 hero 时等飞行结束再启动详情加载，避免首帧大量状态更新抢占动画。
-    if (this.entryFromWholeCard) this.triggerWholeCardExpansion();
-    else this.triggerEntranceExpansion();
-    if (!this.entryFromRect && !this.entryFromWholeCard) this.startInit();
+    if (!this.hero.prepareWholeCardEntrance()) this.hero.prepareCardEntrance();
+    // 请求与入场飞行并行：init 只把"写状态"挂在闸门上，动画期间不会重排整页。
+    if (this.entryFromWholeCard || this.entryFromRect) this.hero.armEntranceGate();
+    // 首次 VSync 后立即移动封面。
+    if (this.entryFromWholeCard) this.hero.triggerWholeCardExpansion();
+    else this.hero.triggerEntranceExpansion();
+    this.startInit();
   }
 
-  /**
-   * 华为官方 CardLongTakeTransition 的核心做法：目标页保持整屏布局，只缩放并裁剪外层容器；
-   * 这样动画期间不会因为宽高连续变化而让播放器、标题和工具栏反复重排。
-   */
-  private prepareWholeCardEntrance(): boolean {
-    const rect: ImageViewerSrcRect | undefined = this.param.cardRect;
-    const snapshot: image.PixelMap | null = AppStorage.get<image.PixelMap>(HERO_BG_SNAPSHOT_KEY) ?? null;
-    AppStorage.delete(HERO_BG_SNAPSHOT_KEY);
-    if (rect === undefined || snapshot === null || rect.w <= 0 || rect.h <= 0 ||
-      this.screenWidthVp <= 0 || this.screenHeightVp <= 0) return false;
-    const scale: number = rect.w / this.screenWidthVp;
-    if (!Number.isFinite(scale) || scale <= 0 || scale >= 1) return false;
-    const clipHeight: number = rect.h / scale;
-    this.entryFromWholeCard = true;
-    this.wholeCardAnimating = true;
-    this.wholeCardSnapshot = snapshot;
-    this.wholeCardSnapshotOpacity = 1;
-    this.wholeCardScale = scale;
-    this.wholeCardClipHeight = clipHeight;
-    this.wholeCardSnapshotHeight = clipHeight;
-    this.wholeCardTranslateX = rect.x - (this.screenWidthVp - rect.w) / 2;
-    this.wholeCardTranslateY = rect.y - (clipHeight - rect.h) / 2;
-    // 圆角会随容器一起缩放，除以 scale 后起始画面恰好保持卡片原有的 6vp 圆角。
-    this.wholeCardRadius = 6 / scale;
-    this.entryContentOpacity = 0;
-    return true;
-  }
-
-  private triggerWholeCardExpansion(): void {
-    if (!this.entryFromWholeCard || this.destroyed || this.closing) return;
-    this.getUIContext().postFrameCallback(new VideoHeroFrameCallback(() => {
-      if (this.destroyed || this.closing) return;
-      this.getUIContext().animateTo({ duration: 350, curve: Curve.EaseInOut, onFinish: () => {
-        this.wholeCardSnapshotOpacity = 0;
-        this.wholeCardAnimating = false;
-        this.startInit();
-      } }, () => {
-        this.wholeCardScale = 1;
-        this.wholeCardTranslateX = 0;
-        this.wholeCardTranslateY = 0;
-        this.wholeCardClipHeight = this.screenHeightVp;
-        this.wholeCardRadius = 0;
-      });
-      this.getUIContext().animateTo({ duration: 100, curve: Curve.Sharp }, () => {
-        this.entryContentOpacity = 1;
-      });
-      this.getUIContext().animateTo({ duration: 100, delay: 50, curve: Curve.Sharp }, () => {
-        this.wholeCardSnapshotOpacity = 0;
-      });
-    }));
-  }
-
-  /** 播放区在窗口中的 hero 矩形。入场期详情尚未返回，天然稳定为 16:9。 */
+  /** 播放区在窗口中的 hero 矩形（作为测量函数注入 VideoHeroTransitionController）。
+   *  入场期详情尚未返回，天然稳定为 16:9。 */
   private playerHeroRect(): ImageViewerSrcRect | undefined {
     if (this.screenWidthVp <= 0) return undefined;
     return {
@@ -737,54 +854,6 @@ export struct VideoDetailPage {
     };
   }
 
-  /** 有 srcRect 时，首帧只把一张独立封面放在源卡片封面上。 */
-  private prepareCardEntrance(): void {
-    const rect = this.param.srcRect;
-    if (rect === undefined || rect.w <= 0 || rect.h <= 0) return;
-    if (this.playerHeroRect() === undefined) return;
-    this.entryFromRect = true;
-    this.entryContentOpacity = 0;
-    this.heroSource = this.entryCoverUrl();
-    this.heroX = rect.x;
-    this.heroY = rect.y;
-    this.heroWidth = rect.w;
-    this.heroHeight = rect.h;
-    this.heroRadius = 10;
-    this.heroOpacity = 1;
-    this.heroVisible = true;
-    this.entranceArmed = true;
-  }
-
-  /** VSync 驱动封面飞向播放区；正文稍后淡入，不再出现缩小的完整详情页。 */
-  private triggerEntranceExpansion(): void {
-    if (!this.entranceArmed || this.destroyed || this.closing) return;
-    this.entranceArmed = false;
-    const target: ImageViewerSrcRect | undefined = this.playerHeroRect();
-    if (target === undefined) {
-      this.heroVisible = false;
-      this.entryContentOpacity = 1;
-      this.startInit();
-      return;
-    }
-    this.getUIContext().postFrameCallback(new VideoHeroFrameCallback(() => {
-      if (this.destroyed || this.closing) return;
-      this.getUIContext().animateTo({ duration: 320, curve: Curve.EaseOut, onFinish: () => {
-        // 节点透明保活：返回时复用同一张已解码封面，避免重新创建 Image 导致卡顿。
-        this.heroOpacity = 0;
-        this.startInit();
-      } }, () => {
-        this.heroX = target.x;
-        this.heroY = target.y;
-        this.heroWidth = target.w;
-        this.heroHeight = target.h;
-        this.heroRadius = 0;
-      });
-      this.getUIContext().animateTo({ duration: 190, delay: 100, curve: Curve.EaseOut }, () => {
-        this.entryContentOpacity = 1;
-      });
-    }));
-  }
-
   private startInit(): void {
     if (this.initStarted || this.destroyed) return;
     this.initStarted = true;
@@ -793,95 +862,29 @@ export struct VideoDetailPage {
   }
 
   onCloseRequested(): void {
+    if (this.destroyed || this.closing) return;
+    const destination: NavDestinationInfo | undefined = this.queryNavDestinationInfo();
+    const target: number = AppStorage.get<number>('videoDetailCloseTargetIndex') ?? -1;
+    if (destination === undefined || destination.index !== target) return;
+    // Watch 会广播到栈内所有保活页面。先消费本次请求，避免 pop 后底页成为栈顶再响应。
+    const handled: number = AppStorage.get<number>('videoDetailCloseHandled') ?? -1;
+    if (handled === this.closeRequest) return;
+    AppStorage.setOrCreate<number>('videoDetailCloseHandled', this.closeRequest);
     this.goBack();
   }
 
-  private beginHeroNavPop(): void {
-    AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
-    AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
-    AppNavStack.pop();
-  }
-
-  private finishHeroNavPop(): void {
-    const request: number = AppStorage.get<number>(HERO_NAV_TRANSITION_FINISH_REQUEST_KEY) ?? 0;
-    AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_FINISH_REQUEST_KEY, request + 1);
-  }
-
-  /** 镜面退出：当前播放区封面收回源封面，详情正文独立淡出。 */
+  /** 镜面退出（当前播放区封面收回源封面，详情正文独立淡出）的动画主体在
+   *  VideoHeroTransitionController.runCloseTransition；这里只负责 closing 防重入。 */
   goBack(): void {
     if (this.closing) return;
     this.closing = true;
-    if (this.param.mirrorHeroReturn === false) {
-      AppNavStack.pop();
-      return;
-    }
-    if (this.entryFromWholeCard && this.param.cardRect !== undefined && this.screenWidthVp > 0) {
-      const rect: ImageViewerSrcRect = this.param.cardRect;
-      const scale: number = rect.w / this.screenWidthVp;
-      const clipHeight: number = rect.h / scale;
-      // 从正常的整屏布局切回固定尺寸动画层；两者此刻视觉尺寸相同，不会产生跳帧。
-      this.wholeCardScale = 1;
-      this.wholeCardTranslateX = 0;
-      this.wholeCardTranslateY = 0;
-      this.wholeCardClipHeight = this.screenHeightVp;
-      this.wholeCardRadius = 0;
-      this.wholeCardSnapshotOpacity = 0;
-      this.entryContentOpacity = 1;
-      this.wholeCardAnimating = true;
-      this.getUIContext().postFrameCallback(new VideoHeroFrameCallback(() => {
-        this.beginHeroNavPop();
-        this.getUIContext().animateTo({ duration: 350, curve: Curve.EaseInOut, onFinish: () => {
-          this.finishHeroNavPop();
-        } }, () => {
-          this.wholeCardScale = scale;
-          this.wholeCardTranslateX = rect.x - (this.screenWidthVp - rect.w) / 2;
-          this.wholeCardTranslateY = rect.y - (clipHeight - rect.h) / 2;
-          this.wholeCardClipHeight = clipHeight;
-          this.wholeCardRadius = 6 / scale;
-        });
-        this.getUIContext().animateTo({ duration: 50, delay: 150, curve: Curve.Friction }, () => {
-          this.wholeCardSnapshotOpacity = 1;
-        });
-        this.getUIContext().animateTo({ duration: 50, delay: 200, curve: Curve.Friction }, () => {
-          this.entryContentOpacity = 0;
-        });
-      }));
-      return;
-    }
-    const rect = this.param.srcRect;
-    if (this.entryFromRect && rect !== undefined) {
-      const start: ImageViewerSrcRect | undefined = this.playerHeroRect();
-      if (start !== undefined) {
-        this.heroSource = this.entryCoverUrl();
-        this.heroX = start.x;
-        this.heroY = start.y;
-        this.heroWidth = start.w;
-        this.heroHeight = start.h;
-        this.heroRadius = 0;
-        this.heroVisible = true;
-        this.heroOpacity = 1;
-        this.getUIContext().postFrameCallback(new VideoHeroFrameCallback(() => {
-          this.beginHeroNavPop();
-          this.getUIContext().animateTo({ duration: 170, curve: Curve.EaseOut }, () => {
-            this.entryContentOpacity = 0;
-          });
-          this.getUIContext().animateTo({ duration: 320, curve: Curve.EaseOut, onFinish: () => {
-            this.finishHeroNavPop();
-          } }, () => {
-            this.heroX = rect.x;
-            this.heroY = rect.y;
-            this.heroWidth = rect.w;
-            this.heroHeight = rect.h;
-            this.heroRadius = 10;
-          });
-        }));
-        return;
-      }
-    }
-    AppNavStack.pop();
+    this.hero.runCloseTransition();
   }
 
   aboutToDisappear(): void {
+    this.videoReportDialog?.close();
+    this.videoReportDialog = null;
+    this.hero.openEntranceGate();
     this.repliesEpoch.invalidate();
     this.threadEpoch.invalidate();
     this.threadLoading = false;
@@ -889,6 +892,9 @@ export struct VideoDetailPage {
     this.playbackSources.invalidate();
     this.initialRequest.invalidate();
     this.reportVideoHeartbeat(this.videoProgressSeconds, true);
+    releasePixelMap(this.wholeCardSnapshot);
+    this.wholeCardSnapshot = null;
+    this.releaseShareCardQr();
     this.timers.forEach((id: number) => {
       clearTimeout(id);
     });
@@ -936,16 +942,16 @@ export struct VideoDetailPage {
 
   /** 相关接口与推荐流会交叉返回同一稿件；aid 或 bvid 任一命中都视为重复。 */
   private appendUniqueRelated(incoming: Array<VideoItem>): number {
+    const current: Array<VideoItem> = this.relatedSource.getAll();
     const seenAid: Set<number> = new Set<number>();
     const seenBvid: Set<string> = new Set<string>();
     if (this.detail.aid > 0) seenAid.add(this.detail.aid);
     if (this.detail.bvid.length > 0) seenBvid.add(this.detail.bvid);
-    for (let i: number = 0; i < this.related.length; i++) {
-      if (this.related[i].aid > 0) seenAid.add(this.related[i].aid);
-      if (this.related[i].bvid.length > 0) seenBvid.add(this.related[i].bvid);
+    for (let i: number = 0; i < current.length; i++) {
+      if (current[i].aid > 0) seenAid.add(current[i].aid);
+      if (current[i].bvid.length > 0) seenBvid.add(current[i].bvid);
     }
-    const next: Array<VideoItem> = this.related.slice();
-    let appended: number = 0;
+    const appended: Array<VideoItem> = [];
     for (let i: number = 0; i < incoming.length; i++) {
       const item: VideoItem = incoming[i];
       if (item.aid <= 0 && item.bvid.length === 0) continue;
@@ -953,11 +959,13 @@ export struct VideoDetailPage {
         (item.bvid.length > 0 && seenBvid.has(item.bvid))) continue;
       if (item.aid > 0) seenAid.add(item.aid);
       if (item.bvid.length > 0) seenBvid.add(item.bvid);
-      next.push(item);
-      appended++;
+      appended.push(item);
     }
-    if (appended > 0) this.related = next;
-    return appended;
+    if (appended.length > 0) {
+      this.relatedSource.append(appended);
+      this.relatedCount = this.relatedSource.totalCount();
+    }
+    return appended.length;
   }
 
   private loadUpStats(mid: number): void {
@@ -1001,6 +1009,9 @@ export struct VideoDetailPage {
       }
       this.applyPlaybackSource(selection.info, selection.cid, selection.pageIndex,
         Math.max(0, Math.floor(selection.info.lastPlayTime / 1000)));
+      CommentLog.info('resume', 'lastPlayTime=' + String(selection.info.lastPlayTime) +
+        ' lastPlayCid=' + String(selection.info.lastPlayCid) + ' pickedCid=' + String(selection.cid) +
+        ' seek=' + String(Math.floor(selection.info.lastPlayTime / 1000)));
     } catch (e) {
       if (!this.destroyed && this.playbackSources.isCurrent(request)) {
         this.playbackAddressFailed = true;
@@ -1035,7 +1046,7 @@ export struct VideoDetailPage {
       const list: Array<VideoItem> = await BiliApi.getRelated(aid, bvid);
       if (this.destroyed) return;
       this.appendUniqueRelated(list);
-      if (this.related.length === 0) this.relatedLoadError = '相关推荐加载失败，点击刷新';
+      if (this.relatedCount === 0) this.relatedLoadError = '相关推荐加载失败，点击刷新';
     } catch (e) {
       if (!this.destroyed) this.relatedLoadError = '相关推荐加载失败，点击刷新';
     } finally {
@@ -1075,7 +1086,8 @@ export struct VideoDetailPage {
     this.playbackAddressFailed = false;
     this.descExpanded = false;
     this.descNeedsExpand = false;
-    this.related = [];
+    this.relatedSource.clear();
+    this.relatedCount = 0;
     this.relatedLoading = false;
     this.relatedLoadError = '';
     this.relatedRecommendIdx = 0;
@@ -1083,6 +1095,8 @@ export struct VideoDetailPage {
     this.upVideoCount = -1;
     try {
       const detail: VideoDetail | null = await BiliApi.getVideoDetail(this.aid, this.bvid, this.param.epId ?? 0);
+      // 请求已经跑完，但入场动画可能还在飞：等飞完再落状态，避免整页骨架在动画中重排。
+      await this.hero.waitEntranceGate();
       if (this.destroyed || !this.initialRequest.isCurrent(request)) return;
       if (detail === null) {
         this.errorText = '视频不存在或已失效';
@@ -1216,196 +1230,11 @@ export struct VideoDetailPage {
     }
   }
 
-  async actionFollow(): Promise<void> {
-    if (!this.ensureLogin() || this.followLoading || this.detail.upMid <= 0) return;
-    if (UserStore.current !== null && UserStore.current.mid === this.detail.upMid) {
-      this.toast('不能关注自己');
-      return;
-    }
-    const previous: boolean = this.following;
-    const next: boolean = !previous;
-    this.following = next;
-    this.followLoading = true;
-    try {
-      const result: ActionResult = await UserApi.setFollowed(this.detail.upMid, next);
-      if (this.destroyed) return;
-      if (!result.ok) {
-        this.following = previous;
-        this.toast(result.message);
-        return;
-      }
-      this.toast(next ? '关注成功' : '已取消关注');
-    } catch (e) {
-      if (!this.destroyed) {
-        this.following = previous;
-        this.toast('网络异常，请稍后重试');
-      }
-    } finally {
-      if (!this.destroyed) this.followLoading = false;
-    }
-  }
-
   private ensureLogin(): boolean {
     if (UserStore.isLogin) return true;
     this.toast('请先登录后再操作');
     AppNavStack.pushPathByName(NAV_LOGIN, null);
     return false;
-  }
-
-  async actionLike(): Promise<void> {
-    if (!this.ensureLogin() || this.actionBusy) return;
-    this.actionBusy = true;
-    this.likeActionVersion++;
-    const next: boolean = !this.liked;
-    // 先给出本地主题色反馈，网络失败再回滚，避免按钮点击后长时间仍是灰色。
-    this.liked = next;
-    this.likeCount = Math.max(0, this.likeCount + (next ? 1 : -1));
-    // 赞与踩互斥：点赞成功时顺带清掉本地踩状态（服务端 like=1 会自动取消踩）。
-    if (next && this.disliked) this.disliked = false;
-    try {
-      const result: ActionResult = await BiliApi.likeVideo(this.detail.aid, this.detail.bvid, next);
-      if (this.destroyed) return;
-      if (!result.ok) {
-        this.liked = !next;
-        this.likeCount = Math.max(0, this.likeCount + (next ? -1 : 1));
-        this.toast(result.message);
-        return;
-      }
-      this.toast(next ? '点赞成功' : '已取消点赞');
-    } catch (e) {
-      if (!this.destroyed) {
-        this.liked = !next;
-        this.likeCount = Math.max(0, this.likeCount + (next ? -1 : 1));
-        this.toast('网络异常，请稍后重试');
-      }
-    } finally {
-      if (!this.destroyed) this.actionBusy = false;
-    }
-  }
-
-  /** 点踩（App 端协议，需 App 授权）：与赞本地互斥。 */
-  async actionDislike(): Promise<void> {
-    if (!this.ensureLogin() || this.actionBusy) return;
-    this.actionBusy = true;
-    const next: boolean = !this.disliked;
-    this.disliked = next;
-    if (next && this.liked) this.liked = false;
-    try {
-      const result: ActionResult = await BiliApi.dislikeVideo(this.detail.aid, this.detail.bvid, next);
-      if (this.destroyed) return;
-      if (!result.ok) {
-        this.disliked = !next;
-        this.toast(result.message);
-        return;
-      }
-      this.toast(next ? '已点踩' : '已取消点踩');
-    } catch (e) {
-      if (!this.destroyed) {
-        this.disliked = !next;
-        this.toast('网络异常，请稍后重试');
-      }
-    } finally {
-      if (!this.destroyed) this.actionBusy = false;
-    }
-  }
-
-  /** 点赞按钮长按：一键三连（点赞+投一币+收藏），弹确认后执行。 */
-  private actionTriple(): void {
-    if (!this.ensureLogin() || this.actionBusy) return;
-    if (this.liked && this.coinCountByMe > 0 && this.favorited) {
-      this.toast('已三连过啦');
-      return;
-    }
-    try {
-      this.getUIContext().getPromptAction().showDialog({
-        title: '一键三连',
-        message: '点赞 + 投 1 枚硬币 + 收藏',
-        buttons: [
-          { text: '取消', color: '#9499A0' },
-          { text: '三连', color: this.accent },
-        ],
-      }).then((dialogResult) => {
-        if (Number(dialogResult.index) !== 1) return;
-        this.doTriple();
-      });
-    } catch (e) {
-      // 弹窗失败不阻塞。
-    }
-  }
-
-  private async doTriple(): Promise<void> {
-    this.actionBusy = true;
-    try {
-      const result: ActionResult = await BiliApi.likeTriple(this.detail.aid);
-      if (this.destroyed) return;
-      if (result.ok) {
-        this.liked = true;
-        this.coinCountByMe = 1;
-        this.favorited = true;
-        this.favoriteCount = this.favoriteCount + 1;
-        this.toast('三连成功 🎉');
-      } else {
-        this.toast(result.message);
-      }
-    } catch (e) {
-      if (!this.destroyed) this.toast('三连失败，请稍后重试');
-    } finally {
-      if (!this.destroyed) this.actionBusy = false;
-    }
-  }
-
-  async actionFavorite(): Promise<void> {
-    if (!this.ensureLogin() || this.actionBusy) return;
-    this.actionBusy = true;
-    this.favoriteActionVersion++;
-    const next: boolean = !this.favorited;
-    this.favorited = next;
-    this.favoriteCount = Math.max(0, this.favoriteCount + (next ? 1 : -1));
-    try {
-      const selfMid: number = UserStore.current !== null ? UserStore.current.mid : 0;
-      let folders: Array<FavoriteFolderItem> = await FavoriteApi.getFavoriteFoldersForVideo(this.detail.aid,
-        selfMid);
-      if (this.destroyed) return;
-      if (folders.length === 0 && next) {
-        // 没有可用收藏夹：先自动创建一个默认收藏夹再收藏，避免"未找到可用的收藏夹"卡住收藏。
-        const created: ActionResult = await FavoriteApi.addFavoriteFolder('默认收藏夹');
-        if (this.destroyed) return;
-        if (created.ok) {
-          folders = await FavoriteApi.getFavoriteFoldersForVideo(this.detail.aid, selfMid);
-        }
-        if (this.destroyed) return;
-      }
-      if (folders.length === 0) {
-        this.favorited = !next;
-        this.favoriteCount = Math.max(0, this.favoriteCount + (next ? -1 : 1));
-        this.toast(next ? '收藏夹创建失败，请稍后重试' : '未找到可用的收藏夹');
-        return;
-      }
-      const selected: Array<number> = [];
-      for (let i: number = 0; i < folders.length; i++) {
-        if (folders[i].favorited) selected.push(folders[i].id);
-      }
-      const addIds: Array<number> = next ? [folders[0].id] : [];
-      const deleteIds: Array<number> = next ? [] : selected;
-      if (!next && deleteIds.length === 0) deleteIds.push(folders[0].id);
-      const result: ActionResult = await FavoriteApi.modifyVideoFavorite(this.detail.aid, addIds, deleteIds);
-      if (this.destroyed) return;
-      if (!result.ok) {
-        this.favorited = !next;
-        this.favoriteCount = Math.max(0, this.favoriteCount + (next ? -1 : 1));
-        this.toast(result.message);
-        return;
-      }
-      this.toast(next ? '收藏成功' : '已取消收藏');
-    } catch (e) {
-      if (!this.destroyed) {
-        this.favorited = !next;
-        this.favoriteCount = Math.max(0, this.favoriteCount + (next ? -1 : 1));
-        this.toast('网络异常，请稍后重试');
-      }
-    } finally {
-      if (!this.destroyed) this.actionBusy = false;
-    }
   }
 
   // ===== 收藏夹多选：长按收藏按钮弹出夹列表勾选 =====
@@ -1616,8 +1445,9 @@ export struct VideoDetailPage {
       this.endRecToken++;
       return;
     }
-    if (this.related.length > 0) {
-      const related: VideoItem = this.related[0];
+    const relatedList: Array<VideoItem> = this.relatedSource.getAll();
+    if (relatedList.length > 0) {
+      const related: VideoItem = relatedList[0];
       if (related.aid > 0 || related.bvid.length > 0) {
         this.endRecTitle = related.title;
         this.endRecCover = related.cover;
@@ -1643,8 +1473,9 @@ export struct VideoDetailPage {
       this.openUgcEpisode(next);
       return;
     }
-    if (this.related.length > 0) {
-      const related: VideoItem = this.related[0];
+    const relatedForPlay: Array<VideoItem> = this.relatedSource.getAll();
+    if (relatedForPlay.length > 0) {
+      const related: VideoItem = relatedForPlay[0];
       if (related.aid > 0 || related.bvid.length > 0) {
         const param: VideoDetailParam = { bvid: related.bvid, aid: related.aid, title: related.title };
         // 用户主动点"立即播放"走入栈：返回回当前视频（播完好），而不是越过它。
@@ -1667,8 +1498,9 @@ export struct VideoDetailPage {
       item.upName = this.detail.upName;
       list.push(item);
     }
-    for (let i: number = 0; i < this.related.length && list.length < 8; i++) {
-      const related: VideoItem = this.related[i];
+    const relatedPool: Array<VideoItem> = this.relatedSource.getAll();
+    for (let i: number = 0; i < relatedPool.length && list.length < 8; i++) {
+      const related: VideoItem = relatedPool[i];
       if (related.aid <= 0 && related.bvid.length === 0) continue;
       let dup: boolean = false;
       for (let j: number = 0; j < list.length; j++) {
@@ -1699,53 +1531,6 @@ export struct VideoDetailPage {
     }
     this.coinChoice = this.coinCountByMe === 1 ? 1 : 2;
     this.coinSheetOpen = true;
-  }
-
-  async submitCoin(): Promise<void> {
-    if (this.actionBusy) return;
-    const available: number = Math.max(0, 2 - this.coinCountByMe);
-    const multiply: number = Math.min(this.coinChoice, available);
-    if (multiply <= 0) {
-      this.coinSheetOpen = false;
-      return;
-    }
-    this.actionBusy = true;
-    this.coinActionVersion++;
-    if (this.coinWithLike) this.likeActionVersion++;
-    // 乐观更新：先变红并收起弹层，失败再整体回滚。
-    const likedBefore: boolean = this.liked;
-    this.coinCountByMe += multiply;
-    this.coinCount += multiply;
-    if (this.coinWithLike && !this.liked) {
-      this.liked = true;
-      this.likeCount++;
-    }
-    this.coinSheetOpen = false;
-    const rollback = () => {
-      this.coinCountByMe = Math.max(0, this.coinCountByMe - multiply);
-      this.coinCount = Math.max(0, this.coinCount - multiply);
-      if (this.coinWithLike && !likedBefore) {
-        this.liked = false;
-        this.likeCount = Math.max(0, this.likeCount - 1);
-      }
-    };
-    try {
-      const result: ActionResult = await BiliApi.coinVideo(this.detail.aid, this.detail.bvid, multiply, this.coinWithLike);
-      if (this.destroyed) return;
-      if (!result.ok) {
-        rollback();
-        this.toast(result.message);
-        return;
-      }
-      this.toast('投币成功');
-    } catch (e) {
-      if (!this.destroyed) {
-        rollback();
-        this.toast('网络异常，请稍后重试');
-      }
-    } finally {
-      if (!this.destroyed) this.actionBusy = false;
-    }
   }
 
   actionShare(): void {
@@ -2420,8 +2205,22 @@ export struct VideoDetailPage {
         this.toast('分享面板暂不可用，已复制评论链接');
       })
       .finally(() => {
+        // 截图 PixelMap 已在 sharePixelMapAsImage 内释放；二维码只服务本次渲染，一并回收。
+        this.releaseShareCardQr();
         this.shareCardBusy = false;
       });
+  }
+
+  /** 释放分享卡二维码并复位；分享流程结束/页面销毁时调用，防止 PixelMap 滞留。 */
+  private releaseShareCardQr(): void {
+    if (this.shareCardQr !== null) {
+      try {
+        this.shareCardQr.release();
+      } catch (e) {
+        // 已释放的二维码忽略。
+      }
+      this.shareCardQr = null;
+    }
   }
 
   /** 复制文本到系统剪贴板；失败静默。 */
@@ -2474,7 +2273,10 @@ export struct VideoDetailPage {
       pageSwitchingCid: this.pageSwitchingCid,
       ugcPanelOpen: this.ugcPanelOpen,
       ugcCount: this.ugcCount,
-      related: this.related,
+      sponsorTag: this.sponsorSkipEnabled ? this.sponsorFullLabel : '',
+      sponsorTagColor: this.sponsorFullColor,
+      relatedCount: this.relatedCount,
+      relatedSource: this.relatedSource,
       relatedLoading: this.relatedLoading,
       relatedLoadError: this.relatedLoadError,
       scroller: this.introScroller,
@@ -2488,13 +2290,13 @@ export struct VideoDetailPage {
       },
       onFollow: () => {
         Haptic.tap();
-        this.actionFollow();
+        this.actions.actionFollow();
       },
-      onLike: () => this.actionLike(),
-      onTriple: () => this.actionTriple(),
-      onDislike: () => this.actionDislike(),
+      onLike: () => this.actions.actionLike(),
+      onTriple: () => this.actions.actionTriple(),
+      onDislike: () => this.actions.actionDislike(),
       onCoin: () => this.openCoinSheet(),
-      onFavorite: () => this.actionFavorite(),
+      onFavorite: () => this.actions.actionFavorite(),
       onFavoritePick: () => this.actionFavoritePick(),
       onShare: () => this.actionShare(),
       onDescAreaChange: (width: Length) => this.updateDescOverflow(width),
@@ -2518,39 +2320,29 @@ export struct VideoDetailPage {
     })
   }
 
-  /** ⋮ 菜单-举报：选原因后给反馈（Web 端无视频举报接口，本地提示）。 */
+  private videoReportDialog: CustomDialogController | null = null;
+
   private reportRelated(item: VideoItem): void {
-    if (!UserStore.isLogin) {
-      this.toast('请先登录后再举报');
-      return;
-    }
-    const reasons: Array<string> = ['违法违规', '色情低俗', '垃圾广告', '人身攻击', '引战', '其他'];
-    const buttons: Array<ReportButtonItem> = [];
-    for (let i: number = 0; i < reasons.length; i++) {
-      buttons.push({ text: reasons[i], color: this.isDark ? '#CCFFFFFF' : '#18191C' });
-    }
-    buttons.push({ text: '取消', color: '#9499A0' });
-    try {
-      this.getUIContext().getPromptAction().showDialog({
-        title: '举报视频',
-        message: item.title.substring(0, Math.min(24, item.title.length)),
-        buttons: buttons,
-      }).then((dialogResult) => {
-        const pick: number = Number(dialogResult.index);
-        if (pick < 0 || pick >= reasons.length) return;
-        if (!this.destroyed) this.toast('已提交举报，感谢反馈');
-      });
-    } catch (e) {
-      // 组件销毁或窗口异常时忽略。
-    }
+    if (!UserStore.isLogin) { this.toast('请先登录后再举报'); return; }
+    if (item.aid <= 0) { this.toast('当前视频不支持举报'); return; }
+    this.videoReportDialog?.close();
+    this.videoReportDialog = new CustomDialogController({
+      builder: VideoReportDialog({ aid: item.aid, title: item.title }),
+      autoCancel: false,
+      customStyle: true,
+    });
+    this.videoReportDialog.open();
   }
 
   /** ⋮ 菜单-不想看：移除该条相关推荐并提示。 */
   private hideRelated(item: VideoItem): void {
-    const next: Array<VideoItem> = this.related.filter((v: VideoItem) =>
+    const kept: Array<VideoItem> = this.relatedSource.getAll().filter((v: VideoItem) =>
       !((item.aid > 0 && v.aid === item.aid) ||
         (item.bvid.length > 0 && v.bvid.length > 0 && v.bvid === item.bvid)));
-    if (next.length !== this.related.length) this.related = next;
+    if (kept.length !== this.relatedSource.totalCount()) {
+      this.relatedSource.reset(kept);
+      this.relatedCount = kept.length;
+    }
     this.toast('已减少相似推荐');
   }
 
@@ -2764,14 +2556,10 @@ export struct VideoDetailPage {
     .clip(true)
   }
 
-  /** 模糊底图用小尺寸封面，借助 B 站图片缩略参数降低下载与解码开销。 */
-  private coverThumb(url: string): string {
-    return url.startsWith('http') ? url + '@480w_270h_1c.webp' : url;
-  }
-
-  /** 卡片侧带过来的封面：detail 数据回来前播放区/底图直接垫它，入场期不出"加载中"占位。 */
+  /** 卡片侧带过来的封面：detail 数据回来前播放区/底图直接垫它，入场期不出"加载中"占位。
+   *  卡片没带封面时才回退详情封面，同样按 900w 出图，避免播放区拉一张原图。 */
   private entryCoverUrl(): string {
-    return this.entryCoverSource.length > 0 ? this.entryCoverSource : this.detail.cover;
+    return this.entryCoverSource.length > 0 ? this.entryCoverSource : biliImageThumbnail(this.detail.cover, 900);
   }
 
   build() {
@@ -2816,6 +2604,11 @@ export struct VideoDetailPage {
               onDanmakuEngineReady: (engine: PlayerDanmakuEngine) => {
                 this.dmEngineRef = engine;
                 this.syncDanmakuViewport();
+              },
+              onSponsorFullLabel: (label: string, color: string) => {
+                if (this.destroyed) return;
+                this.sponsorFullLabel = label;
+                this.sponsorFullColor = color;
               },
               localDanmakuText: this.localDanmakuText,
               localDanmakuToken: this.localDanmakuToken,
@@ -2890,22 +2683,22 @@ export struct VideoDetailPage {
               upFollowing: this.following,
               disliked: this.disliked,
               onFollow: () => {
-                this.actionFollow();
+                this.actions.actionFollow();
               },
               onDislike: () => {
-                this.actionDislike();
+                this.actions.actionDislike();
               },
               onEndRecOpen: (item: VideoItem) => {
                 this.onPlayerEndRecOpen(item);
               },
               onLike: () => {
-                this.actionLike();
+                this.actions.actionLike();
               },
               onCoin: () => {
                 this.openCoinSheet();
               },
               onFavorite: () => {
-                this.actionFavorite();
+                this.actions.actionFavorite();
               },
               onShare: () => {
                 this.actionShare();
@@ -3018,7 +2811,7 @@ export struct VideoDetailPage {
             this.coinWithLike = c;
           },
           onConfirm: () => {
-            this.submitCoin();
+            this.actions.submitCoin();
           },
           onClose: () => {
             if (!this.actionBusy) this.coinSheetOpen = false;

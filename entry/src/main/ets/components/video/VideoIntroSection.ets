@@ -27,11 +27,17 @@ export struct VideoIntroSection {
   @Prop pageSwitchingCid: number = 0;
   @Prop ugcPanelOpen: boolean = false;
   @Prop ugcCount: number = 0;
-  @Prop related: Array<VideoItem> = [];
+  /** 全视频空降标签（如「商业推广」）：显示在标题前；空串不显示。 */
+  @Prop sponsorTag: string = '';
+  @Prop sponsorTagColor: string = '#008A5C';
+  /** 相关推荐行数：relatedSource 是普通属性（父组件持有），空态/尾footer 依赖此响应式计数。 */
+  @Prop relatedCount: number = 0;
   @Prop relatedLoading: boolean = false;
   @Prop relatedLoadError: string = '';
   scroller: Scroller = new Scroller();
   ugcSource: BasicDataSource<UgcSeasonEpisode> = new BasicDataSource<UgcSeasonEpisode>();
+  /** 相关推荐懒加载数据源：无限追加的推荐行必须虚拟化，Scroll+ForEach 全量常驻会随页数线性吃满内存。 */
+  relatedSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
   onOpenUp: () => void = () => {};
   onFollow: () => void = () => {};
   onLike: () => void = () => {};
@@ -170,43 +176,73 @@ export struct VideoIntroSection {
   }
 
   @Builder
-  private Related() {
+  private RelatedHeader() {
     Column({ space: 4 }) {
       Text('相关推荐').fontSize(15).fontWeight(FontWeight.Bold)
         .fontColor(this.isDark ? '#FFFFFF' : '#18191C').width('100%').padding({ top: 6, bottom: 4 })
-      if (this.related.length === 0) {
+      if (this.relatedCount === 0) {
         Text(this.relatedLoading ? '相关推荐加载中…' : this.relatedLoadError)
           .fontSize(12).fontColor(this.relatedLoadError.length > 0 ? this.accent : '#9499A0')
           .width('100%').padding({ top: 12, bottom: 12 })
           .onClick(() => { if (!this.relatedLoading) this.onLoadMoreRelated(); })
-      } else {
-        ForEach(this.related, (item: VideoItem) => {
+      }
+    }.width('100%').alignItems(HorizontalAlign.Start)
+  }
+
+  build() {
+    List({ space: 4, scroller: this.scroller }) {
+      ListItem() {
+        Column({ space: 12 }) {
+          this.OwnerHeader()
+          Row({ space: 6 }) {
+            if (this.sponsorTag.length > 0) {
+              Text(this.sponsorTag)
+                .fontSize(11).fontColor('#FFFFFF')
+                .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+                .borderRadius(4)
+                .backgroundColor(this.sponsorTagColor)
+                .margin({ top: 3 })
+                .flexShrink(0)
+            }
+            Text(this.detail.title).fontSize(17).fontWeight(FontWeight.Bold)
+              .fontColor(this.isDark ? '#FFFFFF' : '#18191C').layoutWeight(1).lineHeight(24)
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Top)
+          this.Metadata()
+          this.Actions()
+          this.DescriptionAndEpisodes()
+        }.width('100%')
+      }.margin({ top: 14, bottom: 8 })
+
+      ListItem() {
+        this.RelatedHeader()
+      }
+
+      LazyForEach(this.relatedSource, (item: VideoItem) => {
+        ListItem() {
           RelatedVideoRow({ item: item, onOpen: this.onOpenRelated,
             onReport: this.onReportRelated, onHide: this.onHideRelated })
-        }, (item: VideoItem) => item.bvid + String(item.aid))
-        if (this.relatedLoading || this.relatedLoadError.length > 0) {
+        }
+      }, (item: VideoItem) => item.bvid + String(item.aid))
+
+      if (this.relatedCount > 0 && (this.relatedLoading || this.relatedLoadError.length > 0)) {
+        ListItem() {
           Text(this.relatedLoading ? '正在刷新更多推荐…' : this.relatedLoadError)
             .fontSize(12).fontColor(this.relatedLoadError.length > 0 ? this.accent : '#9499A0')
             .width('100%').textAlign(TextAlign.Center).padding({ top: 12, bottom: 12 })
             .onClick(this.onLoadMoreRelated)
         }
       }
-    }.width('100%').alignItems(HorizontalAlign.Start)
-  }
 
-  build() {
-    Scroll(this.scroller) {
-      Column({ space: 12 }) {
-        this.OwnerHeader()
-        Text(this.detail.title).fontSize(17).fontWeight(FontWeight.Bold)
-          .fontColor(this.isDark ? '#FFFFFF' : '#18191C').width('100%').lineHeight(24)
-        this.Metadata()
-        this.Actions()
-        this.DescriptionAndEpisodes()
-        this.Related()
-      }.width('100%').padding(14)
+      // 尾部留白对齐原 Scroll 内边距；空态时也保证"点击刷新"文案不贴底。
+      ListItem() {
+        Column().width('100%').height(10)
+      }
     }
-    .width('100%').height('100%').scrollBar(BarState.Off).align(Alignment.Top)
+    .width('100%').height('100%').scrollBar(BarState.Off).edgeEffect(EdgeEffect.None)
+    .cachedCount(4)
+    .padding({ left: 14, right: 14 })
     .onScrollFrameBegin((offset: number, state: ScrollState) => {
       return { offsetRemain: this.onScrollFrame(offset, this.scroller, state) };
     })

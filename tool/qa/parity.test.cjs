@@ -68,7 +68,9 @@ function searchHarness(data) {
   const calls=[];
   const env=environment({
     'common/WbiSign': {WbiSign:{async encWbi(){}}},
-    'api/internal/ApiCommon':{webGet:async(url,params)=>{calls.push({url,params});return data;},getData:x=>x,failureText:()=> 'Request failed'},
+    'api/internal/ApiCommon':{webGet:async(url,params)=>{calls.push({url,params});return data;},
+      webGetSigned:async(url,params)=>{calls.push({url,params});return data;},
+      getData:x=>x,failureText:()=> 'Request failed'},
   });
   return {api:env.load('api/SearchApi').SearchApi,calls};
 }
@@ -521,4 +523,248 @@ test('keyword highlighting handles empty, missing and regex-like input literally
   for(const kw of ['', '  ', '后天']) assert.equal(h.split('明日',kw).some(p=>p.matched),false);
   assert.deepEqual(h.split('a+b 与 aab','a+b').filter(p=>p.matched).map(p=>p.text),['a+b']);
   assert.equal(h.split('🌅明日','明日').map(p=>p.text).join(''),'🌅明日');
+});
+
+test('PiP starting, active and restoring preserve background video even when background audio is disabled', () => {
+  for (const flag of ['pipStarting', 'pipActive', 'pipRestoring']) {
+    for (const enabled of [false, true]) {
+      const {view, actions} = backgroundHarness(enabled, true);
+      view[flag] = true;
+      view.onAppBackgroundChanged();
+      assert.deepEqual(actions, []);
+      view.appInBackground = false;
+      view.onAppBackgroundChanged();
+      assert.deepEqual(actions, ['foreground']);
+      assert.equal(view.pipRestoring, false);
+    }
+  }
+});
+
+function pipHarness(create) {
+  const PiPState = { ABOUT_TO_START:1, STARTED:2, STOPPED:4, ABOUT_TO_RESTORE:5, ERROR:6 };
+  const platform = {isPiPEnabled:()=>true,create,PiPState,PiPTemplateType:{VIDEO_PLAY:0},
+    PiPControlType:{VIDEO_PLAY_PAUSE:0},PiPControlStatus:{PLAY:1,PAUSE:0}};
+  const env = environment({'@kit.ArkUI':{PiPWindow:platform}});
+  const Harness = env.methodHarness('components/player/PlayerView',
+    '  private async startPictureInPicture()', '  onAppBackgroundChanged():',
+    "import { PiPWindow as pictureInPicture } from '@kit.ArkUI';");
+  const events = [], actions = [];
+  const view = Object.assign(new Harness(), {pipController:null,pipActive:false,pipStarting:false,
+    pipRestoring:false,pipGeneration:0,destroyed:false,prepared:true,player:{},surfaceId:'surface',
+    realVideoWidth:1920,realVideoHeight:1080,playing:true,appInBackground:false,
+    getUIContext:()=>({getHostContext:()=>({})}),closeSettingPanels(){},
+    toast:message=>events.push(message),onAppBackgroundChanged:()=>actions.push('background'),
+    togglePlay(){this.playing=!this.playing;actions.push('toggle');}});
+  return {view, events, actions, PiPState};
+}
+function fakePipController() {
+  const callbacks = {}, states = [];
+  return {callbacks,states,stops:0,starts:0,
+    setAutoStartEnabled(){},on:(key,cb)=>{callbacks[key]=cb;},off:key=>{delete callbacks[key];},
+    updatePiPControlStatus:(_type,state)=>states.push(state),updateContentSize(){},
+    async startPiP(){this.starts++;callbacks.stateChange(2);},async stopPiP(){this.stops++;}};
+}
+test('PiP handles playback controls, restoration and background close without losing state', async () => {
+  const controller=fakePipController();const {view,actions}=pipHarness(async()=>controller);
+  await view.startPictureInPicture();assert.equal(view.pipActive,true);
+  controller.callbacks.controlEvent({controlType:0,status:0});assert.equal(view.playing,false);
+  controller.callbacks.controlEvent({controlType:0,status:0});assert.equal(actions.length,1);
+  controller.callbacks.controlEvent({controlType:0,status:1});assert.equal(view.playing,true);
+  view.appInBackground=true;
+  controller.callbacks.stateChange(5);controller.callbacks.stateChange(4);
+  assert.equal(view.pipRestoring,true);assert.deepEqual(actions,['toggle','toggle']);
+  view.pipRestoring=false;controller.callbacks.stateChange(4);
+  assert.deepEqual(actions,['toggle','toggle','background']);
+});
+test('PiP creation after player disposal cannot start an orphan window', async () => {
+  const pending=deferred(),controller=fakePipController();const {view}=pipHarness(()=>pending.promise);
+  const starting=view.startPictureInPicture();view.releasePictureInPicture();view.destroyed=true;
+  pending.resolve(controller);await starting;assert.equal(controller.starts,0);assert.equal(view.pipController,null);
+});
+test('PiP failed start re-applies background policy and allows retry', async () => {
+  const controller=fakePipController();controller.startPiP=async()=>{throw new Error('denied');};
+  const {view,actions,events}=pipHarness(async()=>controller);view.appInBackground=true;
+  await view.startPictureInPicture();assert.equal(view.pipStarting,false);assert.equal(view.pipActive,false);
+  assert.deepEqual(actions,['background']);assert.equal(events.length,1);
+});
+
+function videoReportHarness() {
+  const cookies = new Map([['SESSDATA','test-session'],['bili_jct','test-csrf']]);
+  const calls=[];let payload={code:0,data:[]};
+  const env=environment({'common/WbiSign':{WbiSign:{encWbi:async()=>{},invalidate:()=>{}}},
+    'services/network/HttpClient':{RequestPriority:{NORMAL:1},HttpClient:{
+    getCookie:key=>cookies.get(key)||'',setCookie:(key,value)=>cookies.set(key,value),
+    merge:(a,b)=>({...a,...b}),buildQuery:p=>new URLSearchParams(p).toString(),
+    get:async()=>({ok:true,json:()=>payload}),
+    post:async(url,body,headers)=>{calls.push({url,body,headers});return {ok:true,json:()=>payload};}}}});
+  return {api:env.load('api/VideoReportApi').VideoReportApi,cookies,calls,setPayload:p=>{payload=p;}};
+}
+test('video report reasons retain server IDs and exclude required structured evidence forms', async () => {
+  const {api,setPayload}=videoReportHarness();setPayload({code:0,data:[
+    {tid:10040,name:'含AI生成',remark:'描述位置',controls:null},
+    {tid:8,name:'撞车',controls:[{required:1}]},{tid:0,name:'invalid'}]});
+  const reasons=await api.reasons();assert.equal(reasons.length,1);assert.equal(reasons[0].id,10040);
+  setPayload({code:-1,message:'failed'});await assert.rejects(()=>api.reasons());
+});
+test('video report checks login and content, sends selected reason, and only acknowledges server success', async () => {
+  const {api,calls,cookies,setPayload}=videoReportHarness();
+  assert.equal((await api.submit(1,2,' ')).ok,false);assert.equal(calls.length,0);
+  cookies.delete('SESSDATA');assert.equal((await api.submit(1,2,'问题')).ok,false);assert.equal(calls.length,0);
+  cookies.set('SESSDATA','test-session');setPayload({code:-412,message:'请求被拦截'});
+  assert.equal((await api.submit(123,10040,'  01:20 问题描述  ')).ok,false);
+  const form=new URLSearchParams(calls[0].body);
+  assert.equal(form.get('aid'),'123');assert.equal(form.get('tid'),'10040');
+  assert.equal(form.get('desc'),'01:20 问题描述');assert.equal(form.get('csrf'),'test-csrf');
+  assert.equal(calls[0].headers.buid,cookies.get('Buid'));
+  setPayload({code:0});assert.equal((await api.submit(123,10040,'描述')).ok,true);
+});
+
+test('PiP start completing after release is stopped again and leaves no orphan window', async () => {
+  const pending=deferred(),controller=fakePipController();
+  controller.startPiP=()=>pending.promise;
+  const {view}=pipHarness(async()=>controller);
+  const starting=view.startPictureInPicture();await tick();
+  view.releasePictureInPicture();view.destroyed=true;
+  pending.resolve();await starting;
+  assert.equal(controller.stops,2);assert.equal(view.pipController,null);
+});
+
+test('disabled player gesture preferences suppress playback, seeking and speed changes', () => {
+  const env=environment();
+  for (const [start,end,method,flag] of [
+    ['  private handleDoubleTap():','  @Builder\n  PlayerGestureArea()', 'handleDoubleTap','doubleTapEnabled'],
+    ['  private beginHoldSpeed():','  private endHoldSpeed():','beginHoldSpeed','holdEnabled'],
+    ['  private beginPlayerPan(','  private updatePlayerPan(','beginPlayerPan','panEnabled'],
+    ['  private updatePlayerPan(','  private endPlayerPan():','updatePlayerPan','panEnabled'],
+  ]) {
+    const Harness=env.methodHarness('components/player/PlayerView',start,end);
+    const view=Object.assign(new Harness(),{[flag]:false});
+    // No player/controllers exist: reaching any side effect would throw.
+    assert.doesNotThrow(()=>view[method]({fingerList:[],offsetX:50,offsetY:10}));
+  }
+});
+
+test('turning off scheduled dark mode immediately reapplies the current theme policy', () => {
+  const {AppTheme}=environment({'@kit.ArkUI':{},'@kit.AbilityKit':{},'@kit.ArkData':{},'@kit.BasicServicesKit':{deviceInfo:{}}}).load('common/AppTheme');
+  const applied=[];
+  AppTheme.getMode=()=>AppTheme.MODE_SYSTEM;
+  AppTheme.applyCurrentMode=()=>applied.push('apply');
+  AppTheme.setAutoDarkEnabled(false);
+  assert.deepEqual(applied,['apply']);
+});
+
+test('manual quality and gesture preferences survive a fresh app storage instance', async () => {
+  const disk = new Map();
+  const store = {getSync:(key,fallback)=>disk.has(key)?disk.get(key):fallback,
+    putSync:(key,value)=>disk.set(key,value),flush:async()=>{}};
+  const mocks = {'@kit.ArkUI':{}, '@kit.AbilityKit':{},
+    '@kit.ArkData':{preferences:{getPreferencesSync:()=>store}},
+    '@kit.BasicServicesKit':{deviceInfo:{}}};
+  const first=environment(mocks);
+  await first.load('common/AppTheme').AppTheme.initThemeStore({});
+  first.load('common/PlayerQualityPreference').PlayerQualityPreference.remember(120);
+  first.load('common/AppTheme').AppTheme.setPlayerGesture('playerDoubleTapEnabled',false);
+  const restarted=environment(mocks);
+  await restarted.load('common/AppTheme').AppTheme.initThemeStore({});
+  const pref=restarted.load('common/PlayerQualityPreference').PlayerQualityPreference;
+  assert.equal(pref.requested(),120);
+  assert.equal(restarted.storage.get('playerDoubleTapEnabled'),false);
+  pref.useMode(3);
+  const third=environment(mocks);
+  await third.load('common/AppTheme').AppTheme.initThemeStore({});
+  assert.equal(third.load('common/PlayerQualityPreference').PlayerQualityPreference.requested(),64);
+});
+
+test('quality ceiling never silently selects a stream above the saved choice', () => {
+  const {PlayUrlInfo}=environment().load('model/Models');
+  assert.equal(PlayUrlInfo.fromPlayUrl(qualityResponse([120,116]),80).url,'');
+  assert.equal(PlayUrlInfo.fromPlayUrl({quality:80,durl:[{url:'https://test/1080.mp4'}]},64).url,'');
+});
+
+test('emote package cache deduplicates requests, restores on restart and isolates accounts', async () => {
+  const disk=new Map(); let requests=0;
+  function fresh() {
+    const cache=environment().load('common/EmotePackageCache').EmotePackageCache;
+    cache.configure(k=>disk.get(k)||'',(k,v)=>disk.set(k,v)); return cache;
+  }
+  const pending=deferred(); const cache=fresh();
+  const fetch=()=>{requests++;return pending.promise;};
+  const a=cache.get('u1_reply',fetch),b=cache.get('u1_reply',fetch);
+  pending.resolve('[{"text":"表情","emote":[]}]');
+  assert.deepEqual(await a,await b);assert.equal(requests,1);
+  const restarted=fresh();
+  assert.deepEqual(await restarted.get('u1_reply',()=>{throw Error('must not fetch');}),await a);
+  assert.deepEqual(await restarted.get('u2_reply',async()=>{requests++;return '[{"text":"other"}]';}), [{"text":"other"}]);
+  assert.equal(requests,2);
+});
+
+test('stale emote directories display immediately offline and corrupt cache retries', async () => {
+  const disk=new Map([['u_reply',JSON.stringify({at:1,data:'[{"text":"saved"}]'})],['broken','bad json']]);
+  const cache=environment().load('common/EmotePackageCache').EmotePackageCache;
+  cache.configure(k=>disk.get(k)||'',(k,v)=>disk.set(k,v));
+  const never=deferred();
+  assert.deepEqual(await cache.get('u_reply',()=>never.promise),[{text:'saved'}]);
+  never.reject(Error('offline'));await tick();
+  assert.deepEqual(await cache.get('u_reply',()=>{throw Error('retry throttled');}),[{text:'saved'}]);
+  assert.deepEqual(await cache.get('broken',async()=>'[{"text":"new"}]'),[{text:'new'}]);
+});
+
+test('video back broadcast closes only the targeted destination once, including duplicate video pages', () => {
+  const env=environment();
+  const Page=env.methodHarness('pages/VideoDetail','  onCloseRequested(): void {','  aboutToDisappear(): void {');
+  const hidden=new Page(),shown=new Page();
+  hidden.queryNavDestinationInfo=()=>({index:0});shown.queryNavDestinationInfo=()=>({index:1});
+  hidden.closeRequest=shown.closeRequest=7;
+  let hiddenPops=0,shownPops=0;
+  hidden.goBack=()=>{hiddenPops++;};shown.goBack=()=>{shownPops++;};
+  env.storage.set('videoDetailCloseTargetIndex',1);
+  hidden.onCloseRequested();shown.onCloseRequested();
+  // Even if destination indices change during pop, the request has already been consumed.
+  hidden.queryNavDestinationInfo=()=>({index:1});
+  hidden.onCloseRequested();shown.onCloseRequested();
+  assert.equal(hiddenPops,0);assert.equal(shownPops,1);
+});
+
+test('missing entrance animation callback restores full page and releases data gate', async () => {
+  // 入场闸门已抽到 VideoHeroTransitionController：经 access 闭包驱动一个假页面状态。
+  const env=environment({
+    '@kit.ArkUI':{FrameCallback:class FrameCallback{},UIContext:class UIContext{}},
+    '@kit.ImageKit':{image:{}},
+    'common/AppRouter':{AppNavStack:{},releasePixelMap(){}},
+  });
+  const Hero=env.load('components/video/VideoHeroTransitionController').VideoHeroTransitionController;
+  const state={contentOpacity:0,heroOpacity:0,wholeCardAnimating:true,wholeCardScale:.45,
+    wholeCardTranslateX:0,wholeCardTranslateY:0,wholeCardRadius:0,wholeCardSnapshotOpacity:0,
+    snapshot:null,fromWholeCard:false,fromRect:false,entranceArmed:false,destroyed:false,closing:false};
+  const access={
+    setContentOpacity:v=>{state.contentOpacity=v;},
+    setHeroVisible:()=>{},setHeroSource:()=>{},setHeroX:()=>{},setHeroY:()=>{},
+    setHeroWidth:()=>{},setHeroHeight:()=>{},setHeroRadius:()=>{},setHeroOpacity:v=>{state.heroOpacity=v;},
+    setWholeCardAnimating:v=>{state.wholeCardAnimating=v;},
+    getWholeCardSnapshot:()=>state.snapshot,setWholeCardSnapshot:v=>{state.snapshot=v;},
+    setWholeCardSnapshotOpacity:v=>{state.wholeCardSnapshotOpacity=v;},
+    setWholeCardScale:v=>{state.wholeCardScale=v;},
+    setWholeCardTranslateX:v=>{state.wholeCardTranslateX=v;},
+    setWholeCardTranslateY:v=>{state.wholeCardTranslateY=v;},
+    setWholeCardClipHeight:()=>{},setWholeCardRadius:v=>{state.wholeCardRadius=v;},
+    setWholeCardSnapshotHeight:()=>{},
+    setFromWholeCard:v=>{state.fromWholeCard=v;},isFromWholeCard:()=>state.fromWholeCard,
+    setFromRect:v=>{state.fromRect=v;},isFromRect:()=>state.fromRect,
+    isEntranceArmed:()=>state.entranceArmed,setEntranceArmed:v=>{state.entranceArmed=v;},
+  };
+  let timer;
+  const hero=new Hero({},{gateFallbackMs:600},access,
+    ()=>undefined,()=>'',()=>0,()=>0,()=>undefined,()=>undefined,()=>false,
+    ()=>state.destroyed,()=>state.closing,()=>({}),fn=>{timer=fn;});
+  hero.armEntranceGate();
+  let gateOpen=false;
+  hero.waitEntranceGate().then(()=>{gateOpen=true;});
+  assert.equal(gateOpen,false);
+  timer();await tick();
+  assert.equal(state.wholeCardScale,1);assert.equal(state.wholeCardAnimating,false);
+  assert.equal(state.contentOpacity,1);
+  assert.equal(gateOpen,true,'fallback must release the data gate');
+  state.closing=true;state.wholeCardScale=.45;
+  hero.armEntranceGate();timer();await tick();
+  assert.equal(state.wholeCardScale,.45,'exit animation must not be reset by entrance timeout');
 });

@@ -248,7 +248,9 @@ export struct YouTubeView {
   }
 
   /**
-   * 缩略图两段式：先认磁盘命中，首帧就能用本地文件；未命中的再经应用 HTTP 栈下载。
+   * 缩略图两段式：先认缓存记录命中（cachedThumbnail 只读内存，零同步 IO），首帧就用本地
+   * 文件；未命中（含冷启动磁盘待恢复）的走应用 HTTP 栈的异步管线——已有文件只做异步
+   * 校验后直接复用，缺文件才真正下载，完成后照旧回填 thumbLocal 并置 coversReady。
    * 这样在只能靠代理出网的环境里卡片不会整片空白，命中后也不再重复请求 CDN。
    */
   private primeThumbnails(list: Array<YouTubeVideo>): void {

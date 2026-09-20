@@ -61,12 +61,22 @@ function environment(mocks = {}) {
         return load(path.relative(root, path.resolve(path.dirname(filename), name)).replaceAll('\\', '/'));
       }
       if (name in mocks) return mocks[name];
+      // ArkTS 解析核心的基础依赖：collections 容器（Node 下普通 Array 即满足）与
+      // taskpool（同线程直接执行任务，等价于并发解析的同步结果）。
+      if (name === '@kit.ArkTS') return {
+        collections: { Array },
+        taskpool: { execute: async (task, ...args) => task(...args) },
+        util: {},
+      };
       throw new Error('Missing platform mock: ' + name);
     };
-    new Function('require', 'module', 'exports', 'AppStorage', 'PersistentStorage', code)(
+    // Sendable/Concurrent 是 ArkTS 编译期语义（跨线程共享/并发任务）；Node 沙箱里以恒等装饰器替代。
+    new Function('require', 'module', 'exports', 'AppStorage', 'PersistentStorage', 'Sendable', 'Concurrent', code)(
       localRequire, module, module.exports,
       { get: key => storage.get(key), setOrCreate: (key, value) => storage.set(key, value) },
-      { persistProp() {} }
+      { persistProp() {} },
+      (target) => target,
+      (target) => target
     );
     return module.exports;
   }
@@ -109,13 +119,17 @@ function httpMock(handler) {
 const response = (body, header = {}, responseCode = 200) => ({ result: JSON.stringify(body), header, responseCode });
 
 test('PGC: episode metadata uses the selected episode identity rather than the first episode', async () => {
-  const env = environment({'services/network/HttpClient': {HttpClient:{buildQuery:p=>new URLSearchParams(p).toString()}},
-    'api/internal/ApiCommon': {webGet: async () => ({
-    ok:true,json:()=>({code:0,result:{title:'Series',episodes:[
-      {id:10,aid:1,bvid:'first',cid:100,title:'1',duration:1000},
-      {id:20,aid:2,bvid:'selected',cid:200,title:'2',long_title:'Episode',duration:120000}
-    ]}})
-  })}});
+  const seasonResponse = {ok:true,json:()=>({code:0,result:{title:'Series',episodes:[
+    {id:10,aid:1,bvid:'first',cid:100,title:'1',duration:1000},
+    {id:20,aid:2,bvid:'selected',cid:200,title:'2',long_title:'Episode',duration:120000}
+  ]}})};
+  const env = environment({'services/network/HttpClient': {
+    RequestPriority: {CRITICAL: 900, HIGH: 600, NORMAL: 300, LOW: 100},
+    HttpClient:{buildQuery:p=>new URLSearchParams(p).toString()}},
+    'api/internal/ApiCommon': {
+      webGet: async () => seasonResponse,
+      webGetWithPriority: async () => seasonResponse,
+    }});
   const {BangumiApi} = env.load('api/BangumiApi');
   const detail = await BangumiApi.getEpisodeVideoDetail(20);
   assert.equal(detail.epId,20);assert.equal(detail.cid,200);assert.equal(detail.aid,2);
@@ -127,9 +141,13 @@ test('PGC: episode metadata uses the selected episode identity rather than the f
 test('PGC: authenticated endpoint preserves preview and rejects denied, DRM and segmented results', async () => {
   const calls=[];let payload={code:0,result:{quality:32,is_preview:1,
     durl:[{url:'https://cdn.example.test/preview.mp4',backup_url:[]}]}};
-  const env=environment({'services/network/HttpClient':{},'api/internal/ApiCommon':{
-    webGet:async(...args)=>{calls.push(args);return {ok:true,json:()=>payload};}
-  }});
+  const playurlResponse = async (...args) => {calls.push(args);return {ok:true,json:()=>payload};};
+  const env=environment({
+    'services/network/HttpClient': {RequestPriority: {CRITICAL: 900, HIGH: 600, NORMAL: 300, LOW: 100}},
+    'api/internal/ApiCommon': {
+      webGet: playurlResponse,
+      webGetWithPriority: playurlResponse,
+    }});
   const {BangumiApi}=env.load('api/BangumiApi');
   const info=await BangumiApi.getPlayUrl(20,200,80);
   assert.equal(info.isPreview,true);assert.equal(info.quality,32);
@@ -332,7 +350,8 @@ test('Search: new query starts immediately; old completion cannot replace result
 
 test('History API: network/auth/malformed responses differ from a successful empty list', async () => {
   let next;
-  const env = environment({ '@kit.NetworkKit': httpMock(() => next) });
+  const env = environment({ '@kit.NetworkKit': httpMock(() => next),
+    'common/WbiSign': { WbiSign: { encWbi: async () => {}, invalidate: () => {} } } });
   const { HttpClient } = env.load('services/network/HttpClient');
   HttpClient.setCookie('buvid3', 'real-device-id');
   const { HistoryApi } = env.load('api/HistoryApi');
@@ -1068,3 +1087,146 @@ test('YouTube: the player document survives the initial about:blank navigation',
     /if \(event\.url === 'about:blank' && !this\.initialPageLoaded\) \{[\s\S]{0,200}this\.playerLoaded = false;[\s\S]{0,120}this\.loadPlayer\(\);/);
 });
 
+
+test('emote render sources never start a second network load while disk download is pending', () => {
+  const disk = new Map();
+  const mocks = { 'common/EmoteImageCache': { EmoteImageCache: {
+    localPathOf: url => disk.get(url) || url
+  } } };
+  for (const [file, start, end, method] of [
+    ['components/reply/ReplyEmotePanel', '  private imageSrc(', '  private contentHeight(', 'imageSrc'],
+    ['components/reply/ReplyRichText', '  private emoteSrc(', '  private plainColor(', 'emoteSrc'],
+    ['views/DynamicView', '  private emoteSrc(', '  private toast(', 'emoteSrc']
+  ]) {
+    const Harness = environment(mocks).methodHarness(file, start, end,
+      "import { EmoteImageCache } from 'common/EmoteImageCache';");
+    const view = new Harness();
+    view.emoteLocal = new Map();
+    const url = 'https://example.com/' + method + '.gif';
+    disk.delete(url);
+    assert.equal(view[method](url), '', file + ': pending source must not be a remote URL');
+    disk.set(url, 'file://cached.gif');
+    assert.equal(view[method](url), 'file://cached.gif', file + ': recreated view reads disk immediately');
+  }
+});
+
+test('emote panel caches all category icons and only the displayed version of current emotes', () => {
+  const Harness = environment().methodHarness('components/reply/ReplyEmotePanel',
+    '  private primeCurrentPackage(', '  private primeOne(');
+  const panel = new Harness();
+  panel.currentIndex = 0;
+  panel.packages = [
+    {icon: 'a.png', emotes: [{url: 'still.png', gifUrl: 'animated.gif'}, {url: 'only.png', gifUrl: ''}]},
+    {icon: 'b.png', emotes: [{url: 'later.png', gifUrl: ''}]}
+  ];
+  const calls = [];
+  panel.primeOne = url => calls.push(url);
+  panel.primeCurrentPackage();
+  assert.deepEqual(calls, ['a.png', 'b.png', 'animated.gif', 'only.png']);
+});
+
+test('emote disk cache survives a fresh service instance and deduplicates simultaneous requests', async () => {
+  const directory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'emote-cache-test-'));
+  let downloads = 0;
+  const openFiles = new Map();
+  const mocks = {
+    '@kit.AbilityKit': {common: {}},
+    '@kit.CoreFileKit': {
+      fileUri: {getUriFromPath: p => 'file://' + p},
+      fileIo: {
+        OpenMode: {READ_ONLY: 'r'},
+        statSync: p => fs.statSync(p),
+        openSync: (p, mode) => ({fd: fs.openSync(p, mode)}),
+        readSync: (fd, buffer, options) => fs.readSync(fd, new Uint8Array(buffer), 0, buffer.byteLength, options.offset),
+        closeSync: f => fs.closeSync(f.fd),
+        unlinkSync: p => fs.unlinkSync(p),
+        open: (p, mode) => fs.promises.open(p, mode).then(handle => {
+          openFiles.set(handle.fd, handle);
+          return handle;
+        }),
+        // node:fs 的 promises.read/close 在 node 26 起被移除，只能走 FileHandle 实例方法；
+        // 真实实现按 fd 读写，所以这里维护 fd → 句柄的映射。
+        read: async (fd, buffer, options) => {
+          const view = new Uint8Array(buffer);
+          const result = await openFiles.get(fd).read(view, 0, view.byteLength, options.offset);
+          return result.bytesRead;
+        },
+        close: f => {
+          openFiles.delete(f.fd);
+          return f.close();
+        },
+        unlink: p => fs.promises.unlink(p),
+        listFileSync: p => fs.readdirSync(p),
+        mkdir: p => fs.promises.mkdir(p)
+      }
+    },
+    'services/cache/AssetDownload': {AssetDownload: {save: async (url, dest) => {
+      downloads++;
+      await tick();
+      await fs.promises.writeFile(dest, Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0, 1, 0, 0, 0, 0]));
+      return true;
+    }}}
+  };
+  try {
+    const first = environment(mocks).load('services/cache/RemoteAssetCache').RemoteAssetCache;
+    first.attach({cacheDir: directory});
+    const url = 'https://example.com/emote.gif';
+    const [a, b] = await Promise.all([first.ensureEmote(url), first.ensureEmote(url)]);
+    assert.equal(a, b);
+    assert.ok(a.startsWith('file://'));
+    assert.equal(downloads, 1);
+    const restarted = environment(mocks).load('services/cache/RemoteAssetCache').RemoteAssetCache;
+    restarted.attach({cacheDir: directory});
+    // cached* 是纯内存查询：重启后验证记录为空，首查直接返回远程 url，不做同步查盘。
+    assert.equal(restarted.cachedEmote(url), url);
+    // 磁盘恢复由 ensure* 的异步文件头校验完成：命中既有文件且不重新下载。
+    assert.equal(await restarted.ensureEmote(url), a);
+    assert.equal(downloads, 1, 'disk hit after restart must not download again');
+    assert.equal(restarted.cachedEmote(url), a);
+  } finally {
+    fs.rmSync(directory, {recursive: true, force: true});
+  }
+});
+
+test('automatic audio alignment preserves video buffer and cancels stale pause completion', async () => {
+  const Harness = environment().methodHarness('components/player/PlayerView',
+    '  private gateAudioStart(', '  async changeQuality(');
+  const view = new Harness();
+  let videoSeeks = 0, audioSeeks = 0, plays = 0;
+  const pause = deferred();
+  view.player = {currentTime: 5000, seek: () => videoSeeks++};
+  view.audioPlayer = {currentTime: 4500, state: 'playing', setVolume() {},
+    pause: () => pause.promise, seek: () => audioSeeks++, play: () => plays++};
+  Object.assign(view, {playing: true, prepared: true, audioPrepared: true, audioGateTimer: -1,
+    seekLocked: false, backgroundAudioOnly: false, restoreUserVolume() {}, resetAudioSyncRate() {},
+    handleAudioPlayerError() { assert.fail('unexpected audio error'); }});
+  view.gateAudioStart();
+  view.tryStartGatedAudio();
+  view.cancelAudioGate(); // user seeks or switches source before pause resolves
+  pause.resolve();
+  await tick();
+  assert.equal(audioSeeks, 0);
+  view.audioPlayer.state = 'paused';
+  view.gateAudioStart();
+  view.tryStartGatedAudio();
+  assert.equal(audioSeeks, 1);
+  assert.equal(videoSeeks, 0, 'background synchronization must not seek video');
+  view.finishGatedAudioStart(view.audioPlayer);
+  assert.equal(plays, 1);
+  assert.equal(view.audioGateTimer, -1);
+});
+
+test('temporary speed changes write each player once without restoring an intermediate rate', () => {
+  const Harness = environment().methodHarness('components/player/PlayerView',
+    '  private applyTemporarySpeed(', '  private beginHoldSpeed(', 'const DEBUG = false;');
+  const h = new Harness();
+  const videoRates = [], audioRates = [];
+  Object.assign(h, {prepared: true, audioPrepared: true, audioSyncRate: 0.97,
+    player: {setPlaybackRate: rate => videoRates.push(rate)},
+    audioPlayer: {setPlaybackRate: rate => audioRates.push(rate)}, dmEngine: {setPlaybackRate() {}}});
+  h.applyTemporarySpeed(2);
+  h.applyTemporarySpeed(1);
+  assert.deepEqual(videoRates, [2, 1]);
+  assert.deepEqual(audioRates, [2, 1]);
+  assert.ok(h.speedTransitionUntilMs > Date.now());
+});

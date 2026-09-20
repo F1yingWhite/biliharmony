@@ -55,7 +55,7 @@ export function FeedGradientMask($$: FeedMaskParam) {
 /** 卡片标题（14 号中粗，两行截断） */
 @Builder
 export function FeedCardTitle($$: FeedTitleParam) {
-  Text() { KeywordSpans($$.title, $$.highlightKeyword ?? '', $$.isDark) }
+  Text() { KeywordSpans({ text: $$.title, keyword: $$.highlightKeyword ?? '', isDark: $$.isDark }) }
     .width('100%')
     .fontSize(14)
     .lineHeight(19)

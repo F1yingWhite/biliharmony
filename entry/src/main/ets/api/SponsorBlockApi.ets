@@ -1,6 +1,6 @@
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { util } from '@kit.ArkTS';
-import { HttpClient, HttpResponse } from '../services/network/HttpClient';
+import { HttpClient, HttpResponse, RequestPriority } from '../services/network/HttpClient';
 import { SponsorBlockSegment, SponsorBlockStore } from '../common/SponsorBlock';
 import { asArray, asNumber, asObject, str } from '../common/Utils';
 
@@ -85,7 +85,7 @@ export class SponsorBlockApi {
     if (!ignoreCache && cached !== undefined && Date.now() - cachedAt < 10 * 60 * 1000) return cached;
     const digest: string = await sha256Hex(bvid);
     const response: HttpResponse = await HttpClient.get(SERVER + '/api/skipSegments/' + digest.substring(0, 4),
-      headers(ignoreCache));
+      headers(ignoreCache), RequestPriority.LOW);
     if (response.ok) {
       const blocks: Array<Object> = response.jsonArray();
       for (let i: number = 0; i < blocks.length; i++) {
@@ -109,7 +109,7 @@ export class SponsorBlockApi {
 
     // 兼容旧服务端和自建实例的直查协议。
     const fallback: HttpResponse = await HttpClient.get(SERVER + '/api/skipSegments?' +
-      HttpClient.buildQuery({ 'videoID': bvid, 'cid': String(cid) }), headers(ignoreCache));
+      HttpClient.buildQuery({ 'videoID': bvid, 'cid': String(cid) }), headers(ignoreCache), RequestPriority.LOW);
     if (!fallback.ok) return [];
     const raw: Array<Object> = fallback.jsonArray();
     const result: Array<SponsorBlockSegment> = [];

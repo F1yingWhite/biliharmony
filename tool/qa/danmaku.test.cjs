@@ -36,10 +36,13 @@ function environment(mocks = {}) {
       if (name in mocks) return mocks[name];
       throw new Error('Missing platform mock: ' + name);
     };
-    new Function('require', 'module', 'exports', 'AppStorage', 'PersistentStorage', code)(
+    // Sendable/Concurrent 是 ArkTS 编译期语义（跨线程共享/并发任务）；Node 沙箱里以恒等装饰器替代。
+    new Function('require', 'module', 'exports', 'AppStorage', 'PersistentStorage', 'Sendable', 'Concurrent', code)(
       localRequire, module, module.exports,
       { get: key => storage.get(key), setOrCreate: (key, value) => storage.set(key, value) },
-      { persistProp() {} }
+      { persistProp() {} },
+      (target) => target,
+      (target) => target
     );
     return module.exports;
   }
@@ -134,7 +137,8 @@ function bytesField(field,bytes) {return [...varint((field<<3)|2),...varint(byte
 function intField(field,n) {return [...varint(field<<3),...varint(n)];}
 function protoParser() {
   const env=environment({'@kit.ArkTS':{util:{TextDecoder:{create:()=>({decodeToString:b=>new TextDecoder().decode(b)})}}}});
-  return env.load('common/DanmakuProto').parseDanmakuSegment;
+  // 解析核心已迁至 taskpool 任务文件（DanmakuProto 的 @Concurrent 薄封装）；纯函数在 DanmakuProtoCore。
+  return env.load('common/DanmakuProtoCore').decodeDanmakuSegBuffer;
 }
 
 test('protobuf unknown length-delimited fields cannot swallow subsequent comments or their content',()=>{

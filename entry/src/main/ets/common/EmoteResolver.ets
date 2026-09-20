@@ -8,6 +8,7 @@ import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { DEBUG } from 'BuildProfile';
+import { EmotePackageCache } from './EmotePackageCache';
 import { CommentApi } from '../api/CommentApi';
 import { BiliEmotePackage } from '../model/Models';
 
@@ -34,6 +35,12 @@ export class EmoteResolver {
   static attach(context: common.Context): void {
     try {
       prefs = preferences.getPreferencesSync(context, { name: PREF_NAME });
+      const store: preferences.Preferences = prefs;
+      EmotePackageCache.configure((key: string): string => String(store.getSync(key, '')),
+        (key: string, value: string): void => {
+          store.putSync(key, value);
+          store.flush().catch(() => {});
+        });
       EmoteResolver.loadPersisted();
     } catch (e) {
       prefs = null;

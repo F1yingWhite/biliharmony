@@ -2,14 +2,13 @@
  * 搜索域 API：热搜 / 综合搜索 / 分类搜索 / 全站排行 / 每周必看 / 入站必刷 / 搜索建议。
  */
 import { HttpClient, HttpResponse } from '../services/network/HttpClient';
-import { WbiSign } from '../common/WbiSign';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asString, asNumber, str } from '../common/Utils';
 import { ArticleSearchItem, ArticleSearchResult, HotSearchItem, PgcSearchItem, PgcSearchResult,
   PopularSeriesData, PopularSeriesItem, SearchAllResult, SearchAllSection, SearchTypes, UserSearchItem,
   UserSearchResult, VideoItem, VideoSearchResult } from '../model/Models';
 import { LiveRoomItem, LiveSearchResult } from '../model/LiveModels';
-import { failureText, getData, webGet } from './internal/ApiCommon';
+import { failureText, getData, webGet, webGetSigned } from './internal/ApiCommon';
 
 /** web 搜索每页条数：B 站搜索接口翻页时必须显式传 page_size，否则 page>1 返回空 result。 */
 const SEARCH_PAGE_SIZE: number = 20;
@@ -52,8 +51,7 @@ export class SearchApi {
       'keyword': keyword,
       'page': String(page),
     };
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.searchAll, params);
+    const resp: HttpResponse = await webGetSigned(Api.searchAll, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return [];
@@ -96,8 +94,7 @@ export class SearchApi {
       'page': String(page),
       'page_size': String(SEARCH_PAGE_SIZE),
     };
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.searchAll, params);
+    const resp: HttpResponse = await webGetSigned(Api.searchAll, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) throw new Error(failureText(resp, '搜索失败，请重试'));
     // pageinfo：各分类结果总数，用于结果页 Tab 徽标
@@ -172,8 +169,7 @@ export class SearchApi {
         params[keys[i]] = extra[keys[i]];
       }
     }
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.searchByType, params);
+    const resp: HttpResponse = await webGetSigned(Api.searchByType, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) throw new Error(failureText(resp, '搜索失败，请重试'));
     return data;
@@ -286,8 +282,7 @@ export class SearchApi {
   // ===== 全站排行（rid=0 综合榜，WBI 签名；参考 PiliPlus getRankVideoList） =====
   static async getRankVideos(rid: number = 0): Promise<Array<VideoItem>> {
     const params: Record<string, string> = { 'rid': String(rid), 'type': 'all' };
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.rankAll, params);
+    const resp: HttpResponse = await webGetSigned(Api.rankAll, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       throw new Error('服务器暂未返回榜单，请稍后重试');
@@ -303,8 +298,7 @@ export class SearchApi {
   // ===== 每周必看：series/list 取最新一期 number，再由 series/one 拉该期视频 =====
   static async getPopularSeriesList(): Promise<Array<PopularSeriesItem>> {
     const params: Record<string, string> = { 'web_location': '333.934' };
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.popularSeriesList, params);
+    const resp: HttpResponse = await webGetSigned(Api.popularSeriesList, params);
     const data: Record<string, Object> | null = getData(resp);
     const result: Array<PopularSeriesItem> = [];
     if (data === null) {
@@ -326,8 +320,7 @@ export class SearchApi {
       return result;
     }
     const params: Record<string, string> = { 'number': String(number), 'web_location': '333.934' };
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.popularSeriesOne, params);
+    const resp: HttpResponse = await webGetSigned(Api.popularSeriesOne, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return result;
@@ -348,8 +341,7 @@ export class SearchApi {
     const params: Record<string, string> = {
       'page_size': '100', 'page': String(page), 'web_location': '333.934',
     };
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.popularPrecious, params);
+    const resp: HttpResponse = await webGetSigned(Api.popularPrecious, params);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       throw new Error('入站必刷加载失败');
@@ -366,8 +358,7 @@ export class SearchApi {
   static async getSearchDefault(): Promise<string> {
     try {
       const params: Record<string, string> = {};
-      await WbiSign.encWbi(params);
-      const resp: HttpResponse = await webGet(Api.searchDefault, params);
+      const resp: HttpResponse = await webGetSigned(Api.searchDefault, params);
       const data: Record<string, Object> | null = getData(resp);
       if (data === null) return '';
       // 实测返回结构：data.show_name 是字符串（如 "脱缰凯KK"），name 冗余同值。

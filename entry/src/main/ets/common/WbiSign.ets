@@ -55,13 +55,24 @@ export class WbiSign {
     const orig: string = WbiSign.fileNameWithoutExt(imgUrl) + WbiSign.fileNameWithoutExt(subUrl);
     const mixin: string = WbiSign.computeMixinKey(orig);
     WbiSign.mixinKey = mixin;
-    WbiSign.cacheDay = new Date().getDate();
+    WbiSign.cacheDay = WbiSign.todayIndex();
     return mixin;
+  }
+
+  /** 自 epoch 起的天序号。不能用 getDate()（1~31）：进程跨月存活时同"几号"会误判缓存仍新鲜。 */
+  private static todayIndex(): number {
+    return Math.floor(Date.now() / 86400000);
+  }
+
+  /** 作废缓存密钥：签名被服务端拒绝（-403 等）时由调用方强制下次重取。 */
+  static invalidate(): void {
+    WbiSign.mixinKey = '';
+    WbiSign.cacheDay = -1;
   }
 
   /** 获取 mixinKey（带日级缓存） */
   private static async getMixinKey(): Promise<string> {
-    const today: number = new Date().getDate();
+    const today: number = WbiSign.todayIndex();
     if (WbiSign.mixinKey.length > 0 && WbiSign.cacheDay === today) {
       return WbiSign.mixinKey;
     }
@@ -83,11 +94,15 @@ export class WbiSign {
     params['wts'] = String(Math.floor(Date.now() / 1000));
     const keys: Array<string> = Object.keys(params).sort();
     let query: string = '';
+    let first: boolean = true;
     for (let i: number = 0; i < keys.length; i++) {
       const k: string = keys[i];
-      if (i > 0) {
+      // 重复签名（-403 重试等）时旧 w_rid 不能进入新签名串，否则重试签名同样非法。
+      if (k === 'w_rid') continue;
+      if (!first) {
         query += '&';
       }
+      first = false;
       const raw: string = params[k] ?? '';
       const filtered: string = raw.replace(/[!'()*]/g, '');
       query += encodeURIComponent(k) + '=' + encodeURIComponent(filtered);

@@ -2,15 +2,15 @@
  * 视频播放域 API：详情、播放地址、互动、弹幕、章节与预览图。
  * 移植自 PiliPlus lib/http/*.dart
  */
-import { HttpClient, HttpResponse } from '../services/network/HttpClient';
-import { WbiSign } from '../common/WbiSign';
+import { HttpClient, HttpResponse, RequestPriority } from '../services/network/HttpClient';
 import { appSign } from '../common/AppSign';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asString, asNumber, str, toHttps } from '../common/Utils';
 import { PlayUrlInfo, SubtitleCue, SubtitleTrack, VideoDetail, VideoItem,
   VideoRelationState } from '../model/Models';
-import { parseDanmakuSegment, ProtoDanmaku } from '../common/DanmakuProto';
-import { ActionResult, actionWithCsrf, getData, postVideoAction, webGet, webPost } from './internal/ApiCommon';
+import { decodeDanmakuSeg, decodeDanmakuXml, SendableDanmaku } from '../common/DanmakuProto';
+import { ActionResult, actionWithCsrf, getData, postVideoAction, webGet, webGetSigned,
+  webGetWithPriority, webPost } from './internal/ApiCommon';
 import { CommentLog } from '../common/CommentLog';
 import { BangumiApi } from './BangumiApi';
 
@@ -83,7 +83,7 @@ export class BiliApi {
     const params: Record<string, string> = { 'cid': String(cid) };
     if (aid > 0) params['aid'] = String(aid);
     if (bvid.length > 0) params['bvid'] = bvid;
-    const resp: HttpResponse = await webGet(Api.onlineTotal, params);
+    const resp: HttpResponse = await webGetWithPriority(Api.onlineTotal, params, '', RequestPriority.LOW);
     const data: Record<string, Object> | null = getData(resp);
     return data === null ? '' : str(data, 'total', '');
   }
@@ -93,7 +93,7 @@ export class BiliApi {
     const params: Record<string, string> = { 'cid': String(cid), 'index': '1' };
     if (aid > 0) params['aid'] = String(aid);
     if (bvid.length > 0) params['bvid'] = bvid;
-    const resp: HttpResponse = await webGet(Api.videoShot, params);
+    const resp: HttpResponse = await webGetWithPriority(Api.videoShot, params, '', RequestPriority.LOW);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return null;
     const rawImages: Array<Object> = asArray(data['image']);
@@ -140,7 +140,7 @@ export class BiliApi {
     let lastStatus: number = -1;
     let lastCode: number = -1;
     for (let attempt: number = 0; attempt < 2; attempt++) {
-      const resp: HttpResponse = await webGet(url);
+      const resp: HttpResponse = await webGetWithPriority(url, undefined, '', RequestPriority.CRITICAL);
       lastStatus = resp.status;
       lastCode = resp.ok ? asNumber(resp.json()['code'], -1) : resp.status;
       const data: Record<string, Object> | null = getData(resp);
@@ -186,6 +186,11 @@ export class BiliApi {
     const loggedIn: boolean = HttpClient.getCookie('SESSDATA').length > 0;
     const headers: Record<string, string> = HttpClient.merge(Constants.webHeaders,
       { 'Referer': 'https://www.bilibili.com/video/' + bvid });
+    // 单流换源请求与主请求并行发出：qn<=80 时服务端只可能给出 ≤1080P，下面的换源分支必然命中，
+    // 于是省掉一次串行往返（首帧延迟的主要来源之一）。qn>80（2K/4K）保持原串行路径，
+    // 避免为高画质用户白发一次请求。catch 在这里挂好，未 await 也不能产生未处理拒绝。
+    const mp4Pending: Promise<PlayUrlInfo | null> | null = (qn > 0 && qn <= 80) ?
+      BiliApi.requestMp4Stream(aid, bvid, cid, qn, headers).catch((): PlayUrlInfo | null => null) : null;
     let data: Record<string, Object> | null = null;
     if (loggedIn) {
       // PiliPlus 使用 WBI playurl 获取登录用户真实权限。try_look 只适用于游客，会员请求携带它会退回试看档位。
@@ -201,14 +206,17 @@ export class BiliApi {
       wbiParams['dm_img_str'] = '';
       wbiParams['dm_cover_img_str'] = '';
       wbiParams['dm_img_inter'] = '{"ds":[],"wh":[0,0,0],"of":[0,0,0]}';
-      await WbiSign.encWbi(wbiParams);
-      const wbiResp: HttpResponse = await HttpClient.get(Api.ugcWbiUrl + '?' + HttpClient.buildQuery(wbiParams), headers);
+      // webGetSigned 内置签名与 -403 自愈（mixinKey 轮换后作废缓存重签重试一次）；
+      // Referer/CRITICAL 优先级与原手写调用一致，失败仍落入下方旧端点回退。
+      const wbiResp: HttpResponse = await webGetSigned(Api.ugcWbiUrl, wbiParams,
+        'https://www.bilibili.com/video/' + bvid, undefined, RequestPriority.CRITICAL);
       data = getData(wbiResp);
     }
     if (data === null) {
       // WBI 被局部网络风控时回退旧端点；只有游客才开启 1080P 试看。
       if (!loggedIn) params['try_look'] = '1';
-      const resp: HttpResponse = await HttpClient.get(Api.ugcUrl + '?' + HttpClient.buildQuery(params), headers);
+      const resp: HttpResponse = await HttpClient.get(Api.ugcUrl + '?' + HttpClient.buildQuery(params),
+        headers, RequestPriority.CRITICAL);
       data = getData(resp);
     }
     if (data === null) {
@@ -237,39 +245,46 @@ export class BiliApi {
     // seek 只需单文件 Range 请求。菜单/字幕/续播位仍取自上面的 DASH 响应（其画质列表是全量的）；
     // 高画质（>80，仅 DASH 提供）不换，保持双轨。
     if (info.isDash && info.quality <= 80 && info.url.length > 0) {
-      const mp4Params: Record<string, string> = {
-        'cid': String(cid),
-        'qn': String(info.quality),
-        'fnval': '1',
-        'fnver': '0',
-        'https_url_req': '1',
-      };
-      if (bvid.length > 0) {
-        mp4Params['bvid'] = bvid;
-      } else {
-        mp4Params['avid'] = String(aid);
-      }
       try {
-        const mp4Resp: HttpResponse = await HttpClient.get(Api.ugcUrl + '?' + HttpClient.buildQuery(mp4Params), headers);
-        const mp4Data: Record<string, Object> | null = getData(mp4Resp);
-        if (mp4Data !== null) {
-          const mp4: PlayUrlInfo = PlayUrlInfo.fromPlayUrl(mp4Data, info.quality);
-          if (mp4.url.length > 0 && mp4.quality === info.quality) {
-            info.isDash = false;
-            // 只有同档位单流才能替换；MP4 回落时保留已经拿到的高画质 DASH。
-            info.quality = mp4.quality;
-            info.format = mp4.format;
-            info.urls = mp4.urls;
-            info.url = mp4.url;
-            info.audioUrl = '';
-            info.audioUrls = [];
-          }
+        // 通常上面已并行发出；只有 qn>80 被服务端降级时才会在这里补一次串行请求。
+        const mp4: PlayUrlInfo | null = mp4Pending !== null ? await mp4Pending :
+          await BiliApi.requestMp4Stream(aid, bvid, cid, info.quality, headers);
+        if (mp4 !== null && mp4.url.length > 0 && mp4.quality === info.quality) {
+          info.isDash = false;
+          // 只有同档位单流才能替换；MP4 回落时保留已经拿到的高画质 DASH。
+          info.quality = mp4.quality;
+          info.format = mp4.format;
+          info.urls = mp4.urls;
+          info.url = mp4.url;
+          info.audioUrl = '';
+          info.audioUrls = [];
         }
       } catch (e) {
         // MP4 换源失败保持 DASH 双轨播放，不影响可用。
       }
     }
     return info;
+  }
+
+  /** ≤1080P 的 MP4 单流请求（fnval=1）：失败返回 null，调用方保留 DASH 双轨。 */
+  private static async requestMp4Stream(aid: number, bvid: string, cid: number, qn: number,
+    headers: Record<string, string>): Promise<PlayUrlInfo | null> {
+    const mp4Params: Record<string, string> = {
+      'cid': String(cid),
+      'qn': String(qn),
+      'fnval': '1',
+      'fnver': '0',
+      'https_url_req': '1',
+    };
+    if (bvid.length > 0) {
+      mp4Params['bvid'] = bvid;
+    } else {
+      mp4Params['avid'] = String(aid);
+    }
+    const mp4Resp: HttpResponse = await HttpClient.get(Api.ugcUrl + '?' + HttpClient.buildQuery(mp4Params),
+      headers, RequestPriority.CRITICAL);
+    const mp4Data: Record<string, Object> | null = getData(mp4Resp);
+    return mp4Data === null ? null : PlayUrlInfo.fromPlayUrl(mp4Data, qn);
   }
 
   /** CC 字幕内容：subtitle_url 返回 { body: [{ from, to, content }] }。失败返回空数组，UI 静默降级。 */
@@ -291,7 +306,7 @@ export class BiliApi {
   static async getVideoRelation(aid: number, bvid: string): Promise<VideoRelationState | null> {
     const params: Record<string, string> = { 'aid': String(aid) };
     if (bvid.length > 0) params['bvid'] = bvid;
-    const resp: HttpResponse = await webGet(Api.videoRelation, params);
+    const resp: HttpResponse = await webGetWithPriority(Api.videoRelation, params, '', RequestPriority.HIGH);
     const data: Record<string, Object> | null = getData(resp);
     return data === null ? null : VideoRelationState.from(data);
   }
@@ -405,16 +420,17 @@ export class BiliApi {
       });
   }
 
-  /** 视频播放进度上报（web 心跳协议）：played_time 使用秒；未登录时直接跳过。 */
+  /** 视频播放进度上报（web 心跳协议）：played_time 使用整数秒（浮点会被服务端丢弃）；未登录时直接跳过。 */
   static async reportHeartbeat(aid: number, bvid: string, cid: number, playedSeconds: number): Promise<void> {
-    if (cid <= 0 || playedSeconds <= 0) return;
+    const played: number = Math.floor(playedSeconds);
+    if (cid <= 0 || played <= 0) return;
     if (HttpClient.getCookie('SESSDATA').length === 0) return;
     const csrf: string = HttpClient.getCookie('bili_jct');
     if (csrf.length === 0) return;
     const params: Record<string, string> = {
       'cid': String(cid),
       'type': '3',
-      'played_time': String(playedSeconds),
+      'played_time': String(played),
       'csrf': csrf,
     };
     if (bvid.length > 0) {
@@ -422,7 +438,10 @@ export class BiliApi {
     } else {
       params['aid'] = String(aid);
     }
-    await webPost(Api.heartBeat, params);
+    const resp: HttpResponse = await webPost(Api.heartBeat, params);
+    CommentLog.info('heartbeat', 'code=' + String(asNumber(resp.json()['code'], -1)) +
+      ' msg=' + str(resp.json(), 'message', '') + ' played=' + String(played) +
+      ' cid=' + String(cid));
   }
 
   /** 发送普通滚动弹幕；progress 使用毫秒，与官方 Web 接口一致。 */
@@ -476,7 +495,7 @@ export class BiliApi {
   static async getRelated(aid: number, bvid: string): Promise<Array<VideoItem>> {
     const params: Record<string, string> = bvid.length > 0 ? { 'bvid': bvid } : { 'aid': String(aid) };
     const url: string = Api.relatedList + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await webGet(url);
+    const resp: HttpResponse = await webGetWithPriority(url, undefined, '', RequestPriority.LOW);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
       return [];
@@ -494,9 +513,8 @@ export class BiliApi {
     const params: Record<string, string> = { 'cid': String(cid) };
     if (bvid.length > 0) params['bvid'] = bvid;
     else params['aid'] = String(aid);
-    await WbiSign.encWbi(params);
-    const url: string = Api.playerInfo + '?' + HttpClient.buildQuery(params);
-    const resp: HttpResponse = await webGet(url);
+    // webGetSigned 内置签名与 -403 自愈；原手写路径无 Referer、LOW 优先级，此处语义保持不变。
+    const resp: HttpResponse = await webGetSigned(Api.playerInfo, params, '', undefined, RequestPriority.LOW);
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) return [];
     const points: Array<Object> = asArray(data['view_points']);
@@ -514,7 +532,7 @@ export class BiliApi {
     return result;
   }
 
-  // ===== 弹幕（xml 协议） =====
+  // ===== 弹幕（xml 协议；解析在 taskpool 后台线程执行） =====
   static async getDanmaku(cid: number): Promise<Array<DanmakuItem>> {
     const url: string = Api.danmakuXml + cid + '.xml';
     const resp: HttpResponse = await HttpClient.get(url, {
@@ -523,10 +541,20 @@ export class BiliApi {
     if (!resp.ok) {
       return [];
     }
-    return BiliApi.parseDanmakuXml(resp.body);
+    try {
+      const decoded: Array<SendableDanmaku> = await decodeDanmakuXml(resp.body);
+      const result: Array<DanmakuItem> = [];
+      for (let i: number = 0; i < decoded.length; i++) {
+        const d: SendableDanmaku = decoded[i];
+        result.push(new DanmakuItem(d.time, d.mode, d.color, d.text, d.id, d.fontsize, d.weight, d.idStr));
+      }
+      return result;
+    } catch (e) {
+      return [];
+    }
   }
 
-  // ===== 弹幕（protobuf 分段协议：每 6 分钟一段，与网页端一致） =====
+  // ===== 弹幕（protobuf 分段协议：每 6 分钟一段，与网页端一致；解码在 taskpool 后台线程） =====
   /**
    * 拉取指定分段（1 基）。网络失败或数据无法解析返回 null（调用方回退 XML 或稍后重试）；
    * 空段（200 且无有效条目）返回空数组，视为加载成功。
@@ -551,52 +579,16 @@ export class BiliApi {
       return null;
     }
     try {
-      const elems: Array<ProtoDanmaku> = parseDanmakuSegment(buffer);
+      const elems: Array<SendableDanmaku> = await decodeDanmakuSeg(buffer);
       const result: Array<DanmakuItem> = [];
       for (let i: number = 0; i < elems.length; i++) {
-        result.push(new DanmakuItem(elems[i].time, elems[i].mode, elems[i].color, elems[i].text,
-          elems[i].id, elems[i].fontsize, elems[i].weight, elems[i].idStr));
+        const d: SendableDanmaku = elems[i];
+        result.push(new DanmakuItem(d.time, d.mode, d.color, d.text,
+          d.id, d.fontsize, d.weight, d.idStr));
       }
       return result;
     } catch (e) {
       return null;
     }
   }
-
-  static parseDanmakuXml(xml: string): Array<DanmakuItem> {
-    const result: Array<DanmakuItem> = [];
-    const re: RegExp = /<d p="([^"]*)">([^<]*)<\/d>/g;
-    let m: RegExpExecArray | null = re.exec(xml);
-    while (m !== null) {
-      const p: string = m[1];
-      const text: string = BiliApi.decodeXmlEntities(m[2]);
-      const parts: Array<string> = p.split(',');
-      if (parts.length >= 4) {
-        const time: number = Number(parts[0]);
-        const mode: number = Number(parts[1]);
-        const color: number = Number(parts[3]);
-        if (!Number.isNaN(time)) {
-          // mode/color 脏数据回退默认值，避免 NaN 进入渲染
-          result.push(new DanmakuItem(time,
-            Number.isNaN(mode) ? 1 : mode,
-            Number.isNaN(color) ? 0xFFFFFF : color, text));
-        }
-      }
-      m = re.exec(xml);
-    }
-    return result;
-  }
-
-  static decodeXmlEntities(s: string): string {
-    let out: string = s;
-    out = out.replace(/&amp;/g, '&');
-    out = out.replace(/&lt;/g, '<');
-    out = out.replace(/&gt;/g, '>');
-    out = out.replace(/&quot;/g, '"');
-    out = out.replace(/&#39;/g, "'");
-    out = out.replace(/&apos;/g, "'");
-    out = out.replace(/<[^>]*>/g, '');
-    return out;
-  }
-
 }
