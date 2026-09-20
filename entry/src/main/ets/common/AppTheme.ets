@@ -185,7 +185,7 @@ export class AppTheme {
     if (store === null) return;
     try {
       store.putSync(key, value ? 'true' : 'false');
-      store.flush();
+      store.flush().catch((): void => {});
     } catch (e) {
       // 写盘失败只丢最后一次偏好。
     }
@@ -238,7 +238,7 @@ export class AppTheme {
       const target: preferences.Preferences | null = AppTheme.themePreferences;
       if (target === null) return;
       try {
-        target.flush();
+        target.flush().catch((): void => {});
       } catch (e) {
         // 写盘失败只丢最后一次偏好。
       }
@@ -299,7 +299,7 @@ export class AppTheme {
       const target: preferences.Preferences | null = AppTheme.themePreferences;
       if (target === null) return;
       try {
-        target.flush();
+        target.flush().catch((): void => {});
       } catch (e) {
         // 写盘失败只丢最后一次偏好。
       }
@@ -320,7 +320,7 @@ export class AppTheme {
     try {
       store.putSync(AppTheme.KEY_THEME_MODE, mode);
       store.putSync(AppTheme.KEY_DARK, dark ? 'true' : 'false');
-      store.flush();
+      store.flush().catch((): void => {});
     } catch (e) {
       // 写盘失败只丢最后一次偏好。
     }

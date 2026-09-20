@@ -35,13 +35,13 @@ import { BasicDataSource } from '../common/BasicDataSource';
 import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
 import { ReplyEmotePanel } from '../components/reply/ReplyEmotePanel';
 import { ReplyThreadPanel } from '../components/reply/ReplyThreadPanel';
+import { RepliesController } from '../components/reply/RepliesController';
 import { RelatedVideoRow } from '../components/video/VideoRelatedRow';
 import { VideoReplyTab } from '../components/video/VideoReplyTab';
 import { CoinSheetView } from '../components/video/CoinSheetView';
 import { FavPickSheetView } from '../components/video/FavPickSheetView';
 import { VideoActionItem } from '../components/video/VideoActionItem';
-import { ReplyShareCard, makeReplyQr, makeReplyShareSnapshot,
-  sharePixelMapAsImage } from '../components/reply/ReplyShareCard';
+import { ReplyShareCard } from '../components/reply/ReplyShareCard';
 import { safeToast } from '../common/Toast';
 import { CommentApi } from '../api/CommentApi';
 import { FavoriteApi } from '../api/FavoriteApi';
@@ -106,12 +106,9 @@ export struct VideoDetailPage {
   @State playerEnded: boolean = false;
   @State upFollowerCount: number = -1;
   @State upVideoCount: number = -1;
-  @State replyCursor: string = '';
   @State replyHasMore: boolean = true;
   @State replyLoading: boolean = false;
   @State replyLoadError: string = '';
-  private repliesEpoch: RequestEpoch = new RequestEpoch();
-  private replyRetryReset: boolean = false;
   @State replyItemCount: number = 0;
   @State replyPrefetchCount: number = 0;
   // 回复详情是视频页内的二级导航状态；放入 AppStorage 供 NavDestination
@@ -121,10 +118,8 @@ export struct VideoDetailPage {
   @StorageLink('videoReplyComposerCloseRequest') @Watch('onReplyComposerCloseRequested')
   replyComposerCloseRequest: number = 0;
   @State replyThreadRoot: ReplyItem = new ReplyItem();
-  @State threadCursor: string = '';
   @State threadHasMore: boolean = true;
   @State threadLoading: boolean = false;
-  private threadEpoch: RequestEpoch = new RequestEpoch();
   @State threadPrefetchCount: number = 0;
   /** 当前输入栏回复所属的根评论；为 0 时发布一级评论。与详情面板是否打开相互独立。 */
   @State replyTargetRootRpid: number = 0;
@@ -434,12 +429,182 @@ export struct VideoDetailPage {
   /** 相关推荐懒加载数据源（无限追加必须虚拟化；AutoPlay 取相关第一条也从这里读）。 */
   private relatedSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
   @State threadAllReplies: Array<ReplyItem> = [];
-  // 评论分享卡离屏渲染用的待截内容；只在生成分享图期间短暂赋值。
-  private shareCardItem: ReplyItem = new ReplyItem();
-  private shareCardQr: image.PixelMap | null = null;
-  private shareCardBusy: boolean = false;
   private mainReplyComposerFocused: boolean = false;
   private threadReplyComposerFocused: boolean = false;
+  /**
+   * 评论编排控制器（与动态/番剧详情共享）：游标/请求代际/分享卡临时状态在控制器，
+   * @State 经下方闭包读写。视频页差异经可选钩子注入：首屏清洗 + localSentReplies 合并、
+   * 去重追加、加载/排序/楼中楼日志、首屏与楼中楼的自动续取。clearOnSort=true：切排序清列表。
+   */
+  private replies: RepliesController = new RepliesController({
+    isDestroyed: (): boolean => this.destroyed,
+    toast: (message: string): void => this.toast(message),
+    getUIContext: (): UIContext => this.getUIContext(),
+    resolveOid: (): number => this.detail.aid,
+    resolveType: (): number => 1,
+    canLoadReplies: (): boolean => true,
+    getMainSource: (): BasicDataSource<ReplyItem> => this.replySource,
+    getSortMode: (): number => this.replySortMode,
+    setSortMode: (value: number): void => {
+      this.replySortMode = value;
+    },
+    getRepliesLoading: (): boolean => this.replyLoading,
+    setRepliesLoading: (value: boolean): void => {
+      this.replyLoading = value;
+    },
+    getRepliesHasMore: (): boolean => this.replyHasMore,
+    setRepliesHasMore: (value: boolean): void => {
+      this.replyHasMore = value;
+    },
+    getRepliesCount: (): number => this.replyItemCount,
+    setRepliesCount: (value: number): void => {
+      this.replyItemCount = value;
+    },
+    clearRepliesError: (_reset: boolean): void => {
+      this.replyLoadError = '';
+    },
+    showRepliesError: (reset: boolean, cursor: string, startedAt: number, error: Object): void => {
+      // 保留已加载内容，首屏与分页都展示可重试的错误。
+      this.replyLoadError = '评论加载失败，请检查网络后重试';
+      CommentLog.error('ui.replies.error', 'aid=' + String(this.detail.aid) + ' reset=' + String(reset) +
+        ' cursorLen=' + String(cursor.length) + ' ms=' + String(CommentLog.elapsed(startedAt)) +
+        ' error=' + CommentLog.errorText(error));
+    },
+    applyRepliesReset: (incoming: Array<ReplyItem>): void => {
+      const sanitized: Array<ReplyItem> = this.sanitizeReplies(incoming);
+      const serverIds: Set<number> = new Set<number>();
+      for (let i: number = 0; i < sanitized.length; i++) serverIds.add(sanitized[i].rpid);
+      // 一旦服务端返回该楼层就移除本地快照，改用字段更完整的服务端对象；尚未索引到的
+      // 继续置顶保留，避免发送后切排序或在途刷新把它“吞掉”。
+      this.localSentReplies = this.localSentReplies.filter((item: ReplyItem) => !serverIds.has(item.rpid));
+      this.replySource.reset(this.mergeUniqueReplies(this.localSentReplies, sanitized));
+    },
+    applyRepliesAppend: (incoming: Array<ReplyItem>): void => {
+      this.appendUniqueReplies(this.replySource, incoming);
+    },
+    onRepliesSkip: (reset: boolean, loading: boolean, _hasMore: boolean): void => {
+      if (!reset && loading) {
+        CommentLog.warn('ui.replies.skip', 'reason=loading aid=' + String(this.detail.aid) +
+          ' reset=' + String(reset));
+      }
+    },
+    onRepliesStart: (reset: boolean, cursor: string, before: number): void => {
+      if (reset) this.replyPrefetchCount = 0;
+      CommentLog.info('ui.replies.start', 'aid=' + String(this.detail.aid) + ' reset=' + String(reset) +
+        ' mode=' + String(this.replySortMode) + ' cursorLen=' + String(cursor.length) +
+        ' before=' + String(before));
+    },
+    onRepliesDropped: (rows: number): void => {
+      CommentLog.warn('ui.replies.drop', 'reason=destroyed aid=' + String(this.detail.aid) +
+        ' rows=' + String(rows));
+    },
+    onRepliesDone: (reset: boolean, incoming: number, before: number, cursor: string, hasMore: boolean,
+      startedAt: number): void => {
+      CommentLog.info('ui.replies.done', 'aid=' + String(this.detail.aid) + ' reset=' + String(reset) +
+        ' incoming=' + String(incoming) + ' before=' + String(before) + ' total=' +
+        String(this.replySource.totalCount()) + ' cursorLen=' + String(cursor.length) +
+        ' hasMore=' + String(hasMore) + ' ms=' + String(CommentLog.elapsed(startedAt)));
+    },
+    afterRepliesLoaded: async (_reset: boolean): Promise<void> => {
+      // 某些视频首页只返回置顶/精选的少量评论，自动继续取页直到首屏够用。
+      if (this.replyHasMore && this.replySource.totalCount() < 20 && this.replyPrefetchCount < 5) {
+        this.replyPrefetchCount++;
+        CommentLog.info('ui.replies.prefetch', 'aid=' + String(this.detail.aid) + ' attempt=' +
+          String(this.replyPrefetchCount) + ' total=' + String(this.replySource.totalCount()) +
+          ' cursorLen=' + String(this.replies.getReplyCursor().length));
+        await this.replies.load(false);
+      }
+    },
+    onSortSkip: (current: number, requested: number): void => {
+      CommentLog.warn('ui.replies.sort.skip', 'current=' + String(current) + ' requested=' +
+        String(requested) + ' loading=' + String(this.replyLoading));
+    },
+    onSortChange: (from: number, to: number): void => {
+      CommentLog.info('ui.replies.sort', 'aid=' + String(this.detail.aid) + ' from=' +
+        String(from) + ' to=' + String(to));
+    },
+    onSortApplied: (): void => {
+      this.replyThreadOpen = false;
+    },
+    getThreadRoot: (): ReplyItem => this.replyThreadRoot,
+    setThreadRoot: (root: ReplyItem): void => {
+      this.replyThreadRoot = root;
+    },
+    getThreadReplies: (): Array<ReplyItem> => this.threadAllReplies,
+    setThreadReplies: (list: Array<ReplyItem>): void => {
+      this.threadAllReplies = list;
+    },
+    getThreadLoading: (): boolean => this.threadLoading,
+    setThreadLoading: (value: boolean): void => {
+      this.threadLoading = value;
+    },
+    getThreadHasMore: (): boolean => this.threadHasMore,
+    setThreadHasMore: (value: boolean): void => {
+      this.threadHasMore = value;
+    },
+    isThreadStale: (root: number, oid: number): boolean =>
+      this.replyThreadRoot.rpid !== root || this.detail.aid !== oid,
+    // 保留 item.replies 里的预览回复：接口偶尔返回空列表时，楼中楼不会变成“有数字但没内容”。
+    mergeThreadReplies: (current: Array<ReplyItem>, incoming: Array<ReplyItem>,
+      _reset: boolean): Array<ReplyItem> => this.mergeUniqueReplies(current, incoming),
+    onThreadError: (reset: boolean, startedAt: number, error: Object): void => {
+      // 回复加载失败保持现有内容，threadLoading 复位后可点击继续加载重试。
+      CommentLog.error('ui.thread.error', 'root=' + String(this.replyThreadRoot.rpid) + ' reset=' +
+        String(reset) + ' ms=' + String(CommentLog.elapsed(startedAt)) + ' error=' +
+        CommentLog.errorText(error));
+    },
+    onThreadSkip: (reset: boolean): void => {
+      if ((!reset && this.threadLoading) || (!reset && !this.threadHasMore)) {
+        CommentLog.warn('ui.thread.skip', 'root=' + String(this.replyThreadRoot.rpid) + ' reset=' +
+          String(reset) + ' loading=' + String(this.threadLoading) + ' hasMore=' + String(this.threadHasMore));
+      }
+    },
+    onThreadStart: (reset: boolean, _root: number, _oid: number, cursor: string, before: number): void => {
+      CommentLog.info('ui.thread.start', 'aid=' + String(this.detail.aid) + ' root=' +
+        String(this.replyThreadRoot.rpid) + ' reset=' + String(reset) + ' cursorLen=' +
+        String(cursor.length) + ' before=' + String(before));
+    },
+    onThreadDone: (reset: boolean, incoming: number, before: number, cursor: string, hasMore: boolean,
+      startedAt: number): void => {
+      CommentLog.info('ui.thread.done', 'root=' + String(this.replyThreadRoot.rpid) + ' reset=' +
+        String(reset) + ' incoming=' + String(incoming) + ' before=' + String(before) +
+        ' total=' + String(this.threadAllReplies.length) + ' cursorLen=' + String(cursor.length) +
+        ' hasMore=' + String(hasMore) + ' ms=' + String(CommentLog.elapsed(startedAt)));
+    },
+    afterThreadLoaded: async (allowPrefetch: boolean): Promise<void> => {
+      const target: number = Math.min(20, Math.max(1, this.replyThreadRoot.count));
+      if (allowPrefetch && this.threadHasMore && this.threadAllReplies.length < target &&
+        this.threadPrefetchCount < 5) {
+        this.threadPrefetchCount++;
+        CommentLog.info('ui.thread.prefetch', 'root=' + String(this.replyThreadRoot.rpid) + ' attempt=' +
+          String(this.threadPrefetchCount) + ' total=' + String(this.threadAllReplies.length) +
+          ' target=' + String(target));
+        await this.replies.loadThread(false);
+      }
+    },
+    bumpVersion: (): void => {
+      this.replyLikeVersion++;
+    },
+    getVersion: (): number => this.replyLikeVersion,
+    onAfterMutate: (rpid: number, mainChanged: boolean, threadChanged: boolean, rootChanged: boolean,
+      found: boolean): void => {
+      CommentLog.info('ui.reply.mutate', 'rpid=' + String(rpid) + ' main=' + String(mainChanged) +
+        ' thread=' + String(threadChanged) + ' root=' + String(rootChanged) +
+        ' found=' + String(found) + ' version=' + String(this.replyLikeVersion));
+    },
+    buildShareLink: (item: ReplyItem): string =>
+      'https://www.bilibili.com/video/' + this.detail.bvid + '#reply' + String(item.rpid),
+    renderShareCard: (): void => {
+      this.ReplyShareCardBuilder();
+    },
+    ensureShareContext: (_context: common.UIAbilityContext | undefined): boolean => true,
+    onShareFailed: (item: ReplyItem, link: string, error: Object): void => {
+      CommentLog.error('share.reply.error', 'rpid=' + String(item.rpid) + ' error=' + CommentLog.errorText(error));
+      // 分享面板不可用/截图失败时兜底为复制链接，保证"转发"始终有结果。
+      this.copyTextToClipboard(link);
+      this.toast('分享面板暂不可用，已复制评论链接');
+    },
+  }, true);
 
   onReplyThreadCloseRequested(): void {
     this.closeReplyThread();
@@ -499,8 +664,7 @@ export struct VideoDetailPage {
   }
 
   closeReplyThread(): void {
-    this.threadEpoch.invalidate();
-    this.threadLoading = false;
+    this.replies.cancelThread();
     if (!this.replyThreadOpen) return;
     CommentLog.info('ui.thread.close', 'aid=' + String(this.detail.aid) + ' root=' +
       String(this.replyThreadRoot.rpid) + ' rows=' + String(this.threadAllReplies.length));
@@ -885,16 +1049,14 @@ export struct VideoDetailPage {
     this.videoReportDialog?.close();
     this.videoReportDialog = null;
     this.hero.openEntranceGate();
-    this.repliesEpoch.invalidate();
-    this.threadEpoch.invalidate();
-    this.threadLoading = false;
+    this.replies.dispose();
     this.destroyed = true;
     this.playbackSources.invalidate();
     this.initialRequest.invalidate();
     this.reportVideoHeartbeat(this.videoProgressSeconds, true);
     releasePixelMap(this.wholeCardSnapshot);
     this.wholeCardSnapshot = null;
-    this.releaseShareCardQr();
+    this.replies.releaseShareCard();
     this.timers.forEach((id: number) => {
       clearTimeout(id);
     });
@@ -1121,7 +1283,7 @@ export struct VideoDetailPage {
       this.loadInitialRelated(detail.aid, detail.bvid).catch(() => {
         // 方法内部已经维护错误态；这里仅防止未处理的异步异常。
       });
-      this.loadReplies(true);
+      this.replies.load(true);
       if (UserStore.isLogin) {
         const likeVersion: number = this.likeActionVersion;
         const coinVersion: number = this.coinActionVersion;
@@ -1555,89 +1717,6 @@ export struct VideoDetailPage {
     }
   }
 
-  async loadReplies(reset: boolean): Promise<void> {
-    if (this.destroyed || (!reset && !this.replyHasMore)) return;
-    if (!reset && this.replyLoading) {
-      CommentLog.warn('ui.replies.skip', 'reason=loading aid=' + String(this.detail.aid) +
-        ' reset=' + String(reset));
-      return;
-    }
-    const request: number = this.repliesEpoch.next();
-    this.replyRetryReset = reset;
-    this.replyLoading = true;
-    this.replyLoadError = '';
-    if (reset) this.replyPrefetchCount = 0;
-    const cursor: string = reset ? '' : this.replyCursor;
-    const startedAt: number = Date.now();
-    const before: number = this.replySource.totalCount();
-    CommentLog.info('ui.replies.start', 'aid=' + String(this.detail.aid) + ' reset=' + String(reset) +
-      ' mode=' + String(this.replySortMode) + ' cursorLen=' + String(cursor.length) +
-      ' before=' + String(before));
-    let loaded: boolean = false;
-    try {
-      const data = await CommentApi.getReplies(this.detail.aid, 1, cursor, this.replySortMode);
-      if (this.destroyed || !this.repliesEpoch.isCurrent(request)) {
-        CommentLog.warn('ui.replies.drop', 'reason=destroyed aid=' + String(this.detail.aid) +
-          ' rows=' + String(data.replies.length));
-        return;
-      }
-      if (reset) {
-        const sanitized: Array<ReplyItem> = this.sanitizeReplies(data.replies);
-        const serverIds: Set<number> = new Set<number>();
-        for (let i: number = 0; i < sanitized.length; i++) serverIds.add(sanitized[i].rpid);
-        // 一旦服务端返回该楼层就移除本地快照，改用字段更完整的服务端对象；尚未索引到的
-        // 继续置顶保留，避免发送后切排序或在途刷新把它“吞掉”。
-        this.localSentReplies = this.localSentReplies.filter((item: ReplyItem) => !serverIds.has(item.rpid));
-        this.replySource.reset(this.mergeUniqueReplies(this.localSentReplies, sanitized));
-      } else {
-        this.appendUniqueReplies(this.replySource, data.replies);
-      }
-      this.replyItemCount = this.replySource.totalCount();
-      this.replyCursor = data.cursor;
-      this.replyHasMore = data.hasMore;
-      loaded = true;
-      CommentLog.info('ui.replies.done', 'aid=' + String(this.detail.aid) + ' reset=' + String(reset) +
-        ' incoming=' + String(data.replies.length) + ' before=' + String(before) + ' total=' +
-        String(this.replySource.totalCount()) + ' cursorLen=' + String(this.replyCursor.length) +
-        ' hasMore=' + String(this.replyHasMore) + ' ms=' + String(CommentLog.elapsed(startedAt)));
-    } catch (e) {
-      if (this.destroyed || !this.repliesEpoch.isCurrent(request)) return;
-      // 保留已加载内容，首屏与分页都展示可重试的错误。
-      this.replyLoadError = '评论加载失败，请检查网络后重试';
-      CommentLog.error('ui.replies.error', 'aid=' + String(this.detail.aid) + ' reset=' + String(reset) +
-        ' cursorLen=' + String(cursor.length) + ' ms=' + String(CommentLog.elapsed(startedAt)) +
-        ' error=' + CommentLog.errorText(e as Object));
-    } finally {
-      if (!this.destroyed && this.repliesEpoch.isCurrent(request)) this.replyLoading = false;
-    }
-    if (!loaded || this.destroyed || !this.repliesEpoch.isCurrent(request)) return;
-    // 某些视频首页只返回置顶/精选的少量评论，自动继续取页直到首屏够用。
-    if (this.replyHasMore && this.replySource.totalCount() < 20 && this.replyPrefetchCount < 5) {
-      this.replyPrefetchCount++;
-      CommentLog.info('ui.replies.prefetch', 'aid=' + String(this.detail.aid) + ' attempt=' +
-        String(this.replyPrefetchCount) + ' total=' + String(this.replySource.totalCount()) +
-        ' cursorLen=' + String(this.replyCursor.length));
-      await this.loadReplies(false);
-    }
-  }
-
-  changeReplySort(mode: number): void {
-    if (this.replySortMode === mode || this.destroyed) {
-      CommentLog.warn('ui.replies.sort.skip', 'current=' + String(this.replySortMode) + ' requested=' +
-        String(mode) + ' loading=' + String(this.replyLoading));
-      return;
-    }
-    CommentLog.info('ui.replies.sort', 'aid=' + String(this.detail.aid) + ' from=' +
-      String(this.replySortMode) + ' to=' + String(mode));
-    this.replySortMode = mode;
-    this.replyCursor = '';
-    this.replyHasMore = true;
-    this.replySource.clear();
-    this.replyItemCount = 0;
-    this.replyThreadOpen = false;
-    this.loadReplies(true);
-  }
-
   mergeUniqueReplies(base: Array<ReplyItem>, incoming: Array<ReplyItem>): Array<ReplyItem> {
     const indexes: Map<number, number> = new Map<number, number>();
     const result: Array<ReplyItem> = [];
@@ -1731,16 +1810,13 @@ export struct VideoDetailPage {
       ' declared=' + String(root.count) + ' preview=' + String(root.replies.length) +
       ' liked=' + String(root.liked));
     this.replyThreadAnimating = true;
-    this.replyThreadRoot = root;
-    this.threadAllReplies = this.mergeUniqueReplies([], root.replies);
-    this.threadCursor = '';
-    this.threadHasMore = true;
+    this.replies.beginThread(root, this.mergeUniqueReplies([], root.replies));
     this.threadPrefetchCount = 0;
     this.replyTargetRootRpid = root.rpid;
     this.replyTargetRpid = root.rpid;
     this.replyTargetName = root.uname;
     // 面板立即升起，网络请求在面板内以 loading 状态完成，点击反馈不再等待首批接口。
-    const loading: Promise<void> = this.loadThreadReplies(true, false);
+    const loading: Promise<void> = this.replies.loadThread(true, false);
     this.getUIContext().animateTo({
       duration: 140,
       curve: Curve.EaseOut,
@@ -1767,56 +1843,6 @@ export struct VideoDetailPage {
     this.emotePanelOpen = false;
     this.replyFocusTick++;
     CommentLog.info('ui.reply.select', 'root=' + String(root.rpid) + ' target=' + String(root.rpid));
-  }
-
-  async loadThreadReplies(reset: boolean, allowPrefetch: boolean = true): Promise<void> {
-    if ((!reset && this.threadLoading) || (!reset && !this.threadHasMore)) {
-      CommentLog.warn('ui.thread.skip', 'root=' + String(this.replyThreadRoot.rpid) + ' reset=' +
-        String(reset) + ' loading=' + String(this.threadLoading) + ' hasMore=' + String(this.threadHasMore));
-      return;
-    }
-    const epoch: number = this.threadEpoch.next();
-    this.threadLoading = true;
-    const root: number = this.replyThreadRoot.rpid;
-    const oid: number = this.detail.aid;
-    const cursor: string = reset ? '' : this.threadCursor;
-    const startedAt: number = Date.now();
-    const before: number = this.threadAllReplies.length;
-    CommentLog.info('ui.thread.start', 'aid=' + String(this.detail.aid) + ' root=' +
-      String(this.replyThreadRoot.rpid) + ' reset=' + String(reset) + ' cursorLen=' +
-      String(cursor.length) + ' before=' + String(before));
-    let loaded: boolean = false;
-    try {
-      const data = await CommentApi.getReplyReplies(oid, 1, root, cursor);
-      if (this.destroyed || !this.threadEpoch.isCurrent(epoch) ||
-        this.replyThreadRoot.rpid !== root || this.detail.aid !== oid) return;
-      // 保留 item.replies 里的预览回复：接口偶尔返回空列表时，楼中楼不会变成“有数字但没内容”。
-      this.threadAllReplies = this.mergeUniqueReplies(this.threadAllReplies, data.replies);
-      this.threadCursor = data.cursor;
-      this.threadHasMore = data.hasMore;
-      loaded = true;
-      CommentLog.info('ui.thread.done', 'root=' + String(this.replyThreadRoot.rpid) + ' reset=' +
-        String(reset) + ' incoming=' + String(data.replies.length) + ' before=' + String(before) +
-        ' total=' + String(this.threadAllReplies.length) + ' cursorLen=' + String(this.threadCursor.length) +
-        ' hasMore=' + String(this.threadHasMore) + ' ms=' + String(CommentLog.elapsed(startedAt)));
-    } catch (e) {
-      if (!this.threadEpoch.isCurrent(epoch)) return;
-      // 回复加载失败保持现有内容，threadLoading 复位后可点击继续加载重试。
-      CommentLog.error('ui.thread.error', 'root=' + String(this.replyThreadRoot.rpid) + ' reset=' +
-        String(reset) + ' ms=' + String(CommentLog.elapsed(startedAt)) + ' error=' +
-        CommentLog.errorText(e as Object));
-    } finally {
-      if (!this.destroyed && this.threadEpoch.isCurrent(epoch)) this.threadLoading = false;
-    }
-    if (!loaded) return;
-    const target: number = Math.min(20, Math.max(1, this.replyThreadRoot.count));
-    if (allowPrefetch && this.threadHasMore && this.threadAllReplies.length < target && this.threadPrefetchCount < 5) {
-      this.threadPrefetchCount++;
-      CommentLog.info('ui.thread.prefetch', 'root=' + String(this.replyThreadRoot.rpid) + ' attempt=' +
-        String(this.threadPrefetchCount) + ' total=' + String(this.threadAllReplies.length) +
-        ' target=' + String(target));
-      await this.loadThreadReplies(false);
-    }
   }
 
   @Builder
@@ -1853,7 +1879,7 @@ export struct VideoDetailPage {
       onClose: () => this.closeReplyThread(),
       onLike: (item: ReplyItem) => this.actionReplyLike(item),
       onDislike: (item: ReplyItem) => this.actionReplyDislike(item),
-      onShare: (item: ReplyItem) => this.shareReplyAsImage(item),
+      onShare: (item: ReplyItem) => this.replies.share(item),
       focusTick: this.threadReplyFocusTick,
       focusId: 'video_thread_reply_composer_editor',
       onSelectReply: (item: ReplyItem) => {
@@ -1867,7 +1893,7 @@ export struct VideoDetailPage {
         this.threadRemoveReply(item);
       },
       onLoadMore: () => {
-        this.loadThreadReplies(false).catch(() => {
+        this.replies.loadThread(false).catch(() => {
         });
       },
       onDraftChange: (value: string) => this.replyDraft = value,
@@ -1991,9 +2017,8 @@ export struct VideoDetailPage {
         } else {
           // 极少数兼容接口不返回 rpid，才退回服务端刷新路径。
           this.threadAllReplies = [];
-          this.threadCursor = '';
-          this.threadHasMore = true;
-          await this.loadThreadReplies(true);
+          this.replies.resetThreadPaging();
+          await this.replies.loadThread(true);
         }
       } else if (root > 0) {
         if (sent !== null) {
@@ -2001,9 +2026,8 @@ export struct VideoDetailPage {
           this.detail.reply++;
           CommentLog.info('ui.send.local.inline', 'rpid=' + String(sent.rpid) + ' root=' + String(root));
         } else {
-          this.replyCursor = '';
-          this.replyHasMore = true;
-          await this.loadReplies(true);
+          this.replies.resetMainPaging();
+          await this.replies.load(true);
         }
         this.replyTargetRootRpid = 0;
         this.replyTargetRpid = 0;
@@ -2024,9 +2048,8 @@ export struct VideoDetailPage {
           CommentLog.info('ui.send.local.root', 'rpid=' + String(sent.rpid) + ' total=' +
             String(this.replySource.totalCount()));
         } else {
-          this.replyCursor = '';
-          this.replyHasMore = true;
-          await this.loadReplies(true);
+          this.replies.resetMainPaging();
+          await this.replies.load(true);
         }
       }
     } catch (e) {
@@ -2100,70 +2123,17 @@ export struct VideoDetailPage {
     return null;
   }
 
-  /**
-   * 评论项状态修改的统一入口。
-   * 注意：ReplyCard 的 @Prop item 是深拷贝快照，改它既不影响数据源也不会刷新 UI。
-   * 必须在数据源里的"真身"上执行修改，再克隆换引用触发 @Prop 重新同步。
-   * 同一 rpid 可能同时存在于主列表、楼中楼列表和 replyThreadRoot，逐处各改一次（它们各自渲染）。
-   */
-  private mutateReplyItem(rpid: number, mutate: (target: ReplyItem) => void): ReplyItem | null {
-    let found: ReplyItem | null = null;
-    let mainChanged: boolean = false;
-    let rootChanged: boolean = false;
-    const list: Array<ReplyItem> = this.replySource.getAll();
-    for (let i: number = 0; i < list.length; i++) {
-      if (list[i].rpid === rpid) {
-        found = list[i];
-        mutate(list[i]);
-        const next1: ReplyItem = list[i].clone();
-        next1.rev = list[i].rev + 1;
-        this.replySource.updateItem(i, next1);
-        mainChanged = true;
-        break;
-      }
-    }
-    // 回复详情 Sheet 的数据源是 threadAllReplies（透传给 ReplyThreadPanel 的 @Prop replies）。
-    // 必须在数组里替换成克隆对象并换新数组引用，子组件的 @Watch 才会重建树并刷新点赞态。
-    let threadChanged: boolean = false;
-    for (let i: number = 0; i < this.threadAllReplies.length; i++) {
-      if (this.threadAllReplies[i].rpid === rpid) {
-        if (found === null) found = this.threadAllReplies[i];
-        mutate(this.threadAllReplies[i]);
-        const next2: ReplyItem = this.threadAllReplies[i].clone();
-        next2.rev = this.threadAllReplies[i].rev + 1;
-        const nextThread: Array<ReplyItem> = this.threadAllReplies.slice();
-        nextThread[i] = next2;
-        this.threadAllReplies = nextThread;
-        threadChanged = true;
-        break;
-      }
-    }
-    if (this.replyThreadRoot.rpid === rpid) {
-      if (found === null) found = this.replyThreadRoot;
-      mutate(this.replyThreadRoot);
-      const next3: ReplyItem = this.replyThreadRoot.clone();
-      next3.rev = this.replyThreadRoot.rev + 1;
-      this.replyThreadRoot = next3;
-      rootChanged = true;
-    }
-    this.replyLikeVersion++;
-    CommentLog.info('ui.reply.mutate', 'rpid=' + String(rpid) + ' main=' + String(mainChanged) +
-      ' thread=' + String(threadChanged) + ' root=' + String(rootChanged) +
-      ' found=' + String(found !== null) + ' version=' + String(this.replyLikeVersion));
-    return found;
-  }
-
   /** 评论点赞：委托给共享实现 runReplyLike（登录检查/busy/乐观更新/失败回滚统一在一处）。 */
   async actionReplyLike(item: ReplyItem): Promise<void> {
     await runReplyLike(item, this.replyLikeBusy,
-      (rpid: number, mutate: (target: ReplyItem) => void) => this.mutateReplyItem(rpid, mutate),
+      (rpid: number, mutate: (target: ReplyItem) => void) => this.replies.mutate(rpid, mutate),
       this.replyReactionHooks(true));
   }
 
   /** 评论点踩：同理走共享实现（踩赞互斥逻辑在模块内）。 */
   async actionReplyDislike(item: ReplyItem): Promise<void> {
     await runReplyDislike(item, this.replyLikeBusy,
-      (rpid: number, mutate: (target: ReplyItem) => void) => this.mutateReplyItem(rpid, mutate),
+      (rpid: number, mutate: (target: ReplyItem) => void) => this.replies.mutate(rpid, mutate),
       this.replyReactionHooks(false));
   }
 
@@ -2183,46 +2153,6 @@ export struct VideoDetailPage {
     };
   }
 
-  /** 评论分享：离屏渲染分享卡 → 截成 PNG → 系统分享面板（对齐 B 站"评论分享成图片"）。 */
-  private shareReplyAsImage(item: ReplyItem): void {
-    if (this.shareCardBusy) return;
-    this.shareCardBusy = true;
-    this.toast('正在生成分享图片…');
-    const link: string = 'https://www.bilibili.com/video/' + this.detail.bvid + '#reply' + String(item.rpid);
-    const context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    const uiContext: UIContext = this.getUIContext();
-    (async () => {
-      this.shareCardItem = item;
-      this.shareCardQr = await makeReplyQr(link);
-      const pixelMap: image.PixelMap = await makeReplyShareSnapshot(uiContext,
-        (): void => { this.ReplyShareCardBuilder(); });
-      await sharePixelMapAsImage(context, pixelMap, 'reply_share_' + String(item.rpid));
-    })()
-      .catch((e: Object) => {
-        CommentLog.error('share.reply.error', 'rpid=' + String(item.rpid) + ' error=' + CommentLog.errorText(e));
-        // 分享面板不可用/截图失败时兜底为复制链接，保证"转发"始终有结果。
-        this.copyTextToClipboard(link);
-        this.toast('分享面板暂不可用，已复制评论链接');
-      })
-      .finally(() => {
-        // 截图 PixelMap 已在 sharePixelMapAsImage 内释放；二维码只服务本次渲染，一并回收。
-        this.releaseShareCardQr();
-        this.shareCardBusy = false;
-      });
-  }
-
-  /** 释放分享卡二维码并复位；分享流程结束/页面销毁时调用，防止 PixelMap 滞留。 */
-  private releaseShareCardQr(): void {
-    if (this.shareCardQr !== null) {
-      try {
-        this.shareCardQr.release();
-      } catch (e) {
-        // 已释放的二维码忽略。
-      }
-      this.shareCardQr = null;
-    }
-  }
-
   /** 复制文本到系统剪贴板；失败静默。 */
   private copyTextToClipboard(content: string): void {
     try {
@@ -2238,9 +2168,9 @@ export struct VideoDetailPage {
   @Builder
   ReplyShareCardBuilder() {
     ReplyShareCard({
-      item: this.shareCardItem,
+      item: this.replies.shareItem(),
       upMid: this.detail.upMid,
-      qr: this.shareCardQr,
+      qr: this.replies.shareQr(),
       linkLabel: 'www.bilibili.com/video/' + this.detail.bvid,
       sourceCover: this.detail.cover,
       sourceTitle: this.detail.title,
@@ -2497,14 +2427,14 @@ export struct VideoDetailPage {
           source: this.replySource,
           scroller: this.replyScroller,
           onSortChange: (mode: number) => {
-            this.changeReplySort(mode);
+            this.replies.changeReplySort(mode);
           },
           onLoadMore: (reset: boolean) => {
-            this.loadReplies(reset || (this.replyLoadError.length > 0 && this.replyRetryReset));
+            this.replies.load(reset || (this.replyLoadError.length > 0 && this.replies.getRepliesRetryReset()));
           },
           onLike: (item: ReplyItem) => this.actionReplyLike(item),
           onDislike: (item: ReplyItem) => this.actionReplyDislike(item),
-          onShare: (item: ReplyItem) => this.shareReplyAsImage(item),
+          onShare: (item: ReplyItem) => this.replies.share(item),
           onSelectReply: (item: ReplyItem) => this.selectReplyForComposer(item),
           onOpenThread: (item: ReplyItem) => this.openReplyThread(item),
           onDeleted: (item: ReplyItem) => {

@@ -1,6 +1,6 @@
 import { common } from '@kit.AbilityKit';
-import { preferences } from '@kit.ArkData';
 import { YouTubeVideo } from '../api/YouTubeApi';
+import { PreferencesCollection } from './preferences/PreferencesCollection';
 
 /**
  * 本地 YouTube 列表里的一条记录。
@@ -20,52 +20,35 @@ export class YouTubeLocalVideo {
   at: number = 0;
 }
 
+/** 解码钩子：磁盘 JSON 数组元素 → 记录；缺 id 的损坏条目返回 null 跳过。 */
+function decodeLocalVideo(record: Object): YouTubeLocalVideo | null {
+  const source: Record<string, Object> = (record ?? {}) as Record<string, Object>;
+  const id: string = typeof source['id'] === 'string' ? source['id'] as string : '';
+  if (id.length === 0) return null;
+  const item: YouTubeLocalVideo = new YouTubeLocalVideo();
+  item.id = id;
+  item.title = typeof source['title'] === 'string' ? source['title'] as string : '';
+  item.channel = typeof source['channel'] === 'string' ? source['channel'] as string : '';
+  item.thumbnail = typeof source['thumbnail'] === 'string' ? source['thumbnail'] as string : '';
+  item.duration = typeof source['duration'] === 'string' ? source['duration'] as string : '';
+  item.views = typeof source['views'] === 'string' ? source['views'] as string : '';
+  item.published = typeof source['published'] === 'string' ? source['published'] as string : '';
+  item.at = typeof source['at'] === 'number' ? source['at'] as number : 0;
+  return item;
+}
+
 /**
  * 本地列表存储：稍后观看与观看历史共用同一套逻辑，只是键名、上限与广播键不同。
  *
- * 恢复是异步的，而用户可能在恢复完成前就写入，因此恢复时用「内存优先 + 磁盘补缺」合并，
- * 直接覆盖会让刚写进去的条目消失。
+ * 门闩、内存优先磁盘补缺的恢复与落盘在 PreferencesCollection；
+ * 这里只剩条目装配与「我的」页入口行的计数广播。
  */
-export class YouTubeLocalStore {
-  private readonly storageKey: string;
-  private readonly preferencesName: string;
-  private readonly maxItems: number;
+export class YouTubeLocalStore extends PreferencesCollection<YouTubeLocalVideo> {
   private readonly countKey: string;
-  private cache: Array<YouTubeLocalVideo> = [];
-  private store: preferences.Preferences | null = null;
-  private ready: Promise<void> | null = null;
 
   constructor(storageKey: string, preferencesName: string, maxItems: number, countKey: string) {
-    this.storageKey = storageKey;
-    this.preferencesName = preferencesName;
-    this.maxItems = maxItems;
+    super({ prefName: preferencesName, storageKey: storageKey, maxItems: maxItems }, { decode: decodeLocalVideo });
     this.countKey = countKey;
-  }
-
-  init(context: common.UIAbilityContext): void {
-    this.ready = this.restore(context);
-  }
-
-  private async restore(context: common.UIAbilityContext): Promise<void> {
-    try {
-      const store: preferences.Preferences = await preferences.getPreferences(context,
-        { name: this.preferencesName });
-      this.store = store;
-      const raw: string = store.getSync(this.storageKey, '') as string;
-      this.cache = this.merge(this.cache, this.parse(raw));
-      this.broadcast();
-    } catch (e) {
-      // 读不到就按空列表处理：本地列表不可用不该影响其它功能。
-    }
-  }
-
-  async ensureLoaded(): Promise<Array<YouTubeLocalVideo>> {
-    if (this.ready !== null) await this.ready;
-    return this.list();
-  }
-
-  list(): Array<YouTubeLocalVideo> {
-    return this.cache.slice(0, this.maxItems);
   }
 
   count(): number {
@@ -96,7 +79,7 @@ export class YouTubeLocalStore {
     for (const old of this.cache) {
       if (old.id !== item.id && next.length < this.maxItems) next.push(old);
     }
-    this.save(next);
+    this.replace(next);
     return this.list();
   }
 
@@ -105,74 +88,31 @@ export class YouTubeLocalStore {
     for (const item of this.cache) {
       if (item.id !== id) next.push(item);
     }
-    this.save(next);
+    this.replace(next);
     return this.list();
   }
 
   clear(): void {
-    this.save([]);
+    this.replace([]);
+  }
+
+  protected keyOf(item: YouTubeLocalVideo): string {
+    return item.id;
+  }
+
+  protected sortBy(a: YouTubeLocalVideo, b: YouTubeLocalVideo): number {
+    return b.at - a.at;
+  }
+
+  protected onChanged(raw: string): void {
+    this.broadcast();
+  }
+
+  protected onRestored(diskRaw: string): void {
+    this.broadcast();
   }
 
   private broadcast(): void {
     AppStorage.setOrCreate<number>(this.countKey, this.cache.length);
-  }
-
-  private save(items: Array<YouTubeLocalVideo>): void {
-    this.cache = items.slice(0, this.maxItems);
-    this.broadcast();
-    this.persist(JSON.stringify(this.cache));
-  }
-
-  private async persist(raw: string): Promise<void> {
-    if (this.ready !== null) await this.ready;
-    if (this.store === null) return;
-    this.store.putSync(this.storageKey, raw);
-    await this.store.flush();
-  }
-
-  /** 内存优先、磁盘补缺；按时间倒序，最多 maxItems 条。 */
-  private merge(memory: Array<YouTubeLocalVideo>, disk: Array<YouTubeLocalVideo>): Array<YouTubeLocalVideo> {
-    const seen: Set<string> = new Set<string>();
-    const merged: Array<YouTubeLocalVideo> = [];
-    for (const item of memory) {
-      if (seen.has(item.id)) continue;
-      seen.add(item.id);
-      merged.push(item);
-    }
-    for (const item of disk) {
-      if (seen.has(item.id)) continue;
-      seen.add(item.id);
-      merged.push(item);
-    }
-    merged.sort((a: YouTubeLocalVideo, b: YouTubeLocalVideo) => b.at - a.at);
-    return merged.slice(0, this.maxItems);
-  }
-
-  private parse(raw: string): Array<YouTubeLocalVideo> {
-    if (raw.length === 0) return [];
-    try {
-      const parsed: Object = JSON.parse(raw) as Object;
-      if (!Array.isArray(parsed)) return [];
-      const out: Array<YouTubeLocalVideo> = [];
-      for (const entry of parsed as Array<Object>) {
-        const record: Record<string, Object> = (entry ?? {}) as Record<string, Object>;
-        const id: string = typeof record['id'] === 'string' ? record['id'] as string : '';
-        if (id.length === 0) continue;
-        const item: YouTubeLocalVideo = new YouTubeLocalVideo();
-        item.id = id;
-        item.title = typeof record['title'] === 'string' ? record['title'] as string : '';
-        item.channel = typeof record['channel'] === 'string' ? record['channel'] as string : '';
-        item.thumbnail = typeof record['thumbnail'] === 'string' ? record['thumbnail'] as string : '';
-        item.duration = typeof record['duration'] === 'string' ? record['duration'] as string : '';
-        item.views = typeof record['views'] === 'string' ? record['views'] as string : '';
-        item.published = typeof record['published'] === 'string' ? record['published'] as string : '';
-        item.at = typeof record['at'] === 'number' ? record['at'] as number : 0;
-        out.push(item);
-        if (out.length >= this.maxItems) break;
-      }
-      return out;
-    } catch (e) {
-      return [];
-    }
   }
 }

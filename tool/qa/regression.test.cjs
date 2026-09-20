@@ -316,7 +316,8 @@ test('Playback: a source change during release prevents obsolete player recreati
   const view = Object.assign(new Harness(), { destroyed: false, qualityLoading: false, activeQuality: 80,
     sourceVersion: 1, cid: 10, sourceRequests: new RequestEpoch(),
     player: { release: () => release.promise }, audioPlayer: { async release() { audioReleased++; } },
-    invalidatePlayerCreation() {}, cancelAudioGate() {}, cancelFirstFrameMute() {}, closeSettingPanels() {}, stopDmLoop() {},
+    invalidatePlayerCreation() {}, cancelAudioGate() {}, cancelFirstFrameMute() {}, closeSettingPanels() {},
+    dmClock: { stop() {}, pause() {} }, sponsorCtl: { invalidateForSourceChange() {} },
     initPlayer() { assert.fail('obsolete source recreated a player'); } });
   const request = view.changeQuality(64);
   await tick();

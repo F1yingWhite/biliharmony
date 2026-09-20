@@ -11,6 +11,7 @@ import { Haptic } from '../common/Haptic';
 import { MotionTokens } from '../common/MotionTokens';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
+import { BasicDataSource } from '../common/BasicDataSource';
 import { YouTubeSearchHistoryStore } from '../common/YouTubeSearchHistoryStore';
 
 /**
@@ -38,7 +39,6 @@ export struct YouTubeView {
   @State tab: number = 0;
   @State query: string = '';
   @State searched: string = '';
-  @State videos: Array<YouTubeVideo> = [];
   @State loading: boolean = false;
   @State error: string = '';
   /** 下一页 token；空串表示没有更多（列表底部如实收尾，不假装还有）。 */
@@ -46,10 +46,19 @@ export struct YouTubeView {
   @State loadingMore: boolean = false;
   /** 翻页失败只在底部提示，已加载的结果保持不动。 */
   @State moreError: string = '';
-  /** 缩略图 URL → 本地文件 URI；ArkUI Image() 不读应用代理，只能走应用自己的下载管线。 */
-  @State thumbLocal: Map<string, string> = new Map<string, string>();
-  /** 已解码完成的封面；用于淡入，避免图片在卡片上突然出现。 */
-  @State coversReady: Map<string, boolean> = new Map<string, boolean>();
+  /**
+   * 结果列表数据源：LazyForEach 懒加载，翻页 append 只通知新增行、刷新 reset，
+   * 不再整组替换数组触发全列表 diff（同首页/搜索页的虚拟化做法）。
+   */
+  private videosSource: BasicDataSource<YouTubeVideo> = new BasicDataSource<YouTubeVideo>();
+  /** 行数镜像：BasicDataSource 不是响应式对象，四态切换由这个计数驱动（同 HomeView）。 */
+  @State resultCount: number = 0;
+  /**
+   * 缩略图 URL → 本地文件 URI；ArkUI Image() 不读应用代理，只能走应用自己的下载管线。
+   * 只在行构建/重绑时读取（cachedThumbnail 同款的只读内存约定），更新一律走数据源
+   * 单行通知，所以这里不再需要 @State，避免一张图就绪触发整个结果区重建。
+   */
+  private thumbLocal: Map<string, string> = new Map<string, string>();
   @State accountSheet: boolean = false;
   /** 本地稍后观看数量：由 YouTubeWatchLaterStore 广播，返回本页时不会读到旧值。 */
   @StorageProp('youtubeWatchLaterCount') savedCount: number = 0;
@@ -123,17 +132,17 @@ export struct YouTubeView {
 
   /** 清空输入即回到首页态：结果与游标一起复位，历史 chips 重新可见。 */
   private resetResults(): void {
-    if (this.searched.length === 0 && this.videos.length === 0) return;
+    if (this.searched.length === 0 && this.resultCount === 0) return;
     this.request.next();
     this.searched = '';
-    this.videos = [];
+    this.videosSource.clear();
+    this.resultCount = 0;
     this.continuation = '';
     this.error = '';
     this.moreError = '';
     this.loading = false;
     this.loadingMore = false;
     this.thumbLocal = new Map<string, string>();
-    this.coversReady = new Map<string, boolean>();
   }
 
   /** 平台切换：先让在途请求失效，再广播，避免旧结果写进新平台状态。 */
@@ -179,14 +188,16 @@ export struct YouTubeView {
     this.moreError = '';
     this.searched = query;
     this.activeFilterParams = filterParams;
-    this.videos = [];
+    this.videosSource.clear();
+    this.resultCount = 0;
     this.continuation = '';
     this.thumbLocal = new Map<string, string>();
-    this.coversReady = new Map<string, boolean>();
     this.scroller.scrollTo({ xOffset: 0, yOffset: 0 });
     YouTubeApi.search(query, filterParams).then((page: YouTubeSearchPage) => {
       if (!this.request.isCurrent(token)) return;
-      this.videos = page.videos;
+      // 先 reset 再预取：同一同步块内完成，首帧行构建时 thumbLocal 已填好磁盘命中项。
+      this.videosSource.reset(page.videos);
+      this.resultCount = page.videos.length;
       this.continuation = page.continuation;
       if (page.filters.length > 0) this.filterGroups = page.filters;
       this.primeThumbnails(page.videos);
@@ -215,17 +226,19 @@ export struct YouTubeView {
   /** 跨页去重：同一视频可能同时出现在两页，重复 id 会让列表键冲突。 */
   private appendVideos(incoming: Array<YouTubeVideo>): void {
     const seen: Set<string> = new Set<string>();
-    const merged: Array<YouTubeVideo> = [];
-    for (const video of this.videos) {
+    const all: Array<YouTubeVideo> = this.videosSource.getAll();
+    for (const video of all) {
       seen.add(video.id);
-      merged.push(video);
     }
+    const fresh: Array<YouTubeVideo> = [];
     for (const video of incoming) {
       if (seen.has(video.id)) continue;
       seen.add(video.id);
-      merged.push(video);
+      fresh.push(video);
     }
-    this.videos = merged;
+    // 翻页只把新增行 append 进数据源：LazyForEach 逐行收 onDataAdd，已加载的卡片不重建。
+    this.videosSource.append(fresh);
+    this.resultCount = this.videosSource.totalCount();
   }
 
   /** 触底加载下一页；失败保留已有结果，只在底部显示错误与重试。 */
@@ -248,34 +261,22 @@ export struct YouTubeView {
   }
 
   /**
-   * 缩略图两段式：先认缓存记录命中（cachedThumbnail 只读内存，零同步 IO），首帧就用本地
-   * 文件；未命中（含冷启动磁盘待恢复）的走应用 HTTP 栈的异步管线——已有文件只做异步
-   * 校验后直接复用，缺文件才真正下载，完成后照旧回填 thumbLocal 并置 coversReady。
+   * 缩略图两段式：先认缓存记录命中（cachedThumbnail 只读内存，零同步 IO），行构建时
+   * 直接用本地文件（本地解码很快，不需要再看一次淡入）；未命中（含冷启动磁盘待恢复）
+   * 的走应用 HTTP 栈的异步管线——已有文件只做异步校验后直接复用，缺文件才真正下载。
+   * 这里只负责把缓存填进 thumbLocal、把缺的送去下载；就绪后的显示刷新由
+   * downloadThumbnail 的数据源单行通知驱动，不再整体替换任何状态触发全列表 diff。
    * 这样在只能靠代理出网的环境里卡片不会整片空白，命中后也不再重复请求 CDN。
    */
   private primeThumbnails(list: Array<YouTubeVideo>): void {
-    const next: Map<string, string> = new Map<string, string>();
     const pending: Array<string> = [];
     for (const video of list) {
       const url: string = video.thumbnail;
       if (url.length === 0) continue;
       const cached: string = RemoteAssetCache.cachedThumbnail(url);
-      if (cached !== url) next.set(url, cached);
+      if (cached !== url) this.thumbLocal.set(url, cached);
       else if (!pending.includes(url)) pending.push(url);
     }
-    const merged: Map<string, string> = new Map<string, string>(this.thumbLocal);
-    next.forEach((value: string, key: string) => merged.set(key, value));
-    this.thumbLocal = merged;
-    // 磁盘命中的封面直接可见：本地解码很快，不需要再看一次淡入。
-    const ready: Map<string, boolean> = new Map<string, boolean>(this.coversReady);
-    let changed: boolean = false;
-    next.forEach((value: string, key: string) => {
-      if (ready.get(key) !== true) {
-        ready.set(key, true);
-        changed = true;
-      }
-    });
-    if (changed) this.coversReady = ready;
     for (const url of pending) this.downloadThumbnail(url);
   }
 
@@ -283,38 +284,27 @@ export struct YouTubeView {
     RemoteAssetCache.ensureThumbnail(url).then((local: string) => {
       if (local === url || this.thumbLocal.get(url) === local) return;
       // 结果已被换掉（新搜索／已离开）时不再写回，避免旧列表的图混进新列表。
-      let used: boolean = false;
-      for (const video of this.videos) {
-        if (video.thumbnail === url) { used = true; break; }
+      const all: Array<YouTubeVideo> = this.videosSource.getAll();
+      let index: number = -1;
+      for (let i: number = 0; i < all.length; i++) {
+        if (all[i].thumbnail === url) {
+          index = i;
+          break;
+        }
       }
-      if (!used) return;
-      const next: Map<string, string> = new Map<string, string>(this.thumbLocal);
-      next.set(url, local);
-      this.thumbLocal = next;
-      // 与 onComplete 双保险：即使平台未回调解码完成，封面也不会永久停在透明态。
-      const ready: Map<string, boolean> = new Map<string, boolean>(this.coversReady);
-      ready.set(url, true);
-      this.coversReady = ready;
+      if (index < 0) return;
+      this.thumbLocal.set(url, local);
+      // 单行通知：只有这一行的封面源变了，LazyForEach 只重绑该行（原先是全列表 diff）。
+      this.videosSource.updateItem(index, all[index]);
     }).catch(() => {
       // 下载失败保持远端 URL，交给 Image 组件自己的加载与占位逻辑。
     });
   }
 
-  /** 卡片封面：优先本地缓存文件，未命中时回落到远端 URL。 */
+  /** 卡片封面：优先本地缓存文件，未命中时回落到远端 URL（只读内存记录，构建期零 IO）。 */
   private thumbnailOf(video: YouTubeVideo): string {
     const local: string | undefined = this.thumbLocal.get(video.thumbnail);
     return local !== undefined && local.length > 0 ? local : video.thumbnail;
-  }
-
-  private coverReady(video: YouTubeVideo): boolean {
-    return this.coversReady.get(video.thumbnail) === true;
-  }
-
-  private markCoverReady(video: YouTubeVideo): void {
-    if (this.coversReady.get(video.thumbnail) === true) return;
-    const next: Map<string, boolean> = new Map<string, boolean>(this.coversReady);
-    next.set(video.thumbnail, true);
-    this.coversReady = next;
   }
 
   /** 分类 chip：填入关键词并切到搜索 Tab 展示结果。 */
@@ -359,116 +349,6 @@ export struct YouTubeView {
   /** 分组卡片底色：与 MineView.groupBg() 同值，两个平台的「我的」页卡面一致。 */
   private mineCardBg(): string {
     return this.isDark ? '#26272B' : '#FFFFFF';
-  }
-
-  /**
-   * 信息流卡片：视觉规格复刻哔哩哔哩首页卡片（components/video/VideoCard.ets 的 homeStyle 分支），
-   * 保证两个平台观感一致——白色容器卡 + 圆角 16 + 阴影 8 + 按压缩放，
-   * 封面 4:3 + 底部渐变遮罩，渐变行左侧数据 / 右侧时长，标题固定两行，底栏为作者行。
-   *
-   * 与哔哩哔哩的差异只来自数据本身，不来自设计：YouTube 无弹幕、无多P、无 UP 徽标，
-   * 观看次数是本地化字符串（"8,537次观看"）而非数字，因此直接使用原始文案。
-   */
-  @Builder
-  VideoCard(video: YouTubeVideo) {
-    Column() {
-      // 封面：点击区是封面本身，与哔哩哔哩一致。
-      Stack() {
-        Image(this.thumbnailOf(video))
-          .width('100%')
-          .aspectRatio(4 / 3)
-          .objectFit(ImageFit.Cover)
-          .backgroundColor(this.isDark ? '#2A2C31' : '#E5E7EB')
-          .draggable(false)
-          .syncLoad(false)
-          // 封面淡入：解码完成前保持透明，完成后过渡出现（失败也收尾，不留空白卡）。
-          .opacity(this.coverReady(video) ? 1 : 0)
-          .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
-          .onComplete(() => { this.markCoverReady(video); })
-          .onError(() => { this.markCoverReady(video); })
-
-        // 底部渐变行：左 = 观看次数，右 = 时长（对齐哔哩哔哩「播放/弹幕 ... 时长」层级）。
-        Stack({ alignContent: Alignment.Bottom }) {
-          Column()
-            .width('100%').height(40)
-            .linearGradient({ angle: 180, colors: [['#00000000', 0.0], ['#A6000000', 1.0]] })
-          Row({ space: 10 }) {
-            if (video.views.length > 0) {
-              Row({ space: 4 }) {
-                Stack() {
-                  Image($r('app.media.ic_play'))
-                    .width(6).height(6)
-                    .renderMode(ImageRenderMode.Template).fillColor('#FFFFFF')
-                }
-                .width(17).height(12).alignContent(Alignment.Center)
-                .border({ width: 1, color: '#FFFFFF', radius: 3 })
-                Text(video.views).fontSize(11).fontColor('#FFFFFF').maxLines(1)
-              }.alignItems(VerticalAlign.Center)
-            }
-            Blank()
-            if (video.duration.length > 0) {
-              Text(video.duration).fontSize(11).fontColor('#FFFFFF').maxLines(1)
-            }
-          }
-          .width('100%').height(32).padding({ left: 8, right: 8 })
-          .alignItems(VerticalAlign.Center)
-        }
-        // 必须显式铺满：只给宽度的子节点会被父 Stack 垂直居中，
-        // 结果观看数/时长那一行跑到封面正中间，而不是贴底。
-        .width('100%').height('100%')
-      }
-      .width('100%')
-      .aspectRatio(4 / 3)
-      .clip(true)
-      .onClick(() => this.open(video))
-
-      // 标题：固定两行高度，卡片高度不随标题长短变化（同哔哩哔哩 50vp 规格）。
-      Row() {
-        Text(video.title)
-          .width('100%')
-          .fontSize(14)
-          .lineHeight(19)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-      }
-      .width('100%')
-      .height(50)
-      .alignItems(VerticalAlign.Top)
-      .padding({ left: 12, right: 12, top: 10 })
-      .onClick(() => this.open(video))
-
-      // 作者行：哔哩哔哩此处是「UP 徽标 + 作者名」，YouTube 对应频道名 + 发布时间。
-      Row({ space: 6 }) {
-        Text(video.channel)
-          .fontSize(11)
-          .fontColor(this.isDark ? '#A5AAB5' : '#7D8490')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-        if (video.published.length > 0) {
-          Text(video.published)
-            .fontSize(11)
-            .fontColor(this.isDark ? '#8A8A8F' : '#9499A0')
-            .maxLines(1)
-        }
-      }
-      .width('100%')
-      .height(32)
-      .padding({ left: 12, right: 12 })
-      .alignItems(VerticalAlign.Center)
-      .onClick(() => this.open(video))
-    }
-    .width('100%')
-    .padding({ bottom: 6 })
-    .alignItems(HorizontalAlign.Start)
-    .backgroundColor(this.isDark ? '#24272E' : '#FFFFFF')
-    .borderRadius(16)
-    .clip(true)
-    .shadow({ radius: 8, color: '#08000000', offsetX: 0, offsetY: 1 })
-    .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
-    .stateStyles({ pressed: { opacity: 0.9 }, normal: { opacity: 1 } })
   }
 
   /**
@@ -676,7 +556,7 @@ export struct YouTubeView {
             .onClick(() => this.searchCategory(name))
         }, (name: string) => name)
       }.width('100%')
-      if (this.videos.length > 0 && this.searched.length > 0) {
+      if (this.resultCount > 0 && this.searched.length > 0) {
         Text('「' + this.searched + '」的结果').fontSize(13).width('100%')
           .fontColor(this.isDark ? '#C8C8CC' : '#5A5F66')
       }
@@ -796,19 +676,32 @@ export struct YouTubeView {
           if (this.searched.length > 0) this.runSearch(this.searched);
         })
       }.layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
-    } else if (this.videos.length > 0) {
+    } else if (this.resultCount > 0) {
       Column() {
         // 双列网格：与哔哩哔哩首页一致的 lanes 瀑布流布局与列间距。
+        // LazyForEach 直接挂在滚动容器下：视口 + cachedCount 之外的行不创建，翻页/封面
+        // 就绪只做单行通知，不再全量急切构建（同首页做法）。
         List({ space: LayoutTokens.feedGap, scroller: this.scroller }) {
         // footer 挂在 ListItemGroup 上：双列 lanes 下才能整宽居中（同首页做法）。
         ListItemGroup({ footer: this.ResultFooter() }) {
-          ForEach(this.videos, (video: YouTubeVideo) => {
-            ListItem() { this.VideoCard(video) }
+          LazyForEach(this.videosSource, (video: YouTubeVideo) => {
+            ListItem() {
+              YouTubeVideoCard({
+                cover: this.thumbnailOf(video),
+                title: video.title,
+                channel: video.channel,
+                views: video.views,
+                duration: video.duration,
+                published: video.published,
+                onTap: (): void => { this.open(video); },
+              })
+            }
           }, (video: YouTubeVideo) => video.id)
         }
       }
         .layoutWeight(1).width('100%')
         .lanes(LayoutTokens.feedColumns(this.viewportWidth), LayoutTokens.feedGap)
+        .cachedCount(3)
         // 悬浮 Dock 高 52 + 底边距 16，末端留白必须大于 68 才能完整露出末行（同首页）。
         .contentEndOffset(Immersive.bottomInset() + 76)
         .scrollBar(BarState.Off)
@@ -1062,5 +955,167 @@ export struct YouTubeView {
     .onClick(() => {
       this.tapDockItem(index);
     })
+  }
+}
+
+/**
+ * YouTube 结果卡片：视觉规格复刻哔哩哔哩首页卡片（components/video/VideoCard.ets 的
+ * homeStyle 分支），保证两个平台观感一致——白色容器卡 + 圆角 16 + 阴影 8 + 按压缩放，
+ * 封面 4:3 + 底部渐变遮罩，渐变行左侧数据 / 右侧时长，标题固定两行，底栏为作者行。
+ *
+ * 与哔哩哔哩的差异只来自数据本身，不来自设计：YouTube 无弹幕、无多P、无 UP 徽标，
+ * 观看次数是本地化字符串（"8,537次观看"）而非数字，因此直接使用原始文案。
+ *
+ * 行数据用轻量 @Prop 字符串传入，跳转由调用方经 onTap 注入（同 VideoRowCard 的接口设计）。
+ * @Reusable：结果列表走 LazyForEach 长列表，滚动时复用卡片实例，避免整卡重建。
+ * 封面就绪态是行内局部 @State：单张封面解码完成只刷新本行，不再波及整个结果列表。
+ */
+@Reusable
+@Component
+struct YouTubeVideoCard {
+  /** 封面显示源：本地缓存文件 URI 或远端 URL，由宿主构建行时经 thumbnailOf 解析。 */
+  @Prop @Watch('onCoverChanged') cover: string = '';
+  @Prop title: string = '';
+  @Prop channel: string = '';
+  /** 观看次数 / 时长 / 发布时间：本地化原始文案，空串不显示。 */
+  @Prop views: string = '';
+  @Prop duration: string = '';
+  @Prop published: string = '';
+  onTap: () => void = () => {
+  };
+  @StorageProp('isDarkMode') isDark: boolean = false;
+  /** 封面已可显示：远端图等解码完成再淡入，本地缓存文件（file://）直接可见。 */
+  @State coverShown: boolean = false;
+
+  aboutToAppear(): void {
+    this.coverShown = this.isLocalCover(this.cover);
+  }
+
+  aboutToReuse(params: Record<string, Object>): void {
+    // 复用实例属性同步（@Prop 自动跟随，这里承接回调引用等非常量绑定）。
+    const tap: Object | undefined = params['onTap'];
+    if (typeof tap === 'function') {
+      this.onTap = tap as () => void;
+    }
+  }
+
+  private onCoverChanged(): void {
+    // 换封面回到就绪判定：本地文件直接可见，远端图等解码完成后淡入。
+    this.coverShown = this.isLocalCover(this.cover);
+  }
+
+  private isLocalCover(source: string): boolean {
+    return source.startsWith('file://');
+  }
+
+  build() {
+    Column() {
+      // 封面：点击区是封面本身，与哔哩哔哩一致。
+      Stack() {
+        Image(this.cover)
+          .width('100%')
+          .aspectRatio(4 / 3)
+          .objectFit(ImageFit.Cover)
+          .backgroundColor(this.isDark ? '#2A2C31' : '#E5E7EB')
+          .draggable(false)
+          .syncLoad(false)
+          // 封面淡入：解码完成前保持透明，完成后过渡出现（失败也收尾，不留空白卡）。
+          .opacity(this.coverShown ? 1 : 0)
+          .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
+          .onComplete(() => {
+            if (!this.coverShown) this.coverShown = true;
+          })
+          .onError(() => {
+            if (!this.coverShown) this.coverShown = true;
+          })
+
+        // 底部渐变行：左 = 观看次数，右 = 时长（对齐哔哩哔哩「播放/弹幕 ... 时长」层级）。
+        Stack({ alignContent: Alignment.Bottom }) {
+          Column()
+            .width('100%').height(40)
+            .linearGradient({ angle: 180, colors: [['#00000000', 0.0], ['#A6000000', 1.0]] })
+          Row({ space: 10 }) {
+            if (this.views.length > 0) {
+              Row({ space: 4 }) {
+                Stack() {
+                  Image($r('app.media.ic_play'))
+                    .width(6).height(6)
+                    .renderMode(ImageRenderMode.Template).fillColor('#FFFFFF')
+                }
+                .width(17).height(12).alignContent(Alignment.Center)
+                .border({ width: 1, color: '#FFFFFF', radius: 3 })
+                Text(this.views).fontSize(11).fontColor('#FFFFFF').maxLines(1)
+              }.alignItems(VerticalAlign.Center)
+            }
+            Blank()
+            if (this.duration.length > 0) {
+              Text(this.duration).fontSize(11).fontColor('#FFFFFF').maxLines(1)
+            }
+          }
+          .width('100%').height(32).padding({ left: 8, right: 8 })
+          .alignItems(VerticalAlign.Center)
+        }
+        // 必须显式铺满：只给宽度的子节点会被父 Stack 垂直居中，
+        // 结果观看数/时长那一行跑到封面正中间，而不是贴底。
+        .width('100%').height('100%')
+      }
+      .width('100%')
+      .aspectRatio(4 / 3)
+      .clip(true)
+      .onClick(() => {
+        this.onTap();
+      })
+
+      // 标题：固定两行高度，卡片高度不随标题长短变化（同哔哩哔哩 50vp 规格）。
+      Row() {
+        Text(this.title)
+          .width('100%')
+          .fontSize(14)
+          .lineHeight(19)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .width('100%')
+      .height(50)
+      .alignItems(VerticalAlign.Top)
+      .padding({ left: 12, right: 12, top: 10 })
+      .onClick(() => {
+        this.onTap();
+      })
+
+      // 作者行：哔哩哔哩此处是「UP 徽标 + 作者名」，YouTube 对应频道名 + 发布时间。
+      Row({ space: 6 }) {
+        Text(this.channel)
+          .fontSize(11)
+          .fontColor(this.isDark ? '#A5AAB5' : '#7D8490')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
+        if (this.published.length > 0) {
+          Text(this.published)
+            .fontSize(11)
+            .fontColor(this.isDark ? '#8A8A8F' : '#9499A0')
+            .maxLines(1)
+        }
+      }
+      .width('100%')
+      .height(32)
+      .padding({ left: 12, right: 12 })
+      .alignItems(VerticalAlign.Center)
+      .onClick(() => {
+        this.onTap();
+      })
+    }
+    .width('100%')
+    .padding({ bottom: 6 })
+    .alignItems(HorizontalAlign.Start)
+    .backgroundColor(this.isDark ? '#24272E' : '#FFFFFF')
+    .borderRadius(16)
+    .clip(true)
+    .shadow({ radius: 8, color: '#08000000', offsetX: 0, offsetY: 1 })
+    .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
+    .stateStyles({ pressed: { opacity: 0.9 }, normal: { opacity: 1 } })
   }
 }

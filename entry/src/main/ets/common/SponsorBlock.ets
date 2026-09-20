@@ -186,7 +186,7 @@ export class SponsorBlockStore {
       target.putSync(SponsorBlockStore.KEY_SKIP_COUNT, String((Number.isNaN(count) ? 0 : count) + 1));
       target.putSync(SponsorBlockStore.KEY_SECONDS_SAVED,
         String((Number.isNaN(saved) ? 0 : saved) + seconds));
-      target.flush();
+      target.flush().catch((): void => {});
     } catch (e) {
     }
   }
@@ -196,7 +196,7 @@ export class SponsorBlockStore {
     if (target === null) return;
     try {
       target.putSync(key, value);
-      target.flush();
+      target.flush().catch((): void => {});
     } catch (e) {
     }
   }

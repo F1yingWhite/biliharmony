@@ -147,7 +147,7 @@ test('short speed-change buffering does not pause audio, sustained buffering sti
   let handler, timer, pauses = 0;
   const p = {on(name, callback) {handler = callback;}};
   const h = {player: p, playing: true, audioPrepared: true, speedTransitionUntilMs: Date.now() + 1500,
-    seekCtl: {seekInFlight: false}, pauseDmLoop() {}, startDmLoop() {}, cancelAudioGate() {},
+    seekCtl: {seekInFlight: false}, dmClock: {pause() {}, start() {}, stop() {}}, cancelAudioGate() {},
     audioPlayer: {state: 'playing', setVolume() {}, pause() {pauses++; return Promise.resolve();}}};
   new Function('p', 'media', 'setTimeout', 'clearTimeout', code).call(h, p,
     {BufferingInfoType: {BUFFERING_START: 0, BUFFERING_END: 1}},

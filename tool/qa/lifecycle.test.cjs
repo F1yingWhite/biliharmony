@@ -42,16 +42,14 @@ const ANCHOR = {
   dynLoadFeedStart: '  async loadFeed(reset: boolean): Promise<void> {',
   /** 关注 UP 横滑栏拉取，紧跟在 loadFeed 之后的成员。 */
   dynLoadFeedEnd: '  /** 并行拉取',
-  /** VideoDetail：视频页评论换根。签名无 private，end 是 mutateReplyItem 的文档注释。 */
-  videoLoadRepliesStart: '  async loadReplies(reset: boolean): Promise<void> {',
-  /** VideoDetail：紧随 loadReplies 的合并去重成员，用于只切评论加载逻辑本身。 */
-  videoLoadRepliesEnd: '  mergeUniqueReplies',
-  /** BangumiDetail / DynamicDetail：PGC 与动态详情评论换根，均为 private。 */
-  privateLoadRepliesStart: '  private async loadReplies(reset: boolean): Promise<void> {',
-  /** 三个页面共用的 mutateReplyItem 文档注释首行。 */
-  replyMutationComment: '  /**\n   * 评论项状态修改统一入口：',
-  /** DynamicDetail：紧随 loadReplies 之后的排序切换成员。 */
-  changeReplySortStart: '  private changeReplySort(mode: number): void {',
+  // 三页评论编排已收敛到 components/reply/RepliesController（原 VideoDetail/DynamicDetail/
+  // BangumiDetail 内联的 loadReplies/changeReplySort/loadThreadReplies/mutateReplyItem）。
+  /** 主评论分页加载，紧随其后的排序切换成员。 */
+  repliesLoadStart: '  async load(reset: boolean): Promise<void> {',
+  repliesChangeSortStart: '  changeReplySort(mode: number): void {',
+  /** 楼中楼分页加载，紧随其后的 mutate 成员。 */
+  repliesLoadThreadStart: '  async loadThread(reset: boolean, allowPrefetch: boolean = true): Promise<void> {',
+  repliesMutateStart: '  mutate(rpid: number, mutate: (target: ReplyItem) => void): ReplyItem | null {',
 };
 
 function deferred() {
@@ -110,6 +108,82 @@ function epoch(env) { return new (env.load('common/RequestEpoch').RequestEpoch)(
 function source(env, items = []) {
   const s = new (env.load('common/BasicDataSource').BasicDataSource)();
   s.reset(items); return s;
+}
+
+// ---------------------------------------------------------------------------
+// RepliesController 的页面 access 装配（与各页面的注入闭包逐项对应）。
+// state 模拟留在页面的 @State 字段（断言从 state 读取，等价于改造前直接读页面字段）；
+// p 承接控制器的游标/代际等内部量与 replySource 等页面数据源。
+// ---------------------------------------------------------------------------
+
+/** DynamicDetail / BangumiDetail 共用的楼中楼合并口径：reset 整表替换 + concat 追加。 */
+function replaceOrConcatMerge(current, incoming, reset) {
+  return reset ? (incoming.length > 0 ? incoming : current) : current.concat(incoming);
+}
+
+/** 构造指定页面等价的 RepliesAccess；page ∈ 'VideoDetail' | 'DynamicDetail' | 'BangumiDetail'。 */
+function repliesAccess(page, state, p) {
+  const video = page === 'VideoDetail';
+  return {
+    isDestroyed: () => state.destroyed,
+    toast: () => {},
+    getUIContext: () => ({}),
+    resolveOid: () => (video ? state.aid : page === 'BangumiDetail' ? state.oid : state.commentId),
+    resolveType: () => (page === 'DynamicDetail' ? state.commentType : 1),
+    canLoadReplies: () => page !== 'DynamicDetail' || (state.commentId > 0 && state.commentType > 0),
+    getMainSource: () => p.replySource,
+    getSortMode: () => state.replySortMode,
+    setSortMode: value => { state.replySortMode = value; },
+    // 视频页的 loading/hasMore 字段叫 replyLoading/replyHasMore，动态/番剧叫 repliesLoading/repliesHasMore。
+    getRepliesLoading: () => (video ? state.replyLoading : state.repliesLoading),
+    setRepliesLoading: value => { if (video) state.replyLoading = value; else state.repliesLoading = value; },
+    getRepliesHasMore: () => (video ? state.replyHasMore : state.repliesHasMore),
+    setRepliesHasMore: value => { if (video) state.replyHasMore = value; else state.repliesHasMore = value; },
+    // 视频页的响应式计数叫 replyItemCount，动态/番剧叫 repliesCount。
+    getRepliesCount: () => (video ? state.replyItemCount : state.repliesCount),
+    setRepliesCount: value => { if (video) state.replyItemCount = value; else state.repliesCount = value; },
+    clearRepliesError: reset => {
+      if (video) { state.replyLoadError = ''; return; }
+      state.repliesMoreFailed = false;
+      if (reset) state.repliesFailed = false;
+    },
+    showRepliesError: () => {
+      if (video) { state.replyLoadError = '评论加载失败，请检查网络后重试'; return; }
+      if (state.repliesCount === 0) state.repliesFailed = true;
+      else state.repliesMoreFailed = true;
+    },
+    applyRepliesReset: items => {
+      if (video) { p.replySource.reset(p.mergeUniqueReplies(p.localSentReplies, p.sanitizeReplies(items))); return; }
+      p.replySource.reset(items);
+    },
+    applyRepliesAppend: items => {
+      if (video) { p.appendUniqueReplies(p.replySource, items); return; }
+      p.replySource.append(items);
+    },
+    getThreadRoot: () => state.threadRoot,
+    setThreadRoot: root => { state.threadRoot = root; },
+    getThreadReplies: () => state.threadReplies,
+    setThreadReplies: list => { state.threadReplies = list; },
+    getThreadLoading: () => state.threadLoading,
+    setThreadLoading: value => { state.threadLoading = value; },
+    getThreadHasMore: () => state.threadHasMore,
+    setThreadHasMore: value => { state.threadHasMore = value; },
+    // 动态/番剧在守卫里校验面板仍打开；视频页校验根节点与 aid 均未变。
+    isThreadStale: (root, oid) => video
+      ? state.threadRoot.rpid !== root || state.aid !== oid
+      : !state.threadOpen || state.threadRoot.rpid !== root,
+    // 视频页按 rpid 合并保留预览楼层；动态/番剧 reset 整表替换 + concat 追加。
+    mergeThreadReplies: (current, incoming, reset) => video
+      ? p.mergeUniqueReplies(current, incoming)
+      : replaceOrConcatMerge(current, incoming, reset),
+    onThreadError: () => {},
+    bumpVersion: () => { state.version = (state.version || 0) + 1; },
+    getVersion: () => state.version || 0,
+    buildShareLink: () => '',
+    renderShareCard: () => {},
+    ensureShareContext: () => true,
+    onShareFailed: () => {},
+  };
 }
 
 test('recommendation reset supersedes old pagination and preserves new loading state', async () => {
@@ -339,23 +413,24 @@ for (const page of ['VideoDetail','DynamicDetail','BangumiDetail']) {
     const env=environment({'api/CommentApi':{CommentApi:{getReplyReplies:(oid,type,root)=>{
       calls.push(root);return root===100?old.promise:latest.promise;
     }}}});
-    const video=page==='VideoDetail';
-    const Harness=env.methodHarness('pages/'+page,
-      video?'  async loadThreadReplies(':'  private async loadThreadReplies(',
-      video?'  @Builder\n  VideoThreadEmotePanel()':'  private sentThreadReply(',
-      "import { CommentApi } from '../api/CommentApi'; const CommentLog={warn(){},info(){},error(){},elapsed(){return 0;}};");
-    const p=new Harness();Object.assign(p,{threadEpoch:epoch(env),threadLoading:false,threadHasMore:true,
-      threadCursor:'',threadAllReplies:[],threadReplies:[],threadPrefetchCount:0,threadOpen:true,
-      replyThreadRoot:{rpid:100,count:2},threadRoot:{rpid:100,count:2},detail:{aid:1},
-      item:{commentId:1,commentType:17},replyOid:()=>1,destroyed:false,mergeUniqueReplies:(a,b)=>a.concat(b)});
-    const first=p.loadThreadReplies(true,false);
-    p.replyThreadRoot={rpid:200,count:2};p.threadRoot={rpid:200,count:2};
-    const second=p.loadThreadReplies(true,false);
+    const Harness=env.methodHarness('components/reply/RepliesController',
+      ANCHOR.repliesLoadThreadStart, ANCHOR.repliesMutateStart,
+      "import { CommentApi } from '../../api/CommentApi';");
+    const p=new Harness();
+    const state={destroyed:false,threadLoading:false,threadHasMore:true,threadOpen:true,
+      threadRoot:{rpid:100,count:2},threadReplies:[],aid:1,oid:1,commentId:1,commentType:17};
+    p.threadEpoch=epoch(env);
+    p.threadCursor=''; // 控制器内部量由构造函数初始化；切片装配时手动补齐
+    if (page==='VideoDetail') p.mergeUniqueReplies=(a,b)=>a.concat(b);
+    p.access=repliesAccess(page,state,p);
+    const first=p.loadThread(true,false);
+    state.threadRoot={rpid:200,count:2};
+    const second=p.loadThread(true,false);
     old.resolve({replies:[{rpid:101,rootRpid:100}],cursor:'old',hasMore:false});await first;
-    assert.equal(p.threadLoading,true);assert.equal(p.threadCursor,'');assert.deepEqual(calls,[100,200]);
+    assert.equal(state.threadLoading,true);assert.equal(p.threadCursor,'');assert.deepEqual(calls,[100,200]);
     latest.resolve({replies:[{rpid:201,rootRpid:200}],cursor:'new',hasMore:true});await second;
-    assert.deepEqual((video?p.threadAllReplies:p.threadReplies).map(r=>r.rootRpid),[200]);
-    assert.equal(p.threadCursor,'new');assert.equal(p.threadLoading,false);
+    assert.deepEqual(state.threadReplies.map(r=>r.rootRpid),[200]);
+    assert.equal(p.threadCursor,'new');assert.equal(state.threadLoading,false);
   });
 }
 
@@ -569,24 +644,27 @@ test('dynamic detail: failed continuation preserves comments and retries the sam
     if (calls.length === 1) throw new Error('offline');
     return {replies: [{rpid: 2}], cursor: '3', hasMore: false};
   }}}});
-  const Harness = env.methodHarness('pages/DynamicDetail', ANCHOR.privateLoadRepliesStart, ANCHOR.changeReplySortStart,
-    "import { CommentApi } from '../api/CommentApi';");
+  const Harness = env.methodHarness('components/reply/RepliesController', ANCHOR.repliesLoadStart,
+    ANCHOR.repliesChangeSortStart, "import { CommentApi } from '../../api/CommentApi';");
   const page = new Harness();
-  Object.assign(page, {destroyed: false, repliesLoading: false, repliesFailed: false,
-    repliesMoreFailed: false, repliesEpoch: epoch(env), item: {commentId: 1, commentType: 11},
-    repliesHasMore: true, replySource: source(env, [{rpid: 1}]), repliesCount: 1,
-    replyCursor: '2', replySortMode: 3, param: {}});
-  await page.loadReplies(false);
-  assert.equal(page.repliesMoreFailed, true);
-  assert.equal(page.repliesFailed, false);
+  const state = {destroyed: false, repliesLoading: false, repliesFailed: false, repliesMoreFailed: false,
+    repliesHasMore: true, repliesCount: 1, replySortMode: 3, commentId: 1, commentType: 11,
+    threadRoot: {rpid: 0}, threadReplies: [], threadLoading: false, threadHasMore: true, threadOpen: false};
+  page.repliesEpoch = epoch(env);
+  page.replySource = source(env, [{rpid: 1}]);
+  page.replyCursor = '2';
+  page.access = repliesAccess('DynamicDetail', state, page);
+  await page.load(false);
+  assert.equal(state.repliesMoreFailed, true);
+  assert.equal(state.repliesFailed, false);
   assert.equal(page.replyCursor, '2');
   assert.deepEqual(page.replySource.getAll(), [{rpid: 1}]);
-  await page.loadReplies(false);
+  await page.load(false);
   assert.deepEqual(calls, ['2', '2']);
   assert.deepEqual(page.replySource.getAll(), [{rpid: 1}, {rpid: 2}]);
-  assert.equal(page.repliesMoreFailed, false);
-  assert.equal(page.repliesHasMore, false);
-  await page.loadReplies(false);
+  assert.equal(state.repliesMoreFailed, false);
+  assert.equal(state.repliesHasMore, false);
+  await page.load(false);
   assert.equal(calls.length, 2);
 });
 
@@ -714,80 +792,94 @@ test('timeline: year boundary stays chronological and episode numbers use the pu
 
 function bangumiRepliesHarness(api) {
   const env = environment({'api/CommentApi': {CommentApi: api}});
-  const Harness = env.methodHarness('pages/BangumiDetail', ANCHOR.privateLoadRepliesStart,
-    ANCHOR.replyMutationComment, "import { CommentApi } from '../api/CommentApi';");
+  const Harness = env.methodHarness('components/reply/RepliesController', ANCHOR.repliesLoadStart,
+    ANCHOR.repliesMutateStart, "import { CommentApi } from '../../api/CommentApi';");
   const p = new Harness();
-  Object.assign(p, {destroyed:false, repliesEpoch:epoch(env), replySource:source(env), repliesCount:0,
-    repliesLoading:false, repliesFailed:false, repliesMoreFailed:false, repliesHasMore:true,
-    replyCursor:'', replySortMode:3, oid:1, replyOid() {return this.oid;}});
-  return p;
+  const state = {destroyed:false, repliesLoading:false, repliesFailed:false, repliesMoreFailed:false,
+    repliesHasMore:true, repliesCount:0, replySortMode:3, oid:1,
+    threadRoot:{rpid:0}, threadReplies:[], threadLoading:false, threadHasMore:true, threadOpen:false};
+  p.repliesEpoch = epoch(env);
+  p.replySource = source(env);
+  // 番剧切排序清空列表与游标（构造参数不在切片内，装配时补齐页面取值）。
+  p.clearOnSort = true;
+  p.access = repliesAccess('BangumiDetail', state, p);
+  return {p, state};
 }
 
 test('PGC episode and sort changes supersede pending comments without old loading writes', async () => {
   const old=deferred(), latest=deferred(); const calls=[];
-  const p=bangumiRepliesHarness({getReplies:(oid,type,cursor,mode)=> {
+  const {p, state}=bangumiRepliesHarness({getReplies:(oid,type,cursor,mode)=> {
     calls.push({oid,mode}); return calls.length===1 ? old.promise : latest.promise;
   }});
-  const first=p.loadReplies(true);
-  p.oid=2; p.changeReplySort(2);
+  const first=p.load(true);
+  state.oid=2; p.changeReplySort(2);
   assert.deepEqual(calls,[{oid:1,mode:3},{oid:2,mode:2}]);
   old.resolve({replies:[{rpid:1}],cursor:'old',hasMore:false}); await first;
-  assert.deepEqual(p.replySource.getAll(),[]); assert.equal(p.repliesLoading,true);
+  assert.deepEqual(p.replySource.getAll(),[]); assert.equal(state.repliesLoading,true);
   latest.resolve({replies:[{rpid:2}],cursor:'new',hasMore:true}); await tick();
   assert.deepEqual(p.replySource.getAll(),[{rpid:2}]); assert.equal(p.replyCursor,'new');
-  assert.equal(p.repliesLoading,false);
+  assert.equal(state.repliesLoading,false);
 });
 
 test('PGC failed pagination preserves comments and cursor for same-page retry', async () => {
   const cursors=[];
-  const p=bangumiRepliesHarness({getReplies:async(oid,type,cursor)=> {
+  const {p, state}=bangumiRepliesHarness({getReplies:async(oid,type,cursor)=> {
     cursors.push(cursor); if(cursors.length===1) throw Error('offline');
     return {replies:[{rpid:2}],cursor:'end',hasMore:false};
   }});
-  p.replySource.reset([{rpid:1}]); p.repliesCount=1; p.replyCursor='next';
-  await p.loadReplies(false);
-  assert.deepEqual(p.replySource.getAll(),[{rpid:1}]); assert.equal(p.repliesMoreFailed,true);
-  assert.equal(p.repliesFailed,false); assert.equal(p.replyCursor,'next');
-  await p.loadReplies(false);
+  p.replySource.reset([{rpid:1}]); state.repliesCount=1; p.replyCursor='next';
+  await p.load(false);
+  assert.deepEqual(p.replySource.getAll(),[{rpid:1}]); assert.equal(state.repliesMoreFailed,true);
+  assert.equal(state.repliesFailed,false); assert.equal(p.replyCursor,'next');
+  await p.load(false);
   assert.deepEqual(cursors,['next','next']); assert.deepEqual(p.replySource.getAll(),[{rpid:1},{rpid:2}]);
-  assert.equal(p.repliesMoreFailed,false); assert.equal(p.repliesHasMore,false);
+  assert.equal(state.repliesMoreFailed,false); assert.equal(state.repliesHasMore,false);
 });
 
 function videoRepliesHarness(api) {
   const env=environment({'api/CommentApi':{CommentApi:api}});
-  const Harness=env.methodHarness('pages/VideoDetail',ANCHOR.videoLoadRepliesStart,ANCHOR.videoLoadRepliesEnd,
-    "import { CommentApi } from '../api/CommentApi'; const CommentLog={info(){},warn(){},error(){},elapsed(){return 0},errorText(){return ''}};");
+  const Harness=env.methodHarness('components/reply/RepliesController',ANCHOR.repliesLoadStart,
+    ANCHOR.repliesLoadThreadStart,"import { CommentApi } from '../../api/CommentApi';");
   const p=new Harness();
-  Object.assign(p,{destroyed:false,repliesEpoch:epoch(env),detail:{aid:1},replyLoading:false,
-    replyLoadError:'',replyHasMore:true,replyCursor:'next',replySortMode:3,replyPrefetchCount:5,
-    replySource:source(env,[{rpid:1}]),localSentReplies:[],
-    sanitizeReplies:items=>items,mergeUniqueReplies:(a,b)=>a.concat(b),
-    appendUniqueReplies:(s,items)=>s.reset(s.getAll().concat(items))});
-  return p;
+  const state={destroyed:false, replyLoading:false, replyLoadError:'', replyHasMore:true, replySortMode:3,
+    replyItemCount:1, aid:1, threadRoot:{rpid:0}, threadReplies:[], threadLoading:false,
+    threadHasMore:true, threadOpen:false};
+  p.repliesEpoch=epoch(env);
+  p.replySource=source(env,[{rpid:1}]);
+  p.replyCursor='next'; // 控制器内部量由构造函数初始化；切片装配时手动补齐
+  p.threadCursor='';
+  p.localSentReplies=[];
+  p.sanitizeReplies=items=>items;
+  p.mergeUniqueReplies=(a,b)=>a.concat(b);
+  p.appendUniqueReplies=(s,items)=>s.reset(s.getAll().concat(items));
+  // 视频页切排序清空列表与游标（构造参数不在切片内，装配时补齐页面取值）。
+  p.clearOnSort=true;
+  p.access=repliesAccess('VideoDetail',state,p);
+  return {p,state};
 }
 
 test('video comments: latest sort wins while an earlier page fails', async()=>{
   const old=deferred(), latest=deferred();const modes=[];
-  const p=videoRepliesHarness({getReplies:(oid,type,cursor,mode)=>{
+  const {p,state}=videoRepliesHarness({getReplies:(oid,type,cursor,mode)=>{
     modes.push(mode);return modes.length===1?old.promise:latest.promise;
   }});
-  const pending=p.loadReplies(false);p.changeReplySort(2);
+  const pending=p.load(false);p.changeReplySort(2);
   old.reject(Error('offline'));await pending;
-  assert.deepEqual(modes,[3,2]);assert.equal(p.replyLoading,true);assert.equal(p.replyLoadError,'');
+  assert.deepEqual(modes,[3,2]);assert.equal(state.replyLoading,true);assert.equal(state.replyLoadError,'');
   latest.resolve({replies:[{rpid:2}],cursor:'done',hasMore:false});await tick();
-  assert.deepEqual(p.replySource.getAll(),[{rpid:2}]);assert.equal(p.replyLoading,false);
+  assert.deepEqual(p.replySource.getAll(),[{rpid:2}]);assert.equal(state.replyLoading,false);
 });
 
 test('video comments: pagination error retains content and retries the same cursor',async()=>{
-  const cursors=[];const p=videoRepliesHarness({getReplies:async(oid,type,cursor)=>{
+  const cursors=[];const {p,state}=videoRepliesHarness({getReplies:async(oid,type,cursor)=>{
     cursors.push(cursor);if(cursors.length===1)throw Error('offline');
     return {replies:[{rpid:2}],cursor:'done',hasMore:false};
   }});
-  await p.loadReplies(false);
-  assert.ok(p.replyLoadError);assert.deepEqual(p.replySource.getAll(),[{rpid:1}]);
-  assert.equal(p.replyCursor,'next');assert.equal(p.replyLoading,false);
-  await p.loadReplies(false);
-  assert.deepEqual(cursors,['next','next']);assert.equal(p.replyLoadError,'');
+  await p.load(false);
+  assert.ok(state.replyLoadError);assert.deepEqual(p.replySource.getAll(),[{rpid:1}]);
+  assert.equal(p.replyCursor,'next');assert.equal(state.replyLoading,false);
+  await p.load(false);
+  assert.deepEqual(cursors,['next','next']);assert.equal(state.replyLoadError,'');
   assert.deepEqual(p.replySource.getAll(),[{rpid:1},{rpid:2}]);
 });
 
@@ -839,16 +931,22 @@ test('article spacing: drops styled empty paragraphs but retains text and inline
 test('dynamic comments: sorting during loading drops the old response',async()=>{
   const old=deferred(),latest=deferred();let calls=0;
   const env=environment({'api/CommentApi':{CommentApi:{getReplies:()=>++calls===1?old.promise:latest.promise}}});
-  const Harness=env.methodHarness('pages/DynamicDetail',ANCHOR.privateLoadRepliesStart,ANCHOR.replyMutationComment,
-    "import { CommentApi } from '../api/CommentApi';");
-  const p=new Harness();Object.assign(p,{destroyed:false,repliesEpoch:epoch(env),repliesLoading:false,
-    item:{commentId:1,commentType:11},repliesHasMore:true,replySource:source(env),repliesCount:0,
-    replyCursor:'',replySortMode:3,param:{}});
-  const pending=p.loadReplies(true);p.changeReplySort(2);
+  const Harness=env.methodHarness('components/reply/RepliesController',ANCHOR.repliesLoadStart,
+    ANCHOR.repliesMutateStart,"import { CommentApi } from '../../api/CommentApi';");
+  const p=new Harness();
+  const state={destroyed:false,repliesLoading:false,repliesFailed:false,repliesMoreFailed:false,
+    repliesHasMore:true,repliesCount:0,replySortMode:3,commentId:1,commentType:11,
+    threadRoot:{rpid:0},threadReplies:[],threadLoading:false,threadHasMore:true,threadOpen:false};
+  p.repliesEpoch=epoch(env);
+  p.replySource=source(env);
+  // 动态页切排序特意不清列表（构造参数不在切片内，装配时补齐页面取值）。
+  p.clearOnSort=false;
+  p.access=repliesAccess('DynamicDetail',state,p);
+  const pending=p.load(true);p.changeReplySort(2);
   old.resolve({replies:[{rpid:1}],cursor:'old',hasMore:false});await pending;
-  assert.equal(calls,2);assert.deepEqual(p.replySource.getAll(),[]);assert.equal(p.repliesLoading,true);
+  assert.equal(calls,2);assert.deepEqual(p.replySource.getAll(),[]);assert.equal(state.repliesLoading,true);
   latest.resolve({replies:[{rpid:2}],cursor:'new',hasMore:false});await tick();
-  assert.deepEqual(p.replySource.getAll(),[{rpid:2}]);assert.equal(p.replyCursor,'new');assert.equal(p.repliesLoading,false);
+  assert.deepEqual(p.replySource.getAll(),[{rpid:2}]);assert.equal(p.replyCursor,'new');assert.equal(state.repliesLoading,false);
 });
 
 test('dynamic comments: changing sort keeps visible rows until replacement and preserves them on failure',async()=>{
@@ -856,16 +954,23 @@ test('dynamic comments: changing sort keeps visible rows until replacement and p
   const env=environment({'api/CommentApi':{CommentApi:{getReplies:(id,type,cursor,mode)=>{
     calls.push({cursor,mode});return calls.length===1?failed.promise:retry.promise;
   }}}});
-  const Harness=env.methodHarness('pages/DynamicDetail',ANCHOR.privateLoadRepliesStart,ANCHOR.replyMutationComment,
-    "import { CommentApi } from '../api/CommentApi';");
-  const p=new Harness();Object.assign(p,{destroyed:false,repliesEpoch:epoch(env),repliesLoading:false,
-    item:{commentId:1,commentType:11},repliesHasMore:false,replySource:source(env,[{rpid:9}]),repliesCount:1,
-    replyCursor:'old',replySortMode:3,param:{}});
-  p.changeReplySort(2);assert.deepEqual(p.replySource.getAll(),[{rpid:9}]);assert.equal(p.repliesLoading,true);
+  const Harness=env.methodHarness('components/reply/RepliesController',ANCHOR.repliesLoadStart,
+    ANCHOR.repliesMutateStart,"import { CommentApi } from '../../api/CommentApi';");
+  const p=new Harness();
+  const state={destroyed:false,repliesLoading:false,repliesFailed:false,repliesMoreFailed:false,
+    repliesHasMore:false,repliesCount:1,replySortMode:3,commentId:1,commentType:11,
+    threadRoot:{rpid:0},threadReplies:[],threadLoading:false,threadHasMore:true,threadOpen:false};
+  p.repliesEpoch=epoch(env);
+  p.replySource=source(env,[{rpid:9}]);
+  p.replyCursor='old';
+  // 动态页切排序特意不清列表（构造参数不在切片内，装配时补齐页面取值）。
+  p.clearOnSort=false;
+  p.access=repliesAccess('DynamicDetail',state,p);
+  p.changeReplySort(2);assert.deepEqual(p.replySource.getAll(),[{rpid:9}]);assert.equal(state.repliesLoading,true);
   failed.reject(Error('offline'));await tick();
   assert.deepEqual(p.replySource.getAll(),[{rpid:9}]);assert.equal(p.replyCursor,'old');
-  assert.equal(p.repliesMoreFailed,true);assert.equal(p.repliesRetryReset,true);
-  const pending=p.loadReplies(p.repliesMoreFailed&&p.repliesRetryReset);
+  assert.equal(state.repliesMoreFailed,true);assert.equal(p.repliesRetryReset,true);
+  const pending=p.load(state.repliesMoreFailed&&p.repliesRetryReset);
   retry.resolve({replies:[{rpid:10}],cursor:'new',hasMore:true});await pending;
   assert.deepEqual(calls,[{cursor:'',mode:2},{cursor:'',mode:2}]);assert.deepEqual(p.replySource.getAll(),[{rpid:10}]);
 });

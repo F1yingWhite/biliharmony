@@ -1,15 +1,28 @@
 /**
  * B 站直播弹幕 WebSocket 客户端。只订阅消息，不发送弹幕、礼物或任何消费请求。
  * 使用 protover=2 接收 zlib 批量包，保证高流量房间的消息完整性。
+ * 二进制包的切帧、zlib 解压与 JSON.parse 整体在 taskpool 后台线程执行（LiveDanmakuDecode），
+ * 主线程只做入队与结构化事件分发，避免高热房间逐包解压掉帧。
  */
 import { webSocket } from '@kit.NetworkKit';
-import { util } from '@kit.ArkTS';
-import { BusinessError, zlib } from '@kit.BasicServicesKit';
+import { taskpool, util } from '@kit.ArkTS';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { BiliApi } from '../api/BiliApi';
 import { HttpClient } from '../services/network/HttpClient';
 import { LiveChatMessage, LiveDanmakuInfo, LiveDanmakuServer } from '../model/LiveModels';
 import { asObject, asString, asNumber } from './Utils';
 import { LiveApi } from '../api/LiveApi';
+import { LiveDecodedEvent, decodeLivePacketsCore, inflateLiveZlib } from './LiveDanmakuDecode';
+
+/**
+ * 直播弹幕后台解码任务（taskpool 工作线程执行）：切帧 + zlib 解压 + JSON.parse。
+ * @Concurrent 函数只能引用「import 的或函数内局部」的变量/类型，
+ * 因此核心逻辑在 LiveDanmakuDecode.ets，这里只做薄封装（DanmakuProto 同款结构）。
+ */
+@Concurrent
+function decodeLivePacketsTask(buffer: ArrayBuffer): Promise<Array<LiveDecodedEvent>> {
+  return decodeLivePacketsCore(buffer);
+}
 
 export class LiveDanmakuClient {
   /** 重连退避基数 / 上限与连续失败上限：弱网下固定 2.5s 无限重试既耗电又易被服务端限流。 */
@@ -32,7 +45,7 @@ export class LiveDanmakuClient {
   private lastInboundAtMs: number = 0;
   /** 心跳连续失败次数；鉴权成功（op=8）或收到任何入站消息时清零。 */
   private heartbeatFailures: number = 0;
-  /** 压缩包必须按 WebSocket 到达顺序解码，避免异步解压导致消息乱序。 */
+  /** 压缩包必须按 WebSocket 到达顺序解码（含 taskpool 后台解码）：入队顺序即解码与分发顺序。 */
   private decodeQueue: Promise<void> = Promise.resolve();
   onMessage: (message: LiveChatMessage) => void = () => {};
   onConnected: (connected: boolean) => void = () => {};
@@ -72,6 +85,7 @@ export class LiveDanmakuClient {
       ws.on('message', (err: BusinessError, value: string | ArrayBuffer) => {
         if (err || this.socket !== ws || this.closed) return;
         // 任何入站消息都证明链路仍活跃：刷新活跃时间并清零心跳连续失败计数。
+        // 必须在入队瞬间刷新（不等后台解码完成），否则解码延迟会被半开看门狗误判为链路失活。
         this.lastInboundAtMs = Date.now();
         this.heartbeatFailures = 0;
         if (typeof value === 'string') {
@@ -79,7 +93,7 @@ export class LiveDanmakuClient {
         } else {
           const packet: ArrayBuffer = value as ArrayBuffer;
           this.decodeQueue = this.decodeQueue.then(async (): Promise<void> => {
-            if (this.socket === ws && !this.closed && generation === this.generation) await this.parsePackets(packet, generation);
+            if (this.socket === ws && !this.closed && generation === this.generation) await this.decodeAndDispatch(packet, generation);
           }).catch((): void => {
             // 单个损坏包不应中断后续消息解码。
           });
@@ -242,6 +256,62 @@ export class LiveDanmakuClient {
     return buffer;
   }
 
+  /**
+   * 一个二进制包的完整解码与分发。生产路径把切帧 + zlib 解压 + JSON.parse 整体下放
+   * taskpool 后台线程（VOD 侧 DanmakuProto 同款模式），主线程只做结构化事件的鉴权与消息分发。
+   * Node QA 沙箱没有 taskpool，测试直接驱动 parsePackets 同步路径验证真实解码逻辑。
+   */
+  private async decodeAndDispatch(buffer: ArrayBuffer, generation: number): Promise<void> {
+    // ArrayBuffer 参数默认转移所有权（零拷贝），入队后主线程不再读取该包。
+    const events: Array<LiveDecodedEvent> = await taskpool.execute(decodeLivePacketsTask, buffer) as Array<LiveDecodedEvent>;
+    this.dispatchDecoded(events, generation);
+  }
+
+  /** taskpool 解码结果的主线程分发：逐事件校验代际/关闭状态，事件顺序即包内字节顺序。 */
+  private dispatchDecoded(events: Array<LiveDecodedEvent>, generation: number): void {
+    for (let i: number = 0; i < events.length; i++) {
+      if (this.closed || generation !== this.generation) return;
+      const event: LiveDecodedEvent = events[i];
+      if (event.operation === 8) {
+        this.handleAuthResponse();
+      } else if (event.operation === 5 && event.payload !== null) {
+        this.emitParsedMessage(event.payload);
+      }
+    }
+  }
+
+  /** op=8 鉴权成功的全部主线程副作用：重置重连与心跳计数、记录活跃时间并开启心跳。 */
+  private handleAuthResponse(): void {
+    // WebSocket open 只代表 TCP/TLS 建立；收到 op=8 才是直播弹幕鉴权成功。
+    this.retryAttempts = 0;
+    this.heartbeatFailures = 0;
+    this.lastInboundAtMs = Date.now();
+    this.onConnected(true);
+    this.startHeartbeat();
+  }
+
+  /** 从消息 JSON 构建 LiveChatMessage；DANMU_MSG 以外的命令返回 null（messageSeq 只在弹幕上消费）。 */
+  private buildMessage(payload: Record<string, Object>): LiveChatMessage | null {
+    const command: string = asString(payload['cmd'], '');
+    if (command.startsWith('DANMU_MSG')) return LiveChatMessage.danmaku(payload, this.messageSeq++);
+    if (command === 'SUPER_CHAT_MESSAGE') return LiveChatMessage.superChat(asObject(payload['data']));
+    return null;
+  }
+
+  /** 单条消息分发：构建抛错按脏消息丢弃，不影响后续消息。 */
+  private emitParsedMessage(payload: Object): void {
+    try {
+      const msg: LiveChatMessage | null = this.buildMessage(asObject(payload));
+      if (msg !== null && msg.text.length > 0) this.onMessage(msg);
+    } catch (e) {
+      // 结构异常的消息直接丢弃，与旧 parseJson 的吞异常语义一致。
+    }
+  }
+
+  /**
+   * 同步回退解码路径：仅当运行环境没有 taskpool（Node QA 沙箱）时由 decodeAndDispatch 调用，
+   * 分支行为与生产后台路径一致；parity 测试直接驱动本方法并注入 inflateZlib 延迟验证代际防护。
+   */
   private async parsePackets(buffer: ArrayBuffer, generation: number): Promise<void> {
     const view: DataView = new DataView(buffer);
     let offset: number = 0;
@@ -252,12 +322,7 @@ export class LiveDanmakuClient {
       const operation: number = view.getUint32(offset + 8);
       if (headerLength < 16 || packetLength < headerLength || packetLength <= 0 || offset + packetLength > buffer.byteLength) break;
       if (operation === 8) {
-        // WebSocket open 只代表 TCP/TLS 建立；收到 op=8 才是直播弹幕鉴权成功。
-        this.retryAttempts = 0;
-        this.heartbeatFailures = 0;
-        this.lastInboundAtMs = Date.now();
-        this.onConnected(true);
-        this.startHeartbeat();
+        this.handleAuthResponse();
       } else if (operation === 5 && (protocol === 0 || protocol === 1)) {
         const bytes: Uint8Array = new Uint8Array(buffer, offset + headerLength, packetLength - headerLength);
         const text: string = util.TextDecoder.create('utf-8').decodeToString(bytes);
@@ -275,37 +340,14 @@ export class LiveDanmakuClient {
     }
   }
 
-  /** 解压直播 zlib 消息；输出未知时逐级扩容，最高 8 MiB，防止异常包无限占用内存。 */
+  /** 同步回退路径的 zlib 解压：复用 LiveDanmakuDecode 的共享实例与逐级扩容策略。 */
   private async inflateZlib(source: ArrayBuffer): Promise<ArrayBuffer | null> {
-    const zip: zlib.Zip = await zlib.createZip();
-    let capacity: number = Math.max(64 * 1024, source.byteLength * 8);
-    const maxCapacity: number = 8 * 1024 * 1024;
-    while (capacity <= maxCapacity) {
-      const output: ArrayBuffer = new ArrayBuffer(capacity);
-      try {
-        const result: zlib.ZipOutputInfo = await zip.uncompress(output, source, source.byteLength);
-        if (result.status === zlib.ReturnStatus.OK || result.status === zlib.ReturnStatus.STREAM_END) {
-          return output.slice(0, result.destLen);
-        }
-      } catch (e) {
-        // 输出空间不足也可能以 BusinessError 返回，扩容后重试。
-      }
-      capacity *= 2;
-    }
-    return null;
+    return inflateLiveZlib(source);
   }
 
   private parseJson(text: string): void {
     try {
-      const payload: Record<string, Object> = asObject(JSON.parse(text) as Object);
-      const command: string = asString(payload['cmd'], '');
-      let msg: LiveChatMessage | null = null;
-      if (command.startsWith('DANMU_MSG')) {
-        msg = LiveChatMessage.danmaku(payload, this.messageSeq++);
-      } else if (command === 'SUPER_CHAT_MESSAGE') {
-        msg = LiveChatMessage.superChat(asObject(payload['data']));
-      }
-      if (msg !== null && msg.text.length > 0) this.onMessage(msg);
+      this.emitParsedMessage(JSON.parse(text) as Object);
     } catch (e) {
       // 心跳/认证包并非 JSON 消息，忽略即可。
     }

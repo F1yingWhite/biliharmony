@@ -25,7 +25,6 @@ import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { picker } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { DEBUG } from 'BuildProfile';
-import { displaySync } from '@kit.ArkGraphics2D';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, VideoChapter } from '../../api/BiliApi';
 import { SponsorBlockApi, SponsorBlockResult, SponsorBlockUserInfo } from '../../api/SponsorBlockApi';
 import { UserStore } from '../../services/auth/UserStore';
@@ -33,6 +32,8 @@ import { AppTheme, DanmakuSettings } from '../../common/AppTheme';
 import { Haptic } from '../../common/Haptic';
 import { Immersive } from '../../common/Immersive';
 import { formatDuration, formatCount } from '../../common/Utils';
+import { PlayerSponsorController, SponsorNoticeUi } from './PlayerSponsorController';
+import { PlayerDanmakuClock } from './PlayerDanmakuClock';
 import { PlayUrlInfo, SubtitleCue, SubtitleTrack, VideoItem, VideoQualityOption } from '../../model/Models';
 import { Constants } from '../../common/Constants';
 import { BasicDataSource } from '../../common/BasicDataSource';
@@ -49,7 +50,7 @@ import { PlayerCompactControls } from './PlayerCompactControls';
 import { DanmakuPinResult, PlayerDanmakuInteractionController } from './PlayerDanmakuInteractionController';
 import { PlayerDanmakuAction } from './PlayerDanmakuAction';
 import { SponsorBlockCategory, SponsorBlockMode, SponsorBlockSegment, SponsorBlockStore,
-  sponsorBlockActionLabel, sponsorBlockCategory, sponsorBlockSupportedActions } from '../../common/SponsorBlock';
+  sponsorBlockSupportedActions } from '../../common/SponsorBlock';
 import { SponsorBlockNotice } from './SponsorBlockNotice';
 import { HttpClient } from '../../services/network/HttpClient';
 import { VideoDownloadService } from '../../services/media/VideoDownloadService';
@@ -252,12 +253,16 @@ export struct PlayerView {
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
   private dmEngine: PlayerDanmakuEngine = new PlayerDanmakuEngine(this.ctx);
   private dmInteraction: PlayerDanmakuInteractionController = new PlayerDanmakuInteractionController(this.dmEngine);
-  private dmLoopRunning: boolean = false;
-  private dmDisplaySync: displaySync.DisplaySync | null = null;
-  /** 上次实际绘制时间；按用户设置的目标帧率节流，位移始终使用真实 DisplaySync 时间差。 */
-  private dmLastFrameMs: number = 0;
-  /** 极少数 DisplaySync 初始化失败设备的兼容回退，不参与正常路径。 */
-  private dmFallbackTick: number = -1;
+  private dmClock: PlayerDanmakuClock = new PlayerDanmakuClock({
+    isPlaying: (): boolean => this.playing,
+    isDanmakuOn: (): boolean => this.danmakuOn,
+    getFrameRate: (): number => this.dmFrameRate,
+    getEngine: (): PlayerDanmakuEngine => this.dmEngine,
+    clearPinned: (): void => {
+      this.dmPinnedVisible = false;
+      this.dmPinnedText = '';
+    },
+  });
   private hideTimer: number = -1;
   private sourceIndex: number = 0;
   private retryingSource: boolean = false;
@@ -277,9 +282,6 @@ export struct PlayerView {
   @State sponsorNoticeManual: boolean = false;
   @State sponsorNoticeCanUndo: boolean = false;
   @State sponsorNoticeCanVote: boolean = false;
-  @State sponsorFullLabel: string = '';
-  /** 全视频标签颜色（随分类）；与 label 一起通过 onSponsorFullLabel 交给页面标题区。 */
-  private sponsorFullColor: string = '#008A5C';
   @State sponsorDraftStart: number = -1;
   @State sponsorDraftEnd: number = -1;
   @State sponsorDraftCategory: string = 'sponsor';
@@ -290,13 +292,39 @@ export struct PlayerView {
   @State sponsorUserStats: string = '';
   @State sponsorWarningReason: string = '';
   @StorageProp('sponsorBlockSettingsRevision') @Watch('onSponsorSettingsChanged') sponsorSettingsRevision: number = 0;
-  private sponsorNoticeSegment: SponsorBlockSegment | null = null;
-  private sponsorNoticeTimer: number = -1;
-  private sponsorUndoTime: number = -1;
-  private sponsorMuted: boolean = false;
-  private sponsorHandled: Set<string> = new Set<string>();
-  private sponsorDismissed: Set<string> = new Set<string>();
-  private sponsorViewed: Set<string> = new Set<string>();
+  /** 空降运行时域（片段命中/跳段/静音/提示卡/投票）抽到 PlayerSponsorController。 */
+  private sponsorCtl: PlayerSponsorController = new PlayerSponsorController({
+    isDestroyed: (): boolean => this.destroyed,
+    getSegments: (): Array<SponsorBlockSegment> => this.sponsorSegments,
+    setSegments: (segments: Array<SponsorBlockSegment>): void => {
+      this.sponsorSegments = segments;
+    },
+    getSponsorSkipEnabled: (): boolean => this.sponsorSkipEnabled,
+    getPlayhead: (): number => this.playheadSec,
+    applyNotice: (ui: SponsorNoticeUi | null): void => {
+      if (ui === null) {
+        this.sponsorNoticeVisible = false;
+        this.sponsorNoticeManual = false;
+        this.sponsorNoticeCanUndo = false;
+        return;
+      }
+      this.sponsorNoticeTitle = ui.title;
+      this.sponsorNoticeDetail = ui.detail;
+      this.sponsorNoticeColor = ui.color;
+      this.sponsorNoticeManual = ui.manual;
+      this.sponsorNoticeCanUndo = ui.canUndo;
+      this.sponsorNoticeCanVote = ui.canVote;
+      this.sponsorNoticeVisible = true;
+    },
+    onFullLabel: (label: string, color: string): void => this.onSponsorFullLabel(label, color),
+    seekTo: (seconds: number, precise: boolean): void => this.seekTo(seconds, precise),
+    muteImmediately: (): void => this.muteImmediately(),
+    restoreUserVolume: (): void => this.restoreUserVolume(),
+    isFirstFrameMuteArmed: (): boolean => this.firstFrameMuteArmed,
+    toast: (message: string): void => this.toast(message),
+    getBvid: (): string => this.bvid,
+    getCid: (): number => this.cid,
+  });
   private subtitleCtl: PlayerSubtitleController | null = null;
   private avSessionHelper: PlayerAvSessionHelper | null = null;
   private dmListSource: BasicDataSource<DanmakuItem> = new BasicDataSource<DanmakuItem>();
@@ -398,7 +426,7 @@ export struct PlayerView {
         (): boolean => this.audioPrepared,
         (targetMs: number, resumePlaying: boolean): void => {
           this.preparePlayersForSeek(targetMs, resumePlaying);
-          this.stopDmLoop(false);
+          this.dmClock.stop(false);
         },
         (on: boolean): void => {
           this.buffering = on;
@@ -514,7 +542,7 @@ if (this.runtimeSources.length === 0) {
 
   onSponsorSettingsChanged(): void {
     this.sponsorCategories = SponsorBlockStore.categories();
-    this.updateSponsorFullLabel();
+    this.sponsorCtl.refreshFullLabel();
   }
 
   private ensureAVSession(): void {
@@ -724,7 +752,7 @@ if (this.runtimeSources.length === 0) {
     try {
       video.pause();
       audio.play();
-      this.pauseDmLoop();
+      this.dmClock.pause();
       Immersive.setKeepScreenOn(false);
       this.updateAVSessionPlaybackState();
       if (DEBUG) {
@@ -973,11 +1001,9 @@ if (this.runtimeSources.length === 0) {
     this.subtitleCtl?.reset();
     // 换源立即作废旧视频的空降片段与章节：若等新首帧后的异步加载返回才清，
     // 窗口期内新视频命中旧片段时间区间会误自动跳段、进度条短暂显示旧章节。
-    this.sponsorSegments = [];
-    this.resetSponsorRuntime();
-    this.updateSponsorFullLabel();
+    this.sponsorCtl.invalidateForSourceChange();
     this.chapters = [];
-    this.stopDmLoop(true);
+    this.dmClock.stop(true);
     this.dmEngine.list = [];
     this.dmEngine.cursor = 0;
     this.seekLocked = false;
@@ -1033,7 +1059,7 @@ if (this.runtimeSources.length === 0) {
     this.invalidatePlayerCreation();
     AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
     this.endHoldSpeed();
-    this.clearSponsorNoticeTimer();
+    this.sponsorCtl.clearNoticeTimer();
     this.resumeAfterPrepare = this.playheadSec;
     this.shouldPlayAfterPrepare = false;
     if (this.seekCtl !== null) this.seekCtl.seekResumePlaying = false;
@@ -1081,7 +1107,7 @@ if (this.runtimeSources.length === 0) {
     }
     this.playing = false;
     this.showControls = true;
-    this.pauseDmLoop();
+    this.dmClock.pause();
     this.onPlayingChange(false);
     // pause 完成后恢复音量；播放器仍保持暂停，返回点击继续时声音正常。
     if (this.volumeRestoreTimer >= 0) clearTimeout(this.volumeRestoreTimer);
@@ -1089,7 +1115,7 @@ if (this.runtimeSources.length === 0) {
       this.volumeRestoreTimer = -1;
       if (this.destroyed) return;
       try {
-        const restoreVolume: number = this.sponsorMuted ? 0 : 1;
+        const restoreVolume: number = this.sponsorCtl.isMuted() ? 0 : 1;
         if (this.player === video && video !== null && this.prepared) video.setVolume(restoreVolume);
         if (this.audioPlayer === audio && audio !== null && this.audioPrepared) audio.setVolume(restoreVolume);
       } catch (e) {
@@ -1108,7 +1134,7 @@ if (this.runtimeSources.length === 0) {
 
   private restoreUserVolume(): void {
     try {
-      const restoreVolume: number = this.sponsorMuted ? 0 : 1;
+      const restoreVolume: number = this.sponsorCtl.isMuted() ? 0 : 1;
       if (this.player !== null && this.prepared) this.player.setVolume(restoreVolume);
       if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.setVolume(restoreVolume);
     } catch (e) {
@@ -1172,184 +1198,14 @@ if (this.runtimeSources.length === 0) {
       this.seekRecoveryActive = false;
       this.seekRecoveryCoverVisible = false;
       this.buffering = false;
-      if (this.playing) this.startDmLoop();
+      if (this.playing) this.dmClock.start();
     }
-  }
-
-  async loadSponsorSegments(ignoreCache: boolean = false): Promise<void> {
-    const bvid: string = this.bvid;
-    const cid: number = this.cid;
-    this.sponsorSegments = [];
-    this.resetSponsorRuntime();
-    try {
-      const segments: Array<SponsorBlockSegment> = await SponsorBlockApi.getSegments(bvid, cid, ignoreCache);
-      if (this.destroyed || this.bvid !== bvid || this.cid !== cid) return;
-      this.sponsorSegments = segments;
-      this.updateSponsorFullLabel();
-    } catch (e) {
-      // 空降数据是增强能力，请求失败不能影响播放器主流程。
-    }
-  }
-
-  private sponsorKey(segment: SponsorBlockSegment): string {
-    return segment.uuid.length > 0 ? segment.uuid : segment.category + ':' +
-      segment.start.toFixed(3) + ':' + segment.end.toFixed(3);
-  }
-
-  private resetSponsorRuntime(): void {
-    this.sponsorHandled.clear();
-    this.sponsorDismissed.clear();
-    this.sponsorViewed.clear();
-    this.setSponsorMuted(false);
-    this.sponsorUndoTime = -1;
-    this.sponsorFullLabel = '';
-    this.hideSponsorNotice(false);
-  }
-
-  private clearSponsorNoticeTimer(): void {
-    if (this.sponsorNoticeTimer >= 0) {
-      clearTimeout(this.sponsorNoticeTimer);
-      this.sponsorNoticeTimer = -1;
-    }
-  }
-
-  private updateSponsorFullLabel(): void {
-    let label: string = '';
-    let color: string = '#008A5C';
-    for (let i: number = 0; i < this.sponsorSegments.length; i++) {
-      const segment: SponsorBlockSegment = this.sponsorSegments[i];
-      if (segment.actionType === 'full' && SponsorBlockStore.modeFor(segment.category) !== SponsorBlockMode.DISABLED) {
-        const category: SponsorBlockCategory = sponsorBlockCategory(segment.category);
-        label = category.label;
-        color = category.color;
-        break;
-      }
-    }
-    if (label === this.sponsorFullLabel && color === this.sponsorFullColor) return;
-    this.sponsorFullLabel = label;
-    this.sponsorFullColor = color;
-    // 全视频标签不再画在画面上：交给详情页显示在标题前（全屏时无标题，自然隐藏）。
-    this.onSponsorFullLabel(label, color);
-  }
-
-  private showSponsorNotice(segment: SponsorBlockSegment, manual: boolean, canUndo: boolean): void {
-    const category: SponsorBlockCategory = sponsorBlockCategory(segment.category);
-    this.clearSponsorNoticeTimer();
-    this.sponsorNoticeSegment = segment;
-    this.sponsorNoticeTitle = (canUndo ? '已空降 ' : '') + category.label;
-    this.sponsorNoticeDetail = sponsorBlockActionLabel(segment.actionType) + ' · ' +
-      formatDuration(segment.start) + ' - ' + formatDuration(segment.end);
-    this.sponsorNoticeColor = category.color;
-    this.sponsorNoticeManual = manual;
-    this.sponsorNoticeCanUndo = canUndo;
-    this.sponsorNoticeCanVote = segment.uuid.length > 0;
-    this.sponsorNoticeVisible = true;
-    const autoCloseDelay: number = manual ? 6000 : (canUndo ? 5000 : 3500);
-    this.sponsorNoticeTimer = setTimeout(() => {
-      this.sponsorNoticeTimer = -1;
-      // 手动提示超时等同于用户关闭，防止仍处于片段内时下一次进度回调立即重弹。
-      this.hideSponsorNotice(manual);
-    }, autoCloseDelay);
-  }
-
-  private hideSponsorNotice(dismiss: boolean = true): void {
-    this.clearSponsorNoticeTimer();
-    if (dismiss && this.sponsorNoticeSegment !== null) {
-      this.sponsorDismissed.add(this.sponsorKey(this.sponsorNoticeSegment));
-    }
-    this.sponsorNoticeVisible = false;
-    this.sponsorNoticeManual = false;
-    this.sponsorNoticeCanUndo = false;
-    this.sponsorNoticeSegment = null;
-  }
-
-  private setSponsorMuted(muted: boolean): void {
-    if (this.sponsorMuted === muted) return;
-    this.sponsorMuted = muted;
-    if (muted) this.muteImmediately();
-    else if (!this.firstFrameMuteArmed) this.restoreUserVolume();
-  }
-
-  private recordSponsorView(segment: SponsorBlockSegment, seconds: number): void {
-    const key: string = this.sponsorKey(segment);
-    if (this.sponsorViewed.has(key)) return;
-    this.sponsorViewed.add(key);
-    if (seconds > 0) SponsorBlockStore.recordSkip(seconds);
-    SponsorBlockApi.reportViewed(segment.uuid).catch(() => {});
-  }
-
-  private executeSponsorSegment(segment: SponsorBlockSegment, now: number): void {
-    const key: string = this.sponsorKey(segment);
-    this.sponsorHandled.add(key);
-    this.sponsorDismissed.delete(key);
-    if (segment.actionType === 'mute') {
-      this.sponsorUndoTime = now;
-      this.setSponsorMuted(true);
-      this.showSponsorNotice(segment, false, true);
-      return;
-    }
-    if (segment.actionType === 'poi') {
-      this.sponsorUndoTime = now;
-      this.seekTo(segment.start, true);
-      this.showSponsorNotice(segment, false, true);
-      return;
-    }
-    if (segment.actionType === 'full') {
-      this.showSponsorNotice(segment, false, false);
-      return;
-    }
-    this.sponsorUndoTime = now;
-    this.seekTo(segment.end + 0.01, true);
-    this.recordSponsorView(segment, Math.max(0, segment.end - now));
-    this.showSponsorNotice(segment, false, true);
-  }
-
-  private undoSponsorSkip(): void {
-    const segment: SponsorBlockSegment | null = this.sponsorNoticeSegment;
-    if (segment === null) return;
-    if (segment.actionType === 'mute') {
-      this.setSponsorMuted(false);
-    } else if (this.sponsorUndoTime >= 0) {
-      this.seekTo(this.sponsorUndoTime, true);
-    }
-    this.sponsorHandled.add(this.sponsorKey(segment));
-    this.hideSponsorNotice(false);
-  }
-
-  private sponsorNoticePrimary(): void {
-    const segment: SponsorBlockSegment | null = this.sponsorNoticeSegment;
-    if (segment === null) return;
-    if (this.sponsorNoticeCanUndo) this.undoSponsorSkip();
-    else this.executeSponsorSegment(segment, this.playheadSec);
-  }
-
-  private voteSponsor(type: number): void {
-    const segment: SponsorBlockSegment | null = this.sponsorNoticeSegment;
-    if (segment === null) return;
-    this.voteSponsorSegment(segment, type);
-  }
-
-  private voteSponsorSegment(segment: SponsorBlockSegment, type: number): void {
-    SponsorBlockApi.vote(segment.uuid, type).then((result: SponsorBlockResult) => {
-      this.toast(result.message);
-      if (!result.ok) return;
-      segment.votes += type === 1 ? 1 : -1;
-      if (type === 0) {
-        const key: string = this.sponsorKey(segment);
-        this.sponsorSegments = this.sponsorSegments.filter((item: SponsorBlockSegment) =>
-          this.sponsorKey(item) !== key);
-        this.setSponsorMuted(false);
-        this.hideSponsorNotice(false);
-      } else {
-        this.sponsorSegments = this.sponsorSegments.slice();
-      }
-    }).catch(() => this.toast('投票失败，请稍后重试'));
   }
 
   private changeSponsorMode(category: string, mode: number): void {
     SponsorBlockStore.setMode(category, mode);
     this.sponsorCategories = SponsorBlockStore.categories();
-    this.updateSponsorFullLabel();
+    this.sponsorCtl.refreshFullLabel();
   }
 
   private markSponsorStart(): void {
@@ -1396,7 +1252,7 @@ if (this.runtimeSources.length === 0) {
   }
 
   private seekSponsorSegment(segment: SponsorBlockSegment): void {
-    this.sponsorHandled.add(this.sponsorKey(segment));
+    this.sponsorCtl.markHandled(segment);
     this.seekTo(segment.start, true);
     this.closeSettingPanels();
   }
@@ -1440,7 +1296,7 @@ if (this.runtimeSources.length === 0) {
       if (result.uuids.length > 0) segment.uuid = result.uuids[0];
       this.sponsorSegments = this.sponsorSegments.concat([segment]);
       this.sponsorSegments.sort((a: SponsorBlockSegment, b: SponsorBlockSegment) => a.start - b.start);
-      this.updateSponsorFullLabel();
+      this.sponsorCtl.refreshFullLabel();
       this.clearSponsorDraft();
       this.toast(result.message);
       this.loadSponsorUserInfo(true).catch(() => {});
@@ -1487,8 +1343,7 @@ if (this.runtimeSources.length === 0) {
     this.sponsorSkipEnabled = next;
     AppTheme.persistSponsorSkip(next);
     if (!next) {
-      this.setSponsorMuted(false);
-      this.hideSponsorNotice(false);
+      this.sponsorCtl.deactivate();
     }
     this.toast(next ? '空降助手已开启' : '空降助手已关闭');
   }
@@ -1514,42 +1369,6 @@ if (this.runtimeSources.length === 0) {
     } catch (e) {
       // 章节请求失败时保留普通进度条，不影响播放。
     }
-  }
-
-  maybeSkipSponsor(now: number): boolean {
-    if (!this.sponsorSkipEnabled || this.sponsorSegments.length === 0) {
-      this.setSponsorMuted(false);
-      return false;
-    }
-    let keepMuted: boolean = false;
-    let activeManual: boolean = false;
-    for (let i: number = 0; i < this.sponsorSegments.length; i++) {
-      const segment: SponsorBlockSegment = this.sponsorSegments[i];
-      const mode: number = SponsorBlockStore.modeFor(segment.category);
-      if (mode === SponsorBlockMode.DISABLED || segment.actionType === 'full' || segment.actionType === 'poi') continue;
-      const inside: boolean = now >= segment.start && now < segment.end - 0.04;
-      if (!inside) continue;
-      const key: string = this.sponsorKey(segment);
-      if (segment.actionType === 'mute' && (mode === SponsorBlockMode.AUTO || this.sponsorHandled.has(key))) {
-        keepMuted = true;
-      }
-      if (this.sponsorHandled.has(key) || this.sponsorDismissed.has(key)) continue;
-      if (mode === SponsorBlockMode.AUTO) {
-        this.executeSponsorSegment(segment, now);
-        this.setSponsorMuted(segment.actionType === 'mute');
-        return segment.actionType === 'skip';
-      }
-      if (mode === SponsorBlockMode.MANUAL) {
-        activeManual = true;
-        if (!this.sponsorNoticeVisible || this.sponsorNoticeSegment === null ||
-          this.sponsorKey(this.sponsorNoticeSegment) !== key) {
-          this.showSponsorNotice(segment, true, false);
-        }
-      }
-    }
-    this.setSponsorMuted(keepMuted);
-    if (!activeManual && this.sponsorNoticeManual) this.hideSponsorNotice(false);
-    return false;
   }
 
   async loadDanmaku(): Promise<void> {
@@ -1673,7 +1492,7 @@ if (this.runtimeSources.length === 0) {
     if (this.deferredLoadsDone || this.destroyed) return;
     this.deferredLoadsDone = true;
     this.cancelDeferredLoadTimer();
-    this.loadSponsorSegments();
+    this.sponsorCtl.loadSponsorSegments();
     this.loadVideoChapters();
     this.seekPreviewCtl.preload(this.aid, this.bvid, this.cid);
     this.loadOnlineTotal();
@@ -1709,7 +1528,7 @@ if (this.runtimeSources.length === 0) {
           this.reportVideoSize(p);
           try {
             p.setPlaybackRate(this.playbackRate);
-            p.setVolume(this.sponsorMuted ? 0 : 1);
+            p.setVolume(this.sponsorCtl.isMuted() ? 0 : 1);
           } catch (e) {
             // 某些视频解码器不支持非常用倍速，保持 1x 即可。
           }
@@ -1721,18 +1540,18 @@ if (this.runtimeSources.length === 0) {
           this.revealFirstFrameIfReady();
           this.onPlayingChange(true);
           this.scheduleControlsHide();
-          this.startDmLoop();
+          this.dmClock.start();
           this.buffering = false;
           this.ensureAVSession();
           this.updateAVSessionPlaybackState();
           Immersive.setKeepScreenOn(true);
         } else if (state === 'paused' && (this.backgroundAudioOnly || this.backgroundVideoResumePending)) {
           // 后台音乐模式只暂停视频轨；逻辑播放态和 AVSession 仍由音频轨维持。
-          this.pauseDmLoop();
+          this.dmClock.pause();
           Immersive.setKeepScreenOn(false);
         } else if (state === 'paused' && ((this.seekCtl?.seekInFlight ?? false) || this.seekRecoveryActive)) {
           // seek 内部暂停只是解码状态切换，不能把逻辑播放态、系统媒体会话和控制栏改成“用户暂停”。
-          this.pauseDmLoop();
+          this.dmClock.pause();
         } else if (state === 'paused' || state === 'completed') {
           this.resumeTransitionActive = false;
           this.playing = false;
@@ -1742,7 +1561,7 @@ if (this.runtimeSources.length === 0) {
             this.hideTimer = -1;
           }
           this.onPlayingChange(false);
-          this.pauseDmLoop();
+          this.dmClock.pause();
           this.updateAVSessionPlaybackState();
           Immersive.setKeepScreenOn(false);
             if (state === 'completed') {
@@ -1816,7 +1635,7 @@ if (this.runtimeSources.length === 0) {
         this.spawnDanmaku(nextTime);
         // 弹幕分段预取：进入新段或逼近段尾时拉取下一段（XML 兜底模式下为空操作）。
         this.prefetchDanmakuSegments(nextTime);
-        if (this.maybeSkipSponsor(nextTime)) return;
+        if (this.sponsorCtl.maybeSkipSponsor(nextTime)) return;
         this.checkAudioSync(t);
       });
       p.on('durationUpdate', (d: number) => {
@@ -1829,7 +1648,7 @@ if (this.runtimeSources.length === 0) {
       const pauseForBuffer = (): void => {
         // seek 的短暂缓冲由延迟提示管理，快速定位不闪 loading。
         if ((this.seekCtl?.seekInFlight ?? true) === false) this.buffering = true;
-        this.pauseDmLoop();
+        this.dmClock.pause();
         const audio: media.AVPlayer | null = this.audioPlayer;
         if (audio !== null && this.audioPrepared && this.playing &&
           !(this.seekCtl?.seekInFlight ?? true) && bufferingAudioPause === null) {
@@ -1872,7 +1691,7 @@ if (this.runtimeSources.length === 0) {
           // seek 尚未完成音轨对齐时不能提前隐藏 loading 或恢复弹幕时钟。
           if ((this.seekCtl?.seekInFlight ?? true) === false && !this.seekRecoveryActive) {
             this.buffering = false;
-            this.startDmLoop();
+            this.dmClock.start();
           }
         }
       });
@@ -1966,7 +1785,7 @@ if (this.runtimeSources.length === 0) {
         this.audioPrepared = true;
         try {
           audio.setPlaybackRate(this.playbackRate);
-          audio.setVolume(this.sponsorMuted ? 0 : 1);
+          audio.setVolume(this.sponsorCtl.isMuted() ? 0 : 1);
         } catch (e) {
           // 倍速不被音频解码器支持时，设置入口会统一回退到 1x。
         }
@@ -2022,7 +1841,7 @@ if (this.runtimeSources.length === 0) {
       }
       // 后台听视频时视频轨已暂停，SponsorBlock 的跳段/静音只能由音频轨进度回调驱动；
       // skip 触发的 seekTo 走双轨定位，与前台行为一致。
-      this.maybeSkipSponsor(nextTime);
+      this.sponsorCtl.maybeSkipSponsor(nextTime);
     });
     try {
       const source: media.MediaSource = media.createMediaSourceWithUrl(sourceUrl, this.playbackHeaders());
@@ -2259,7 +2078,7 @@ if (this.runtimeSources.length === 0) {
       this.firstRenderReady = false;
       this.buffering = true;
       this.closeSettingPanels();
-      this.stopDmLoop(false);
+      this.dmClock.stop(false);
       if (oldPlayer !== null) {
         try {
           await oldPlayer.release();
@@ -2669,10 +2488,7 @@ if (this.runtimeSources.length === 0) {
     this.resumeTransitionActive = this.compactMode && !this.fullscreen;
     this.onResumeRequest();
     try {
-      this.sponsorHandled.clear();
-      this.sponsorDismissed.clear();
-      this.setSponsorMuted(false);
-      this.hideSponsorNotice(false);
+      this.sponsorCtl.resetForReplay();
       this.resetDanmakuAt(0);
       this.playheadSec = 0;
       this.curTime = 0;
@@ -3201,8 +3017,8 @@ if (this.runtimeSources.length === 0) {
     this.seekRecoveryActive = false;
     this.seekRecoveryCoverVisible = false;
     this.audioStartPending = false;
-    this.stopDmLoop(true);
-    this.releaseDmClock();
+    this.dmClock.stop(true);
+    this.dmClock.release();
     this.dmEngine.clearCaches();
     Immersive.setKeepScreenOn(false);
     this.deactivateAVSession();
@@ -3231,112 +3047,7 @@ if (this.runtimeSources.length === 0) {
 
   spawnDanmaku(now: number): void {
     this.dmEngine.spawn(now);
-    if (this.dmEngine.active.length > 0) this.startDmLoop();
-  }
-
-  /** 统一绘制入口：画布上已经没有活动弹幕时顺带停掉定时器。 */
-  private renderDanmakuFrame(advance: boolean = true, frameTimeMs: number = Date.now()): void {
-    this.dmEngine.drawFrame(advance, frameTimeMs);
-    if (this.dmEngine.active.length === 0) this.stopDmLoop(false);
-  }
-
-  startDmLoop(): void {
-    if (this.dmLoopRunning || !this.danmakuOn || this.dmEngine.active.length === 0) {
-      return;
-    }
-    this.dmEngine.lastDrawMs = 0;
-    this.dmLastFrameMs = 0;
-    this.dmLoopRunning = true;
-    try {
-      if (this.dmDisplaySync === null) {
-        const sync: displaySync.DisplaySync = displaySync.create();
-        sync.setExpectedFrameRateRange(this.dmExpectedFrameRateRange());
-        sync.on('frame', (info: displaySync.IntervalInfo): void => {
-          if (this.dmLoopRunning && this.playing && this.danmakuOn && this.dmEngine.active.length > 0) {
-            const frameTimeMs: number = info.timestamp / 1_000_000;
-            if (this.shouldRenderDmFrame(frameTimeMs)) this.renderDanmakuFrame(true, frameTimeMs);
-          }
-        });
-        this.dmDisplaySync = sync;
-      }
-      this.dmDisplaySync.start();
-    } catch (e) {
-      // API 26 正常走 DisplaySync；仅为异常 ROM 保留可播放兜底。
-      this.dmFallbackTick = setInterval(() => {
-        if (this.dmLoopRunning && this.playing && this.danmakuOn && this.dmEngine.active.length > 0) {
-          const frameTimeMs: number = Date.now();
-          if (this.shouldRenderDmFrame(frameTimeMs)) this.renderDanmakuFrame(true, frameTimeMs);
-        }
-      }, 16);
-    }
-  }
-
-  /** 暂停/缓冲时只停时钟，保留已上屏弹幕；恢复播放后从当前帧继续推进。 */
-  private pauseDmLoop(): void {
-    this.stopDmClock();
-    this.dmEngine.lastDrawMs = 0;
-  }
-
-  stopDmLoop(clearActive: boolean): void {
-    this.stopDmClock();
-    this.dmEngine.lastDrawMs = 0;
-    if (clearActive) {
-      this.dmEngine.clearActive();
-      this.dmPinnedVisible = false;
-      this.dmPinnedText = '';
-    } else {
-      this.dmEngine.clearCanvas();
-    }
-  }
-
-  private stopDmClock(): void {
-    this.dmLoopRunning = false;
-    this.dmLastFrameMs = 0;
-    if (this.dmDisplaySync !== null) {
-      try {
-        this.dmDisplaySync.stop();
-      } catch (e) {
-      }
-    }
-    if (this.dmFallbackTick >= 0) {
-      clearInterval(this.dmFallbackTick);
-      this.dmFallbackTick = -1;
-    }
-  }
-
-  private shouldRenderDmFrame(frameTimeMs: number): boolean {
-    // 不再因弹幕密度或长按倍速暗中降到 30/20fps；用户选择的帧率是唯一上限。
-    // 实际位移仍按两次绘制的真实时间差推进，设备刷新率不足时不会慢放或失去音画同步。
-    const minIntervalMs: number = 1000 / Math.max(24, this.dmFrameRate);
-    if (this.dmLastFrameMs <= 0) {
-      this.dmLastFrameMs = frameTimeMs;
-      return true;
-    }
-    const nextFrameMs: number = this.dmLastFrameMs + minIntervalMs;
-    if (frameTimeMs + 0.5 < nextFrameMs) {
-      return false;
-    }
-    // 按目标时间线累积而不是重置为实际回调时间：120Hz 上选择 90fps 时会以 2/1/1 帧
-    // 的节奏逼近 90，而不是每次都从当前帧重算后退化成固定 60fps。
-    const overdueMs: number = Math.max(0, frameTimeMs - nextFrameMs);
-    this.dmLastFrameMs = nextFrameMs + Math.floor(overdueMs / minIntervalMs) * minIntervalMs;
-    return true;
-  }
-
-  private dmExpectedFrameRateRange(): ExpectedFrameRateRange {
-    const target: number = Math.max(24, Math.min(120, Math.round(this.dmFrameRate)));
-    return { min: Math.min(30, target), max: target, expected: target };
-  }
-
-  private releaseDmClock(): void {
-    this.stopDmClock();
-    if (this.dmDisplaySync !== null) {
-      try {
-        this.dmDisplaySync.off('frame');
-      } catch (e) {
-      }
-      this.dmDisplaySync = null;
-    }
+    if (this.dmEngine.active.length > 0) this.dmClock.start();
   }
 
   toggleDanmaku(): void {
@@ -3348,7 +3059,7 @@ if (this.runtimeSources.length === 0) {
     this.danmakuOn = enabled;
     this.dmEngine.enabled = enabled;
     if (!enabled) {
-      this.stopDmLoop(true);
+      this.dmClock.stop(true);
     } else {
       // 重新开启时从当前播放位置继续，不补画已经错过的一大批弹幕。
       this.dmEngine.syncCursor(this.playheadSec - 0.08);
@@ -3359,16 +3070,16 @@ if (this.runtimeSources.length === 0) {
   }
 
   restartDmLoopForViewport(): void {
-    const shouldRestart: boolean = this.dmLoopRunning;
-    this.stopDmLoop(false);
+    const shouldRestart: boolean = this.dmClock.isRunning();
+    this.dmClock.stop(false);
     this.dmEngine.clearCaches();
     // 横竖屏字号和轨道数不同，切换时立即重排，避免旋转后沿用旧坐标产生抽搐。
     this.setDmFontScale(this.dmFontScale);
-    if (shouldRestart || (this.playing && this.dmEngine.active.length > 0)) this.startDmLoop();
+    if (shouldRestart || (this.playing && this.dmEngine.active.length > 0)) this.dmClock.start();
   }
 
   resetDanmakuAt(time: number): void {
-    this.stopDmLoop(true);
+    this.dmClock.stop(true);
     this.dmEngine.resetAt(time);
   }
 
@@ -3425,14 +3136,7 @@ if (this.runtimeSources.length === 0) {
 
   setDmFrameRate(value: number): void {
     this.dmFrameRate = Math.max(24, Math.min(120, Math.round(value)));
-    this.dmLastFrameMs = 0;
-    if (this.dmDisplaySync !== null) {
-      try {
-        this.dmDisplaySync.setExpectedFrameRateRange(this.dmExpectedFrameRateRange());
-      } catch (e) {
-        // 系统不接受高于屏幕刷新率的目标值时，DisplaySync 会继续使用设备可用帧率。
-      }
-    }
+    this.dmClock.frameRateChanged();
     this.persistDanmaku();
   }
 
@@ -3474,7 +3178,7 @@ if (this.runtimeSources.length === 0) {
     this.dmEngine.blockColorDm = this.blockColorDm;
     this.dmEngine.minWeight = this.dmBlockLevel;
     this.dmEngine.applyFilters();
-    if (this.dmEngine.active.length === 0) this.stopDmLoop(false);
+    if (this.dmEngine.active.length === 0) this.dmClock.stop(false);
     this.persistDanmaku();
   }
 
@@ -3672,9 +3376,9 @@ if (this.runtimeSources.length === 0) {
             manual: this.sponsorNoticeManual,
             canUndo: this.sponsorNoticeCanUndo,
             canVote: this.sponsorNoticeCanVote,
-            onPrimary: () => this.sponsorNoticePrimary(),
-            onVote: (type: number) => this.voteSponsor(type),
-            onClose: () => this.hideSponsorNotice(true),
+            onPrimary: () => this.sponsorCtl.noticePrimary(),
+            onVote: (type: number) => this.sponsorCtl.voteNotice(type),
+            onClose: () => this.sponsorCtl.hideNotice(true),
           })
         }
         .width('100%')
@@ -4103,7 +3807,7 @@ if (this.runtimeSources.length === 0) {
       },
       onSponsorModeChange: (category: string, mode: number) => this.changeSponsorMode(category, mode),
       onSponsorRefresh: () => {
-        this.loadSponsorSegments(true);
+        this.sponsorCtl.loadSponsorSegments(true);
         this.loadSponsorUserInfo(true).catch(() => {});
       },
       onSponsorMarkStart: () => this.markSponsorStart(),
@@ -4116,7 +3820,7 @@ if (this.runtimeSources.length === 0) {
       onSponsorClear: () => this.clearSponsorDraft(),
       onSponsorSubmit: () => this.submitSponsorDraft().catch(() => {}),
       onSponsorSegmentSeek: (segment: SponsorBlockSegment) => this.seekSponsorSegment(segment),
-      onSponsorSegmentVote: (segment: SponsorBlockSegment, type: number) => this.voteSponsorSegment(segment, type),
+      onSponsorSegmentVote: (segment: SponsorBlockSegment, type: number) => this.sponsorCtl.voteSegment(segment, type),
       onSponsorUserNameChange: (value: string) => this.sponsorUserName = value,
       onSponsorSaveUserName: () => this.saveSponsorUsername().catch(() => this.toast('昵称更新失败')),
       onSponsorAcknowledgeWarning: () => this.acknowledgeSponsorWarning().catch(() => this.toast('操作失败')),
