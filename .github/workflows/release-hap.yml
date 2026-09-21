@@ -1,11 +1,14 @@
 name: Build release HAP
 
+# 每次 push 到 main（或手动触发）：GitHub 官方 ubuntu 机器构建未签名 release HAP，
+# 全量 QA 通过后发布到滚动 Release（tag=latest，每次刷新覆盖）。
 on:
   push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # 发布 Release 需要
 
 concurrency:
   group: release-hap-${{ github.ref }}
@@ -13,89 +16,127 @@ concurrency:
 
 jobs:
   build-release-hap:
-    # HarmonyOS API 26 / DevEco Studio is not installed on GitHub-hosted runners.
-    # Register a macOS ARM64 self-hosted runner with the custom label "biliharmony".
-    runs-on: [self-hosted, macOS, ARM64, biliharmony]
-    timeout-minutes: 30
-    env:
-      HARMONY_BUILD_PROFILE_B64: ${{ secrets.HARMONY_BUILD_PROFILE_B64 }}
-
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Check DevEco toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -x /Applications/DevEco-Studio.app/Contents/tools/hvigor/bin/hvigorw
-          test -x /Applications/DevEco-Studio.app/Contents/tools/ohpm/bin/ohpm
-          test -d /Applications/DevEco-Studio.app/Contents/sdk/default
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
-      - name: Apply private signing configuration
-        shell: bash
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # hvigor 的纹理压缩工具链在 Linux 上需要 mesa GL。
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev
+
+      # 下载 HarmonyOS command-line-tools + API 26 SDK（与 compileSdkVersion 26.0.0 对应），
+      # 设置 HOS_SDK_HOME 并把 hvigorw/ohpm 加入 PATH。
+      - name: Set up HarmonyOS command-line tools (API 26)
+        uses: ErBWs/setup-ohos@v2
+        with:
+          version: '26.0.0.821'
+          cache: true
+
+      - name: Locate toolchain
         run: |
           set -euo pipefail
-          if [ -n "${HARMONY_BUILD_PROFILE_B64}" ]; then
-            printf '%s' "${HARMONY_BUILD_PROFILE_B64}" | /usr/bin/base64 -D > build-profile.json5
-            echo "Signing configuration loaded from GitHub Actions secrets."
-          else
-            echo "No signing secret configured; the unsigned release HAP will still be uploaded."
+          echo "HOS_SDK_HOME=$HOS_SDK_HOME" >> "$GITHUB_ENV"
+          echo "DEVECO_SDK_HOME=$HOS_SDK_HOME" >> "$GITHUB_ENV"
+          CTL_ROOT="$(dirname "$HOS_SDK_HOME")"
+          echo "CTL_ROOT=$CTL_ROOT" >> "$GITHUB_ENV"
+          echo "$CTL_ROOT/bin" >> "$GITHUB_PATH"
+          hvigorw_path="$(find "$CTL_ROOT" -name hvigorw -type f | head -1)"
+          echo "hvigorw: ${hvigorw_path:-MISSING}"
+          # QA 沙箱的 TypeScript 转译器优先用工具链自带的一份；没有就临时装一份。
+          ts_dir="$(find "$CTL_ROOT" -type d -path '*hvigor/node_modules/typescript' | head -1)"
+          if [ -z "$ts_dir" ]; then
+            npm i --prefix "$RUNNER_TEMP/ts" typescript@5.8 --no-audit --no-fund
+            ts_dir="$RUNNER_TEMP/ts/node_modules/typescript"
           fi
-          # 旧签名 Secret 可能保留 API 24；仅统一 SDK 元数据，保留全部签名字段。
+          echo "ARKTS_TEST_TYPESCRIPT=$ts_dir" >> "$GITHUB_ENV"
+          java -version 2>&1 | head -1
+          node --version
+
+      - name: Install dependencies
+        run: ohpm install --all
+
+      # 仓库内 build-profile 的 signingConfigs 为空数组（签名材料不入库），
+      # 摘除 product 对默认签名配置的悬空引用，hvigor 才会产出未签名 HAP 而非报错。
+      - name: Neutralize dangling signing reference
+        run: |
           python3 - <<'PY'
           from pathlib import Path
           import re
-          profile = Path('build-profile.json5')
-          updated, count = re.subn(r'("compatibleSdkVersion"\s*:\s*)("[^"]*"|\d+)',
-                                   r'\1"26.0.0"', profile.read_text())
-          if count == 0:
-              raise SystemExit('compatibleSdkVersion is missing from build-profile.json5')
-          profile.write_text(updated)
+          p = Path('build-profile.json5')
+          text = p.read_text()
+          if re.search(r'"signingConfigs"\s*:\s*\[\s*\]', text):
+              stripped = re.sub(r'"signingConfig"\s*:\s*"default"\s*,?', '', text)
+              if stripped != text:
+                  p.write_text(stripped)
+                  print('removed dangling signingConfig reference')
+              else:
+                  print('no dangling signingConfig reference found')
+          else:
+              print('signing configs present, leaving profile untouched')
           PY
 
       - name: Run service regression tests
-        shell: bash
-        run: /Applications/DevEco-Studio.app/Contents/tools/node/bin/node --test --test-timeout=10000 tool/qa/regression.test.cjs tool/qa/lifecycle.test.cjs tool/qa/danmaku.test.cjs tool/qa/parity.test.cjs tool/qa/dock-transition.test.cjs tool/qa/handedness.test.cjs
+        run: |
+          node --test --test-timeout=10000 \
+            tool/qa/danmaku.test.cjs tool/qa/dock-transition.test.cjs tool/qa/handedness.test.cjs \
+            tool/qa/lifecycle.test.cjs tool/qa/parity.test.cjs tool/qa/player-seek.test.cjs \
+            tool/qa/regression.test.cjs
 
-      - name: Build release HAP
-        shell: bash
-        run: bash tool/build.sh clean release
+      - name: Build unsigned release HAP
+        run: hvigorw clean assembleHap --mode module -p product=default -p buildMode=release
 
-      - name: Verify and checksum release artifacts
-        shell: bash
+      - name: Verify release artifacts
         run: |
           set -euo pipefail
           generated_profile="entry/build/default/generated/profile/default/BuildProfile.ets"
-          output_dir="entry/build/default/outputs/default"
+          grep -Fq "BUILD_MODE_NAME = 'release'" "$generated_profile"
+          grep -Fq "DEBUG = false" "$generated_profile"
+          hap="entry/build/default/outputs/default/entry-default-unsigned.hap"
+          test -f "$hap"
+          ( cd entry/build/default/outputs/default && sha256sum -- *.hap > hap.sha256 )
+          cat "$OUT_DIR/hap.sha256"
+        env:
+          OUT_DIR: entry/build/default/outputs/default
 
-          grep -Fq "BUILD_MODE_NAME = 'release'" "${generated_profile}"
-          grep -Fq "DEBUG = false" "${generated_profile}"
-
-          shopt -s nullglob
-          packages=("${output_dir}"/*.hap)
-          if [ "${#packages[@]}" -eq 0 ]; then
-            echo "::error::No release HAP was generated."
-            exit 1
-          fi
-
-          for package in "${packages[@]}"; do
-            shasum -a 256 "${package}" > "${package}.sha256"
-          done
-
-      - name: Upload release HAP
-        uses: actions/upload-artifact@v7
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
         with:
           name: biliharmony-release-${{ github.run_number }}-${{ github.sha }}
           path: |
             entry/build/default/outputs/default/*.hap
-            entry/build/default/outputs/default/*.hap.sha256
+            entry/build/default/outputs/default/hap.sha256
           if-no-files-found: error
           retention-days: 30
 
-      - name: Remove private signing configuration
-        if: always()
-        shell: bash
-        run: git restore --source=HEAD --worktree build-profile.json5
+      # 滚动 Release：tag=latest，每次推送刷新（删除重建）；未签名 HAP 需自行签名后安装。
+      - name: Publish to rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          OUT=entry/build/default/outputs/default
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest \
+            --title "最新构建（未签名 HAP）" \
+            --prerelease \
+            --notes "自动构建于 commit ${{ github.sha }}（$(date -u '+%Y-%m-%d %H:%M UTC')），push 到 main 触发。
+
+          - \`entry-default-unsigned.hap\`：release 构建、未签名，安装前需自行签名
+          - \`hap.sha256\`：产物校验和
+          - 全量 QA 通过后才会发布本包" \
+            "$OUT/entry-default-unsigned.hap" "$OUT/hap.sha256"
