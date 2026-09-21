@@ -68,6 +68,11 @@ function environment(mocks = {}) {
         taskpool: { execute: async (task, ...args) => task(...args) },
         util: {},
       };
+      // LiveDanmakuClient 等模块引用 hilog：Node 沙箱以静默实现兜底。
+      if (name === '@kit.PerformanceAnalysisKit') {
+        const noop = () => {};
+        return { hilog: { debug: noop, info: noop, warn: noop, error: noop } };
+      }
       throw new Error('Missing platform mock: ' + name);
     };
     // Sendable/Concurrent 是 ArkTS 编译期语义（跨线程共享/并发任务）；Node 沙箱里以恒等装饰器替代。

@@ -7,6 +7,7 @@
 import { webSocket } from '@kit.NetworkKit';
 import { taskpool, util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BiliApi } from '../api/BiliApi';
 import { HttpClient } from '../services/network/HttpClient';
 import { LiveChatMessage, LiveDanmakuInfo, LiveDanmakuServer } from '../model/LiveModels';
@@ -33,6 +34,10 @@ export class LiveDanmakuClient {
   private static readonly MAX_HEARTBEAT_FAILURES: number = 2;
   /** 半开连接判定阈值：应为连接状态但超过该时长无任何入站消息（含 op=3 心跳回应）即主动重连。 */
   private static readonly INBOUND_STALE_MS: number = 90000;
+  /** taskpool 回退只上报一次：这个进程若不支持跨线程传输，每个包都回退但日志只刷一条。 */
+  private static taskpoolFallbackLogged: boolean = false;
+  /** 首次 taskpool 失败后粘性走主线程解码：不再为每个包白跑一次线程池往返。 */
+  private static syncDecode: boolean = false;
   private roomId: number = 0;
   private generation: number = 0;
   private socket: webSocket.WebSocket | null = null;
@@ -61,6 +66,7 @@ export class LiveDanmakuClient {
       const info: LiveDanmakuInfo | null = await LiveApi.getLiveDanmakuInfo(roomId);
       if (this.closed || generation !== this.generation) return;
       if (info === null || info.servers.length === 0) {
+        hilog.warn(0x0000, 'LiveDm', 'getDanmuInfo empty for room %{public}d', roomId);
         this.onConnected(false);
         this.scheduleReconnect();
         return;
@@ -122,6 +128,7 @@ export class LiveDanmakuClient {
         });
       } catch (e) {
         if (this.socket === ws && generation === this.generation && !this.closed) {
+          hilog.warn(0x0000, 'LiveDm', 'ws connect failed code %{public}d', (e as BusinessError).code ?? 0);
           this.onConnected(false);
           this.scheduleReconnect();
         }
@@ -177,6 +184,7 @@ export class LiveDanmakuClient {
   private scheduleReconnect(): void {
     if (this.closed || this.retryTimer >= 0 || this.roomId <= 0) return;
     if (this.retryAttempts >= LiveDanmakuClient.MAX_RETRY_ATTEMPTS) {
+      hilog.error(0x0000, 'LiveDm', 'danmaku reconnect gave up after %{public}d attempts', this.retryAttempts);
       this.onGiveUp();
       return;
     }
@@ -259,12 +267,33 @@ export class LiveDanmakuClient {
   /**
    * 一个二进制包的完整解码与分发。生产路径把切帧 + zlib 解压 + JSON.parse 整体下放
    * taskpool 后台线程（VOD 侧 DanmakuProto 同款模式），主线程只做结构化事件的鉴权与消息分发。
+   * taskpool 执行失败（跨线程序列化限制等）时回退主线程同步解码：慢一些但鉴权与消息
+   * 都不能丢——回退缺失曾导致「弹幕 WebSocket 鉴权永不完成 → 无限重连 → 永远显示重连中」，
+   * 而错误被入队 catch 吞掉、聊天列表靠 HTTP 历史轮询兜底照常流动，完全无感知。
    * Node QA 沙箱没有 taskpool，测试直接驱动 parsePackets 同步路径验证真实解码逻辑。
    */
   private async decodeAndDispatch(buffer: ArrayBuffer, generation: number): Promise<void> {
-    // ArrayBuffer 参数默认转移所有权（零拷贝），入队后主线程不再读取该包。
-    const events: Array<LiveDecodedEvent> = await taskpool.execute(decodeLivePacketsTask, buffer) as Array<LiveDecodedEvent>;
-    this.dispatchDecoded(events, generation);
+    if (LiveDanmakuClient.syncDecode) {
+      this.dispatchDecoded(await decodeLivePacketsCore(buffer), generation);
+      return;
+    }
+    // ArrayBuffer 参数默认转移所有权（零拷贝）；但转移发生在 execute 内部，一旦任务失败
+    // （真实运行时拒绝普通对象数组跨线程返回）原缓冲可能已被剥离，主线程回退解码必须用
+    // 入口处留下的副本，否则鉴权包被静默丢弃、连接永远到不了 op=8。
+    const backup: ArrayBuffer = buffer.slice(0);
+    try {
+      const events: Array<LiveDecodedEvent> =
+        await taskpool.execute(decodeLivePacketsTask, buffer) as Array<LiveDecodedEvent>;
+      this.dispatchDecoded(events, generation);
+    } catch (e) {
+      if (!LiveDanmakuClient.taskpoolFallbackLogged) {
+        LiveDanmakuClient.taskpoolFallbackLogged = true;
+        hilog.warn(0x0000, 'LiveDm', 'taskpool decode unavailable (%{public}s), staying on main thread',
+          (e as BusinessError).message ?? 'unknown');
+      }
+      LiveDanmakuClient.syncDecode = true;
+      this.dispatchDecoded(await decodeLivePacketsCore(backup), generation);
+    }
   }
 
   /** taskpool 解码结果的主线程分发：逐事件校验代际/关闭状态，事件顺序即包内字节顺序。 */

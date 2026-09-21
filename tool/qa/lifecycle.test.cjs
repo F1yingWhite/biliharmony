@@ -74,6 +74,11 @@ function environment(mocks = {}) {
         return load(path.relative(root, path.resolve(path.dirname(filename), name)).replaceAll('\\', '/'));
       }
       if (name in mocks) return mocks[name];
+      // LiveDanmakuClient 等模块引用 hilog：Node 沙箱以静默实现兜底。
+      if (name === '@kit.PerformanceAnalysisKit') {
+        const noop = () => {};
+        return { hilog: { debug: noop, info: noop, warn: noop, error: noop } };
+      }
       throw new Error('Missing platform mock: ' + name);
     };
     new Function('require', 'module', 'exports', 'AppStorage', 'PersistentStorage', code)(
