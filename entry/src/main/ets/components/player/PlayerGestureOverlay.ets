@@ -12,19 +12,18 @@ export interface PlayerScrubTarget {
 }
 
 export class PlayerScrubController {
-  private target: PlayerScrubTarget | null = null;
+  private targets: Set<PlayerScrubTarget> = new Set<PlayerScrubTarget>();
 
   attach(target: PlayerScrubTarget): void {
-    this.target = target;
+    this.targets.add(target);
   }
 
   detach(target: PlayerScrubTarget): void {
-    if (this.target === target) this.target = null;
+    this.targets.delete(target);
   }
 
   show(value: number): void {
-    const current: PlayerScrubTarget | null = this.target;
-    if (current !== null) current.showScrub(value);
+    this.targets.forEach((target: PlayerScrubTarget) => target.showScrub(value));
   }
 }
 

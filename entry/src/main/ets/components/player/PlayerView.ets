@@ -224,6 +224,9 @@ export struct PlayerView {
   // 父结构体不再随手势采样频率全量重渲染。这里只留非响应式镜像供手势结束时的 seekTo 读取落点。
   private gestureScrubValue: number = -1;
   private scrubCtl: PlayerScrubController = new PlayerScrubController();
+  // 底部进度条/章节条的「待落点」通道：横滑期间与结束后保持预览位置（条跟手），
+  // seek 完成后清零回落到真实播放进度。与 scrubCtl 分开：叠层预览卡要在手势结束时立即消失。
+  private seekTargetCtl: PlayerScrubController = new PlayerScrubController();
   @State systemVolumeLevel: number = 0;
   private systemVolume: SystemMediaVolume = new SystemMediaVolume();
   @State gestureAdjustKind: string = '';
@@ -456,6 +459,7 @@ export struct PlayerView {
           }
           // seek 完成：解锁进度回写，让 timeUpdate 接管进度显示。
           this.seekLocked = false;
+          this.seekTargetCtl.show(-1);
           // 播放中的 seek 要等新位置首个 timeUpdate 再撤遮罩/缓冲；暂停态可直接显示定位帧。
           if (!resume) this.buffering = false;
         },
@@ -481,6 +485,7 @@ export struct PlayerView {
         (value: number): void => {
           this.gestureScrubValue = value;
           this.scrubCtl.show(value);
+          this.seekTargetCtl.show(value);
           if (value >= 0) this.requestSeekPreview(value);
         },
         (value: number): void => {
@@ -1012,6 +1017,7 @@ if (this.runtimeSources.length === 0) {
     this.dmEngine.list = [];
     this.dmEngine.cursor = 0;
     this.seekLocked = false;
+    this.seekTargetCtl.show(-1);
     this.endScreenOpen = false;
     this.onPlayingChange(false);
     if (oldPlayer !== null) {
@@ -2288,6 +2294,7 @@ if (this.runtimeSources.length === 0) {
     this.sliderDragging = false;
     this.gestureScrubValue = -1;
     this.scrubCtl.show(-1);
+    this.seekTargetCtl.show(-1);
     this.closeSeekPreview();
   }
 
@@ -2295,6 +2302,7 @@ if (this.runtimeSources.length === 0) {
     this.sliderDragging = false;
     this.gestureScrubValue = -1;
     this.scrubCtl.show(-1);
+    this.seekTargetCtl.show(-1);
     this.seekPreviewSeconds = -1;
     this.seekPreviewCtl.release();
   }
@@ -2559,6 +2567,7 @@ if (this.runtimeSources.length === 0) {
       this.seekRecoveryActive = false;
       this.seekRecoveryCoverVisible = false;
       this.seekLocked = false;
+      this.seekTargetCtl.show(-1);
       this.buffering = false;
       try {
         if (resume && this.prepared) {
@@ -2579,6 +2588,7 @@ if (this.runtimeSources.length === 0) {
     this.seekRecoveryActive = false;
     this.seekRecoveryCoverVisible = false;
     this.seekLocked = false;
+    this.seekTargetCtl.show(-1);
     this.invalidatePlayerCreation();
     const stalledAudio: media.AVPlayer | null = this.audioPlayer;
     this.player = null;
@@ -3420,6 +3430,7 @@ if (this.runtimeSources.length === 0) {
         Row() {
           PlayerChapterBar({
             chapters: this.chapters, progress: this.progressDisplayTime(), duration: this.duration,
+            scrubCtl: this.seekTargetCtl,
             controlsVisible: this.showControls, fullscreen: this.fullscreen,
             onSelect: (seconds: number) => {
               this.seekTo(seconds, true);
@@ -3442,6 +3453,7 @@ if (this.runtimeSources.length === 0) {
               progress: this.progressDisplayTime(),
               duration: this.duration,
               chapters: this.chapters,
+              scrubCtl: this.seekTargetCtl,
               sponsorSegments: this.visibleSponsorSegments(),
               titleColor: this.sheetTitleColor(),
               onBack: () => this.handlePlayerBack(),
@@ -3505,6 +3517,7 @@ if (this.runtimeSources.length === 0) {
               sponsorSegments: this.visibleSponsorSegments(),
               progress: this.progressDisplayTime(),
               duration: this.duration,
+              scrubCtl: this.seekTargetCtl,
               qualityLoading: this.qualityLoading,
               qualityLabel: this.qualityLabel(),
               playbackRate: this.playbackRate,

@@ -2,12 +2,38 @@ import { VideoChapter } from '../../api/BiliApi';
 import { SponsorBlockSegment } from '../../common/SponsorBlock';
 import { formatDuration } from '../../common/Utils';
 import { PlayerProgressBar } from './PlayerProgressBar';
+import { PlayerScrubController, PlayerScrubTarget } from './PlayerGestureOverlay';
 
 @Component
 export struct PlayerCompactControls {
   @Prop playing: boolean = false;
   @Prop progress: number = 0;
   @Prop duration: number = 0;
+  /** 横滑快进的待落点：进度条跟手显示它，seek 完成后宿主清零回落真实进度。 */
+  @State scrubPreview: number = -1;
+  scrubCtl: PlayerScrubController | null = null;
+  private scrubTarget: PlayerScrubTarget | null = null;
+
+  aboutToAppear(): void {
+    const ctl: PlayerScrubController | null = this.scrubCtl;
+    if (ctl !== null) {
+      this.scrubTarget = { showScrub: (value: number): void => { this.scrubPreview = value; } };
+      ctl.attach(this.scrubTarget);
+    }
+  }
+
+  aboutToDisappear(): void {
+    const ctl: PlayerScrubController | null = this.scrubCtl;
+    if (ctl !== null && this.scrubTarget !== null) {
+      ctl.detach(this.scrubTarget);
+      this.scrubTarget = null;
+    }
+  }
+
+  private displayProgress(): number {
+    return this.scrubPreview >= 0 ? this.scrubPreview : this.progress;
+  }
+
   @Prop chapters: Array<VideoChapter> = [];
   @Prop sponsorSegments: Array<SponsorBlockSegment> = [];
   @Prop titleColor: string = '#FFFFFF';
@@ -78,9 +104,9 @@ export struct PlayerCompactControls {
         Blank()
         Row({ space: 7 }) {
           this.IconButton($r('app.media.ic_pause'), 16, 36, true, () => this.onPlay())
-          Text(formatDuration(this.progress)).fontSize(10).fontColor(this.titleColor)
+          Text(formatDuration(this.displayProgress())).fontSize(10).fontColor(this.titleColor)
           PlayerProgressBar({
-            value: this.progress,
+            value: this.displayProgress(),
             duration: this.duration,
             compact: true,
             chapters: this.chapters,
