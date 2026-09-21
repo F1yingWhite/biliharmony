@@ -8,7 +8,7 @@ import { VideoRowCard } from './VideoRowCard';
 import { display } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { VideoItem } from '../../model/Models';
-import { formatCount, formatDuration } from '../../common/Utils';
+import { formatCount, formatDuration, formatRelativeTime } from '../../common/Utils';
 import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   NAV_VIDEO_DETAIL, VideoDetailParam, ImageViewerSrcRect, setHeroBgSnapshot } from '../../common/AppRouter';
 import { Haptic } from '../../common/Haptic';
@@ -87,9 +87,117 @@ export struct VideoCard {
         onTap: () => this.openDetail(),
       })
       .id(this.cardId())
+    } else if (this.homeStyle) {
+      this.BewlyCard()
     } else {
       this.GridCard()
     }
+  }
+
+  /**
+   * 首页卡片（BewlyBewly 风格，素材/设计来自 MIT 许可的 BewlyBewly 项目）：
+   * 16:9 封面只留时长胶囊与多P角标，信息区改为「头像行 → 标题 → 播放·弹幕 + 相对时间」，
+   * 无卡片底色，直接浮于页面背景。
+   */
+  @Builder
+  BewlyCard() {
+    Column() {
+      Stack() {
+        FeedCoverImage({ cover: this.video.cover, isDark: this.isDark })
+        Column() {
+          if (this.video.videos > 1) {
+            Text('多P · ' + this.video.videos)
+              .fontSize(10)
+              .fontColor('#FFFFFF')
+              .backgroundColor('#99000000')
+              .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+              .borderRadius(4)
+          }
+          Blank()
+          if (this.video.duration > 0) {
+            Text(formatDuration(this.video.duration))
+              .fontSize(10)
+              .fontColor('#FFFFFF')
+              .backgroundColor('#99000000')
+              .padding({ left: 5, right: 5, top: 2, bottom: 2 })
+              .borderRadius(4)
+          }
+        }
+        .width('100%')
+        .height('100%')
+        .padding(8)
+        .alignItems(HorizontalAlign.Start)
+        .justifyContent(FlexAlign.SpaceBetween)
+      }
+      .width('100%')
+      .aspectRatio(16 / 9)
+      .borderRadius(12)
+      .clip(true)
+      .id(this.coverId())
+      .onClick(() => this.openDetail())
+
+      // 头像 + UP 主行（App 推流卡片无头像时回退 UP 角标）
+      Row({ space: 5 }) {
+        if (this.video.upFace.length > 0) {
+          Image(this.video.upFace)
+            .width(20)
+            .height(20)
+            .borderRadius(10)
+            .alt($r('app.media.placeholder_cover'))
+        } else {
+          Text('UP')
+            .fontSize(8)
+            .fontColor(this.isDark ? '#8A8A8F' : '#9499A0')
+            .padding({ left: 3, right: 3, top: 1, bottom: 1 })
+            .border({ width: 0.8, color: this.isDark ? '#666970' : '#AEB2B8', radius: 2 })
+        }
+        Text(this.video.upName)
+          .fontSize(11)
+          .fontColor(this.isDark ? '#A5AAB5' : '#7D8490')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
+          .onClick(() => this.openDetail())
+        if (this.showMore) {
+          this.MoreDot()
+        }
+      }
+      .width('100%')
+      .height(24)
+      .margin({ top: 8 })
+      .alignItems(VerticalAlign.Center)
+
+      // 标题（两行固定，卡片等高）
+      Row() {
+        FeedCardTitle({ title: this.video.title, isDark: this.isDark, highlightKeyword: this.highlightKeyword })
+      }
+      .width('100%')
+      .height(40)
+      .margin({ top: 2 })
+      .alignItems(VerticalAlign.Top)
+      .onClick(() => this.openDetail())
+
+      // 元信息行：播放 · 弹幕，右侧相对投稿时间
+      Row() {
+        Text((this.video.playText || formatCount(this.video.play)) + ' · ' +
+          (this.video.danmakuText || formatCount(this.video.danmaku)))
+          .fontSize(11)
+          .fontColor(this.isDark ? '#8A8A8F' : '#9499A0')
+          .maxLines(1)
+        Blank()
+        if (this.video.pubdate > 0) {
+          Text(formatRelativeTime(this.video.pubdate))
+            .fontSize(11)
+            .fontColor(this.isDark ? '#8A8A8F' : '#9499A0')
+        }
+      }
+      .width('100%')
+      .margin({ top: 3 })
+      .alignItems(VerticalAlign.Center)
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .id(this.cardId())
   }
 
   @Builder

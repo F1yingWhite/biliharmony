@@ -9,6 +9,7 @@ import { VIDEO_ZONE_OPTIONS, SearchNumOption, VideoItem } from '../model/Models'
 import { BiliApi } from '../api/BiliApi';
 import { LoadingView } from '../components/LoadingView';
 import { PageHeader } from '../components/PageHeader';
+import { ChannelIcons } from '../common/ChannelIcons';
 import { VideoRowCard } from '../components/video/VideoRowCard';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { LayoutTokens } from '../common/LayoutTokens';
@@ -71,10 +72,17 @@ export struct ZoneChannelPage {
               .width(38)
               .height(38)
               .fill(colorWithAlpha(this.accent, '22'))
-            Text(z.label.charAt(0))
-              .fontSize(17)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(this.accent)
+            if (ChannelIcons.rawfileFor(z.label).length > 0) {
+              Image($rawfile(ChannelIcons.rawfileFor(z.label)))
+                .width(22)
+                .height(22)
+                .fillColor(this.accent)
+            } else {
+              Text(z.label.charAt(0))
+                .fontSize(17)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(this.accent)
+            }
           }
           .width(48)
           Text(z.label)

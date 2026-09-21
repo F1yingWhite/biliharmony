@@ -5,6 +5,8 @@
 - 语言/UI：ArkTS + ArkUI（声明式）
 - 目标 SDK：**HarmonyOS API 26**（compileSdkVersion / compatibleSdkVersion / targetSdkVersion = 26.0.0）
 - 构建：hvigor + ohpm（零第三方依赖，仅使用系统 Kit）
+- 设计与素材致谢：首页卡片设计（16:9 封面 + 头像行 + 相对时间元信息）、频道胶囊样式与分区图标集
+  取自/参考 [BewlyBewly](https://github.com/BewlyBewly/BewlyBewly)（MIT License），推荐源切换交互亦参考其实现
 - 工程根目录即 DevEco Studio 工程，可直接 Open 打开
 
 > 仅供学习交流使用。所有接口均来自 B 站官方公开 API，不提供任何破解内容。

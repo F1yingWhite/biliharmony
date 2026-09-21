@@ -407,6 +407,10 @@ export struct HomeView {
     .height(35)
     .borderRadius(18)
     .backgroundColor(this.visualTab === index ? (this.isDark ? '#EE34363C' : '#F2FFFFFF') : Color.Transparent)
+    // BewlyBewly 同款悬浮胶囊：选中片带柔和投影，与页面底色分层
+    .shadow(this.visualTab === index ? {
+      radius: 10, color: this.isDark ? '#40000000' : '#1E4A5568', offsetX: 0, offsetY: 2,
+    } : { radius: 0, color: Color.Transparent, offsetX: 0, offsetY: 0 })
     .accessibilityText(label)
     .accessibilitySelected(this.visualTab === index)
     .animation({ duration: 180, curve: Curve.EaseOut })
