@@ -111,7 +111,7 @@ Tab 切换用 layout dump 的 `selected` 属性验证（dock 点击坐标 y=2660
 1. **沉浸光感底栏**：`AppTheme.isImmersiveUiSupported() = deviceInfo.apiAvailable('26.0.0')`（`AppTheme.ets:362`）→ API24 模拟器上恒 false → 恒走 PlainTabs 实底栏。这台 VM 从来不会有玻璃浮层底栏；API26 真机会自动呈现。
 2. **build-profile**：`compatibleSdkVersion` 暂为 `6.1.1(24)`（API24 模拟器运行必需；compatible 是"最低支持版本"，不影响 API26 真机），`compile/target` 仍为 `26.0.0`。
 3. **设备端工具约束**（脚本调试经验）：设备无 `awk`、toybox `sed` 不支持 `\) `（用 `[)]`）、无 `/proc/cpuinfo`；`dumpLayout` 输出**整棵树**（被覆盖的根页面节点仍在），屏幕识别不能靠 id 计数，需结合 `selected` 属性/帧分析；hdc 管道命令注意引号层（Python 中用 argv 直传单参数给 `hdc shell`，避免宿主机 sh 二次解析）。
-4. **官方文档**：曾以 git submodule 挂载于 `docs/openharmony-docs`（本地源仓 `ohdocs-md`，pin `8046e9d`）；因源仓 url 为开发机本地路径、其他机器无法 clone，2026-08-19 已从主仓库移除。md 摘录仍保留在开发机 `/app/rssd/ohos-builder/ohdocs-md` 供本地参考。
+4. **官方文档**：曾以 git submodule 挂载于 `docs/openharmony-docs`（本地源仓 `ohdocs-md`，pin `8046e9d`）；因源仓 url 为开发机本地路径、其他机器无法 clone，2026-08-19 已从主仓库移除。md 摘录仍保留在开发机本地目录（`ohdocs-md`） 供本地参考。
 
 ---
 
