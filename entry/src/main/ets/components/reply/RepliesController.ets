@@ -129,6 +129,8 @@ export class RepliesController {
   private repliesRetryReset: boolean = false;
   private threadCursor: string = '';
   private threadEpoch: RequestEpoch = new RequestEpoch();
+  /** 服务端交付过的最大 rev：加载路径给新条目盖更高的 rev，让卡片镜像守卫接受服务端真值。 */
+  private deliveredRevCeiling: number = 0;
   // 评论分享卡离屏渲染用的待截内容；只在生成分享图期间短暂赋值。
   private shareCardItem: ReplyItem = new ReplyItem();
   private shareCardQr: image.PixelMap | null = null;
@@ -168,8 +170,8 @@ export class RepliesController {
         if (this.access.onRepliesDropped !== undefined) this.access.onRepliesDropped(data.replies.length);
         return;
       }
-      if (reset) this.access.applyRepliesReset(data.replies);
-      else this.access.applyRepliesAppend(data.replies);
+      if (reset) this.access.applyRepliesReset(this.stampServerRevs(data.replies));
+      else this.access.applyRepliesAppend(this.stampServerRevs(data.replies));
       this.access.setRepliesCount(this.access.getMainSource().totalCount());
       this.replyCursor = data.cursor;
       this.access.setRepliesHasMore(data.hasMore);
@@ -227,8 +229,8 @@ export class RepliesController {
       const result: ReplyData = await CommentApi.getReplyReplies(oid, this.access.resolveType(), root, cursor);
       if (this.access.isDestroyed() || !this.threadEpoch.isCurrent(epoch) ||
         this.access.isThreadStale(root, oid)) return;
-      this.access.setThreadReplies(this.access.mergeThreadReplies(this.access.getThreadReplies(), result.replies,
-        reset));
+      this.access.setThreadReplies(this.access.mergeThreadReplies(this.access.getThreadReplies(),
+        this.stampServerRevs(result.replies), reset));
       this.threadCursor = result.cursor;
       this.access.setThreadHasMore(result.hasMore);
       loaded = true;
@@ -286,7 +288,37 @@ export class RepliesController {
     return found;
   }
 
-  /** 评论分享：离屏渲染分享卡 → 截成 PNG → 系统分享面板（对齐 B 站"评论分享成图片"）。 */
+  /**
+   * 给服务端下发的评论盖单调递增 rev（高于历史上交付过的所有值，也高于数据源现存值）。
+   *
+   * ReplyCard 的镜像守卫只接受 rev 严格更大的更新；而解析出的新条目 rev 恒为 0，
+   * 一条评论被本地点过赞（mirrorRev 已推进）后，同会话内任何服务端真值刷新
+   * （换排序重载、重试、分页合并）都会被守卫拒之门外，表现为点赞态错乱、
+   * 与服务端脱节。盖高 rev 后：新交付必然通过守卫刷新镜像（服务端是权威），
+   * 旧代过期快照（rev 更低）依然被拒；本地乐观推进从新基点继续 lockstep。
+   */
+  private stampServerRevs(items: Array<ReplyItem>): Array<ReplyItem> {
+    if (items.length === 0) return items;
+    let base: number = this.deliveredRevCeiling;
+    const mainSource: BasicDataSource<ReplyItem> = this.access.getMainSource();
+    const existing: Array<ReplyItem> = mainSource.getAll();
+    for (let i: number = 0; i < existing.length; i++) {
+      if (existing[i].rev > base) base = existing[i].rev;
+    }
+    const thread: Array<ReplyItem> = this.access.getThreadReplies();
+    for (let i: number = 0; i < thread.length; i++) {
+      if (thread[i].rev > base) base = thread[i].rev;
+    }
+    if (this.access.getThreadRoot().rev > base) base = this.access.getThreadRoot().rev;
+    for (let i: number = 0; i < items.length; i++) {
+      items[i].rev = base + 1 + i;
+    }
+    this.deliveredRevCeiling = base + items.length;
+    return items;
+  }
+
+  /**
+   * 评论分享：离屏渲染分享卡 → 截成 PNG → 系统分享面板（对齐 B 站"评论分享成图片"）。 */
   share(item: ReplyItem): void {
     if (this.shareCardBusy) return;
     this.shareCardBusy = true;

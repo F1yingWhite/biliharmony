@@ -50,6 +50,8 @@ const ANCHOR = {
   /** 楼中楼分页加载，紧随其后的 mutate 成员。 */
   repliesLoadThreadStart: '  async loadThread(reset: boolean, allowPrefetch: boolean = true): Promise<void> {',
   repliesMutateStart: '  mutate(rpid: number, mutate: (target: ReplyItem) => void): ReplyItem | null {',
+  /** stampServerRevs 定义在 mutate 之后；加载切片要用到它，end 锚点取 share 签名。 */
+  repliesShareStart: '  share(item: ReplyItem): void {',
 };
 
 function deferred() {
@@ -412,11 +414,13 @@ for (const page of ['VideoDetail','DynamicDetail','BangumiDetail']) {
     const old=deferred(),latest=deferred();const calls=[];
     const env=environment({'api/CommentApi':{CommentApi:{getReplyReplies:(oid,type,root)=>{
       calls.push(root);return root===100?old.promise:latest.promise;
-    }}}});
+    }}},'@kit.PerformanceAnalysisKit':{hilog:{}},'BuildProfile':{DEBUG:false}});
     const Harness=env.methodHarness('components/reply/RepliesController',
-      ANCHOR.repliesLoadThreadStart, ANCHOR.repliesMutateStart,
-      "import { CommentApi } from '../../api/CommentApi';");
+      ANCHOR.repliesLoadThreadStart, ANCHOR.repliesShareStart,
+      "import { CommentApi } from '../../api/CommentApi';\nimport { mutateReplyInArray, mutatedReplyClone } from '../../common/ReplyMutation';");
     const p=new Harness();
+    p.deliveredRevCeiling=0;
+    p.replySource=source(env,[]);
     const state={destroyed:false,threadLoading:false,threadHasMore:true,threadOpen:true,
       threadRoot:{rpid:100,count:2},threadReplies:[],aid:1,oid:1,commentId:1,commentType:17};
     p.threadEpoch=epoch(env);
@@ -431,6 +435,63 @@ for (const page of ['VideoDetail','DynamicDetail','BangumiDetail']) {
     latest.resolve({replies:[{rpid:201,rootRpid:200}],cursor:'new',hasMore:true});await second;
     assert.deepEqual(state.threadReplies.map(r=>r.rootRpid),[200]);
     assert.equal(p.threadCursor,'new');assert.equal(state.threadLoading,false);
+  });
+}
+
+for (const page of ['VideoDetail','DynamicDetail','BangumiDetail']) {
+  test(`${page} fresh server replies outrank local rev so like mirrors resync (desync regression)`, async () => {
+    // 用户报告：本地点赞后重进页面，点赞态错乱/丢失。根因：服务端解析条目 rev 恒为 0，
+    // ReplyCard 的镜像守卫（只接受 rev 严格更大的更新）会拒绝同会话内的所有服务端真值刷新。
+    // 修复后加载交付必须携带单调递增 rev：高于此前交付值与数据源现存值。
+    let serverReplies = [];
+    const env = environment({'api/CommentApi': {CommentApi: {
+      getReplies: async () => ({replies: serverReplies, cursor: '', hasMore: false}),
+      getReplyReplies: async () => ({replies: [], cursor: '', hasMore: false})}},
+      '@kit.PerformanceAnalysisKit':{hilog:{}},'BuildProfile':{DEBUG:false}});
+    const Models = env.load('model/Models');
+    // 服务端解析产物是 ReplyItem 实例（mutate 依赖其 clone 方法），不能用普通对象。
+    const makeReply = (rpid, liked, like) => {
+      const it = new Models.ReplyItem();
+      it.rpid = rpid; it.liked = liked; it.like = like; it.rev = 0;
+      return it;
+    };
+    const Harness = env.methodHarness('components/reply/RepliesController',
+      ANCHOR.repliesLoadStart, ANCHOR.repliesShareStart,
+      "import { CommentApi } from '../../api/CommentApi';\nimport { mutateReplyInArray, mutatedReplyClone } from '../../common/ReplyMutation';");
+    const p = new Harness();
+    p.deliveredRevCeiling = 0;
+    p.replyCursor = '';
+    p.repliesRetryReset = false;
+    p.repliesEpoch = epoch(env);
+    const state = {destroyed: false, aid: 42, oid: 42, commentId: 42, commentType: 17,
+      replyLoading: false, replyHasMore: true, replyItemCount: 0, replySortMode: 0, replyLoadError: '',
+      threadRoot: {rpid: 0, rev: 0}, threadReplies: []};
+    p.access = repliesAccess(page, state, p);
+    p.replySource = source(env, []);
+    p.mergeUniqueReplies = (a, b) => a.concat(b);
+    p.sanitizeReplies = items => items;
+    p.localSentReplies = [];
+    p.appendUniqueReplies = (src, items) => { for (const it of items) src.append(it); };
+    // 首屏：服务端说未点赞。
+    serverReplies = [makeReply(11, false, 5)];
+    await p.load(true);
+    let row = p.replySource.getAll()[0];
+    const revAfterLoad = row.rev;
+    assert.ok(revAfterLoad > 0, 'server items must be stamped above raw parse rev 0');
+    // 本地点赞：数据源克隆 rev+1（等价于卡片镜像推进到同一值）。
+    p.mutate(11, target => { target.liked = true; target.like = 6; });
+    row = p.replySource.getAll()[0];
+    assert.equal(row.liked, true);
+    const revAfterTap = row.rev;
+    assert.equal(revAfterTap, revAfterLoad + 1);
+    // 同会话重载：服务端真值（已点赞）以更高 rev 交付，必须能通过镜像守卫刷新卡片。
+    serverReplies = [makeReply(11, true, 6)];
+    await p.load(true);
+    row = p.replySource.getAll()[0];
+    assert.equal(row.liked, true, 'server truth must survive the reload');
+    assert.ok(row.rev > revAfterTap, 'fresh server truth must outrank the card mirror rev');
+    // 旧代快照（重载前的旧对象，rev 更低）依然必须被守卫拒绝。
+    assert.ok(revAfterTap > revAfterLoad);
   });
 }
 
@@ -652,6 +713,7 @@ test('dynamic detail: failed continuation preserves comments and retries the sam
     threadRoot: {rpid: 0}, threadReplies: [], threadLoading: false, threadHasMore: true, threadOpen: false};
   page.repliesEpoch = epoch(env);
   page.replySource = source(env, [{rpid: 1}]);
+  page.stampServerRevs = items => items;
   page.replyCursor = '2';
   page.access = repliesAccess('DynamicDetail', state, page);
   await page.load(false);
@@ -800,6 +862,7 @@ function bangumiRepliesHarness(api) {
     threadRoot:{rpid:0}, threadReplies:[], threadLoading:false, threadHasMore:true, threadOpen:false};
   p.repliesEpoch = epoch(env);
   p.replySource = source(env);
+  p.stampServerRevs = items => items;
   // 番剧切排序清空列表与游标（构造参数不在切片内，装配时补齐页面取值）。
   p.clearOnSort = true;
   p.access = repliesAccess('BangumiDetail', state, p);
@@ -852,6 +915,8 @@ function videoRepliesHarness(api) {
   p.sanitizeReplies=items=>items;
   p.mergeUniqueReplies=(a,b)=>a.concat(b);
   p.appendUniqueReplies=(s,items)=>s.reset(s.getAll().concat(items));
+  // 切片不含 stampServerRevs（定义在 mutate 之后），本组断言与打桩无关，恒等桩即可。
+  p.stampServerRevs=items=>items;
   // 视频页切排序清空列表与游标（构造参数不在切片内，装配时补齐页面取值）。
   p.clearOnSort=true;
   p.access=repliesAccess('VideoDetail',state,p);
@@ -939,6 +1004,7 @@ test('dynamic comments: sorting during loading drops the old response',async()=>
     threadRoot:{rpid:0},threadReplies:[],threadLoading:false,threadHasMore:true,threadOpen:false};
   p.repliesEpoch=epoch(env);
   p.replySource=source(env);
+  p.stampServerRevs=items=>items;
   // 动态页切排序特意不清列表（构造参数不在切片内，装配时补齐页面取值）。
   p.clearOnSort=false;
   p.access=repliesAccess('DynamicDetail',state,p);
@@ -963,6 +1029,7 @@ test('dynamic comments: changing sort keeps visible rows until replacement and p
   p.repliesEpoch=epoch(env);
   p.replySource=source(env,[{rpid:9}]);
   p.replyCursor='old';
+  p.stampServerRevs=items=>items;
   // 动态页切排序特意不清列表（构造参数不在切片内，装配时补齐页面取值）。
   p.clearOnSort=false;
   p.access=repliesAccess('DynamicDetail',state,p);
