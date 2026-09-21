@@ -196,16 +196,21 @@ export class MessageApi {
 
   /**
    * 通知中心全部已读：回复/@/赞接口会在读取首屏时推进服务端已读状态；系统通知需额外上报游标。
-   * 任何一步失败都返回失败，调用方不能先清本地角标再用成功提示掩盖服务端失败。
+   * 四类首屏互不依赖，并行拉取（串行 5 个 RTT 在弱网下按钮要转 3-5 秒）；任何一步失败都返回失败，
+   * 调用方不能先清本地角标再用成功提示掩盖服务端失败。
    */
   static async markAllNotificationsRead(): Promise<ActionResult> {
     const kinds: Array<string> = ['reply', 'at', 'like'];
-    for (let i: number = 0; i < kinds.length; i++) {
-      const page: MsgNotifyPageData = await MessageApi.getMsgFeedNotify(kinds[i]);
-      if (page.error.length > 0) return new ActionResult(false, page.error);
+    const pages: Array<MsgNotifyPageData> = await Promise.all([
+      MessageApi.getMsgFeedNotify(kinds[0]),
+      MessageApi.getMsgFeedNotify(kinds[1]),
+      MessageApi.getMsgFeedNotify(kinds[2]),
+      MessageApi.getSysNotifications(),
+    ]);
+    for (let i: number = 0; i < pages.length; i++) {
+      if (pages[i].error.length > 0) return new ActionResult(false, pages[i].error);
     }
-    const sysPage: MsgNotifyPageData = await MessageApi.getSysNotifications();
-    if (sysPage.error.length > 0) return new ActionResult(false, sysPage.error);
+    const sysPage: MsgNotifyPageData = pages[3];
     if (sysPage.items.length > 0 && sysPage.items[0].sysCursor.length > 0) {
       const result: ActionResult = await MessageApi.updateSysMsgCursor(sysPage.items[0].sysCursor);
       if (!result.ok) return result;

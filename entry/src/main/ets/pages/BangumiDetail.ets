@@ -8,6 +8,7 @@ import { common } from '@kit.AbilityKit';
 import { AppNavStack, BangumiDetailParam, NAV_BANGUMI_DETAIL, NAV_LOGIN, NAV_VIDEO_DETAIL, VideoDetailParam } from '../common/AppRouter';
 import { BangumiEpisode, BangumiSeason, ReplyItem } from '../model/Models';
 import { ActionResult } from '../api/BiliApi';
+import { biliImageThumbnail } from '../common/ImageUrl';
 import { BangumiApi } from '../api/BangumiApi';
 import { Immersive } from '../common/Immersive';
 import { LoadingView } from '../components/LoadingView';
@@ -530,7 +531,7 @@ export struct BangumiDetailPage {
   Header() {
     Stack({ alignContent: Alignment.TopStart }) {
       if (this.season.cover.length > 0) {
-        Image(this.season.cover)
+        Image(biliImageThumbnail(this.season.cover, 480))
           .width('100%')
           .height('100%')
           .objectFit(ImageFit.Cover)
@@ -637,7 +638,7 @@ export struct BangumiDetailPage {
           .borderRadius(6)
           .backgroundColor(this.isDark ? '#26272B' : '#E3E5E7')
         if (ep.cover.length > 0) {
-          Image(ep.cover)
+          Image(biliImageThumbnail(ep.cover, 480))
             .width('100%')
             .aspectRatio(16 / 10)
             .objectFit(ImageFit.Cover)
@@ -747,7 +748,7 @@ export struct BangumiDetailPage {
   RelatedCell(item: BangumiSeason) {
     Row({ space: 8 }) {
       if (item.cover.length > 0) {
-        Image(item.cover)
+        Image(biliImageThumbnail(item.cover, 320))
           .width(100)
           .height(62)
           .borderRadius(6)

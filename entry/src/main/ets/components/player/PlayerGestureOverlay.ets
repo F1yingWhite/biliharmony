@@ -1,4 +1,32 @@
 import { image } from '@kit.ImageKit';
+import { VideoChapter } from '../../api/BiliApi';
+import { chapterTitleAt } from './PlayerChapterSupport';
+
+/**
+ * 横滑预览时间的注入通道：预览时间状态由本叠层自持（@State scrubPreview），
+ * 父级手势回调经控制器写入，而不是写父级 @State——否则 3800 行的播放器结构体
+ * 会以手势采样频率（60~120Hz）全量重渲染，是横滑快进掉帧的主因。
+ */
+export interface PlayerScrubTarget {
+  showScrub: (value: number) => void;
+}
+
+export class PlayerScrubController {
+  private target: PlayerScrubTarget | null = null;
+
+  attach(target: PlayerScrubTarget): void {
+    this.target = target;
+  }
+
+  detach(target: PlayerScrubTarget): void {
+    if (this.target === target) this.target = null;
+  }
+
+  show(value: number): void {
+    const current: PlayerScrubTarget | null = this.target;
+    if (current !== null) current.showScrub(value);
+  }
+}
 
 /** 在线人数、长按倍速、横滑预览、音量/亮度的轻量叠层。 */
 @Component
@@ -9,8 +37,9 @@ export struct PlayerGestureOverlay {
   @Prop showControls: boolean = false;
   @Prop fullscreen: boolean = false;
   @Prop holdSpeedActive: boolean = false;
-  @Prop gestureSeekPreview: number = -1;
   @Prop sliderSeekPreview: number = -1;
+  /** 视频侧传入章节表后，预览卡内按预览时间就地算章节名（横滑期间父级不重渲染，prop 会过期）。 */
+  @Prop chapters: Array<VideoChapter> = [];
   @Prop seekPreviewFrame: image.PixelMap | null = null;
   @Prop seekPreviewCover: string = '';
   @Prop seekPreviewSprite: string = '';
@@ -21,6 +50,27 @@ export struct PlayerGestureOverlay {
   @Prop gestureAdjustPercent: number = -1;
   @Prop panStartTime: number = 0;
   @Prop duration: number = 0;
+  /** 父级经 scrubCtl 注入的横滑预览时间；-1 表示不在横滑中。 */
+  @State scrubPreview: number = -1;
+  scrubCtl: PlayerScrubController | null = null;
+  private scrubTarget: PlayerScrubTarget | null = null;
+
+  aboutToAppear(): void {
+    const ctl: PlayerScrubController | null = this.scrubCtl;
+    if (ctl !== null) {
+      this.scrubTarget = { showScrub: (value: number): void => { this.scrubPreview = value; } };
+      ctl.attach(this.scrubTarget);
+    }
+  }
+
+  aboutToDisappear(): void {
+    const ctl: PlayerScrubController | null = this.scrubCtl;
+    if (ctl !== null && this.scrubTarget !== null) {
+      ctl.detach(this.scrubTarget);
+      this.scrubTarget = null;
+    }
+  }
+
   build() {
     Stack({ alignContent: Alignment.Center }) {
       // 竖屏不再悬浮显示在线人数（已移到详情页"播放量"信息行的时间后面），横屏全屏保留。
@@ -46,7 +96,15 @@ export struct PlayerGestureOverlay {
   }
 
   private seekPreviewTime(): number {
-    return this.sliderSeekPreview >= 0 ? this.sliderSeekPreview : this.gestureSeekPreview;
+    return this.sliderSeekPreview >= 0 ? this.sliderSeekPreview : this.scrubPreview;
+  }
+
+  /** 预览位置的章节名：视频侧按章节表就地计算（跟随预览时间）；直播侧无章节表，回退 prop。 */
+  private scrubChapterTitle(): string {
+    if (this.chapters.length > 0) {
+      return chapterTitleAt(this.chapters, this.seekPreviewTime(), this.duration);
+    }
+    return this.chapterTitle;
   }
 
   /** 拖动定位预览：图片保持 16:9，时间固定覆盖在底部，避免取帧完成时改变布局。 */
@@ -91,8 +149,8 @@ export struct PlayerGestureOverlay {
       .clip(true)
       .shadow({ radius: 5, color: '#77000000', offsetY: 1 })
 
-      if (this.chapterTitle.length > 0) {
-        Text(this.chapterTitle).fontSize(12).fontColor('#FFFFFF').maxLines(1)
+      if (this.scrubChapterTitle().length > 0) {
+        Text(this.scrubChapterTitle()).fontSize(12).fontColor('#FFFFFF').maxLines(1)
           .width(this.previewWidth()).textAlign(TextAlign.Center)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .textShadow({ radius: 3, color: '#CC000000', offsetX: 0, offsetY: 1 })

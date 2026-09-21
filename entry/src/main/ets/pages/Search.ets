@@ -6,6 +6,7 @@ import { KeywordSpans } from '../components/KeywordSpans';
  */
 import { RequestEpoch } from '../common/RequestEpoch';
 import { Immersive } from '../common/Immersive';
+import { biliImageThumbnail } from '../common/ImageUrl';
 import { AppNavStack, ArticlePageParam, LiveRoomParam, NAV_ARTICLE, NAV_BANGUMI_DETAIL, NAV_LIVE_ROOM,
   NAV_VIDEO_DETAIL, NAV_USER_SPACE, BangumiDetailParam, VideoDetailParam, UserSpaceParam } from '../common/AppRouter';
 import {
@@ -1029,10 +1030,11 @@ export struct SearchPage {
   PgcRow(item: PgcSearchItem) {
     Row({ space: 10 }) {
       Stack({ alignContent: Alignment.TopStart }) {
-        Image(item.cover)
+        Image(biliImageThumbnail(item.cover, 320))
           .width(84)
           .height(112)
           .objectFit(ImageFit.Cover)
+          .alt($r('app.media.placeholder_cover'))
         if (item.seasonTypeName.length > 0) {
           Text(item.seasonTypeName)
             .fontSize(9)
@@ -1220,11 +1222,12 @@ export struct SearchPage {
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
       if (item.cover.length > 0) {
-        Image(item.cover)
+        Image(biliImageThumbnail(item.cover, 360))
           .width(110)
           .height(74)
           .objectFit(ImageFit.Cover)
           .borderRadius(6)
+          .alt($r('app.media.placeholder_cover'))
       }
     }
     .width('100%')
@@ -1289,10 +1292,11 @@ export struct SearchPage {
   AllUserRecentVideo(item: VideoItem) {
     Column({ space: 5 }) {
       Stack({ alignContent: Alignment.Bottom }) {
-        Image(item.cover)
+        Image(biliImageThumbnail(item.cover, 640))
           .width('100%')
           .aspectRatio(1.6)
           .objectFit(ImageFit.Cover)
+          .alt($r('app.media.placeholder_cover'))
         Row({ space: 4 }) {
           if (item.play > 0) {
             Image($r('app.media.ic_play'))

@@ -37,7 +37,7 @@ import { PlayerDanmakuClock } from './PlayerDanmakuClock';
 import { PlayUrlInfo, SubtitleCue, SubtitleTrack, VideoItem, VideoQualityOption } from '../../model/Models';
 import { Constants } from '../../common/Constants';
 import { BasicDataSource } from '../../common/BasicDataSource';
-import { PlayerGestureOverlay } from './PlayerGestureOverlay';
+import { PlayerGestureOverlay, PlayerScrubController } from './PlayerGestureOverlay';
 import { PlayerFullscreenHeader } from './PlayerFullscreenHeader';
 import { CONTROLS_GRADIENT_COLORS, DM_SEGMENT_SECONDS } from './PlayerDanmakuSupport';
 import { PlayerDanmakuEngine } from './PlayerDanmakuEngine';
@@ -220,7 +220,10 @@ export struct PlayerView {
   @State blockBottomDm: boolean = false;
   @State blockColorDm: boolean = false;
   @State holdSpeedActive: boolean = false;
-  @State gestureSeekPreview: number = -1;
+  // 横滑预览时间下沉到 PlayerGestureOverlay 自持（scrubCtl 注入写回），
+  // 父结构体不再随手势采样频率全量重渲染。这里只留非响应式镜像供手势结束时的 seekTo 读取落点。
+  private gestureScrubValue: number = -1;
+  private scrubCtl: PlayerScrubController = new PlayerScrubController();
   @State systemVolumeLevel: number = 0;
   private systemVolume: SystemMediaVolume = new SystemMediaVolume();
   @State gestureAdjustKind: string = '';
@@ -476,16 +479,18 @@ export struct PlayerView {
     if (this.gestureCtl === null) {
       this.gestureCtl = new PlayerGestureController(
         (value: number): void => {
-          this.gestureSeekPreview = value;
+          this.gestureScrubValue = value;
+          this.scrubCtl.show(value);
           if (value >= 0) this.requestSeekPreview(value);
         },
         (value: number): void => {
-          if (this.gestureSeekPreview >= 0 && value === -1) {
-            const preview: number = this.gestureSeekPreview;
+          if (this.gestureScrubValue >= 0 && value === -1) {
+            const preview: number = this.gestureScrubValue;
             Haptic.seek();
             // 横滑快进/后退按预览值精确落点，不能退回约 5 秒一档的关键帧。
             this.seekTo(preview);
-            this.gestureSeekPreview = -1;
+            this.gestureScrubValue = -1;
+            this.scrubCtl.show(-1);
             this.closeSeekPreview();
           }
         },
@@ -2244,7 +2249,6 @@ if (this.runtimeSources.length === 0) {
 
   private progressDisplayTime(): number {
     if (this.sliderDragging) return this.sliderDragValue;
-    if (this.gestureSeekPreview >= 0) return this.gestureSeekPreview;
     return this.duration > 0 ? this.curTime : 0;
   }
 
@@ -2282,13 +2286,15 @@ if (this.runtimeSources.length === 0) {
 
   private clearSeekPreviewInteraction(): void {
     this.sliderDragging = false;
-    this.gestureSeekPreview = -1;
+    this.gestureScrubValue = -1;
+    this.scrubCtl.show(-1);
     this.closeSeekPreview();
   }
 
   private releaseSeekPreview(): void {
     this.sliderDragging = false;
-    this.gestureSeekPreview = -1;
+    this.gestureScrubValue = -1;
+    this.scrubCtl.show(-1);
     this.seekPreviewSeconds = -1;
     this.seekPreviewCtl.release();
   }
@@ -3353,7 +3359,8 @@ if (this.runtimeSources.length === 0) {
         showControls: this.showControls,
         fullscreen: this.fullscreen,
         holdSpeedActive: this.holdSpeedActive,
-        gestureSeekPreview: this.gestureSeekPreview,
+        chapters: this.chapters,
+        scrubCtl: this.scrubCtl,
         sliderSeekPreview: this.sliderDragging ? this.sliderDragValue : -1,
         seekPreviewFrame: this.seekPreviewFrame,
         seekPreviewCover: this.videoCover,

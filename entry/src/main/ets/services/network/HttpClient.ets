@@ -8,6 +8,7 @@ import { asObject, asString } from '../../common/Utils';
 import { Constants } from '../../common/Constants';
 import { CredentialPolicy } from './CredentialPolicy';
 import { AuthSession } from '../auth/AuthSession';
+import { parseJsonAsync } from './JsonParseTask';
 
 export class HttpResponse {
   status: number;
@@ -48,31 +49,42 @@ export class HttpResponse {
   }
 
   /** 解析后缓存：大响应（首页 feed/搜索/评论）常被 json()/getData()/failureText() 多次读取，
-   *  每次都全量 JSON.parse 会成倍放大主线程开销（ArkTS 的 JSON.parse 相对较慢）。 */
-  private parsedObject: Record<string, Object> | null = null;
-  private parsedArrayBody: Array<Object> | null = null;
+   *  每次都全量 JSON.parse 会成倍放大主线程开销（ArkTS 的 JSON.parse 相对较慢）。
+   *  大 body 在返回调用方前经 taskpool 预热（adoptParsed 注入），首次读取即命中缓存。 */
+  private parsedOnce: boolean = false;
+  private parsedObject: Record<string, Object> = {} as Record<string, Object>;
+  private parsedArrayBody: Array<Object> = [] as Array<Object>;
 
-  /** 解析 JSON body，失败返回空对象 */
-  json(): Record<string, Object> {
-    if (this.parsedObject !== null) return this.parsedObject;
+  /** 单次解析同时填充对象/数组两个视图，json() 与 jsonArray() 混用不再重复 parse。 */
+  private ensureParsed(): void {
+    if (this.parsedOnce) return;
+    this.parsedOnce = true;
     try {
       const parsed: Object = JSON.parse(this.body) as Object;
       this.parsedObject = asObject(parsed);
+      this.parsedArrayBody = Array.isArray(parsed) ? parsed as Array<Object> : [] as Array<Object>;
     } catch (e) {
       this.parsedObject = {} as Record<string, Object>;
+      this.parsedArrayBody = [] as Array<Object>;
     }
+  }
+
+  /** taskpool 预热结果注入：后台线程解析好的对象树直接进缓存，主线程零解析。 */
+  adoptParsed(parsed: Object): void {
+    this.parsedOnce = true;
+    this.parsedObject = asObject(parsed);
+    this.parsedArrayBody = Array.isArray(parsed) ? parsed as Array<Object> : [] as Array<Object>;
+  }
+
+  /** 解析 JSON body，失败返回空对象 */
+  json(): Record<string, Object> {
+    this.ensureParsed();
     return this.parsedObject;
   }
 
   /** 解析 JSON 数组 body；body 非数组（如 JSON 对象）时返回空数组 */
   jsonArray(): Array<Object> {
-    if (this.parsedArrayBody !== null) return this.parsedArrayBody;
-    try {
-      const parsed: Object = JSON.parse(this.body) as Object;
-      this.parsedArrayBody = Array.isArray(parsed) ? parsed as Array<Object> : [] as Array<Object>;
-    } catch (e) {
-      this.parsedArrayBody = [] as Array<Object>;
-    }
+    this.ensureParsed();
     return this.parsedArrayBody;
   }
 }
@@ -449,7 +461,8 @@ export class HttpClient {
     }
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
     if (trusted) HttpClient.absorbCookies(resp.header);
-    return new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>);
+    return HttpClient.prewarmParse(
+      new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>));
   }
 
   static async post(url: string, body?: string, extraHeaders?: Record<string, string>,
@@ -467,7 +480,28 @@ export class HttpClient {
     }
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
     if (trusted) HttpClient.absorbCookies(resp.header);
-    return new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>);
+    return HttpClient.prewarmParse(
+      new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>));
+  }
+
+  /** 超过该长度的 body 才值得一次 taskpool 往返；小响应主线程解析更便宜。 */
+  private static readonly ASYNC_PARSE_THRESHOLD: number = 32 * 1024;
+
+  /**
+   * 大 JSON 响应在返回调用方前先经 taskpool 预热解析：解析搬进后台线程，
+   * 首屏与翻页帧不再被最长 10~40ms 的主线程 JSON.parse 阻塞。
+   * 仅对看起来是 JSON 的 body 生效（风险控制 HTML 等大页面不进线程池白跑一趟）；
+   * 后台解析失败自动回退主线程同步解析，调用方无感。
+   */
+  private static async prewarmParse(resp: HttpResponse): Promise<HttpResponse> {
+    const body: string = resp.body;
+    if (body.length < HttpClient.ASYNC_PARSE_THRESHOLD) return resp;
+    const head: string = body.length > 32 ? body.substring(0, 32) : body;
+    const trimmed: string = head.trimStart();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return resp;
+    const parsed: Object | null = await parseJsonAsync(body);
+    if (parsed !== null) resp.adoptParsed(parsed);
+    return resp;
   }
 
   /** 合并两个 header 表（ArkTS 不支持对象展开） */

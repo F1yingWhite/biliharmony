@@ -1,5 +1,6 @@
 import { BasicDataSource } from '../../common/BasicDataSource';
 import { colorWithAlpha, formatCount, formatDate } from '../../common/Utils';
+import { biliImageThumbnail } from '../../common/ImageUrl';
 import { UgcSeasonEpisode, VideoDetail, VideoItem, VideoPage } from '../../model/Models';
 import { RelatedVideoRow } from './VideoRelatedRow';
 import { VideoActionItem } from './VideoActionItem';
@@ -159,7 +160,8 @@ export struct VideoIntroSection {
                 ListItem() {
                   Row({ space: 8 }) {
                     if (episode.cover.length > 0) {
-                      Image(episode.cover).width(72).height(42).objectFit(ImageFit.Cover).borderRadius(5)
+                      Image(biliImageThumbnail(episode.cover, 240)).width(72).height(42).objectFit(ImageFit.Cover)
+                        .borderRadius(5).alt($r('app.media.placeholder_cover'))
                     }
                     Text(episode.sectionTitle.length > 0 ? episode.sectionTitle + ' · ' + episode.title : episode.title)
                       .fontSize(12).fontColor(this.isDark ? '#D0D0D0' : '#222222').maxLines(2).layoutWeight(1)

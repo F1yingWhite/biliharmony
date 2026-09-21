@@ -5,6 +5,7 @@
 import { VideoItem } from '../../model/Models';
 import { formatCount, formatDuration } from '../../common/Utils';
 import { Haptic } from '../../common/Haptic';
+import { biliImageThumbnail } from '../../common/ImageUrl';
 
 @Reusable
 @Component
@@ -24,11 +25,12 @@ export struct RelatedVideoRow {
     Row({ space: 10 }) {
       Row({ space: 10 }) {
         Stack({ alignContent: Alignment.BottomStart }) {
-          Image(this.item.cover)
+          Image(biliImageThumbnail(this.item.cover, 360))
             .width(120)
             .height(68)
             .objectFit(ImageFit.Cover)
             .borderRadius(6)
+            .alt($r('app.media.placeholder_cover'))
           Row({ space: 4 }) {
             // 高互动角标固定在左下角，时长固定在右下角，二者共享一行不会重叠。
             if (this.item.coin >= 10000 || this.item.share >= 10000) {

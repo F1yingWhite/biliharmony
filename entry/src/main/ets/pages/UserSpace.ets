@@ -103,7 +103,11 @@ export struct UserSpacePage {
     this.loading = true;
     this.errorText = '';
     try {
-      const info: UserSpaceInfo | null = await UserApi.getUserSpaceInfo(this.param.mid);
+      // 信息与统计只依赖 mid，并行取省一个 RTT；两者仍在同一条 async 链上 await——
+      // 异步 .then 在部分 nav 模式（返回后又 push）下不触发、stat 恒 0 的问题不复现。
+      const infoPromise: Promise<UserSpaceInfo | null> = UserApi.getUserSpaceInfo(this.param.mid);
+      const statPromise: Promise<UserStat> = UserApi.getUserStat(this.param.mid);
+      const info: UserSpaceInfo | null = await infoPromise;
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
       if (info === null) {
         this.errorText = '用户信息加载失败，请检查网络后重试';
@@ -111,9 +115,7 @@ export struct UserSpacePage {
       }
       this.info = info;
       this.prepareHeaderAssetCache();
-      // 统计放主流程 await：异步 .then 在部分 nav 模式（返回后又 push）下不触发，
-      // info 能显示而 stat 恒 0 就是这个原因——两者对齐到同一 async 链。
-      const stat: UserStat = await UserApi.getUserStat(this.param.mid);
+      const stat: UserStat = await statPromise;
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
       this.stat = stat;
       this.statFollower = stat.follower;

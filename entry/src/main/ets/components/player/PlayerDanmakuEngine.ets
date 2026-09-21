@@ -10,6 +10,9 @@ import { ActiveDm, colorHex, parseSpecialDanmaku, SpecialTrack } from './PlayerD
 /** 未及时上屏的弹幕最多容忍一次播放器时间回调的抖动，避免繁忙片段形成延迟队列。 */
 const MAX_SPAWN_LATENCY_SECONDS: number = 0.75;
 
+/** 重叠档的绝对同屏上限：只在极端堆积（远超 QA 钉住的 180 条契约）时兜底帧预算。 */
+const OVERLAP_HARD_CAP: number = 240;
+
 /** 弹幕视口矩形（Canvas 像素坐标），供点击气泡定位。 */
 export class DmViewportRect {
   x: number = 0;
@@ -558,7 +561,9 @@ export class PlayerDanmakuEngine {
 
   private maxActive(): number {
     // 所有当前时间的候选都可上屏，保留时间窗口和用户屏蔽规则。
-    if (this.density >= 30) return this.list.length + this.active.length;
+    // 重叠档不设密度上限是产品契约（QA 钉住 180 条同屏全显），但为极端堆积兜底一个
+    // 安全阀：240 条以上每帧描边+填充的绘制成本会把帧时间顶出预算，新弹幕从下一段再进。
+    if (this.density >= 30) return Math.min(this.list.length + this.active.length, OVERLAP_HARD_CAP);
     return this.laneCount() * (this.density >= 27 ? 10 : 6);
   }
 

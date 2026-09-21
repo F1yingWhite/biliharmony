@@ -6,6 +6,7 @@ import { BiliApi, ActionResult } from '../../api/BiliApi';
 import { FavoriteFolderItem, FavoriteVideoPageData, HistoryPageData, HistoryVideoItem, VideoItem, WatchLaterItem } from '../../model/Models';
 import { UserStore } from '../../services/auth/UserStore';
 import { formatCount, formatDuration, formatRelativeTime } from '../../common/Utils';
+import { biliImageThumbnail } from '../../common/ImageUrl';
 import { LoadingView } from '../../components/LoadingView';
 import { LoadMoreFooter } from '../../components/LoadMoreFooter';
 import { PageHeader } from '../../components/PageHeader';
@@ -450,11 +451,12 @@ export struct FavoritesPage {
   @Builder
   FolderRow(item: FavoriteFolderItem) {
     Row({ space: 12 }) {
-      Image(item.cover)
+      Image(biliImageThumbnail(item.cover, 320))
         .width(104)
         .height(68)
         .objectFit(ImageFit.Cover)
         .borderRadius(8)
+        .alt($r('app.media.placeholder_cover'))
       Column({ space: 7 }) {
         Row({ space: 6 }) {
           Text(item.title)
