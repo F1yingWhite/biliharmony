@@ -71,6 +71,7 @@ function environment(mocks = {}) {
         util: {},
       };
       // LiveDanmakuClient 等模块引用 hilog：Node 沙箱以静默实现兜底。
+      if (name === 'BuildProfile') return { DEBUG: false };
       if (name === '@kit.PerformanceAnalysisKit') {
         const noop = () => {};
         return { hilog: { debug: noop, info: noop, warn: noop, error: noop } };
