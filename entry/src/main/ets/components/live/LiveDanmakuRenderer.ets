@@ -1,6 +1,7 @@
 /**
  * 直播弹幕 Canvas 渲染器：把 LivePlayerView 里内联的滚动弹幕引擎抽成独立类。
- * 职责与 PlayerDanmakuEngine 对齐：车道分配、双缓冲推进、定时器与绘制；组件层只保留视图/开关同步。
+ * 职责与 PlayerDanmakuEngine 对齐：车道分配（弹道桶）、双缓冲推进、文本测量缓存与绘制；
+ * 帧推进经注入的 LiveDanmakuFrameClock（DisplaySync，见 LiveDanmakuClock）驱动，组件层只保留视图/开关同步。
  * socket 批量到达的弹幕先入短时待喷队列，拥挤时优先保证新消息的实时性。
  */
 import { LiveChatMessage, LiveEmoteItem } from '../../model/LiveModels';
@@ -8,6 +9,17 @@ import { colorHex } from '../player/PlayerDanmakuSupport';
 import { image } from '@kit.ImageKit';
 import { HttpClient } from '../../services/network/HttpClient';
 import { Constants } from '../../common/Constants';
+
+/**
+ * 帧时钟最小注入面（由 LiveDanmakuClock 实现）：渲染器不 import 时钟模块，
+ * 纯逻辑单测环境无需 mock DisplaySync；未注入时不驱动帧循环（测试直接调用 drainQueue/drawFrame）。
+ */
+export interface LiveDanmakuFrameClock {
+  start: () => void;
+  stop: () => void;
+  release: () => void;
+  frameRateChanged: () => void;
+}
 
 class ActiveLiveDanmaku {
   message: LiveChatMessage;
@@ -17,6 +29,8 @@ class ActiveLiveDanmaku {
   width: number;
   text: string;
   textWidth: number = 0;
+  /** 每条弹幕只换算一次的绘制色（SC 固定金色），绘制帧不再逐帧调 colorHex。 */
+  renderColor: string = '#FFFFFF';
   emote: image.PixelMap | null = null;
   emoteWidth: number = 0;
   emoteHeight: number = 0;
@@ -50,7 +64,6 @@ export class LiveDanmakuRenderer {
   private pending: Array<LiveChatMessage> = [];
   private readonly pendingTtlMs: number = 3000;
   private lastReleaseMs: number = 0;
-  private tick: number = -1;
   private lastDrawMs: number = 0;
   private nextLane: number = 0;
   private seenMessageIds: Set<string> = new Set<string>();
@@ -59,9 +72,27 @@ export class LiveDanmakuRenderer {
   private emoteLoading: Set<string> = new Set<string>();
   private emoteFailed: Set<string> = new Set<string>();
   private resourceGeneration: number = 0;
+  /** 帧时钟（LivePlayerView 注入 DisplaySync 实现）；null 表示纯逻辑测试环境，不驱动帧循环。 */
+  private clock: LiveDanmakuFrameClock | null = null;
+  // drawFrame 双缓冲，原地复用两个持久数组，避免每帧分配 keep 数组带来的 GC 压力。
+  private activeBack: Array<ActiveLiveDanmaku> = [];
+  /** 文本测量缓存（size:text 键），同字号重复文案不再每条 spawn 都触发 Canvas 字体解析。 */
+  private textWidthCache: Map<string, number> = new Map<string, number>();
+  /** 每轮喷发只构建一次弹道桶，轨道可用性检查从扫描全量 active 降到只看轨道内弹幕。 */
+  private laneBuckets: Array<Array<ActiveLiveDanmaku>> = [];
 
   constructor(ctx: CanvasRenderingContext2D) {
     this.ctx = ctx;
+  }
+
+  /** 挂载 DisplaySync 帧时钟（LiveDanmakuClock 实例）；release 时随渲染器一并释放。 */
+  attachClock(clock: LiveDanmakuFrameClock): void {
+    this.clock = clock;
+  }
+
+  /** 时钟访问面：还有已上屏弹幕或待喷队列。 */
+  hasWork(): boolean {
+    return this.active.length > 0 || this.pending.length > 0;
   }
 
   /** 进入播放器时用已有消息建立基线，避免启动瞬间把历史消息全部重喷一遍。 */
@@ -123,6 +154,8 @@ export class LiveDanmakuRenderer {
     this.trimPending(now);
     if (this.pending.length === 0) return;
     if (now - this.lastReleaseMs < 32) return;
+    // 本轮喷发只建一次弹道桶；轨道可用性检查只扫轨道内弹幕，不再 O(active) 逐候选轨道全量扫描。
+    this.rebuildLaneBuckets();
     const burst: number = this.pending.length;
     let released: boolean = false;
     let attempts: number = 0;
@@ -147,6 +180,7 @@ export class LiveDanmakuRenderer {
     this.resourceGeneration++;
     this.playing = false;
     this.pending = [];
+    if (this.clock !== null) this.clock.release();
     this.stopLoop(true);
     this.seenMessageIds.clear();
     this.messageBaselineReady = false;
@@ -204,9 +238,9 @@ export class LiveDanmakuRenderer {
 
   private laneAvailable(lane: number, spawnX: number): boolean {
     const gap: number = Math.max(1, this.fontSize() * (this.density >= 27 ? 0.15 : 0.3) * this.spacing);
-    for (let i: number = 0; i < this.active.length; i++) {
-      const current: ActiveLiveDanmaku = this.active[i];
-      if (current.lane === lane && current.x + current.width + gap > spawnX) return false;
+    const bucket: Array<ActiveLiveDanmaku> = this.laneBucket(lane);
+    for (let i: number = 0; i < bucket.length; i++) {
+      if (bucket[i].x + bucket[i].width + gap > spawnX) return false;
     }
     return true;
   }
@@ -300,8 +334,9 @@ export class LiveDanmakuRenderer {
       body = message.emotes.length > 0 && message.emotes[0].emoji.length > 0 ? message.emotes[0].emoji : '[表情]';
     }
     const text: string = body;
-    this.ctx.font = '600 ' + String(this.fontSize()) + 'vp sans-serif';
-    const textWidth: number = text.length > 0 ? this.ctx.measureText(text).width : 0;
+    const fontSize: number = this.fontSize();
+    // 文本宽度走测量缓存（size:text 键），高热房间的刷屏文案不再每条都触发 Canvas 字体解析。
+    const textWidth: number = text.length > 0 ? this.measure(text, fontSize) : 0;
     const emoteItem = message.emotes.length > 0 ? message.emotes[0] : null;
     // 普通表情为 0.8 行高，只有协议明确的房间大表情使用 1.2 行高。
     const emoteHeight: number = emote !== null ? this.lineHeight() *
@@ -319,31 +354,46 @@ export class LiveDanmakuRenderer {
     const active: ActiveLiveDanmaku = new ActiveLiveDanmaku(message, spawnX, lane, baseSpeed *
       Math.max(0.5, this.speedScale), width, text);
     active.textWidth = textWidth;
+    // 颜色每条只换算一次（SC 固定金色），绘制帧不再逐条调 colorHex。
+    active.renderColor = message.type === 'sc' ? '#FFD45A' : colorHex(message.color);
     active.emote = emote;
     active.emoteWidth = emoteWidth;
     active.emoteHeight = emoteHeight;
     this.active.push(active);
+    this.laneBucket(lane).push(active);
     if (this.playing) this.startLoop();
     return true;
   }
 
-  private drawFrame(): void {
+  /** 时钟帧回调：按节奏放队列，再推进一帧；空闲自停由 drawFrame 触发。 */
+  renderTick(frameTimeMs: number): void {
+    this.drainQueue();
+    this.drawFrame(frameTimeMs);
+  }
+
+  private drawFrame(frameTimeMs: number): void {
     this.ctx.clearRect(0, 0, this.width, this.height);
-    const now: number = Date.now();
-    const delta: number = this.lastDrawMs > 0 ? Math.min(0.12, Math.max(0.012, (now - this.lastDrawMs) / 1000)) : 0.033;
-    this.lastDrawMs = now;
+    // DisplaySync 给出的帧时间与 setInterval 兜底同源使用；位移按两次绘制的真实间隔推进。
+    const delta: number = this.lastDrawMs > 0 ?
+      Math.min(0.12, Math.max(0.012, (frameTimeMs - this.lastDrawMs) / 1000)) : 0.033;
+    this.lastDrawMs = frameTimeMs;
     const fontSize: number = this.fontSize();
     const topInset: number = 6;
     this.ctx.font = '600 ' + String(fontSize) + 'vp sans-serif';
     this.ctx.lineWidth = this.fullscreen ? 0.8 : 0.7;
     this.ctx.strokeStyle = '#B3000000';
     this.ctx.globalAlpha = Math.min(1, Math.max(0.2, this.opacity));
-    const keep: Array<ActiveLiveDanmaku> = [];
+    const keep: Array<ActiveLiveDanmaku> = this.activeBack;
+    keep.length = 0;
+    let appliedColor: string = '';
     for (let i: number = 0; i < this.active.length; i++) {
       const dm: ActiveLiveDanmaku = this.active[i];
       dm.x -= dm.speed * delta;
       if (dm.x + dm.width < -10) continue;
-      this.ctx.fillStyle = dm.message.type === 'sc' ? '#FFD45A' : colorHex(dm.message.color);
+      if (appliedColor !== dm.renderColor) {
+        this.ctx.fillStyle = dm.renderColor;
+        appliedColor = dm.renderColor;
+      }
       const y: number = topInset + dm.lane * this.lineHeight() + fontSize;
       if (dm.text.length > 0) {
         this.ctx.strokeText(dm.text, dm.x, y);
@@ -356,42 +406,67 @@ export class LiveDanmakuRenderer {
       keep.push(dm);
     }
     this.ctx.globalAlpha = 1;
+    this.activeBack = this.active;
     this.active = keep;
     // 队列里还有待喷弹幕时循环保持运转，彻底清空后才停表。
     if (keep.length === 0 && this.pending.length === 0) this.stopLoop(false);
   }
 
   private startLoop(): void {
-    if (this.tick >= 0 || !this.enabled || (this.active.length === 0 && this.pending.length === 0)) return;
-    this.lastDrawMs = Date.now();
-    this.tick = setInterval(() => {
-      if (this.playing && this.enabled) {
-        this.drainQueue();
-        this.drawFrame();
-      }
-    }, Math.max(8, Math.round(1000 / Math.max(24, Math.min(120, this.frameRate)))));
+    if (!this.enabled || (this.active.length === 0 && this.pending.length === 0)) return;
+    this.lastDrawMs = 0;
+    if (this.clock !== null) this.clock.start();
+    // 未注入时钟的纯逻辑测试环境不驱动帧循环；drainQueue/drawFrame 由测试直接调用。
   }
 
   frameRate: number = 60;
 
   setFrameRate(value: number): void {
     this.frameRate = Math.max(24, Math.min(120, Math.round(value)));
-    if (this.tick >= 0) {
-      clearInterval(this.tick);
-      this.tick = -1;
-      this.startLoop();
-    }
+    if (this.clock !== null) this.clock.frameRateChanged();
   }
 
   private stopLoop(clear: boolean): void {
-    if (this.tick >= 0) clearInterval(this.tick);
-    this.tick = -1;
+    if (this.clock !== null) this.clock.stop();
     this.lastDrawMs = 0;
     if (clear) {
-      this.active = [];
+      this.active.length = 0;
+      this.activeBack.length = 0;
       this.pending = [];
       this.nextLane = 0;
+      this.laneBuckets.length = 0;
     }
     this.ctx.clearRect(0, 0, this.width, this.height);
+  }
+
+  /** 文本测量缓存：同字号键控，超限后淘汰最早插入的一半（Map 迭代序即插入序）。 */
+  private measure(text: string, sizeVp: number): number {
+    const key: string = String(Math.round(sizeVp * 10)) + ':' + text;
+    const cached: number | undefined = this.textWidthCache.get(key);
+    if (cached !== undefined) return cached;
+    this.ctx.font = '600 ' + sizeVp + 'vp sans-serif';
+    const result: number = this.ctx.measureText(text).width;
+    if (this.textWidthCache.size > 512) {
+      let evict: number = 256;
+      for (const oldest of this.textWidthCache.keys()) {
+        if (evict <= 0) break;
+        this.textWidthCache.delete(oldest);
+        evict--;
+      }
+    }
+    this.textWidthCache.set(key, result);
+    return result;
+  }
+
+  private rebuildLaneBuckets(): void {
+    const count: number = this.laneCount();
+    while (this.laneBuckets.length < count) this.laneBuckets.push([]);
+    for (let i: number = 0; i < this.laneBuckets.length; i++) this.laneBuckets[i].length = 0;
+    for (let i: number = 0; i < this.active.length; i++) this.laneBucket(this.active[i].lane).push(this.active[i]);
+  }
+
+  private laneBucket(lane: number): Array<ActiveLiveDanmaku> {
+    while (this.laneBuckets.length <= lane) this.laneBuckets.push([]);
+    return this.laneBuckets[lane];
   }
 }

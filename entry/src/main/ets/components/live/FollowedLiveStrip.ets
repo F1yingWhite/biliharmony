@@ -3,6 +3,10 @@ import { FollowedLivePage, LiveRoomItem } from '../../model/LiveModels';
 import { RequestEpoch } from '../../common/RequestEpoch';
 import { UserStore } from '../../services/auth/UserStore';
 import { AppNavStack, LiveRoomParam, NAV_LIVE_ROOM, NAV_LOGIN } from '../../common/AppRouter';
+import { biliImageThumbnail } from '../../common/ImageUrl';
+
+/** 48vp 头像格（face 缺失回退封面时同样缩略）：对齐 UserDecorations 的 240w 头像出图约定。 */
+const AVATAR_RENDER_WIDTH: number = 240;
 
 @Component
 export struct FollowedLiveStrip {
@@ -91,9 +95,12 @@ export struct FollowedLiveStrip {
             ForEach(this.rooms, (room: LiveRoomItem) => {
               Column({ space: 5 }) {
                 Stack({ alignContent: Alignment.Bottom }) {
-                  Image(room.face || room.cover || $r('app.media.placeholder_avatar_noface'))
+                  Image(room.face.length > 0 ? biliImageThumbnail(room.face, AVATAR_RENDER_WIDTH) :
+                    (room.cover.length > 0 ? biliImageThumbnail(room.cover, AVATAR_RENDER_WIDTH) :
+                    $r('app.media.placeholder_avatar_noface')))
                     .width(48).height(48).borderRadius(24).objectFit(ImageFit.Cover)
                     .border({ width: 1.5, color: this.accent })
+                    .alt($r('app.media.placeholder_avatar_noface'))
                   Text('直播中').fontSize(8).fontColor('#FFFFFF').backgroundColor(this.accent)
                     .padding({ left: 5, right: 5, top: 1, bottom: 1 }).borderRadius(5)
                 }.height(52)

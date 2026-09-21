@@ -1,5 +1,9 @@
 import { LiveRoomItem } from '../../model/LiveModels';
 import { AppNavStack, LiveRoomParam, NAV_LIVE_ROOM } from '../../common/AppRouter';
+import { biliImageThumbnail } from '../../common/ImageUrl';
+
+/** 封面单元格约 40% 屏宽（~150vp）：按 VideoCard 双列卡 900w/180vp 的同款 ~5 倍密度出图。 */
+const COVER_RENDER_WIDTH: number = 750;
 
 /** 分区中的紧凑直播行：固定封面高度，给标题和主播保留独立空间。 */
 @Reusable
@@ -15,7 +19,10 @@ export struct LiveRoomRow {
   build() {
     Row({ space: 12 }) {
       Stack({ alignContent: Alignment.BottomStart }) {
-        Image(this.room.cover).width('100%').height('100%').objectFit(ImageFit.Cover)
+        Image(this.room.cover.length > 0 ? biliImageThumbnail(this.room.cover, COVER_RENDER_WIDTH) :
+          this.room.cover)
+          .width('100%').height('100%').objectFit(ImageFit.Cover)
+          .alt($r('app.media.placeholder_cover'))
           .syncLoad(false)
         Text(this.room.watched.length > 0 ? this.room.watched : '直播中')
           .fontSize(10).fontColor('#FFFFFF').maxLines(1)

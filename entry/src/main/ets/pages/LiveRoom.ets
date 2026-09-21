@@ -5,8 +5,10 @@ import { AppNavStack, LiveRoomParam, NAV_LOGIN } from '../common/AppRouter';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { Immersive } from '../common/Immersive';
 import { LiveDanmakuClient } from '../common/LiveDanmakuClient';
+import { MotionTokens } from '../common/MotionTokens';
+import { biliImageThumbnail } from '../common/ImageUrl';
 import { LiveSuperChatShelf } from '../components/live/LiveSuperChatShelf';
-import { LivePlayerView } from '../components/live/LivePlayerView';
+import { LivePlayerFeed, LivePlayerView } from '../components/live/LivePlayerView';
 import { StaticLiveImage } from '../components/live/StaticLiveImage';
 import { BackButton, BackButtonVariant } from '../components/BackButton';
 import { LiveChatMessage, LiveEmoteItem, LiveEmotePackage, LivePlayInfo, LiveRoomInfo } from '../model/LiveModels';
@@ -14,13 +16,15 @@ import { UserStore } from '../services/auth/UserStore';
 import { LiveApi } from '../api/LiveApi';
 import { colorHex } from '../components/player/PlayerDanmakuSupport';
 
+/** 播放器占位封面：满屏宽单元格（~360vp）按 VideoCard 同款 ~5 倍密度出图，避免整图解码。 */
+const PLAYER_COVER_RENDER_WIDTH: number = 1800;
+
 @Component
 export struct LiveRoomPage {
   param: LiveRoomParam = { roomId: 0, uid: 0, title: '', uname: '', face: '', cover: '' };
   @State roomInfo: LiveRoomInfo = new LiveRoomInfo();
   @State playInfo: LivePlayInfo = new LivePlayInfo();
-  // messages 保持时间正序（LivePlayerView 弹幕浮层取尾部 N 条）；chatSource 同为正序（新消息在底部，自动贴底）
-  @State messages: Array<LiveChatMessage> = [];
+  // 播放器消息走 liveFeed 直通道（保持时间正序，挂载时建立增量基线）；不再用 @State 驱动播放器 @Prop 深拷贝。
   /** 聊天列表懒加载数据源：220ms 合帧批次只做增量追加/头部裁剪，避免整组 @State 数组换引用全量 diff。 */
   private chatSource: BasicDataSource<LiveChatMessage> = new BasicDataSource<LiveChatMessage>();
   private chatScroller: Scroller = new Scroller();
@@ -30,7 +34,6 @@ export struct LiveRoomPage {
   @State loading: boolean = true;
   @State qualityLoading: boolean = false;
   @State refreshing: boolean = false;
-  @State liveSyncVersion: number = 0;
   @State draft: string = '';
   @State sending: boolean = false;
   @State emotePanelOpen: boolean = false;
@@ -48,6 +51,8 @@ export struct LiveRoomPage {
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   private client: LiveDanmakuClient = new LiveDanmakuClient();
+  /** 播放器数据直通道：聊天合帧批次/SC 合并结果直呼播放器与 SC 浮层，替代 @Prop 数组深拷贝。 */
+  private liveFeed: LivePlayerFeed = new LivePlayerFeed();
   // 弹幕合帧缓冲：高频消息攒 220ms 批量写入 @State，避免每条消息驱动整页重渲染
   private pendingMsgs: Array<LiveChatMessage> = [];
   private flushTimer: number = -1;
@@ -114,7 +119,7 @@ export struct LiveRoomPage {
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
       this.knownMessageIds.clear();
       for (let i: number = 0; i < history.length; i++) this.knownMessageIds.add(history[i].id);
-      this.messages = history;
+      this.liveFeed.resetMessages(history);
       this.chatSource.reset(history.slice(-200));
       this.chatAtBottom = true;
       this.scrollChatToEnd(true);
@@ -138,6 +143,7 @@ export struct LiveRoomPage {
     const snapshot: Array<LiveChatMessage> = await LiveApi.getLiveSuperChats(this.param.roomId);
     if (this.destroyed || generation !== this.lifecycleGeneration) return;
     this.superChats = this.mergeSuperChats(this.superChats, snapshot);
+    this.liveFeed.publishSuperChats(this.superChats);
   }
 
   async changeQuality(qn: number): Promise<void> {
@@ -183,12 +189,11 @@ export struct LiveRoomPage {
 
       this.knownMessageIds.clear();
       for (let i: number = 0; i < history.length; i++) this.knownMessageIds.add(history[i].id);
-      this.messages = history;
+      this.liveFeed.resetMessages(history);
       this.chatSource.reset(history.slice(-200));
       this.chatAtBottom = true;
       this.lastLiveMessageAt = Date.now();
       this.playInfo = play;
-      this.liveSyncVersion++;
       this.errorText = '';
       this.scrollChatToEnd(true);
       synced = true;
@@ -244,7 +249,7 @@ export struct LiveRoomPage {
       local.text = emote === null ? content : (emote.emoji.length > 0 ? emote.emoji : emote.unique);
       if (emote !== null) local.emotes.push(emote);
       this.knownMessageIds.add(local.id);
-      this.messages = this.messages.concat([local]);
+      this.liveFeed.publishMessages(this.liveFeed.currentMessages().concat([local]));
       this.appendChatMessages([local]);
       this.chatAtBottom = true;
       this.scrollChatToEnd();
@@ -265,6 +270,7 @@ export struct LiveRoomPage {
     this.lastLiveMessageAt = Date.now();
     if (message.type === 'sc') {
       this.superChats = this.mergeSuperChats([message], this.superChats);
+      this.liveFeed.publishSuperChats(this.superChats);
     }
     this.pendingMsgs.push(message);
     if (this.flushTimer < 0) {
@@ -323,6 +329,7 @@ export struct LiveRoomPage {
         if (!this.knownMessageIds.has(results[0][i].id)) this.appendMessage(results[0][i]);
       }
       this.superChats = this.mergeSuperChats(this.superChats, results[1]);
+      this.liveFeed.publishSuperChats(this.superChats);
     } finally {
       if (this.historyPollGeneration === generation) this.historyPollGeneration = -1;
     }
@@ -336,15 +343,15 @@ export struct LiveRoomPage {
     if (overflow > 0) this.chatSource.trimHead(overflow);
   }
 
-  /** 合帧落盘：正序 messages 供播放器浮层；chatSource 同为正序，新消息追加在底部。 */
+  /** 合帧落盘：正序 messages 经 liveFeed 直供播放器浮层；chatSource 同为正序，新消息追加在底部。 */
   private flushMessages(): void {
     if (this.destroyed || this.pendingMsgs.length === 0) {
       return;
     }
     const batch: Array<LiveChatMessage> = this.pendingMsgs;
     this.pendingMsgs = [];
-    const next: Array<LiveChatMessage> = this.messages.concat(batch);
-    this.messages = next.length > 240 ? next.slice(next.length - 200) : next;
+    const next: Array<LiveChatMessage> = this.liveFeed.currentMessages().concat(batch);
+    this.liveFeed.publishMessages(next.length > 240 ? next.slice(next.length - 200) : next);
     this.appendChatMessages(batch);
     // 用户本就在底部时才跟滚；翻上去读历史不打断。
     if (this.chatAtBottom) this.scrollChatToEnd();
@@ -361,6 +368,17 @@ export struct LiveRoomPage {
         this.chatScroller.scrollEdge(Edge.End);
       }, delays[i]);
     }
+  }
+
+  /** 全屏切换：播放器节点的尺寸/边距在同一动画上下文过渡，绑定 fullscreen 的布局一起平滑回流。 */
+  private animateFullscreenChange(value: boolean): void {
+    if (this.fullscreen === value || this.destroyed) return;
+    this.getUIContext().animateTo({
+      duration: MotionTokens.navigation,
+      curve: Curve.EaseOut,
+    }, () => {
+      this.fullscreen = value;
+    });
   }
 
   @Builder
@@ -624,7 +642,9 @@ export struct LiveRoomPage {
         Stack({ alignContent: Alignment.Center }) {
           if (this.playInfo.url.length === 0) {
             if (this.roomInfo.cover.length > 0) {
-              Image(this.roomInfo.cover).width('100%').height('100%').objectFit(ImageFit.Cover).opacity(0.45)
+              Image(biliImageThumbnail(this.roomInfo.cover, PLAYER_COVER_RENDER_WIDTH))
+                .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(0.45)
+                .alt($r('app.media.placeholder_cover'))
             }
             if (this.loading) {
               LoadingProgress().width(38).height(38).color('#FFFFFF')
@@ -646,7 +666,7 @@ export struct LiveRoomPage {
         this.ChatTabs()
         if (this.chatTab === 0) {
           if (this.superChats.length > 0) {
-            LiveSuperChatShelf({ messages: this.superChats })
+            LiveSuperChatShelf({ feed: this.liveFeed.superChatFeed })
           }
           this.DanmakuList()
           this.DanmakuComposer()
@@ -659,13 +679,12 @@ export struct LiveRoomPage {
 
       if (this.playInfo.url.length > 0) {
         LivePlayerView({
-          playInfo: this.playInfo, messages: this.messages, superChats: this.superChats,
-          syncVersion: this.liveSyncVersion,
+          playInfo: this.playInfo, feed: this.liveFeed,
           retrying: this.refreshing,
           onRetry: () => this.syncLive(),
           title: this.roomInfo.title, uname: this.roomInfo.uname,
           onQualityChange: (qn: number) => this.changeQuality(qn),
-          onFullscreenChange: (value: boolean) => this.fullscreen = value,
+          onFullscreenChange: (value: boolean) => this.animateFullscreenChange(value),
         })
         .width('100%')
         .height(this.fullscreen ? '100%' : this.playerHeight)
