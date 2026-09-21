@@ -186,15 +186,19 @@ test('live overlap density drains a burst without the old 30-active and 48-pendi
   r.drainQueue();assert.equal(r.active.length,180);assert.equal(r.pending.length,0);
 });
 
-// 用户报告：直播间永远显示「重连中」而聊天靠历史轮询兜底照常流动。根因：op=8 鉴权回包
-// 走 taskpool 跨线程传普通对象，运行时拒绝传输时异常被入队 catch 吞掉，鉴权永不完成。
-// 回退主线程同步解码后，即使 taskpool 不可用也必须完成鉴权（onConnected(true)）。
-test('live danmaku auth completes via main-thread decode fallback when taskpool rejects', async () => {
+// 用户报告：直播间永远显示「重连中」而聊天靠历史轮询兜底照常流动。根因：解码核心是
+// 异步的（zlib 解压只有 Promise API），taskpool 任务返回未决 Promise 被真机运行时拒绝
+// （Can't return Promise in pending state），异常被入队 catch 吞掉、鉴权永不完成。
+// 现生产路径走长驻 Worker；当 Worker 不可用（创建失败/崩坏）时必须回退主线程同步解码，
+// 保证 op=8 鉴权仍然完成（onConnected(true)）。
+test('live danmaku auth completes via main-thread decode fallback when worker unavailable', async () => {
   const env = environment({
     '@kit.NetworkKit': { webSocket: {} },
     '@kit.BasicServicesKit': { BusinessError: class {}, zlib: {} },
     '@kit.ArkTS': { collections: { Array },
-      taskpool: { execute: async () => { throw new Error('plain object transfer unsupported'); } },
+      worker: { ThreadWorker: class {
+        constructor() { throw new Error('worker unavailable'); }
+      } },
       util: {} },
     'api/BiliApi': { BiliApi: {} },
     'api/LiveApi': { LiveApi: {} },

@@ -66,6 +66,8 @@ function environment(mocks = {}) {
       if (name === '@kit.ArkTS') return {
         collections: { Array },
         taskpool: { execute: async (task, ...args) => task(...args) },
+        // LiveDanmakuClient 的后台解码 Worker：Node 沙箱以静默实例兜底。
+        worker: { ThreadWorker: class { on() {} off() {} postMessage() {} terminate() {} } },
         util: {},
       };
       // LiveDanmakuClient 等模块引用 hilog：Node 沙箱以静默实现兜底。

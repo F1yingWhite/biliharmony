@@ -1,11 +1,12 @@
 /**
  * B 站直播弹幕 WebSocket 客户端。只订阅消息，不发送弹幕、礼物或任何消费请求。
  * 使用 protover=2 接收 zlib 批量包，保证高流量房间的消息完整性。
- * 二进制包的切帧、zlib 解压与 JSON.parse 整体在 taskpool 后台线程执行（LiveDanmakuDecode），
- * 主线程只做入队与结构化事件分发，避免高热房间逐包解压掉帧。
+ * 二进制包的切帧、zlib 解压与 JSON.parse 在长驻 Worker 线程执行
+ * （workers/LiveDanmakuDecodeWorker.ets），主线程只做结构化事件的鉴权与消息分发；
+ * Worker 不可用时回退主线程同步解码（功能完整，仅让出帧预算）。
  */
 import { webSocket } from '@kit.NetworkKit';
-import { taskpool, util } from '@kit.ArkTS';
+import { util, worker } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BiliApi } from '../api/BiliApi';
@@ -15,14 +16,17 @@ import { asObject, asString, asNumber } from './Utils';
 import { LiveApi } from '../api/LiveApi';
 import { LiveDecodedEvent, decodeLivePacketsCore, inflateLiveZlib } from './LiveDanmakuDecode';
 
-/**
- * 直播弹幕后台解码任务（taskpool 工作线程执行）：切帧 + zlib 解压 + JSON.parse。
- * @Concurrent 函数只能引用「import 的或函数内局部」的变量/类型，
- * 因此核心逻辑在 LiveDanmakuDecode.ets，这里只做薄封装（DanmakuProto 同款结构）。
- */
-@Concurrent
-function decodeLivePacketsTask(buffer: ArrayBuffer): Promise<Array<LiveDecodedEvent>> {
-  return decodeLivePacketsCore(buffer);
+/** 主线程 ↔ 解码 Worker 的请求/回执结构（generation 回传用于丢弃过期连接的结果）。 */
+interface WorkerDecodeRequest {
+  seq: number;
+  generation: number;
+  buffer: ArrayBuffer;
+}
+
+interface WorkerDecodeResponse {
+  seq: number;
+  generation: number;
+  events: Array<LiveDecodedEvent>;
 }
 
 export class LiveDanmakuClient {
@@ -34,10 +38,6 @@ export class LiveDanmakuClient {
   private static readonly MAX_HEARTBEAT_FAILURES: number = 2;
   /** 半开连接判定阈值：应为连接状态但超过该时长无任何入站消息（含 op=3 心跳回应）即主动重连。 */
   private static readonly INBOUND_STALE_MS: number = 90000;
-  /** taskpool 回退只上报一次：这个进程若不支持跨线程传输，每个包都回退但日志只刷一条。 */
-  private static taskpoolFallbackLogged: boolean = false;
-  /** 首次 taskpool 失败后粘性走主线程解码：不再为每个包白跑一次线程池往返。 */
-  private static syncDecode: boolean = false;
   private roomId: number = 0;
   private generation: number = 0;
   private socket: webSocket.WebSocket | null = null;
@@ -50,17 +50,23 @@ export class LiveDanmakuClient {
   private lastInboundAtMs: number = 0;
   /** 心跳连续失败次数；鉴权成功（op=8）或收到任何入站消息时清零。 */
   private heartbeatFailures: number = 0;
-  /** 压缩包必须按 WebSocket 到达顺序解码（含 taskpool 后台解码）：入队顺序即解码与分发顺序。 */
-  private decodeQueue: Promise<void> = Promise.resolve();
   onMessage: (message: LiveChatMessage) => void = () => {};
   onConnected: (connected: boolean) => void = () => {};
   /** 连续失败达到上限放弃自动重连时回调一次，UI 可据此展示"点击重连"。 */
   onGiveUp: () => void = () => {};
+  /** 后台解码 Worker（长驻，随房间关闭销毁）：切帧/解压/JSON.parse 在此线程执行。 */
+  private decodeWorker: worker.ThreadWorker | null = null;
+  /** Worker 创建失败或运行中崩坏后粘性回退主线程同步解码，不再反复尝试。 */
+  private decodeWorkerBroken: boolean = false;
+  private decodeSeq: number = 0;
+  private static workerActiveLogged: boolean = false;
 
   async connect(roomId: number): Promise<void> {
     this.close();
     this.roomId = roomId;
     this.closed = false;
+    // 预热解码 Worker：首个鉴权回包不必支付线程冷启动。
+    this.ensureDecodeWorker();
     const generation: number = this.generation;
     try {
       const info: LiveDanmakuInfo | null = await LiveApi.getLiveDanmakuInfo(roomId);
@@ -98,10 +104,9 @@ export class LiveDanmakuClient {
           this.parseJson(value as string);
         } else {
           const packet: ArrayBuffer = value as ArrayBuffer;
-          this.decodeQueue = this.decodeQueue.then(async (): Promise<void> => {
-            if (this.socket === ws && !this.closed && generation === this.generation) await this.decodeAndDispatch(packet, generation);
-          }).catch((): void => {
-            // 单个损坏包不应中断后续消息解码。
+          // Worker 路径按消息到达顺序回传（单线程 FIFO）；同步回退路径在 decodeAndDispatch
+          // 内部 await，同样保持顺序。单个损坏包不应中断后续消息解码。
+          this.decodeAndDispatch(packet, generation).catch((): void => {
           });
         }
       });
@@ -144,7 +149,6 @@ export class LiveDanmakuClient {
   close(): void {
     this.generation++;
     this.closed = true;
-    this.decodeQueue = Promise.resolve();
     this.stopHeartbeat();
     if (this.retryTimer >= 0) {
       clearTimeout(this.retryTimer);
@@ -157,6 +161,15 @@ export class LiveDanmakuClient {
         ws.close();
       } catch (e) {
         // 已关闭的连接无需再次处理。
+      }
+    }
+    // 房间关闭即销毁解码 Worker（线程随页面退出释放）；先摘引用，exit 事件不会误报崩坏。
+    const w: worker.ThreadWorker | null = this.decodeWorker;
+    this.decodeWorker = null;
+    if (w !== null) {
+      try {
+        w.terminate();
+      } catch (e) {
       }
     }
     this.onConnected(false);
@@ -264,39 +277,70 @@ export class LiveDanmakuClient {
     return buffer;
   }
 
-  /**
-   * 一个二进制包的完整解码与分发。生产路径把切帧 + zlib 解压 + JSON.parse 整体下放
-   * taskpool 后台线程（VOD 侧 DanmakuProto 同款模式），主线程只做结构化事件的鉴权与消息分发。
-   * taskpool 执行失败（跨线程序列化限制等）时回退主线程同步解码：慢一些但鉴权与消息
-   * 都不能丢——回退缺失曾导致「弹幕 WebSocket 鉴权永不完成 → 无限重连 → 永远显示重连中」，
-   * 而错误被入队 catch 吞掉、聊天列表靠 HTTP 历史轮询兜底照常流动，完全无感知。
-   * Node QA 沙箱没有 taskpool，测试直接驱动 parsePackets 同步路径验证真实解码逻辑。
-   */
-  private async decodeAndDispatch(buffer: ArrayBuffer, generation: number): Promise<void> {
-    if (LiveDanmakuClient.syncDecode) {
-      this.dispatchDecoded(await decodeLivePacketsCore(buffer), generation);
-      return;
-    }
-    // ArrayBuffer 参数默认转移所有权（零拷贝）；但转移发生在 execute 内部，一旦任务失败
-    // （真实运行时拒绝普通对象数组跨线程返回）原缓冲可能已被剥离，主线程回退解码必须用
-    // 入口处留下的副本，否则鉴权包被静默丢弃、连接永远到不了 op=8。
-    const backup: ArrayBuffer = buffer.slice(0);
+  /** 确保后台解码 Worker 可用并返回它；创建失败或已崩坏时返回 null（粘性走同步解码）。 */
+  private ensureDecodeWorker(): worker.ThreadWorker | null {
+    if (this.decodeWorkerBroken) return null;
+    if (this.decodeWorker !== null) return this.decodeWorker;
     try {
-      const events: Array<LiveDecodedEvent> =
-        await taskpool.execute(decodeLivePacketsTask, buffer) as Array<LiveDecodedEvent>;
-      this.dispatchDecoded(events, generation);
-    } catch (e) {
-      if (!LiveDanmakuClient.taskpoolFallbackLogged) {
-        LiveDanmakuClient.taskpoolFallbackLogged = true;
-        hilog.warn(0x0000, 'LiveDm', 'taskpool decode unavailable (%{public}s), staying on main thread',
-          (e as BusinessError).message ?? 'unknown');
+      const w: worker.ThreadWorker = new worker.ThreadWorker('entry/ets/workers/LiveDanmakuDecodeWorker.ets');
+      w.on('message', (event: Object) => {
+        const response: WorkerDecodeResponse = event as WorkerDecodeResponse;
+        this.dispatchDecoded(response.events, response.generation);
+      });
+      w.on('messageerror', (): void => this.breakDecodeWorker('messageerror'));
+      w.on('error', (): void => this.breakDecodeWorker('error'));
+      w.on('exit', (): void => this.breakDecodeWorker('exit'));
+      this.decodeWorker = w;
+      if (!LiveDanmakuClient.workerActiveLogged) {
+        LiveDanmakuClient.workerActiveLogged = true;
+        hilog.info(0x0000, 'LiveDm', 'background decode worker active');
       }
-      LiveDanmakuClient.syncDecode = true;
-      this.dispatchDecoded(await decodeLivePacketsCore(backup), generation);
+      return w;
+    } catch (e) {
+      this.breakDecodeWorker('create');
+      return null;
     }
   }
 
-  /** taskpool 解码结果的主线程分发：逐事件校验代际/关闭状态，事件顺序即包内字节顺序。 */
+  /** Worker 崩坏：摘引用并销毁，粘性回退主线程同步解码（只报一次日志）。 */
+  private breakDecodeWorker(reason: string): void {
+    const w: worker.ThreadWorker | null = this.decodeWorker;
+    if (w === null) return;
+    this.decodeWorker = null;
+    this.decodeWorkerBroken = true;
+    hilog.warn(0x0000, 'LiveDm', 'decode worker unavailable (%{public}s), main-thread sync decode', reason);
+    try {
+      w.terminate();
+    } catch (e) {
+    }
+  }
+
+  /**
+   * 一个二进制包的完整解码与分发。生产路径把切帧 + zlib 解压 + JSON.parse 发给
+   * 长驻 Worker（workers/LiveDanmakuDecodeWorker.ets），主线程只做结构化事件的
+   * 鉴权与消息分发；Worker 不可用/崩坏时回退主线程同步解码——鉴权与消息都不能丢，
+   * 回退缺失曾导致「弹幕鉴权永不完成 → 无限重连 → 永远显示重连中」且错误被吞、
+   * 聊天列表靠 HTTP 历史轮询兜底照常流动，完全无感知。
+   * 顺序保证：Worker 单线程按到达顺序回传；同步路径在本调用内 await，同样有序。
+   */
+  private async decodeAndDispatch(buffer: ArrayBuffer, generation: number): Promise<void> {
+    const w: worker.ThreadWorker | null = this.ensureDecodeWorker();
+    if (w !== null) {
+      this.decodeSeq++;
+      const request: WorkerDecodeRequest = { seq: this.decodeSeq, generation: generation, buffer: buffer };
+      try {
+        w.postMessage(request);
+        return;
+      } catch (e) {
+        // post 失败（线程刚崩坏等）：本包就地同步解码，后续包自动走同步路径。
+        this.breakDecodeWorker('post');
+      }
+    }
+    const events: Array<LiveDecodedEvent> = await decodeLivePacketsCore(buffer);
+    this.dispatchDecoded(events, generation);
+  }
+
+  /** 解码结果的主线程分发：逐事件校验代际/关闭状态，事件顺序即包内字节顺序。 */
   private dispatchDecoded(events: Array<LiveDecodedEvent>, generation: number): void {
     for (let i: number = 0; i < events.length; i++) {
       if (this.closed || generation !== this.generation) return;
@@ -338,7 +382,7 @@ export class LiveDanmakuClient {
   }
 
   /**
-   * 同步回退解码路径：仅当运行环境没有 taskpool（Node QA 沙箱）时由 decodeAndDispatch 调用，
+   * 同步回退解码路径：Worker 不可用（创建失败/崩坏）或 Node QA 沙箱时由 decodeAndDispatch 调用，
    * 分支行为与生产后台路径一致；parity 测试直接驱动本方法并注入 inflateZlib 延迟验证代际防护。
    */
   private async parsePackets(buffer: ArrayBuffer, generation: number): Promise<void> {
