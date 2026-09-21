@@ -22,6 +22,8 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
         with:
+          # 需要完整历史与 latest 标签：生成「上次构建 → 本次」的更新日志。
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up JDK 17
@@ -124,19 +126,35 @@ jobs:
           retention-days: 30
 
       # 滚动 Release：tag=latest，每次推送刷新（删除重建）；未签名 HAP 需自行签名后安装。
+      - name: Generate standardized release notes
+        run: |
+          set -euo pipefail
+          # PREV：latest 标签指向的上一次构建提交；首次发布时为空（脚本只取最近 20 条）。
+          prev="$(git rev-parse -q --verify refs/tags/latest 2>/dev/null || true)"
+          bash tool/release-notes.sh "$prev" "$GITHUB_SHA" > release_notes.md
+          echo "---- release notes ----"
+          cat release_notes.md
+
       - name: Publish to rolling release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           OUT=entry/build/default/outputs/default
-          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
-          gh release create latest \
-            --title "最新构建（未签名 HAP）" \
-            --prerelease \
-            --notes "自动构建于 commit ${{ github.sha }}（$(date -u '+%Y-%m-%d %H:%M UTC')），push 到 main 触发。
-
-          - \`entry-default-unsigned.hap\`：release 构建、未签名，安装前需自行签名
-          - \`hap.sha256\`：产物校验和
-          - 全量 QA 通过后才会发布本包" \
-            "$OUT/entry-default-unsigned.hap" "$OUT/hap.sha256"
+          TITLE="最新构建（未签名 HAP）"
+          # latest 标签随本次构建移动（给下一次发布划更新范围的边界）。
+          if git rev-parse -q --verify refs/tags/latest >/dev/null 2>&1; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/latest" \
+              -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/latest" -f sha="$GITHUB_SHA" >/dev/null
+          fi
+          if gh release view latest >/dev/null 2>&1; then
+            gh release edit latest --title "$TITLE" --prerelease --notes-file release_notes.md
+            gh release upload latest --clobber "$OUT/entry-default-unsigned.hap" "$OUT/hap.sha256"
+          else
+            gh release create latest --target "$GITHUB_SHA" \
+              --title "$TITLE" --prerelease --notes-file release_notes.md \
+              "$OUT/entry-default-unsigned.hap" "$OUT/hap.sha256"
+          fi
