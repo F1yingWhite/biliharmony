@@ -26,7 +26,7 @@ export class PreferencesHandle {
     this.prefName = prefName;
   }
 
-  /** 取（或建）指定 Preferences 文件的句柄；随后用 bind/bindSync 完成实际打开。 */
+  /** 取（或建）指定 Preferences 文件的句柄；随后用 bind 完成实际打开。 */
   static open(name: string): PreferencesHandle {
     const existing: PreferencesHandle | undefined = PreferencesHandle.opened.get(name);
     if (existing !== undefined) return existing;
@@ -40,17 +40,6 @@ export class PreferencesHandle {
     if (this.store !== null) return true;
     try {
       this.store = await preferences.getPreferences(context, { name: this.prefName });
-      return true;
-    } catch (e) {
-      this.store = null;
-      return false;
-    }
-  }
-
-  /** 同步打开（冷启动关键路径）；失败保持未绑定，由调用方决定降级行为。 */
-  bindSync(context: common.Context): boolean {
-    try {
-      this.store = preferences.getPreferencesSync(context, { name: this.prefName });
       return true;
     } catch (e) {
       this.store = null;

@@ -484,6 +484,27 @@ export class AppTheme {
     AppTheme.setDark(AppTheme.inAutoDarkWindow(new Date()));
   }
 
+  /**
+   * 定时深色的进程级心跳（60s）：跨时刻后自动切换明暗，无需重启。
+   * 挂在 Ability 生命周期而非旧实现的 MineView Tab 上——Tabs 保活下旧实现勉强能用，
+   * 但用户一次都不进「我的」时定时深色完全不生效，这是行为 bug 不只是性能问题。
+   */
+  private static autoDarkTimer: number = -1;
+
+  static startAutoDarkTicker(): void {
+    if (AppTheme.autoDarkTimer >= 0) return;
+    AppTheme.autoDarkTimer = setInterval((): void => {
+      AppTheme.applyAutoDark();
+    }, 60 * 1000);
+  }
+
+  static stopAutoDarkTicker(): void {
+    if (AppTheme.autoDarkTimer >= 0) {
+      clearInterval(AppTheme.autoDarkTimer);
+      AppTheme.autoDarkTimer = -1;
+    }
+  }
+
   /** palette 记忆化三元组：结果仅由 (accent, isDark) 决定，入参不变则直接复用上次结果。 */
   private static lastPaletteAccent: string = '';
   private static lastPaletteDark: boolean = false;

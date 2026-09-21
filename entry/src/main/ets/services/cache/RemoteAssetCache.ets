@@ -40,12 +40,14 @@ export class RemoteAssetCache {
   private static revalidatingPaths: Set<string> = new Set<string>();
   private static legacyAvatarPurgeScheduled: boolean = false;
   private static legacyReplySharePurgeScheduled: boolean = false;
+  private static legacyHashPurgeScheduled: boolean = false;
 
   static attach(context: common.Context): void {
     try {
       assetCacheDir = context.cacheDir;
       RemoteAssetCache.scheduleLegacyAvatarPurge();
       RemoteAssetCache.scheduleLegacyReplySharePurge();
+      RemoteAssetCache.scheduleLegacyHashPurge();
     } catch (e) {
       assetCacheDir = '';
     }
@@ -172,9 +174,25 @@ export class RemoteAssetCache {
   private static remember(path: string, fallback: string): string {
     const uri: string = RemoteAssetCache.uriOf(path, fallback);
     // 短期记住已验证的命中；过期后由后台异步重验刷新，允许系统回收缓存文件。
-    if (RemoteAssetCache.verifiedPaths.size >= 512) RemoteAssetCache.verifiedPaths.clear();
+    RemoteAssetCache.evictVerifiedOverflow();
     RemoteAssetCache.verifiedPaths.set(path, new VerifiedAsset(uri));
     return uri;
+  }
+
+  /** 记录表按 LRU 淘汰（重 remember 视为最近使用），不再像旧版那样满 512 一次性全清。 */
+  private static evictVerifiedOverflow(): void {
+    while (RemoteAssetCache.verifiedPaths.size >= 512) {
+      let oldestPath: string = '';
+      let oldestAt: number = Number.MAX_VALUE;
+      RemoteAssetCache.verifiedPaths.forEach((entry: VerifiedAsset, path: string) => {
+        if (entry.at < oldestAt) {
+          oldestAt = entry.at;
+          oldestPath = path;
+        }
+      });
+      if (oldestPath.length === 0) break;
+      RemoteAssetCache.verifiedPaths.delete(oldestPath);
+    }
   }
 
   private static async download(url: string, path: string, subdir: string, media: boolean): Promise<string> {
@@ -311,10 +329,56 @@ export class RemoteAssetCache {
     setTimeout(removeBatch, 0);
   }
 
+  /**
+   * 双 32 位哈希（djb2 + sdbm）拼成 64 位文件名：单 djb2 只有 32 位空间，
+   * 大规模装扮/表情下碰撞意味着两个 URL 共用同一文件、渲染出对方的资源。
+   */
+  /** 升级到 64 位哈希文件名后，旧 32 位哈希的缓存文件不可能再命中，分批回收。 */
+  private static scheduleLegacyHashPurge(): void {
+    if (RemoteAssetCache.legacyHashPurgeScheduled || assetCacheDir.length === 0) return;
+    RemoteAssetCache.legacyHashPurgeScheduled = true;
+    const subdirs: Array<string> =
+      [DIR_EMOTES, DIR_DECORATIONS, DIR_COLLECTIONS, DIR_COLLECTION_MEDIA, DIR_THUMBNAILS];
+    for (let i: number = 0; i < subdirs.length; i++) {
+      const dir: string = RemoteAssetCache.dirPath(subdirs[i]);
+      if (dir.length === 0) continue;
+      let entries: Array<string> = [];
+      try {
+        entries = fs.listFileSync(dir);
+      } catch (e) {
+        continue;
+      }
+      const legacyFiles: Array<string> = [];
+      for (let j: number = 0; j < entries.length; j++) {
+        if (/^a[0-9a-f]{1,8}\.(?:png|webp|gif|jpe?g|bmp|mp4|webm|mov|m4v)$/i.test(entries[j])) {
+          legacyFiles.push(entries[j]);
+        }
+      }
+      let index: number = 0;
+      const removeBatch = (): void => {
+        const end: number = Math.min(legacyFiles.length, index + 64);
+        for (; index < end; index++) {
+          try {
+            fs.unlinkSync(dir + '/' + legacyFiles[index]);
+          } catch (e) {
+            // 单个旧缓存文件失败不阻塞其余清理；下次启动会再次尝试。
+          }
+        }
+        if (index < legacyFiles.length) setTimeout(removeBatch, 0);
+      };
+      setTimeout(removeBatch, 0);
+    }
+  }
+
   private static hash(url: string): string {
-    let value: number = 5381;
-    for (let i: number = 0; i < url.length; i++) value = ((value << 5) + value) ^ url.charCodeAt(i);
-    return 'a' + (value >>> 0).toString(16);
+    let djb2: number = 5381;
+    let sdbm: number = 0;
+    for (let i: number = 0; i < url.length; i++) {
+      const code: number = url.charCodeAt(i);
+      djb2 = ((djb2 << 5) + djb2) ^ code;
+      sdbm = code + (sdbm << 6) + (sdbm << 16) - sdbm;
+    }
+    return 'a' + (djb2 >>> 0).toString(16) + (sdbm >>> 0).toString(16);
   }
 
   private static extension(url: string, media: boolean): string {

@@ -49,6 +49,8 @@ export default class EntryAbility extends UIAbility {
     });
     AppTheme.bindNativeModeApplier((mode: string) => this.applyNativeThemeMode(mode));
     AppTheme.applyCurrentMode();
+    // 定时深色的进程级心跳：不依赖用户进过「我的」Tab。
+    AppTheme.startAutoDarkTicker();
     if (DEBUG) hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onCreate');
   }
 
@@ -110,6 +112,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onDestroy(): void {
+    AppTheme.stopAutoDarkTicker();
     if (DEBUG) hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onDestroy');
   }
 

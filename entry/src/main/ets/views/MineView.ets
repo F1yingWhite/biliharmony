@@ -33,23 +33,13 @@ export struct MineView {
   @State loading: boolean = true;
   @State user: UserInfo = new UserInfo();
   @State stat: UserStat = new UserStat();
-  @State autoDark: boolean = false;
   @State appVersion: string = '';
-  /** 定时深色：每分钟应用一次，跨时刻后自动切换明暗（无需重启）。 */
-  private autoTimer: number = -1;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('themeMode') themeMode: string = AppTheme.MODE_SYSTEM;
   @StorageProp('glassEnabled') glassOn: boolean = true;
   @StorageProp('loginVersion') @Watch('onLoginChanged') loginVer: number = 0;
   @StorageProp('userPendant') userPendant: string = '';
-
-  aboutToDisappear(): void {
-    if (this.autoTimer >= 0) {
-      clearInterval(this.autoTimer);
-      this.autoTimer = -1;
-    }
-  }
 
   onLoginChanged(): void {
     // 登录/登出广播：刷新用户信息（Tabs 保活，aboutToAppear 不会再触发）
@@ -59,20 +49,11 @@ export struct MineView {
 
   aboutToAppear(): void {
     this.loadAppVersion();
-    this.autoDark = AppTheme.isAutoDarkEnabled();
     this.init().catch(() => {
     });
-    if (this.autoTimer < 0) {
-      this.autoTimer = setInterval(() => {
-        AppTheme.applyAutoDark();
-        this.syncAutoDark();
-      }, 60 * 1000);
-    }
   }
-
-  private syncAutoDark(): void {
-    this.autoDark = AppTheme.isAutoDarkEnabled();
-  }
+  // 定时深色心跳已上移到 AppTheme.startAutoDarkTicker（EntryAbility 生命周期）：
+  // 旧实现在这里挂 60s 定时器，用户不进「我的」Tab 时定时深色完全不生效。
 
   private async loadAppVersion(): Promise<void> {
     if (this.appVersion.length > 0) return;
