@@ -405,7 +405,7 @@ export class HttpClient {
 
   /** 保留平台错误码；不记录可能包含 Cookie、签名或个人数据的异常文本和 URL。 */
   private static async execute(url: string, method: http.RequestMethod, dataType: http.HttpDataType,
-    extraHeaders?: Record<string, string>, body?: string,
+    extraHeaders?: Record<string, string>, body?: string | ArrayBuffer,
     priority: number = RequestPriority.NORMAL): Promise<HttpExecution> {
     const request: http.HttpRequest = http.createHttp();
     try {
@@ -486,6 +486,37 @@ export class HttpClient {
 
   /** 超过该长度的 body 才值得一次 taskpool 往返；小响应主线程解析更便宜。 */
   private static readonly ASYNC_PARSE_THRESHOLD: number = 32 * 1024;
+
+  /**
+   * 二进制 POST（multipart 上传等）：body 原样字节发送，Content-Type 由调用方显式给定。
+   * 凭证/buvid/session 语义与 post() 完全一致。
+   */
+  static async postBinary(url: string, contentType: string, body: ArrayBuffer,
+    extraHeaders?: Record<string, string>, priority: number = RequestPriority.NORMAL)
+    : Promise<HttpResponse> {
+    HttpClient.ensureInit();
+    const trusted: boolean = CredentialPolicy.allows(url);
+    const session: number = AuthSession.version;
+    if (trusted) await HttpClient.ensureBuvid();
+    if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
+    const headers: Record<string, string> = { 'Content-Type': contentType };
+    if (extraHeaders) {
+      const keys: Array<string> = Object.keys(extraHeaders);
+      for (let i: number = 0; i < keys.length; i++) {
+        headers[keys[i]] = extraHeaders[keys[i]];
+      }
+    }
+    const execution: HttpExecution =
+      await HttpClient.execute(url, http.RequestMethod.POST, http.HttpDataType.STRING, headers, body, priority);
+    const resp: http.HttpResponse | null = execution.response;
+    if (resp === null) {
+      return new HttpResponse(-1, '', {}, execution.transportCode);
+    }
+    if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
+    if (trusted) HttpClient.absorbCookies(resp.header);
+    return HttpClient.prewarmParse(
+      new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>));
+  }
 
   /**
    * 大 JSON 响应在返回调用方前先经 taskpool 预热解析：解析搬进后台线程，

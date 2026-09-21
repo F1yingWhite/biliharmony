@@ -221,6 +221,8 @@ export class Api {
   static readonly memberDynamic: string = HttpString.apiBaseUrl + '/x/polymer/web-dynamic/v1/feed/space';
   static readonly thumbDynamic: string = HttpString.apiBaseUrl + '/x/dynamic/feed/dyn/thumb';
   static readonly createDynamic: string = HttpString.apiBaseUrl + '/x/dynamic/feed/create/dyn';
+  // 动态图片上传（multipart；协议对齐 PiliPlus lib/http/msg.dart uploadBfs）
+  static readonly uploadBfs: string = HttpString.apiBaseUrl + '/x/dynamic/feed/draw/upload_bfs';
   // 动态举报（需登录；对齐 PiliPlus lib/http/api.dart dynamicReport）
   static readonly dynamicReport: string = HttpString.apiBaseUrl + '/x/dynamic/feed/dynamic_report/add';
 

@@ -26,13 +26,19 @@ import { LayoutTokens } from '../common/LayoutTokens';
 import { Haptic } from '../common/Haptic';
 import { HeaderBackdrop } from '../components/GlassHeaderBar';
 import { Handedness } from '../common/Handedness';
-import { DynamicApi } from '../api/DynamicApi';
+import { DynamicApi, DynUploadedImage } from '../api/DynamicApi';
+import { DynDraftImage, DynImagePreparer } from '../common/DynImagePreparer';
 import { EmoteResolver } from '../common/EmoteResolver';
 import { EmoteImageCache } from '../common/EmoteImageCache';
 import { LiveApi } from '../api/LiveApi';
 import { UserApi } from '../api/UserApi';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { image } from '@kit.ImageKit';
+import { picker } from '@kit.CoreFileKit';
+import { common } from '@kit.AbilityKit';
+
+/** 动态图文发布的单条动态图片上限（与 B 站网页端/官方 App 一致）。 */
+const DYN_MAX_IMAGES: number = 9;
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -1033,10 +1039,14 @@ export struct DynamicView {
   @State refreshStatus: RefreshStatus = RefreshStatus.Inactive;
   @State dynCount: number = 0;
   @State errorText: string = '';
-  // 发布动态（纯文字）面板状态
+  // 发布动态（纯文字 / 图文）面板状态
   @State showComposer: boolean = false;
   @State composerText: string = '';
   @State composing: boolean = false;
+  /** 已选图片草稿（选图时已预处理落盘缓存，发布阶段只上传）。 */
+  @State composerImages: Array<DynDraftImage> = [];
+  /** 发布进行中的阶段文案（上传图片 1/3、发布中…），为空时按钮显示默认文案。 */
+  @State composerStage: string = '';
   // 发布气泡（悬浮入口）：随惯用手换边。必须是本页 @Builder 而非自定义组件——
   // 自定义组件的包装节点是 HitTestMode.Default，全屏容器会拦截整个动态列表的滑动与点击。
   @StorageProp(Handedness.KEY_SIDE) @Watch('onComposeHandSideChanged') composeHandSide: string = Handedness.RIGHT;
@@ -1590,7 +1600,7 @@ export struct DynamicView {
     }
   }
 
-  /** 发布动态（纯文本）底部面板：输入 + 发布；发布成功后重载 feed。用系统 bindSheet 从底部滑出。 */
+  /** 发布动态（纯文字 / 图文）底部面板：输入 + 选图 + 发布；发布成功后重载 feed。用系统 bindSheet 从底部滑出。 */
   @Builder
   DynComposerSheet() {
     Column({ space: 12 }) {
@@ -1616,37 +1626,170 @@ export struct DynamicView {
         .backgroundColor(this.isDark ? '#26272B' : '#F3F4F6')
         .borderRadius(10)
         .onChange((value: string) => this.composerText = value)
+      if (this.composerImages.length > 0 || !this.composing) {
+        // 图片九宫格：已选缩略图 + 末尾的添加块（满 9 张时隐藏）。
+        Flex({ wrap: FlexWrap.Wrap }) {
+          ForEach(this.composerImages, (img: DynDraftImage) => {
+            Stack({ alignContent: Alignment.TopEnd }) {
+              Image('file://' + img.cachePath)
+                .width(72)
+                .height(72)
+                .borderRadius(8)
+                .objectFit(ImageFit.Cover)
+                .alt($r('app.media.placeholder_cover'))
+              Text('×')
+                .fontSize(13)
+                .fontColor('#FFFFFF')
+                .textAlign(TextAlign.Center)
+                .width(20)
+                .height(20)
+                .borderRadius(10)
+                .backgroundColor('#99000000')
+                .margin(3)
+                .onClick(() => this.removeDynImage(img))
+            }
+            .margin({ right: 8, bottom: 8 })
+          }, (img: DynDraftImage) => img.key)
+          if (this.composerImages.length < DYN_MAX_IMAGES && !this.composing) {
+            Column() {
+              Text('+').fontSize(26).fontColor('#9499A0')
+              Text(String(this.composerImages.length) + '/' + String(DYN_MAX_IMAGES))
+                .fontSize(9)
+                .fontColor('#B0B3B8')
+                .margin({ top: 1 })
+            }
+            .width(72)
+            .height(72)
+            .borderRadius(8)
+            .justifyContent(FlexAlign.Center)
+            .backgroundColor(this.isDark ? '#26272B' : '#F3F4F6')
+            .margin({ right: 8, bottom: 8 })
+            .stateStyles({
+              pressed: { opacity: 0.6 },
+              normal: { opacity: 1 },
+            })
+            .onClick(() => this.pickDynImages())
+          }
+        }
+        .width('100%')
+      }
       Text(this.composerText.length + ' / 2000')
         .width('100%').fontSize(11).fontColor('#B0B3B8').textAlign(TextAlign.End)
-      Button(this.composing ? '发布中…' : '发布')
+      Button(this.composing ? (this.composerStage.length > 0 ? this.composerStage : '发布中…') : '发布')
         .width('100%').height(42).borderRadius(21)
         .fontSize(15).fontColor('#FFFFFF')
         .backgroundColor(this.accent)
-        .enabled(!this.composing && this.composerText.trim().length > 0)
+        .enabled(!this.composing && (this.composerText.trim().length > 0 || this.composerImages.length > 0))
         .onClick(() => this.submitDynamic())
     }
     .width('100%')
     .padding({ left: 16, right: 16, top: 16, bottom: 16 })
   }
 
+  /** 调起系统相册多选；选中的图片立即预处理成草稿（GIF 保真 / 静态图限边重编码）。 */
+  private async pickDynImages(): Promise<void> {
+    if (this.composing) return;
+    const remaining: number = DYN_MAX_IMAGES - this.composerImages.length;
+    if (remaining <= 0) {
+      this.showToast('一条动态最多 ' + String(DYN_MAX_IMAGES) + ' 张图片');
+      return;
+    }
+    try {
+      const photoPicker: picker.PhotoViewPicker = new picker.PhotoViewPicker();
+      const options: picker.PhotoSelectOptions = {
+        MIMEType: picker.PhotoViewMIMETypes.IMAGE_TYPE,
+        maxSelectNumber: remaining,
+      };
+      const result: picker.PhotoSelectResult = await photoPicker.select(options);
+      if (result.photoUris.length === 0) return;
+      this.composerStage = '处理图片…';
+      this.composing = true;
+      const context: common.Context | undefined = this.getUIContext().getHostContext();
+      if (context === undefined) return;
+      let failed: number = 0;
+      for (let i: number = 0; i < result.photoUris.length; i++) {
+        if (this.composerImages.length >= DYN_MAX_IMAGES) break;
+        const draft: DynDraftImage | null = await DynImagePreparer.prepare(context, result.photoUris[i]);
+        if (draft === null) {
+          failed++;
+          continue;
+        }
+        this.composerImages.push(draft);
+      }
+      if (failed > 0) {
+        this.showToast(String(failed) + ' 张图片处理失败，已跳过');
+      }
+    } catch (e) {
+      // 用户取消选择或 picker 异常：静默返回。
+    } finally {
+      this.composing = false;
+      this.composerStage = '';
+    }
+  }
+
+  private removeDynImage(img: DynDraftImage): void {
+    // 发布（上传）进行中不允许增删：上传列表与草稿列表必须保持一致。
+    if (this.composing) return;
+    const next: Array<DynDraftImage> = [];
+    for (let i: number = 0; i < this.composerImages.length; i++) {
+      if (this.composerImages[i] !== img) next.push(this.composerImages[i]);
+    }
+    this.composerImages = next;
+    DynImagePreparer.cleanup([img]);
+  }
+
+  private clearComposerImages(): void {
+    DynImagePreparer.cleanup(this.composerImages);
+    this.composerImages = [];
+  }
+
   private async submitDynamic(): Promise<void> {
     if (this.composing) return;
+    const text: string = this.composerText.trim();
+    const images: Array<DynDraftImage> = this.composerImages;
+    if (text.length === 0 && images.length === 0) return;
+    if (text.length > 2000) {
+      this.showToast('动态内容过长（最多 2000 字）');
+      return;
+    }
     this.composing = true;
+    let result: ActionResult | null = null;
     try {
-      const result: ActionResult = await DynamicApi.publish(this.composerText);
-      if (result.ok) {
+      if (images.length > 0) {
+        // 逐张上传，阶段文案实时反馈；任何一张失败立即中止（已上传的不重传也无需回滚）。
+        const uploaded: Array<DynUploadedImage> = [];
+        for (let i: number = 0; i < images.length; i++) {
+          this.composerStage = '上传图片 ' + String(i + 1) + '/' + String(images.length);
+          const bytes: ArrayBuffer = await DynImagePreparer.readBytes(images[i].cachePath);
+          const up = await DynamicApi.uploadDynImage(bytes, images[i].fileName, images[i].mimeType);
+          if (!up.ok || up.image === null) {
+            result = new ActionResult(false, up.message);
+            break;
+          }
+          uploaded.push(up.image);
+        }
+        if (uploaded.length === images.length) {
+          this.composerStage = '发布中…';
+          result = await DynamicApi.publishWithImages(text, uploaded);
+        }
+      } else {
+        result = await DynamicApi.publish(text);
+      }
+      if (result !== null && result.ok) {
         this.showComposer = false;
         this.composerText = '';
+        this.clearComposerImages();
         this.showToast('发布成功');
         this.loadFeed(true).catch(() => {
         });
-      } else {
+      } else if (result !== null) {
         this.showToast(result.message);
       }
     } catch (e) {
       this.showToast('发布失败，请检查网络');
     } finally {
       this.composing = false;
+      this.composerStage = '';
     }
   }
 

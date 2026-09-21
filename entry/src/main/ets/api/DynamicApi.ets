@@ -1,12 +1,36 @@
 /**
- * 动态域 API：单条详情 / 关注动态 feed / 点赞 / 转发 / 用户空间动态。
+ * 动态域 API：单条详情 / 关注动态 feed / 点赞 / 转发 / 图文发布 / 用户空间动态。
  */
-import { HttpClient, HttpResponse } from '../services/network/HttpClient';
+import { HttpClient, HttpResponse, RequestPriority } from '../services/network/HttpClient';
+import { buildMultipart, MultipartField, MultipartFile, MultipartRequest } from '../services/network/MultipartBody';
 import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asBool, asNumber, str, randomString } from '../common/Utils';
 import { DynamicItem, DynamicPageData } from '../model/Models';
 import { ActionResult, actionWithCsrf, getData, postVideoAction, webGet, webGetSigned,
   webPost } from './internal/ApiCommon';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+import { DEBUG } from 'BuildProfile';
+
+/** 一张已上传到 B 站 bfs 的动态图片（publishWithImages 的入参单元）。 */
+export class DynUploadedImage {
+  imgSrc: string = '';
+  imgWidth: number = 0;
+  imgHeight: number = 0;
+  imgSize: number = 0;
+}
+
+/** 图片上传结果：ok=false 时 message 为用户可读原因。 */
+export class DynUploadResult {
+  ok: boolean = false;
+  message: string = '';
+  image: DynUploadedImage | null = null;
+
+  constructor(ok: boolean, message: string, image: DynUploadedImage | null) {
+    this.ok = ok;
+    this.message = message;
+    this.image = image;
+  }
+}
 
 export class DynamicApi {
   static async getDynamicDetail(id: string): Promise<DynamicItem | null> {
@@ -105,6 +129,118 @@ export class DynamicApi {
     return postVideoAction(Api.createDynamic, {
       'dynamic': text, 'type': '4', 'at_uids': '', 'topic_id': '',
     });
+  }
+
+  // ===== 图文动态发布（协议对齐 PiliPlus lib/http/msg.dart uploadBfs + lib/http/dynamics.dart createDynamic） =====
+
+  /** upload_bfs 响应解析（纯函数，QA 直接测）：code=0 且返回了 image_url 才算成功。 */
+  static parseUploadResponse(json: Record<string, Object>): DynUploadResult {
+    const code: number = asNumber(json['code'], -1);
+    const serverMessage: string = str(json, 'message', str(json, 'msg', ''));
+    if (code !== 0) {
+      return new DynUploadResult(false,
+        serverMessage.length > 0 ? serverMessage : '图片上传失败 (' + String(code) + ')', null);
+    }
+    const data: Record<string, Object> = asObject(json['data']);
+    const url: string = str(data, 'image_url', '');
+    if (url.length === 0) {
+      return new DynUploadResult(false, '图片上传响应缺少地址', null);
+    }
+    const image: DynUploadedImage = new DynUploadedImage();
+    image.imgSrc = url;
+    image.imgWidth = asNumber(data['image_width'], 0);
+    image.imgHeight = asNumber(data['image_height'], 0);
+    image.imgSize = asNumber(data['img_size'], 0);
+    return new DynUploadResult(true, '上传成功', image);
+  }
+
+  /** 上传一张动态图片（multipart → bfs 存储），返回可发布图片对象。 */
+  static async uploadDynImage(data: ArrayBuffer, fileName: string, mimeType: string): Promise<DynUploadResult> {
+    const csrf: string = HttpClient.getCookie('bili_jct');
+    if (csrf.length === 0) return new DynUploadResult(false, '登录状态缺少 CSRF，请重新登录', null);
+    const boundary: string = 'BiliHarmonyForm' + randomString(16);
+    const fields: Array<MultipartField> = [
+      new MultipartField('category', 'daily'),
+      new MultipartField('biz', 'new_dyn'),
+      new MultipartField('csrf', csrf),
+    ];
+    const files: Array<MultipartFile> = [new MultipartFile('file_up', fileName, mimeType, data)];
+    const request: MultipartRequest = buildMultipart(fields, files, boundary);
+    const resp: HttpResponse = await HttpClient.postBinary(Api.uploadBfs, request.contentType, request.body,
+      Constants.webHeaders, RequestPriority.HIGH);
+    if (DEBUG) {
+      hilog.info(0x0000, 'DynPub', 'upload resp %{public}d body=%{public}s', resp.status,
+        resp.body.substring(0, Math.min(240, resp.body.length)));
+    }
+    if (!resp.ok) {
+      return new DynUploadResult(false, '图片上传失败 (' + String(resp.status) + ')', null);
+    }
+    return DynamicApi.parseUploadResponse(resp.json());
+  }
+
+  /** 图文动态 dyn_req 构建（纯函数，QA 直接测）：scene=2，文本放 contents、图片放 pics。 */
+  static buildImageDynReq(text: string, images: Array<DynUploadedImage>, uploadId: string): Record<string, Object> {
+    const contents: Array<Object> = [];
+    if (text.length > 0) {
+      const textEntry: Record<string, Object> = { 'raw_text': text, 'type': 1, 'biz_id': '' };
+      contents.push(textEntry);
+    }
+    const pics: Array<Object> = [];
+    for (let i: number = 0; i < images.length; i++) {
+      const pic: Record<string, Object> = {
+        'img_src': images[i].imgSrc,
+        'img_width': images[i].imgWidth,
+        'img_height': images[i].imgHeight,
+        'img_size': images[i].imgSize,
+      };
+      pics.push(pic);
+    }
+    const contentObj: Record<string, Object> = { 'contents': contents };
+    const appMeta: Record<string, Object> = { 'from': 'create.dynamic.web', 'mobi_app': 'web' };
+    const metaObj: Record<string, Object> = { 'app_meta': appMeta };
+    const dynReqObj: Record<string, Object> = {
+      'content': contentObj,
+      'scene': 2,
+      'pics': pics,
+      'upload_id': uploadId,
+      'meta': metaObj,
+    };
+    return dynReqObj;
+  }
+
+  /**
+   * 发布图文动态。文本可空（纯图动态）。
+   * create/dyn 的 scene=2 分支要求 JSON body（form 的 dyn_req 字符串会被 -400 拒绝，
+   * 2026-09 实测；csrf 走 query，对齐 PiliPlus lib/http/dynamics.dart createDynamic）。
+   */
+  static async publishWithImages(text: string, images: Array<DynUploadedImage>): Promise<ActionResult> {
+    if (images.length === 0) return DynamicApi.publish(text);
+    const trimmed: string = text.trim();
+    if (trimmed.length > 2000) return new ActionResult(false, '动态内容过长（最多 2000 字）');
+    return actionWithCsrf('登录状态缺少 CSRF，请重新登录', '发布成功', '动态发布失败',
+      (csrf: string): Promise<HttpResponse> => {
+        const uploadId: string = '0_' + String(Math.floor(Date.now() / 1000)) + '_' +
+          String(Math.floor(Math.random() * 9000) + 1000);
+        const dynReqObj: Record<string, Object> = DynamicApi.buildImageDynReq(trimmed, images, uploadId);
+        const bodyObj: Record<string, Object> = { 'dyn_req': dynReqObj };
+        const query: Record<string, string> = {
+          'platform': 'web',
+          'csrf': csrf,
+          'x-bili-device-req-json': '{"platform":"web","device":"pc"}',
+          'x-bili-web-req-json': '{"spm_id":"333.999"}',
+        };
+        const headers: Record<string, string> = HttpClient.merge(Constants.webHeaders,
+          { 'Content-Type': 'application/json' });
+        return HttpClient.post(Api.createDynamic + '?' + HttpClient.buildQuery(query),
+          JSON.stringify(bodyObj), headers)
+          .then((resp: HttpResponse): HttpResponse => {
+            if (DEBUG) {
+              hilog.info(0x0000, 'DynPub', 'publish resp %{public}d body=%{public}s', resp.status,
+                resp.body.substring(0, Math.min(240, resp.body.length)));
+            }
+            return resp;
+          });
+      });
   }
 
   static async report(dynId: string, reason: string): Promise<ActionResult> {
