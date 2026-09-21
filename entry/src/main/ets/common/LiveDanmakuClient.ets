@@ -29,6 +29,11 @@ interface WorkerDecodeResponse {
   events: Array<LiveDecodedEvent>;
 }
 
+/** 宿主侧 on('message') 回调在不同 API 版本下可能是 MessageEvent 包装（数据在 data 字段）。 */
+interface WorkerDecodeEnvelope {
+  data?: WorkerDecodeResponse;
+}
+
 export class LiveDanmakuClient {
   /** 重连退避基数 / 上限与连续失败上限：弱网下固定 2.5s 无限重试既耗电又易被服务端限流。 */
   private static readonly RETRY_BASE_DELAY_MS: number = 2500;
@@ -59,7 +64,11 @@ export class LiveDanmakuClient {
   /** Worker 创建失败或运行中崩坏后粘性回退主线程同步解码，不再反复尝试。 */
   private decodeWorkerBroken: boolean = false;
   private decodeSeq: number = 0;
+  private workerBatches: number = 0;
+  private deliveredMessages: number = 0;
+  /** Worker 激活与坏消息只上报一次：这些是进程级状态，同一进程内只刷一条日志。 */
   private static workerActiveLogged: boolean = false;
+  private static workerBadMessageLogged: boolean = false;
 
   async connect(roomId: number): Promise<void> {
     this.close();
@@ -277,6 +286,31 @@ export class LiveDanmakuClient {
     return buffer;
   }
 
+  /**
+   * Worker 回传分发。宿主侧 on('message') 的回调参数在不同 API 版本下可能是裸响应
+   * 或 MessageEvent 包装（数据在 data 字段）——按裸数据取值曾以 undefined events
+   * 崩掉整个应用（jscrash），两种形态都兼容，分发处再做一次空值防御。
+   */
+  private handleWorkerMessage(event: Object): void {
+    const envelope: WorkerDecodeEnvelope = event as WorkerDecodeEnvelope;
+    const response: WorkerDecodeResponse = (envelope !== null && envelope.data !== undefined && envelope.data !== null)
+      ? envelope.data as WorkerDecodeResponse
+      : event as WorkerDecodeResponse;
+    if (response === null || response === undefined || response.events === null || response.events === undefined) {
+      if (!LiveDanmakuClient.workerBadMessageLogged) {
+        LiveDanmakuClient.workerBadMessageLogged = true;
+        hilog.warn(0x0000, 'LiveDm', 'worker message missing events; keys=%{public}s',
+          response === null || response === undefined ? 'null' : Object.keys(response).join(','));
+      }
+      return;
+    }
+    this.workerBatches++;
+    if (response.events.length > 0 && this.workerBatches <= 10) {
+      hilog.info(0x0000, 'LiveDm', 'worker batch %{public}d: %{public}d events', this.workerBatches, response.events.length);
+    }
+    this.dispatchDecoded(response.events, response.generation);
+  }
+
   /** 确保后台解码 Worker 可用并返回它；创建失败或已崩坏时返回 null（粘性走同步解码）。 */
   private ensureDecodeWorker(): worker.ThreadWorker | null {
     if (this.decodeWorkerBroken) return null;
@@ -284,8 +318,7 @@ export class LiveDanmakuClient {
     try {
       const w: worker.ThreadWorker = new worker.ThreadWorker('entry/ets/workers/LiveDanmakuDecodeWorker.ets');
       w.on('message', (event: Object) => {
-        const response: WorkerDecodeResponse = event as WorkerDecodeResponse;
-        this.dispatchDecoded(response.events, response.generation);
+        this.handleWorkerMessage(event);
       });
       w.on('messageerror', (): void => this.breakDecodeWorker('messageerror'));
       w.on('error', (): void => this.breakDecodeWorker('error'));
@@ -375,7 +408,14 @@ export class LiveDanmakuClient {
   private emitParsedMessage(payload: Object): void {
     try {
       const msg: LiveChatMessage | null = this.buildMessage(asObject(payload));
-      if (msg !== null && msg.text.length > 0) this.onMessage(msg);
+      if (msg !== null && msg.text.length > 0) {
+        this.deliveredMessages++;
+        if (this.deliveredMessages <= 3) {
+          hilog.info(0x0000, 'LiveDm', 'delivered message %{public}d via %{public}s',
+            this.deliveredMessages, this.decodeWorker !== null ? 'worker' : 'sync');
+        }
+        this.onMessage(msg);
+      }
     } catch (e) {
       // 结构异常的消息直接丢弃，与旧 parseJson 的吞异常语义一致。
     }

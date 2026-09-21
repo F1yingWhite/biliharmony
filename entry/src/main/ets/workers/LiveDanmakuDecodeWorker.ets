@@ -9,6 +9,7 @@
  * 完成后再 postMessage 已解码的普通结果即可。
  */
 import { worker, ThreadWorkerGlobalScope, MessageEvent } from '@kit.ArkTS';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { LiveDecodedEvent, decodeLivePacketsCore } from '../common/LiveDanmakuDecode';
 
 interface DecodeRequest {
@@ -30,7 +31,17 @@ workerPort.onmessage = (e: MessageEvent<Object>) => {
   decodeLivePacketsCore(request.buffer).then((events: Array<LiveDecodedEvent>) => {
     const response: DecodeResponse = { seq: request.seq, generation: request.generation, events: events };
     workerPort.postMessage(response);
-  }).catch(() => {
-    // 单个损坏包静默丢弃，不中断后续解码；链路异常由主线程看门狗与重连兜底。
+  }).catch((err: Object) => {
+    // 单个损坏包不中断后续解码；但失败必须回传让主线程可见（静默吞掉曾让
+    // 「鉴权成功而弹幕全无」无从诊断）。同因只回传一次细节，避免刷屏。
+    const detail: string = String(err);
+    const response: DecodeResponse = { seq: request.seq, generation: request.generation, events: [] };
+    workerPort.postMessage(response);
+    if (detail !== lastFailure) {
+      lastFailure = detail;
+      hilog.error(0x0000, 'LiveDmW', 'decode failed: %{public}s', detail);
+    }
   });
 };
+
+let lastFailure: string = '';

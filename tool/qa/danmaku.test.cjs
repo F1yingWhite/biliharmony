@@ -219,6 +219,30 @@ test('live danmaku auth completes via main-thread decode fallback when worker un
   client.stopHeartbeat();
 });
 
+// 真机 jscrash：宿主侧 on('message') 回调在不同 API 版本下可能是 MessageEvent 包装
+// （数据在 data 字段）也可能是裸响应；按裸数据取值时 events 为 undefined 直接崩掉应用。
+test('worker message handler accepts both raw payload and MessageEvent envelope', () => {
+  const env = environment({
+    '@kit.NetworkKit': { webSocket: {} },
+    '@kit.BasicServicesKit': { BusinessError: class {}, zlib: {} },
+    '@kit.ArkTS': { collections: { Array }, worker: {}, util: {} },
+    'api/BiliApi': { BiliApi: {} },
+    'api/LiveApi': { LiveApi: {} },
+    'services/network/HttpClient': { HttpClient: { getCookie: () => '' } },
+  });
+  const { LiveDanmakuClient } = env.load('common/LiveDanmakuClient');
+  const client = new LiveDanmakuClient();
+  const seen = [];
+  client.onConnected = (value) => seen.push(value);
+  client.closed = false;
+  const response = { seq: 1, generation: 0, events: [{ operation: 8, payload: null }] };
+  client.handleWorkerMessage(response);                     // 裸响应形态
+  client.handleWorkerMessage({ data: response });           // MessageEvent 包装形态
+  client.handleWorkerMessage({ data: { seq: 2 } });         // 坏包：不崩、不分发
+  assert.deepEqual(seen, [true, true]);
+  client.stopHeartbeat();
+});
+
 
 test('live history fallback renders only newly received messages after initial baseline', () => {
   const {LiveChatMessage} = environment().load('model/LiveModels');
