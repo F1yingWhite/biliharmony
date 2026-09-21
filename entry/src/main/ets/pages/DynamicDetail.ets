@@ -475,7 +475,7 @@ export struct DynamicDetailPage {
   ThreadSheet() {
     ReplyThreadPanel({
       root: this.threadRoot,
-      replies: this.threadReplies,
+      replies: $threadReplies,
       loading: this.threadLoading,
       hasMore: this.threadHasMore,
       version: this.replyVersion,

@@ -94,6 +94,7 @@ struct ReplyPictureCell {
  * 头像装扮、富文本、图片、@/空降/BV 跳转和点赞态都只能在这里实现，
  * 避免不同页面的评论能力与视觉继续分叉。
  */
+@Reusable
 @Component
 export struct ReplyCard {
   @Prop @Watch('onItemChanged') item: ReplyItem = new ReplyItem();
@@ -144,6 +145,33 @@ export struct ReplyCard {
   aboutToAppear(): void {
     this.destroyed = false;
     this.syncMirrorFromItem();
+    this.primeNameplate();
+  }
+
+  /**
+   * 复用重挂载：三个评论 LazyForEach 滚动回收时整卡复用，必须清掉随旧行遗留的瞬态——
+   * 镜像按新数据重建（无论框架先更新 @Prop 还是先回调本钩子都成立：直接读 params 里的
+   * 新 item，随后 @Watch 的 rpid/rev 守卫会兜底再同步一次），动画缩放与楼中楼高度测量
+   * 回到初始态，避免上一条评论的点赞动效/连接线残留。
+   */
+  aboutToReuse(params: Record<string, Object>): void {
+    this.destroyed = false;
+    this.likeTimers.forEach((id: number) => clearTimeout(id));
+    this.likeTimers.clear();
+    this.likeScale = 1;
+    this.dislikeScale = 1;
+    this.measuredThreadHeight = 72;
+    const next: Object | undefined = params['item'];
+    if (next instanceof ReplyItem) {
+      const fresh: ReplyItem = next as ReplyItem;
+      this.mirrorLiked = fresh.liked;
+      this.mirrorDisliked = fresh.disliked;
+      this.mirrorLike = fresh.like;
+      this.mirrorRpid = fresh.rpid;
+      this.mirrorRev = fresh.rev;
+    } else {
+      this.syncMirrorFromItem();
+    }
     this.primeNameplate();
   }
 

@@ -10,7 +10,9 @@ import { CommentLog } from '../../common/CommentLog';
 @Component
 export struct ReplyThreadPanel {
   @Prop @Watch('onRootChanged') root: ReplyItem = new ReplyItem();
-  @Prop @Watch('onRepliesChanged') replies: Array<ReplyItem> = [];
+  // @Link 而非 @Prop：@Prop 对整表深拷贝（楼中楼每次加载更多/插楼/屏蔽过滤都拷几百个
+  // 胖对象）；@Link 按引用共享父级 @State 数组，重赋值时同样触发 @Watch 重建回复树。
+  @Link @Watch('onRepliesChanged') replies: Array<ReplyItem>;
   @Prop loading: boolean = false;
   @Prop hasMore: boolean = false;
   @Prop version: number = 0;

@@ -591,16 +591,20 @@ for (const [file, method] of [['RelationList', 'getRelationUsers'], ['BlackListP
     const Harness = env.methodHarness('pages/' + file, '  private async load(', '  private openUser(',
       "import { UserApi } from '../api/UserApi';");
     const view = new Harness();
-    Object.assign(view, { param: { mid: 1, mode: 'following' }, users: [{ mid: 1 }], total: 4,
+    // 关注/粉丝与黑名单已改造为 BasicDataSource 增量 append，这里注入真实数据源并按行数断言。
+    Object.assign(view, { param: { mid: 1, mode: 'following' }, usersSource: source(env, [{ mid: 1 }]),
+      userCount: 1, total: 4,
       page: 2, loading: false, failed: false, destroyed: false, hasMore: true, requestEpoch: epoch(env) });
     await view.load(false);
-    assert.equal(view.failed, true); assert.equal(view.page, 2); assert.equal(view.users.length, 1);
+    assert.equal(view.failed, true); assert.equal(view.page, 2);
+    assert.equal(view.usersSource.totalCount(), 1); assert.equal(view.userCount, 1);
     await view.load(false);
-    assert.deepEqual(pages, [2, 2]); assert.equal(view.failed, false); assert.equal(view.users.length, 2);
+    assert.deepEqual(pages, [2, 2]); assert.equal(view.failed, false);
+    assert.equal(view.usersSource.totalCount(), 2); assert.equal(view.userCount, 2);
     const old = view.load(false);
     view.requestEpoch.invalidate(); view.destroyed = true;
     pending.resolve({ users: [{ mid: 3 }], total: 4 }); await old;
-    assert.equal(view.users.length, 2);
+    assert.equal(view.usersSource.totalCount(), 2); assert.equal(view.userCount, 2);
   });
 }
 

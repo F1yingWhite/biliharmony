@@ -1861,7 +1861,7 @@ export struct VideoDetailPage {
   VideoThreadSheet() {
     ReplyThreadPanel({
       root: this.replyThreadRoot,
-      replies: this.threadAllReplies,
+      replies: $threadAllReplies,
       loading: this.threadLoading,
       hasMore: this.threadHasMore,
       version: this.replyLikeVersion,
