@@ -9,6 +9,8 @@ import { uiMaterial } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { deviceInfo } from '@kit.BasicServicesKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+import { DEBUG } from 'BuildProfile';
 
 /** 弹幕设置全量快照：规范默认值即播放器初始态，首开/恢复默认/持久化读取兜底都以此为准。 */
 export class DanmakuSettings {
@@ -110,6 +112,8 @@ export class AppTheme {
     AppTheme.ensureBool('sponsorSkipEnabled', true);
     AppTheme.ensureNumber('videoQualityPref', 0);
     AppTheme.ensureNumber('videoManualQuality', 0);
+    // 首页推荐源：'web'（Web 个性化推荐，默认）| 'app'（App 推流，服务端个性化最强）。
+    AppTheme.ensureString('recommendMode', 'web');
     // 定时深色：默认关闭；时段默认 19:00 - 07:00（跨午夜）。
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_AUTO_DARK, false);
     PersistentStorage.persistProp<string>(AppTheme.KEY_AUTO_DARK_START, '19:00');
@@ -159,6 +163,9 @@ export class AppTheme {
       if (auto.length > 0) AppStorage.setOrCreate<boolean>('autoContinuePlay', auto === 'true');
       const sponsor: string = AppTheme.themePreferences.getSync('sponsorSkipEnabled', '') as string;
       if (sponsor.length > 0) AppStorage.setOrCreate<boolean>('sponsorSkipEnabled', sponsor === 'true');
+      const recMode: string = AppTheme.themePreferences.getSync('recommendMode', '') as string;
+      if (DEBUG) hilog.info(0x0000, 'RecMode', 'restore read=%{public}s', recMode);
+      if (recMode === 'app' || recMode === 'web') AppStorage.setOrCreate<string>('recommendMode', recMode);
       const background: string = AppTheme.themePreferences.getSync('backgroundPlaybackEnabled', '') as string;
       if (background.length > 0) AppStorage.setOrCreate<boolean>('backgroundPlaybackEnabled', background === 'true');
       const store: preferences.Preferences = AppTheme.themePreferences;
@@ -208,6 +215,24 @@ export class AppTheme {
   /** 广告空降开关写 Preferences。 */
   static persistSponsorSkip(on: boolean): void {
     AppTheme.syncBooleanPref('sponsorSkipEnabled', on);
+  }
+
+  /** 首页推荐源写 Preferences（'web' | 'app'；切换即落盘，重启还原）。 */
+  static persistRecommendMode(mode: string): void {
+    const store: preferences.Preferences | null = AppTheme.themePreferences;
+    if (DEBUG) hilog.info(0x0000, 'RecMode', 'persist %{public}s store=%{public}s', mode,
+      String(store !== null));
+    if (store === null) return;
+    try {
+      store.putSync('recommendMode', mode);
+      store.flush().then((): void => {
+        if (DEBUG) hilog.info(0x0000, 'RecMode', 'flush ok');
+      }).catch((e: Object): void => {
+        if (DEBUG) hilog.error(0x0000, 'RecMode', 'flush fail %{public}s', String(e));
+      });
+    } catch (e) {
+      // 写盘失败只丢最后一次偏好。
+    }
   }
 
   private static readonly KEY_LAST_BRIGHTNESS: string = 'lastWindowBrightness';

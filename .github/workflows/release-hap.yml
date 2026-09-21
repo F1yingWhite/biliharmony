@@ -95,7 +95,7 @@ jobs:
       - name: Run service regression tests
         run: |
           node --test --test-timeout=10000 \
-            tool/qa/danmaku.test.cjs tool/qa/dock-transition.test.cjs tool/qa/dyn_publish.test.cjs \
+            tool/qa/danmaku.test.cjs tool/qa/dock-transition.test.cjs tool/qa/dyn_publish.test.cjs tool/qa/feed_source.test.cjs \
             tool/qa/handedness.test.cjs tool/qa/lifecycle.test.cjs tool/qa/parity.test.cjs \
             tool/qa/player-seek.test.cjs tool/qa/regression.test.cjs
 

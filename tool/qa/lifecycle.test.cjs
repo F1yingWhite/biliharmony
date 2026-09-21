@@ -199,8 +199,10 @@ test('recommendation reset supersedes old pagination and preserves new loading s
   const Harness = env.methodHarness('views/HomeView', '  async loadRecommend(', '  async loadHot(',
     "import { FeedApi } from '../api/FeedApi';");
   const p = new Harness();
-  Object.assign(p, {recEpoch:epoch(env), recFetching:false, recHasMore:true, recIdx:10,
-    recSource:source(env, [{aid:1}]), recCount:1});
+  Object.assign(p, {recEpoch:epoch(env), recFetching:false, recHasMore:true,
+    recSource:source(env, [{aid:1}]), recCount:1,
+    // 曝光窗口为独立行为，本用例注入恒等桩，聚焦 reset/epoch 语义。
+    filterSeen: l => l, rememberSeen: () => {}});
   const first = p.loadRecommend(false), reset = p.loadRecommend(true);
   old.resolve([]); await first;
   assert.equal(calls, 2); assert.equal(p.recFetching, true); assert.equal(p.recHasMore, true);

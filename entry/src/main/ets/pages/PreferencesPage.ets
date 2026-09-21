@@ -60,6 +60,7 @@ export struct PreferencesPage {
   @StorageProp('playerDoubleTapEnabled') doubleTap: boolean = true;
   @StorageProp('playerPanEnabled') pan: boolean = true;
   @StorageProp('playerHoldEnabled') hold: boolean = true;
+  @StorageProp('recommendMode') recommendMode: string = 'web';
   @State editingTime: boolean = false;
   @State startHour: number = 19;
   @State startMinute: number = 0;
@@ -202,6 +203,14 @@ export struct PreferencesPage {
     Column() {
       PreferenceRow({ title: '沉浸光感', detail: '为导航与浮层启用通透材质', toggle: true, checked: this.glassOn,
         onChange: (value: boolean) => AppTheme.setGlassEnabled(value) })
+      this.DividerLine()
+      PreferenceRow({ title: '首页推荐源', detail: this.recommendMode === 'app' ? 'App 推流：服务端个性化最强，翻页自动去重' : 'Web 个性化推荐：官方网页端同款会话协议',
+        toggle: true, checked: this.recommendMode === 'app',
+        onChange: (value: boolean) => {
+          const mode: string = value ? 'app' : 'web';
+          AppStorage.setOrCreate<string>('recommendMode', mode);
+          AppTheme.persistRecommendMode(mode);
+        } })
       this.DividerLine()
       PreferenceRow({ title: '定时深色', detail: this.themeMode === 'system' ? '按指定时段切换，支持跨午夜' : '切换为跟随系统后可用',
         toggle: true, checked: this.autoDark, rowEnabled: this.themeMode === 'system',

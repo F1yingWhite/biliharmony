@@ -72,7 +72,6 @@ export struct HomeView {
   @State viewportWidth: number = 360;
   @State loadingMore: boolean = false;
   // 每频道独立的分页游标 / 错误文案 / 到底标记，互不串台
-  @State recIdx: number = 0;
   @State hotPage: number = 1;
   @State livePage: number = 1;
   @State recError: string = '';
@@ -90,6 +89,8 @@ export struct HomeView {
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
   @StorageProp('loginVersion') @Watch('onLoginChanged') loginVersion: number = 0;
+  // 推荐源切换（Web 个性化 / App 推流）：切换即重开会话重载首页。
+  @StorageProp('recommendMode') @Watch('onRecommendModeChanged') recommendMode: string = 'web';
   private tabsController: TabsController = new TabsController();
   private recScroller: Scroller = new Scroller();
   private hotScroller: Scroller = new Scroller();
@@ -122,8 +123,26 @@ export struct HomeView {
     this.recFetching = false;
     this.recSource.clear();
     this.recCount = 0;
+    // 换账号后曝光窗口不再适用：新账号的推荐是另一套候选。
+    this.clearSeenWindow();
+    FeedApi.resetRecommendSession();
     try {
       await UserStore.ensureLoaded();
+      await this.loadRecommend(true);
+    } catch (e) {
+      if (this.recSource.isEmpty()) this.recError = '推荐加载失败，请检查网络后重试';
+    }
+  }
+
+  /** 推荐源切换（Web / App 推流）：清列表并重开会话立即生效。 */
+  private async onRecommendModeChanged(): Promise<void> {
+    this.recEpoch.invalidate();
+    this.recFetching = false;
+    this.recSource.clear();
+    this.recCount = 0;
+    this.clearSeenWindow();
+    FeedApi.resetRecommendSession();
+    try {
       await this.loadRecommend(true);
     } catch (e) {
       if (this.recSource.isEmpty()) this.recError = '推荐加载失败，请检查网络后重试';
@@ -170,6 +189,45 @@ export struct HomeView {
     return out;
   }
 
+  // ===== 近期曝光窗口：跨刷新记忆最近看过的推荐，服务端重复下发时本地兜底过滤 =====
+  private readonly seenWindow: Array<string> = [];
+  private readonly seenSet: Set<string> = new Set<string>();
+  private readonly seenWindowMax: number = 400;
+
+  private videoKeyOf(item: VideoItem): string {
+    return item.bvid.length > 0 ? item.bvid : 'a' + String(item.aid);
+  }
+
+  /** 过滤掉近期曝光窗口内的视频（不清窗口，仅读取）。 */
+  private filterSeen(incoming: Array<VideoItem>): Array<VideoItem> {
+    const out: Array<VideoItem> = [];
+    for (let i: number = 0; i < incoming.length; i++) {
+      if (!this.seenSet.has(this.videoKeyOf(incoming[i]))) {
+        out.push(incoming[i]);
+      }
+    }
+    return out;
+  }
+
+  private rememberSeen(items: Array<VideoItem>): void {
+    for (let i: number = 0; i < items.length; i++) {
+      const key: string = this.videoKeyOf(items[i]);
+      if (!this.seenSet.has(key)) {
+        this.seenSet.add(key);
+        this.seenWindow.push(key);
+      }
+    }
+    while (this.seenWindow.length > this.seenWindowMax) {
+      const oldest: string | undefined = this.seenWindow.shift();
+      if (oldest !== undefined) this.seenSet.delete(oldest);
+    }
+  }
+
+  private clearSeenWindow(): void {
+    this.seenWindow.length = 0;
+    this.seenSet.clear();
+  }
+
   private dedupLive(source: BasicDataSource<LiveRoomItem>, incoming: Array<LiveRoomItem>): Array<LiveRoomItem> {
     const seen: Set<number> = new Set<number>();
     const base: Array<LiveRoomItem> = source.getAll();
@@ -196,13 +254,16 @@ export struct HomeView {
       // 推荐不是有限列表。空响应也可能来自网络失败、过滤或服务端暂时没有候选。
       // 每轮最多尝试三批，既能跳过重复页，也不会在异常时无限请求。
       for (let attempt: number = 0; attempt < 3; attempt++) {
-        const idx: number = this.recIdx;
-        const list: Array<VideoItem> = await FeedApi.getRecommend(idx);
+        // reset 只作用于第一帧（开新会话）；重试翻页沿用同一会话继续向后要。
+        const list: Array<VideoItem> = await FeedApi.getRecommend(reset && attempt === 0);
         if (!this.recEpoch.isCurrent(epoch)) return;
-        this.recIdx = idx + Math.max(1, list.length);
-        const fresh: Array<VideoItem> = reset ? list : this.dedupVideos(this.recSource, list);
+        const unseen: Array<VideoItem> = this.filterSeen(list);
+        const fresh: Array<VideoItem> = reset && attempt === 0
+          ? unseen
+          : this.dedupVideos(this.recSource, unseen);
         if (fresh.length === 0) continue;
-        if (reset) this.recSource.reset(fresh);
+        this.rememberSeen(fresh);
+        if (reset && attempt === 0) this.recSource.reset(fresh);
         else this.recSource.append(fresh);
         this.recCount = this.recSource.totalCount();
         return;

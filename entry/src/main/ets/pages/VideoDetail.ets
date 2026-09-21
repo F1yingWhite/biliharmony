@@ -338,7 +338,6 @@ export struct VideoDetailPage {
   private lastHeartbeatSeconds: number = -1;
   private playbackSources: PlaybackSourceCoordinator = new PlaybackSourceCoordinator();
   private initialRequest: RequestEpoch = new RequestEpoch();
-  private relatedRecommendIdx: number = 0;
   private destroyed: boolean = false;
   private timers: Set<number> = new Set<number>();
   private replyLikeBusy: Set<number> = new Set<number>();
@@ -1220,15 +1219,14 @@ export struct VideoDetailPage {
     if (this.relatedLoading) return;
     this.relatedLoading = true;
     this.relatedLoadError = '';
-    const idx: number = this.relatedRecommendIdx;
     try {
-      const list: Array<VideoItem> = await FeedApi.getRecommend(idx);
+      // 续接全局推荐会话翻页（会话游标由 FeedApi 维护，与首页共享去重信号）。
+      const list: Array<VideoItem> = await FeedApi.getRecommend(false);
       if (this.destroyed) return;
       if (list.length === 0) {
         this.relatedLoadError = '暂时没有刷新到新推荐，点击重试';
         return;
       }
-      this.relatedRecommendIdx = idx + list.length;
       if (this.appendUniqueRelated(list) === 0) {
         this.relatedLoadError = '这批推荐已看过，点击继续刷新';
       }
@@ -1252,7 +1250,6 @@ export struct VideoDetailPage {
     this.relatedCount = 0;
     this.relatedLoading = false;
     this.relatedLoadError = '';
-    this.relatedRecommendIdx = 0;
     this.upFollowerCount = -1;
     this.upVideoCount = -1;
     try {
