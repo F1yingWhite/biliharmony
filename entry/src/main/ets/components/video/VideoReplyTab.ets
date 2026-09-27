@@ -152,7 +152,7 @@ export struct VideoReplyTab {
       })
     }
     .width('100%')
-    .height(42)
+    .constraintSize({ minHeight: 44 })
     .padding({ left: 14, right: 14 })
     .border({ width: { bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
   }

@@ -3,6 +3,7 @@
  * selected 为 @Prop，父组件切换选中态时单 chip 刷新。
  */
 import { Haptic } from '../common/Haptic';
+import { MotionTokens } from '../common/MotionTokens';
 
 @Component
 export struct FilterChip {
@@ -16,14 +17,22 @@ export struct FilterChip {
   @StorageProp('isDarkMode') isDark: boolean = false;
 
   build() {
-    Text(this.label)
+    Button({ type: ButtonType.Normal }) {
+      Text(this.label)
       .fontSize(12)
       .fontColor(this.selected ? '#FFFFFF' : (this.isDark ? '#C6C7CB' : '#61666D'))
       .padding({ left: 12, right: 12, top: 5, bottom: 5 })
       .backgroundColor(this.selected ? this.accent : (this.isDark ? '#2E3136' : '#ECEEF0'))
       .borderRadius(14)
+      .animation({ duration: MotionTokens.content, curve: Curve.EaseOut })
+    }
+      .padding(0)
+      .constraintSize({ minWidth: 44, minHeight: 44 })
+      .backgroundColor(Color.Transparent)
+      .borderRadius(22)
       .margin({ right: 8, bottom: this.bottomMargin })
-      .animation({ duration: 180, curve: Curve.EaseOut })
+      .accessibilityText(this.label)
+      .accessibilitySelected(this.selected)
       .onClick(() => {
         Haptic.light();
         this.onTap();
