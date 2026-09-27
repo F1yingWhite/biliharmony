@@ -633,14 +633,14 @@ struct Index {
         .width(24)
         .height(24)
         .fillColor(this.currentTab === index ? this.accent :
-          (this.isDark ? '#B5B8BE' : '#62676D'))
+          (this.isDark ? '#D1D4DA' : '#62676D'))
         .scale({ x: this.tabScale[index], y: this.tabScale[index] })
         .animation({ duration: 260, curve: curves.springMotion(0.35, 0.7) })
       Text(label)
         .fontSize(11)
         .fontWeight(this.currentTab === index ? FontWeight.Medium : FontWeight.Normal)
         .fontColor(this.currentTab === index ? this.accent :
-          (this.isDark ? '#B5B8BE' : '#62676D'))
+          (this.isDark ? '#D1D4DA' : '#62676D'))
     }
     .width('100%')
     .height('100%')
@@ -778,6 +778,9 @@ struct Index {
             this.DockNavigation()
           }
           .width(this.dockBarWidth())
+          // 材质仍由 HdsTabs 渲染，底层胶囊限制亮封面对深色导航文字的干扰。
+          .backgroundColor(this.glassOn && this.isDark ? '#CC101114' : Color.Transparent)
+          .borderRadius(DOCK_BAR_HEIGHT / 2)
           .alignItems(HorizontalAlign.Center)
         }
       }
