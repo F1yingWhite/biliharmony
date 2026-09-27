@@ -28,6 +28,7 @@ import { pasteboard } from '@kit.BasicServicesKit';
  */
 @Component
 export struct YouTubeDetailPage {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   param: YouTubeVideo = new YouTubeVideo();
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('windowStatusBarHeight') statusInset: number = 0;
@@ -740,7 +741,7 @@ export struct YouTubeDetailPage {
             .objectFit(ImageFit.Cover)
             .backgroundColor('#000000')
             .hitTestBehavior(HitTestMode.None)
-            .transition(MotionTokens.appear())
+            .transition(MotionTokens.appear(this.reduceMotion))
         }
       }
       .width('100%').height(this.fullscreen ? '100%' : 240)

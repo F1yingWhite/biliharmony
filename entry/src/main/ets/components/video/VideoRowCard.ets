@@ -11,6 +11,7 @@ import { MotionTokens } from '../../common/MotionTokens';
 @Reusable
 @Component
 export struct VideoRowCard {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @Prop highlightKeyword: string = '';
   @Prop cover: string = '';
   @Prop coverId: string = '';
@@ -104,7 +105,7 @@ export struct VideoRowCard {
       this.onTap();
     })
     // 与 VideoCard 等卡片统一的按压反馈：按下轻微淡出，松开恢复。
-    .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
+    .animation({ duration: MotionTokens.duration(MotionTokens.feedback, this.reduceMotion), curve: Curve.EaseOut })
     .stateStyles({
       pressed: {
         opacity: 0.9,

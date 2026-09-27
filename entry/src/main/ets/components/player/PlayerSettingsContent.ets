@@ -1,3 +1,4 @@
+import { MotionTokens } from '../../common/MotionTokens';
 import { DanmakuItem, DmFilterRule, VideoChapter } from '../../api/BiliApi';
 import { SponsorBlockCategory, SponsorBlockSegment } from '../../common/SponsorBlock';
 import { BasicDataSource } from '../../common/BasicDataSource';
@@ -11,6 +12,7 @@ import { SponsorBlockPanel } from './SponsorBlockPanel';
 
 @Component
 export struct PlayerSettingsContent {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @Prop page: string = 'menu';
   @Prop fullscreen: boolean = false;
   @Prop isDark: boolean = false;
@@ -295,7 +297,7 @@ export struct PlayerSettingsContent {
         }
         .width('100%')
         .layoutWeight(1)
-        .transition(TransitionEffect.move(TransitionEdge.END).combine(TransitionEffect.opacity(0.5)))
+        .transition(this.reduceMotion ? MotionTokens.appear(true) : TransitionEffect.move(TransitionEdge.END).combine(TransitionEffect.opacity(0.5)))
       } else {
         PlayerMoreSheet({
           forceDark: this.fullscreen,
@@ -331,7 +333,7 @@ export struct PlayerSettingsContent {
           onDownload: () => this.onDownload(),
           onStub: (message: string) => this.onStub(message),
         })
-        .transition(TransitionEffect.move(TransitionEdge.START).combine(TransitionEffect.opacity(0.5)))
+        .transition(this.reduceMotion ? MotionTokens.appear(true) : TransitionEffect.move(TransitionEdge.START).combine(TransitionEffect.opacity(0.5)))
       }
     }
     .width('100%')

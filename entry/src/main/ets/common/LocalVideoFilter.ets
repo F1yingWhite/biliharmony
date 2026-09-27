@@ -97,6 +97,6 @@ export class LocalVideoFilter extends PreferencesCollection<number> {
 
   async clear(): Promise<void> {
     await this.ensureLoaded();
-    this.replace([]);
+    this.clearItems();
   }
 }

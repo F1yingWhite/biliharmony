@@ -9,6 +9,7 @@ import { MotionTokens } from '../common/MotionTokens';
 
 @Component
 export struct LoadMoreFooter {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @Prop loading: boolean = false;
   @Prop hasMore: boolean = true;
   @Prop moreText: string = '加载更多';
@@ -59,7 +60,7 @@ export struct LoadMoreFooter {
       Text(this.endText)
         .fontSize(this.fontSize)
         .fontColor('#9499A0')
-        .transition(MotionTokens.appear())
+        .transition(MotionTokens.appear(this.reduceMotion))
     }
   }
 

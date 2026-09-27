@@ -5,9 +5,9 @@
 **HarmonyOS NEXT 原生第三方哔哩哔哩客户端**
 
 从开源项目 [PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus) 移植并扩展，ArkTS / ArkUI 全原生实现 ——
-不是跨端套壳：系统 AVPlayer 播放、Canvas 自绘弹幕引擎、服务卡片 / 系统提醒 / 画中画等鸿蒙能力原生接入。
+不是跨端套壳：系统 AVPlayer 播放、Canvas 自绘弹幕引擎、系统提醒 / 画中画等鸿蒙能力原生接入。
 
-`HarmonyOS API 26` · `ArkTS + ArkUI` · `零第三方依赖（仅系统 Kit）` · `QA 217 用例`
+`HarmonyOS API 26` · `ArkTS + ArkUI` · `零第三方依赖（仅系统 Kit）` · [QA 回归说明](tool/qa/README.md)
 
 <img src="docs/screenshots/home.jpg" width="260" alt="首页信息流"/>
 <img src="docs/screenshots/detail.jpg" width="260" alt="视频详情与弹幕播放器"/>
@@ -26,7 +26,7 @@
 
 ## 这是什么
 
-BiliHaromny 是为 HarmonyOS NEXT 打造的第三方 B 站客户端。项目以 [PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus)（Flutter）的功能与协议实现为蓝本，用 **ArkTS + ArkUI 从零重写为鸿蒙原生应用**：WBI / App 签名、DASH 播放、直播 WebSocket 弹幕等核心链路均为纯 ArkTS 实现，同时接入服务卡片、reminderAgent 系统提醒、画中画、沉浸式窗口等 HarmonyOS 原生能力。
+BiliHaromny 是为 HarmonyOS NEXT 打造的第三方 B 站客户端。项目以 [PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus)（Flutter）的功能与协议实现为蓝本，用 **ArkTS + ArkUI 从零重写为鸿蒙原生应用**：WBI / App 签名、DASH 播放、直播 WebSocket 弹幕等核心链路均为纯 ArkTS 实现，同时接入 reminderAgent 系统提醒、画中画、沉浸式窗口等 HarmonyOS 原生能力。
 
 模块对应关系见 [docs/移植对照-PiliPlus.md](docs/移植对照-PiliPlus.md)。
 
@@ -67,7 +67,6 @@ BiliHaromny 是为 HarmonyOS NEXT 打造的第三方 B 站客户端。项目以 
 - 一键导出：**MP4 / M4A / 弹幕 XML（12 段合并）/ CC 字幕 SRT / 封面**
 
 ### 🧩 鸿蒙原生能力
-- 桌面**「继续观看」服务卡片**（2x2 / 2x4，点击直接续播）
 - **开播系统提醒**（reminderAgent 日历提醒，免推送服务）
 - **宽屏 Navigation 分栏**（840vp+，外观设置实验开关）
 - **封面取色动态主题**（Material You 风格色调板）、玻璃拟态材质（可关闭降级）、沉浸式系统栏、深色模式 / 定时深色
@@ -106,14 +105,14 @@ bash tool/build.sh clean release      # release
 node --test --test-timeout=10000 tool/qa/*.test.cjs
 ```
 
-217 个用例：核心逻辑（签名 / 解析 / 状态机 / 组件构建）以 TS 转译 + 平台 mock 在 Node 端回归，无需真机。CI 每次推送全量执行。
+核心逻辑（签名 / 解析 / 状态机 / 组件构建）以 TS 转译 + 平台 mock 在 Node 端回归，无需真机。环境配置、覆盖范围和验证边界见 [QA 回归说明](tool/qa/README.md)，用例数量以实际运行结果为准。CI 每次推送全量执行。
 
 ## 项目结构
 
 ```text
 entry/src/main/ets/
-├── entryability/EntryAbility.ets    # 入口：主题初始化、沉浸式系统栏、卡片深链、启动代理
-├── entryformability/                # 桌面「继续观看」服务卡片 FormExtensionAbility
+├── entryability/EntryAbility.ets    # 入口：主题初始化、沉浸式系统栏、深链、启动代理
+├── entryformability/                # 已取消注册的桌面卡片历史实现（保留源码）
 ├── pages/                           # 路由页（视频详情 / 搜索 / 登录 / 直播间 / 私信 / 番剧 / 下载中心 …）
 ├── views/                           # 主 Tab 视图（首页三频道 / 动态 / 我的 / YouTube 外壳）
 ├── components/
@@ -146,4 +145,6 @@ entry/src/main/ets/
 
 ## 已知边界
 
-不做消费类功能（大会员 / 充电 / 送礼）、创作中心、直播回放；历史弹幕与视频举报因官方无公开接口暂缺。画中画与宽屏分栏已实现，真机持续验收中。
+不做消费类功能（大会员 / 充电 / 送礼）、创作中心、直播回放；历史弹幕暂缺。视频举报已接入可用原因和服务端结果确认，画中画与宽屏分栏已实现，真机持续验收中。
+
+桌面「继续观看」服务卡片已按用户要求取消入口，不作为当前交付功能；范围变更记录见 [模拟器测试记录](docs/emulator-test-2026-09-27.md#用户范围纠正取消桌面卡片集中浮窗播放)。

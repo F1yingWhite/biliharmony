@@ -27,7 +27,7 @@ export class KeywordHistoryStore extends PreferencesCollection<string> {
   protected onInit(): void {
     PersistentStorage.persistProp<string>(this.storageKey, '[]');
     const legacyRaw: string = AppStorage.get<string>(this.storageKey) ?? '[]';
-    this.cache = this.merge([], this.parseList(legacyRaw));
+    this.cache = this.merge(this.cache, this.parseList(legacyRaw));
   }
 
   protected keyOf(item: string): string {
@@ -69,16 +69,11 @@ export class KeywordHistoryStore extends PreferencesCollection<string> {
   }
 
   remove(keyword: string): Array<string> {
-    const old: Array<string> = this.items();
-    const next: Array<string> = [];
-    for (let i: number = 0; i < old.length; i++) {
-      if (old[i] !== keyword) next.push(old[i]);
-    }
-    this.replace(next);
-    return next;
+    this.removeKey(keyword);
+    return this.items();
   }
 
   clear(): void {
-    this.replace([]);
+    this.clearItems();
   }
 }

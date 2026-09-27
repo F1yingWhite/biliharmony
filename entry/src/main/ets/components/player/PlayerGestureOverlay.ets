@@ -1,3 +1,4 @@
+import { MotionTokens } from '../../common/MotionTokens';
 import { image } from '@kit.ImageKit';
 import { VideoChapter } from '../../api/BiliApi';
 import { chapterTitleAt } from './PlayerChapterSupport';
@@ -30,6 +31,7 @@ export class PlayerScrubController {
 /** 在线人数、长按倍速、横滑预览、音量/亮度的轻量叠层。 */
 @Component
 export struct PlayerGestureOverlay {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @Prop onlineTotal: string = '';
   @Prop chapterTitle: string = '';
   @Prop compactMode: boolean = false;
@@ -222,6 +224,7 @@ export struct PlayerGestureOverlay {
 /** 小范围原生透明度动画，不用 JS 定时器刷新整个视频手势叠层。 */
 @Component
 struct HoldSpeedArrows {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @State shining: boolean = false;
 
   build() {
@@ -231,8 +234,9 @@ struct HoldSpeedArrows {
           .width(13)
           .height(16)
           .fillColor('#FFFFFF')
-          .opacity(this.shining ? 1 : 0.44)
-          .animation({ duration: 480, delay: index * 160, iterations: -1,
+          .opacity(this.reduceMotion || this.shining ? 1 : 0.44)
+          .animation({ duration: this.reduceMotion ? 0 : 480, delay: this.reduceMotion ? 0 : index * 160,
+            iterations: this.reduceMotion ? 1 : -1,
             playMode: PlayMode.Alternate, curve: Curve.EaseInOut })
       }, (index: number) => String(index))
     }

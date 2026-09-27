@@ -15,6 +15,7 @@ import { DecoratedAvatar, UserDecorationBanner } from '../UserDecorations';
 import { biliImageOriginal, biliImageThumbnail } from '../../common/ImageUrl';
 import { Haptic } from '../../common/Haptic';
 import { curves } from '@kit.ArkUI';
+import { MotionTokens } from '../../common/MotionTokens';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { ActionResult } from '../../api/BiliApi';
 import { UserApi } from '../../api/UserApi';
@@ -229,6 +230,7 @@ export struct ReplyCard {
   /** 点赞动效：先放大再 spring 回弹；父页面负责真实状态翻转。 */
   private playLikeAnimation(): void {
     Haptic.tap();
+    if (MotionTokens.isReduced()) { this.likeScale = 1; return; }
     this.getUIContext().animateTo({ duration: 110, curve: Curve.EaseOut }, () => {
       this.likeScale = 1.28;
     });
@@ -242,6 +244,7 @@ export struct ReplyCard {
   /** 点踩动效：轻微下沉，回弹。 */
   private playDislikeAnimation(): void {
     Haptic.tap();
+    if (MotionTokens.isReduced()) { this.dislikeScale = 1; return; }
     this.getUIContext().animateTo({ duration: 110, curve: Curve.EaseOut }, () => {
       this.dislikeScale = 0.8;
     });
@@ -287,6 +290,11 @@ export struct ReplyCard {
 
   private openPicture(index: number): void {
     const originals: Array<string> = this.item.pictures.map((url: string) => biliImageOriginal(url));
+    if (MotionTokens.isReduced()) {
+      const viewer: ImageViewerParam = { images: originals, initialIndex: index };
+      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
+      return;
+    }
     const rects: Array<ImageViewerSrcRect> = this.collectPictureRects();
     const rect: ImageViewerSrcRect | undefined = index < rects.length && rects[index].w > 0 ? rects[index] : undefined;
     const ids: Array<string> = [];

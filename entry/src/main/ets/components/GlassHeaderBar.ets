@@ -1,3 +1,4 @@
+import { MotionTokens } from '../common/MotionTokens';
 /**
  * 玻璃头栏：搜索胶囊 + 消息 + 头像，按智感握姿的惯用手做结构化换边
  * （直接条件重排子节点，不再用 translate 硬移，杜绝换边时压到头像）。
@@ -17,6 +18,7 @@ import { GlassCapsuleSurface, ImmersiveEdgeMask } from './ImmersiveSurfaces';
 /** 遮罩放在频道导航下方，让背景化开，文字与按钮保持清晰。 */
 @Component
 export struct HeaderBackdrop {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @StorageProp('windowStatusBarHeight') statusBarInset: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
@@ -35,12 +37,13 @@ export struct HeaderBackdrop {
 
 @Component
 export struct GlassHeaderBar {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @StorageProp(Handedness.KEY_SIDE) @Watch('onHandSideChanged') handSide: string = Handedness.RIGHT;
   /** 0 = 右手（胶囊在左、头像在右）；1 = 左手（结构化换边：头像/铃铛在左、胶囊在右）。 */
   @State handPosition: number = 0;
 
   onHandSideChanged(): void {
-    this.getUIContext().animateTo({ duration: 240, curve: Curve.EaseInOut }, () => {
+    this.getUIContext().animateTo({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseInOut }, () => {
       this.handPosition = this.handSide === Handedness.LEFT ? 1 : 0;
     });
   }

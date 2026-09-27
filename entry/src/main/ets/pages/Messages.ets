@@ -22,6 +22,7 @@ import { biliImageOriginal, biliImageThumbnail } from '../common/ImageUrl';
 
 @Component
 export struct MessagesPage {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @State current: MessageSessionItem = new MessageSessionItem();
   /** 聊天记录数据源：老消息 prepend、新消息 append 均增量通知 LazyForEach，不整表重建。 */
   private messagesSource: BasicDataSource<PrivateMessageItem> = new BasicDataSource<PrivateMessageItem>();
@@ -461,6 +462,11 @@ export struct MessagesPage {
 
   private openRichMessage(item: PrivateMessageItem): void {
     if (item.imageUrl.length > 0) {
+      if (MotionTokens.isReduced()) {
+        const viewer: ImageViewerParam = { images: [biliImageOriginal(item.imageUrl)], initialIndex: 0 };
+        AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
+        return;
+      }
       const rect: ImageViewerSrcRect | undefined = this.componentRect(this.richMediaId(item));
       const preview: string = biliImageThumbnail(item.imageUrl, 640);
       const viewer: ImageViewerParam = {
@@ -485,6 +491,10 @@ export struct MessagesPage {
       title: item.richTitle.length > 0 ? item.richTitle : item.text,
       cover: item.richCover,
     };
+    if (MotionTokens.isReduced()) {
+      AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param, false);
+      return;
+    }
     try {
       const cardRect: ImageViewerSrcRect | undefined = this.componentRect(this.richCardId(item));
       if (cardRect !== undefined) {
@@ -848,7 +858,7 @@ export struct MessagesPage {
       .translate({ x: this.threadOpen ? '-24%' : '0%' })
       .opacity(this.threadOpen ? 0.88 : 1)
       .hitTestBehavior(this.threadOpen ? HitTestMode.None : HitTestMode.Default)
-      .animation({ duration: MotionTokens.navigation, curve: Curve.EaseOut })
+      .animation({ duration: MotionTokens.duration(MotionTokens.navigation, this.reduceMotion), curve: Curve.EaseOut })
 
       Stack({ alignContent: Alignment.TopStart }) {
         this.MessageThreadPage()
@@ -859,7 +869,7 @@ export struct MessagesPage {
       .zIndex(1)
       .hitTestBehavior(this.threadOpen ? HitTestMode.Default : HitTestMode.None)
       .shadow({ radius: 12, color: '#26000000', offsetX: -5, offsetY: 0 })
-      .animation({ duration: MotionTokens.navigation, curve: Curve.EaseOut })
+      .animation({ duration: MotionTokens.duration(MotionTokens.navigation, this.reduceMotion), curve: Curve.EaseOut })
     }
     .width('100%')
     .height('100%')

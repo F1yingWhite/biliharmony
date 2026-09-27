@@ -21,6 +21,7 @@ const PLAYER_COVER_RENDER_WIDTH: number = 1800;
 
 @Component
 export struct LiveRoomPage {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   param: LiveRoomParam = { roomId: 0, uid: 0, title: '', uname: '', face: '', cover: '' };
   @State roomInfo: LiveRoomInfo = new LiveRoomInfo();
   @State playInfo: LivePlayInfo = new LivePlayInfo();
@@ -374,7 +375,7 @@ export struct LiveRoomPage {
   private animateFullscreenChange(value: boolean): void {
     if (this.fullscreen === value || this.destroyed) return;
     this.getUIContext().animateTo({
-      duration: MotionTokens.navigation,
+      duration: MotionTokens.duration(MotionTokens.navigation, this.reduceMotion),
       curve: Curve.EaseOut,
     }, () => {
       this.fullscreen = value;

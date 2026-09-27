@@ -1,3 +1,4 @@
+import { MotionTokens } from '../../common/MotionTokens';
 /**
  * 弹幕列表面板：竖屏弹层/横屏抽屉/设置内嵌页共用。
  * 从 PlayerView.DanmakuListPanel 拆出。
@@ -9,6 +10,7 @@ import { DanmakuItem } from '../../api/BiliApi';
 
 @Component
 export struct DanmakuListPanel {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @Prop embedded: boolean = false;
   @Prop forceDark: boolean = false;
   @Prop count: number = 0;
@@ -102,10 +104,10 @@ export struct DanmakuListPanel {
     .backdropBlur(this.embedded ? 0 : 24)
     .border(this.embedded ? { width: 0 } : { width: { top: 0.5 }, color: this.darkMode() ? '#333333' : '#EEEEEE' })
     .align(this.embedded ? Alignment.Top : Alignment.Bottom)
-    .transition(this.embedded ? TransitionEffect.IDENTITY :
+    .transition(this.embedded ? TransitionEffect.IDENTITY : this.reduceMotion ? MotionTokens.appear(true) :
       TransitionEffect.asymmetric(
         TransitionEffect.opacity(0).combine(TransitionEffect.translate({ y: 24 }))
-          .animation({ duration: 200, curve: Curve.EaseOut }),
-        TransitionEffect.opacity(0).animation({ duration: 150, curve: Curve.EaseIn })))
+          .animation({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseOut }),
+        TransitionEffect.opacity(0).animation({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseIn })))
   }
 }

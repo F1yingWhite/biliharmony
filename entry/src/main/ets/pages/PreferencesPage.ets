@@ -1,4 +1,5 @@
 import { AppTheme } from '../common/AppTheme';
+import { MotionTokens } from '../common/MotionTokens';
 import { Handedness } from '../common/Handedness';
 import { Immersive } from '../common/Immersive';
 import { PlayerQualityPreference } from '../common/PlayerQualityPreference';
@@ -48,6 +49,7 @@ export struct PreferencesPage {
   @StorageProp('userAccentColor') userAccent: string = '#FB7299';
   @StorageProp('themeMode') themeMode: string = 'system';
   @StorageProp('glassEnabled') glassOn: boolean = true;
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @StorageProp('autoDarkEnabled') autoDark: boolean = false;
   @StorageProp('autoDarkStart') start: string = '19:00';
   @StorageProp('autoDarkEnd') end: string = '07:00';
@@ -204,6 +206,10 @@ export struct PreferencesPage {
     Column() {
       PreferenceRow({ title: '沉浸光感', detail: '为导航与浮层启用通透材质', toggle: true, checked: this.glassOn,
         onChange: (value: boolean) => AppTheme.setGlassEnabled(value) })
+      this.DividerLine()
+      PreferenceRow({ title: '减少动效', detail: '减少缩放、弹跳和页面位移，保留操作反馈与图片手势',
+        toggle: true, checked: this.reduceMotion,
+        onChange: (value: boolean) => AppTheme.setReduceMotion(value) })
       this.DividerLine()
       PreferenceRow({ title: '宽屏分栏（实验性）', detail: '840vp 以上平板/折叠屏展开时，目标页以右侧分栏展示',
         toggle: true, checked: this.wideSplit,

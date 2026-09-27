@@ -127,6 +127,7 @@ function backgroundHarness(enabled,playing) {
   const Harness=env.methodHarness('components/player/PlayerView','  onAppBackgroundChanged():','  private setBackgroundPlayback(');
   const actions=[];
   const view=Object.assign(new Harness(),{appInBackground:true,backgroundPlaybackEnabled:enabled,playing,
+    seekCtl:null,cancelAudioGate(){},
     dmClock:{pause(){},release(){}},resetDanmakuAt(){},spawnDanmaku(){},
     releasePictureInPicture(){actions.push('stopPiP');this.pipActive=false;this.pipStarting=false;this.pipRestoring=false;},
     togglePlay(){actions.push('pause');},enterBackgroundAudioOnly(){actions.push('audio');},leaveBackgroundAudioOnly(){actions.push('foreground');}});

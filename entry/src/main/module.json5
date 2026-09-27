@@ -22,9 +22,9 @@
         "name": "EntryAbility",
         "srcEntry": "./ets/entryability/EntryAbility.ets",
         "description": "$string:EntryAbility_desc",
-        "icon": "$media:app_layered_icon_20260814",
+        "icon": "$media:app_layered_icon_20260927",
         "label": "$string:EntryAbility_label",
-        "startWindowIcon": "$media:app_start_icon_20260814",
+        "startWindowIcon": "$media:app_icon_20260927",
         "startWindowBackground": "$color:start_window_background",
         "backgroundModes": [
           "audioPlayback"

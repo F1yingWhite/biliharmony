@@ -299,7 +299,7 @@ export class RemoteAssetCache {
     setTimeout(removeBatch, 0);
   }
 
-  /** 升级后回收旧版曾长期留在 cacheDir 根目录的评论分享图与缩略图。 */
+  /** 回收旧版分享图，以及上次进程退出后遗留超过一天的分页分享图；近期预览不受影响。 */
   private static scheduleLegacyReplySharePurge(): void {
     if (RemoteAssetCache.legacyReplySharePurgeScheduled || assetCacheDir.length === 0) return;
     let entries: Array<string> = [];
@@ -310,7 +310,15 @@ export class RemoteAssetCache {
     }
     const legacyFiles: Array<string> = [];
     for (let i: number = 0; i < entries.length; i++) {
-      if (/^reply_share_[0-9]+(?:_thumb)?\.(?:png|jpg)$/i.test(entries[i])) legacyFiles.push(entries[i]);
+      if (/^reply_share_[0-9]+(?:_thumb)?\.(?:png|jpg)$/i.test(entries[i])) {
+        legacyFiles.push(entries[i]);
+        continue;
+      }
+      const session: RegExpExecArray | null = /^reply_share_[0-9]+_([0-9]+)_[0-9]+_[0-9]+\.png$/i.exec(entries[i]);
+      if (session !== null) {
+        const createdAt: number = Number(session[1]);
+        if (createdAt > 0 && createdAt < Date.now() - 24 * 60 * 60 * 1000) legacyFiles.push(entries[i]);
+      }
     }
     if (legacyFiles.length === 0) return;
     RemoteAssetCache.legacyReplySharePurgeScheduled = true;

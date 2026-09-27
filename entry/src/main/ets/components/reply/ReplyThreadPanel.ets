@@ -1,3 +1,4 @@
+import { MotionTokens } from '../../common/MotionTokens';
 import { BiliEmotePackage, ReplyItem } from '../../model/Models';
 import { formatCount } from '../../common/Utils';
 import { LayoutTokens } from '../../common/LayoutTokens';
@@ -9,6 +10,7 @@ import { CommentLog } from '../../common/CommentLog';
 /** 动态、视频等业务可复用的回复详情容器；业务页只负责接口与状态。 */
 @Component
 export struct ReplyThreadPanel {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @Prop @Watch('onRootChanged') root: ReplyItem = new ReplyItem();
   // @Link 而非 @Prop：@Prop 对整表深拷贝（楼中楼每次加载更多/插楼/屏蔽过滤都拷几百个
   // 胖对象）；@Link 按引用共享父级 @State 数组，重赋值时同样触发 @Watch 重建回复树。
@@ -102,7 +104,7 @@ export struct ReplyThreadPanel {
     else this.collapsed.add(item.rpid);
     CommentLog.info('tree.toggle', 'root=' + String(this.root.rpid) + ' rpid=' + String(item.rpid) +
       ' collapsed=' + String(this.collapsed.has(item.rpid)));
-    this.getUIContext().animateTo({ duration: 150, curve: Curve.EaseInOut }, () => this.rebuildTree());
+    this.getUIContext().animateTo({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseInOut }, () => this.rebuildTree());
   }
 
   build() {

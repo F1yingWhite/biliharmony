@@ -32,6 +32,7 @@ const YOUTUBE_CATEGORIES: Array<string> = ['音乐', '游戏', '科技', '电影
 
 @Component
 export struct YouTubeView {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('windowStatusBarHeight') statusInset: number = 0;
   @StorageProp('glassEnabled') glassOn: boolean = true;
@@ -916,7 +917,7 @@ export struct YouTubeView {
       // 深色模式给原生玻璃叠深色吸收底（同主框架：约 70% 透明度仍会泛白）。
       .barBackgroundColor(this.glassOn ? (this.isDark ? '#EA15161A' : '#00000000') :
         AppTheme.floatBg(this.isDark, false))
-      .animationDuration(MotionTokens.navigation)
+      .animationDuration(MotionTokens.duration(MotionTokens.navigation, this.reduceMotion))
       .animationMode(AnimationMode.CONTENT_FIRST)
       .onChange(() => {
         AppTheme.resetHeaderFade();
@@ -973,6 +974,7 @@ export struct YouTubeView {
 @Reusable
 @Component
 struct YouTubeVideoCard {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   /** 封面显示源：本地缓存文件 URI 或远端 URL，由宿主构建行时经 thumbnailOf 解析。 */
   @Prop @Watch('onCoverChanged') cover: string = '';
   @Prop title: string = '';
@@ -1021,7 +1023,7 @@ struct YouTubeVideoCard {
           .syncLoad(false)
           // 封面淡入：解码完成前保持透明，完成后过渡出现（失败也收尾，不留空白卡）。
           .opacity(this.coverShown ? 1 : 0)
-          .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
+          .animation({ duration: MotionTokens.duration(MotionTokens.feedback, this.reduceMotion), curve: Curve.EaseOut })
           .onComplete(() => {
             if (!this.coverShown) this.coverShown = true;
           })
@@ -1115,7 +1117,7 @@ struct YouTubeVideoCard {
     .borderRadius(16)
     .clip(true)
     .shadow({ radius: 8, color: '#08000000', offsetX: 0, offsetY: 1 })
-    .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
+    .animation({ duration: MotionTokens.duration(MotionTokens.feedback, this.reduceMotion), curve: Curve.EaseOut })
     .stateStyles({ pressed: { opacity: 0.9 }, normal: { opacity: 1 } })
   }
 }

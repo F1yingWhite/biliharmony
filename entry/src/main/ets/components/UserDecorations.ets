@@ -1,3 +1,4 @@
+import { MotionTokens } from '../common/MotionTokens';
 /**
  * 用户装扮公用组件。
  * 评论、动态和个人空间共用同一套头像/挂件比例，避免各页面分别调尺寸后互相漂移。
@@ -7,6 +8,7 @@ import { biliImageThumbnail } from '../common/ImageUrl';
 
 @Component
 export struct DecoratedAvatar {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @StorageProp('isDark') isDark: boolean = false;
   @Prop @Watch('onFaceChanged') face: string = '';
   @Prop @Watch('onPendantChanged') pendant: string = '';
@@ -78,7 +80,7 @@ export struct DecoratedAvatar {
             .border({ width: this.avatarBorderWidth, color: this.avatarBorderColor })
             .clip(true)
             .opacity(this.avatarLoaded ? 1 : 0)
-            .animation({ duration: 120, curve: Curve.EaseOut })
+            .animation({ duration: MotionTokens.duration(MotionTokens.feedback, this.reduceMotion), curve: Curve.EaseOut })
             .onComplete(() => {
               this.avatarLoaded = true;
             })
@@ -98,7 +100,7 @@ export struct DecoratedAvatar {
             .objectFit(ImageFit.Cover)
             .clip(true)
             .opacity(this.avatarLoaded ? 1 : 0)
-            .animation({ duration: 120, curve: Curve.EaseOut })
+            .animation({ duration: MotionTokens.duration(MotionTokens.feedback, this.reduceMotion), curve: Curve.EaseOut })
             .onComplete(() => {
               this.avatarLoaded = true;
             })
@@ -133,6 +135,7 @@ export struct DecoratedAvatar {
  *  原始宽高比显示为右上角小卡（官方动态卡片样式），编号叠加在图右侧 1:1 编号区。 */
 @Component
 export struct UserDecorationBanner {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @Prop @Watch('onImageUrlChanged') imageUrl: string = '';
   @Prop numberPrefix: string = 'NO.';
   @Prop numberText: string = '';

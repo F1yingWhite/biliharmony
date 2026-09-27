@@ -28,6 +28,7 @@ import { HeaderBackdrop } from '../components/GlassHeaderBar';
 /** 频道保持可见，搜索收起时上移；单独订阅滚动值，避免重建信息流。 */
 @Component
 struct FloatingSubTabs {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @StorageProp(Handedness.KEY_SIDE) @Watch('onHandSideChanged') handSide: string = Handedness.RIGHT;
   @State handPosition: number = 0;
   private handLayoutMounted: boolean = false;
@@ -65,6 +66,7 @@ struct FloatingSubTabs {
 
 @Component
 export struct HomeView {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @StorageProp('windowStatusBarHeight') statusBarInset: number = 0;
   @State tab: number = 0; // 0 推荐 / 1 热门 / 2 直播
   @State visualTab: number = 0;
@@ -778,7 +780,7 @@ export struct HomeView {
       .barHeight(0)
       .cachedMaxCount(1, TabsCacheMode.CACHE_BOTH_SIDE)
       .animationMode(AnimationMode.CONTENT_FIRST)
-      .animationDuration(MotionTokens.content)
+      .animationDuration(MotionTokens.duration(MotionTokens.content, this.reduceMotion))
       .animationCurve(Curve.EaseOut)
       .onAnimationStart((index: number, targetIndex: number, extraInfo: TabsAnimationEvent) => {
         this.visualTab = targetIndex;

@@ -5,6 +5,7 @@
 import { tonalPalette, isDarkColor } from './ColorUtil';
 import { PlayerQualityPreference } from './PlayerQualityPreference';
 import { Constants } from './Constants';
+import { MotionTokens } from './MotionTokens';
 import { uiMaterial } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
@@ -87,6 +88,8 @@ export class AppTheme {
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_USER_ACCENT_MIGRATED, false);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_DARK, false);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_GLASS_ENABLED, true);
+    PersistentStorage.persistProp<boolean>(MotionTokens.KEY_REDUCE_MOTION, false);
+    AppTheme.ensureBool(MotionTokens.KEY_REDUCE_MOTION, false);
     PersistentStorage.persistProp<boolean>('wideSplitEnabled', false);
     PersistentStorage.persistProp<boolean>('playerDoubleTapEnabled', true);
     PersistentStorage.persistProp<boolean>('playerPanEnabled', true);
@@ -183,7 +186,7 @@ export class AppTheme {
         store.putSync('videoQualityPref', qualityMode);
         store.flush().catch(() => {});
       });
-      for (const key of ['playerDoubleTapEnabled', 'playerPanEnabled', 'playerHoldEnabled']) {
+      for (const key of ['playerDoubleTapEnabled', 'playerPanEnabled', 'playerHoldEnabled', MotionTokens.KEY_REDUCE_MOTION]) {
         const saved: string = store.getSync(key, '') as string;
         if (saved.length > 0) AppStorage.setOrCreate<boolean>(key, saved === 'true');
       }
@@ -208,6 +211,11 @@ export class AppTheme {
   static setPlayerGesture(key: string, enabled: boolean): void {
     AppStorage.setOrCreate<boolean>(key, enabled);
     AppTheme.syncBooleanPref(key, enabled);
+  }
+
+  static setReduceMotion(enabled: boolean): void {
+    AppStorage.setOrCreate<boolean>(MotionTokens.KEY_REDUCE_MOTION, enabled);
+    AppTheme.syncBooleanPref(MotionTokens.KEY_REDUCE_MOTION, enabled);
   }
 
   /** 自动连播开关写 Preferences。 */

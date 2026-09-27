@@ -84,16 +84,12 @@ export class YouTubeLocalStore extends PreferencesCollection<YouTubeLocalVideo> 
   }
 
   remove(id: string): Array<YouTubeLocalVideo> {
-    const next: Array<YouTubeLocalVideo> = [];
-    for (const item of this.cache) {
-      if (item.id !== id) next.push(item);
-    }
-    this.replace(next);
+    this.removeKey(id);
     return this.list();
   }
 
   clear(): void {
-    this.replace([]);
+    this.clearItems();
   }
 
   protected keyOf(item: YouTubeLocalVideo): string {

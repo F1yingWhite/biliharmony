@@ -189,16 +189,24 @@ export struct WatchLaterPage {
   private async removeSelected(): Promise<void> {
     if (this.actionBusy) return;
     const aids: Array<number> = Array.from(this.selectedAids);
+    if (aids.length === 0) return;
     this.actionBusy = true;
     try {
       const result: ActionResult = await HistoryApi.delWatchLater(aids);
+      if (this.destroyed) return;
       if (!result.ok) {
         this.toast(result.message);
         return;
       }
+      // 以发请求时的选择快照移除；并作废旧列表请求，防止已删除条目被迟到读响应恢复。
+      this.listEpoch.invalidate();
+      this.loading = false;
+      this.errorText = '';
+      const removed: Set<number> = new Set<number>(aids);
+      this.itemsSource.reset(this.itemsSource.getAll().filter((item: WatchLaterItem) => !removed.has(item.video.aid)));
+      this.itemCount = this.itemsSource.totalCount();
       this.toast('已删除 ' + String(aids.length) + ' 个视频');
       this.exitSelecting();
-      await this.load();
     } catch (e) {
       this.toast('网络异常，请稍后重试');
     } finally {
@@ -237,6 +245,16 @@ export struct WatchLaterPage {
   }
 
   @Builder
+  HeaderActions() {
+    Row({ space: 6 }) {
+      this.HeaderSelectAction()
+      if (!this.selecting) {
+        this.ClearAction()
+      }
+    }
+  }
+
+  @Builder
   SwipeDelete(item: WatchLaterItem) {
     Row() {
       Text('删除')
@@ -258,8 +276,7 @@ export struct WatchLaterPage {
       PageHeader({
         title: this.selecting ? '已选 ' + String(this.selectedAids.size) + ' 项' : '稍后再看',
         trailing: (): void => {
-          if (this.selecting) this.HeaderSelectAction()
-          else this.ClearAction()
+          this.HeaderActions()
         },
       })
       if (this.itemCount === 0) {

@@ -4,7 +4,8 @@ import { systemShare } from '@kit.ShareKit';
 import { display, FrameCallback } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
-  ImageViewerParam, ImageViewerSrcRect } from '../common/AppRouter';
+  HERO_NAV_TRANSITION_FINISH_REQUEST_KEY, ImageViewerParam, ImageViewerSrcRect } from '../common/AppRouter';
+import { MotionTokens } from '../common/MotionTokens';
 import { Immersive } from '../common/Immersive';
 import { BackButton } from '../components/BackButton';
 import { biliImageThumbnail } from '../common/ImageUrl';
@@ -83,7 +84,7 @@ struct ZoomableImage {
     const scale: number = this.scaleValue;
     const x: number = this.offsetX;
     const y: number = this.offsetY;
-    if (this.useSystemGeometry) {
+    if (this.useSystemGeometry && !MotionTokens.isReduced()) {
       // 共享节点的手势变换与 pop 放进同一次动画事务，直接飞回来源图。
       this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
         this.scaleValue = 1;
@@ -142,7 +143,7 @@ struct ZoomableImage {
       this.offsetX = nextX;
       this.offsetY = nextY;
     };
-    if (animated) this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, update);
+    if (animated && !MotionTokens.isReduced()) this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, update);
     else update();
     this.onZoomChange(nextScale > 1.05);
   }
@@ -153,7 +154,7 @@ struct ZoomableImage {
       this.offsetX = 0;
       this.offsetY = 0;
     };
-    if (animated) this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, update);
+    if (animated && !MotionTokens.isReduced()) this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, update);
     else update();
     this.onZoomChange(false);
   }
@@ -260,6 +261,7 @@ struct ZoomableImage {
 
 @Component
 export struct ImageViewerPage {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   param: ImageViewerParam = { images: [], initialIndex: 0 };
   @State currentIndex: number = 0;
   @State saving: boolean = false;
@@ -316,6 +318,8 @@ export struct ImageViewerPage {
 
   aboutToAppear(): void {
     this.closing = false;
+    this.exitStarted = false;
+    this.resetZoomForExit = false;
     this.entryFromRect = false;
     this.heroEntranceStarted = false;
     this.heroFlightFinished = false;
@@ -348,6 +352,10 @@ export struct ImageViewerPage {
 
   /** 有 srcRect 时先让独立 hero 与源缩略图完全重合；图片解码完成后按原始比例飞到 Contain 落点。 */
   private prepareRectEntrance(): void {
+    if (MotionTokens.isReduced()) {
+      this.finishWithoutMotion();
+      return;
+    }
     // 来源与当前大图存在同名 geometryTransition 时由 ArkUI 复用同一个渲染节点，
     // 不再额外创建 hero Image，避免退出时二次解码/上传纹理造成闪帧。
     if (this.hasSystemGeometryTransition()) return;
@@ -371,6 +379,7 @@ export struct ImageViewerPage {
     // 来源页先消失、黑底后出现，会形成只有部分图片可见的亮色闪帧。
     this.getUIContext().postFrameCallback(new ImageHeroFrameCallback(() => {
       if (this.closing) return;
+      if (MotionTokens.isReduced()) { this.finishWithoutMotion(); return; }
       this.getUIContext().animateTo({ duration: IMAGE_BG_ENTER_DURATION, curve: Curve.EaseInOut }, () => {
         this.bgOpacity = 1;
       });
@@ -454,6 +463,7 @@ export struct ImageViewerPage {
 
   private startHeroEntrance(naturalWidth: number, naturalHeight: number): void {
     if (!this.entryFromRect || this.heroEntranceStarted || this.closing) return;
+    if (MotionTokens.isReduced()) { this.finishWithoutMotion(); return; }
     const target: ImageViewerSrcRect | undefined = this.containRect(naturalWidth, naturalHeight);
     if (target === undefined) {
       this.finishHeroEntranceWithoutFlight();
@@ -468,6 +478,7 @@ export struct ImageViewerPage {
     }
     this.getUIContext().postFrameCallback(new ImageHeroFrameCallback(() => {
       if (this.closing) return;
+      if (MotionTokens.isReduced()) { this.finishWithoutMotion(); return; }
       this.getUIContext().animateTo({ duration: IMAGE_HERO_ENTER_DURATION, curve: Curve.EaseOut, onFinish: () => {
         // Swiper 先放到 hero 下方；是否淡掉 hero 由 Image.onComplete 决定，不能只按固定
         // 帧数猜解码速度。冷缓存图片比动画慢时，固定延迟仍会露出一帧黑底。
@@ -496,6 +507,7 @@ export struct ImageViewerPage {
   /** hero 与 Swiper 的纹理都已就绪后再交叉淡化；force 仅用于异常图片的有界兜底。 */
   private finishHeroEntranceHandoff(force: boolean): void {
     if (!this.heroFlightFinished || !this.heroVisible || this.closing) return;
+    if (MotionTokens.isReduced()) { this.finishWithoutMotion(); return; }
     if (!force && !this.naturalSizes.has(this.param.initialIndex)) return;
     this.heroFlightFinished = false;
     if (this.heroHandoffTimer >= 0) {
@@ -513,6 +525,7 @@ export struct ImageViewerPage {
   }
 
   private finishHeroEntranceWithoutFlight(): void {
+    if (MotionTokens.isReduced()) { this.finishWithoutMotion(); return; }
     this.heroEntranceStarted = true;
     this.heroFlightFinished = false;
     this.heroVisible = false;
@@ -532,6 +545,35 @@ export struct ImageViewerPage {
     }, 260);
   }
 
+  /** 无动画路径一次性清理飞行、解码交接和输入等待，异步图片回调不再接管页面。 */
+  private finishWithoutMotion(): void {
+    if (this.heroFallbackTimer >= 0) clearTimeout(this.heroFallbackTimer);
+    if (this.interactionReadyTimer >= 0) clearTimeout(this.interactionReadyTimer);
+    if (this.heroHandoffTimer >= 0) clearTimeout(this.heroHandoffTimer);
+    if (this.heroExitTimer >= 0) clearTimeout(this.heroExitTimer);
+    this.heroFallbackTimer = -1;
+    this.interactionReadyTimer = -1;
+    this.heroHandoffTimer = -1;
+    this.heroExitTimer = -1;
+    this.clearHeroFrame();
+    this.entryFromRect = false;
+    this.heroEntranceStarted = false;
+    this.heroFlightFinished = false;
+    this.heroExitPending = false;
+    this.heroExitTarget = undefined;
+    this.heroVisible = false;
+    this.heroSource = '';
+    this.heroOpacity = 0;
+    this.viewerOpacity = 1;
+    this.uiOpacity = 1;
+    this.bgOpacity = 1;
+    this.interactionReady = !this.closing;
+    AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, false);
+    AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 0);
+    const request: number = AppStorage.get<number>(HERO_NAV_TRANSITION_FINISH_REQUEST_KEY) ?? 0;
+    AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_FINISH_REQUEST_KEY, request + 1);
+  }
+
   onCloseRequested(): void {
     this.goBack();
   }
@@ -544,6 +586,10 @@ export struct ImageViewerPage {
     this.exitWasZoomed = this.currentZoomed;
     this.closing = true;
     this.interactionReady = false;
+    if (MotionTokens.isReduced()) {
+      this.finishBack();
+      return;
+    }
     if (this.currentZoomed) {
       this.resetZoomForExit = true;
       return;
@@ -561,6 +607,11 @@ export struct ImageViewerPage {
   private finishBack(): void {
     if (this.exitStarted) return;
     this.exitStarted = true;
+    if (MotionTokens.isReduced()) {
+      this.finishWithoutMotion();
+      AppNavStack.pop(false);
+      return;
+    }
     if (this.heroFallbackTimer >= 0) {
       clearTimeout(this.heroFallbackTimer);
       this.heroFallbackTimer = -1;
@@ -655,6 +706,11 @@ export struct ImageViewerPage {
   /** 退出 hero 解码完成后先覆盖当前大图，再启动缩回及 Navigation pop。 */
   private startHeroExitFlight(): void {
     if (!this.closing || !this.heroExitPending || this.heroExitTarget === undefined) return;
+    if (MotionTokens.isReduced()) {
+      this.finishWithoutMotion();
+      AppNavStack.pop(false);
+      return;
+    }
     this.heroExitPending = false;
     if (this.heroExitTimer >= 0) {
       clearTimeout(this.heroExitTimer);
@@ -728,6 +784,7 @@ export struct ImageViewerPage {
    * geometryTransition 解析错源节点（点开图片从错误位置放大，如右上角）。
    */
   private transitionIdFor(index: number): string {
+    if (MotionTokens.isReduced()) return 'image-viewer-reduced-' + String(index);
     // geometryTransition 不接受空 ID（真机会直接报 4100001，并中断图片页构建）。
     // 手动 hero 动画和非当前 Swiper 页仍给一个仅查看器内部使用、不会命中源图的稳定 ID。
     if (index !== this.currentIndex) return 'image-viewer-idle-' + String(index);
@@ -785,6 +842,7 @@ export struct ImageViewerPage {
   }
 
   private hasSystemGeometryTransition(): boolean {
+    if (MotionTokens.isReduced()) return false;
     const ids: Array<string> | undefined = this.param.transitionIds;
     if (ids !== undefined && this.currentIndex >= 0 && this.currentIndex < ids.length &&
       ids[this.currentIndex].length > 0) return true;
@@ -957,8 +1015,8 @@ export struct ImageViewerPage {
     .width('100%')
     .height('100%')
     .transition(TransitionEffect.asymmetric(
-      TransitionEffect.opacity(0).animation({ duration: 180, curve: Curve.EaseOut }),
-      TransitionEffect.opacity(0).animation({ duration: 150, curve: Curve.EaseIn })))
+      TransitionEffect.opacity(0).animation({ duration: MotionTokens.duration(180, this.reduceMotion), curve: Curve.EaseOut }),
+      TransitionEffect.opacity(0).animation({ duration: MotionTokens.duration(150, this.reduceMotion), curve: Curve.EaseIn })))
   }
 
   aboutToDisappear(): void {
@@ -1024,6 +1082,7 @@ export struct ImageViewerPage {
         .indicator(false)
         .loop(false)
         .cachedCount(1)
+        .duration(MotionTokens.duration(400, this.reduceMotion))
         .disableSwipe(this.currentZoomed)
         .opacity(this.viewerOpacity)
         .onChange((index: number) => {
@@ -1106,7 +1165,7 @@ export struct ImageViewerPage {
         .alignItems(HorizontalAlign.Center)
         .hitTestBehavior(HitTestMode.Transparent)
         .opacity(this.uiOpacity)
-        .transition(TransitionEffect.opacity(1).animation({ duration: 140, curve: Curve.EaseOut }))
+        .transition(TransitionEffect.opacity(1).animation({ duration: MotionTokens.duration(140, this.reduceMotion), curve: Curve.EaseOut }))
       }
 
       if (this.actionMenuOpen) {

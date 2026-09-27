@@ -7,6 +7,7 @@ import { FeedCardTitle, FeedCoverImage, FeedGradientMask } from '../FeedCardPart
 @Reusable
 @Component
 export struct LiveRoomCard {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @Prop highlightKeyword: string = '';
   @Prop room: LiveRoomItem = new LiveRoomItem();
   @StorageProp('accentColor') accent: string = '#FB7299';
@@ -73,7 +74,7 @@ export struct LiveRoomCard {
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
-    .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
+    .animation({ duration: MotionTokens.duration(MotionTokens.feedback, this.reduceMotion), curve: Curve.EaseOut })
     .stateStyles({ pressed: { opacity: 0.9 }, normal: { opacity: 1 } })
     .onClick(() => {
       const param: LiveRoomParam = {

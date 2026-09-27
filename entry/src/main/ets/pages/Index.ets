@@ -81,6 +81,7 @@ function stdDestination(onShownCb: () => void, onWillDisappearCb: () => void) {
 @Entry
 @Component
 struct Index {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) @Watch('onMotionPreferenceChanged') reduceMotion: boolean = false;
   @State @Watch('onCurrentTabChanged') currentTab: number = 0;
   /** 宽屏分栏（实验性）：840vp 以上把推送目标页显示为右侧分栏；默认关闭保持 Stack。 */
   @StorageProp('wideSplitEnabled') wideSplitEnabled: boolean = false;
@@ -103,6 +104,7 @@ struct Index {
   private cardNavigationReady: boolean = false;
 
   aboutToAppear(): void {
+    this.onMotionPreferenceChanged();
     this.reapplyBarColors();
     UserStore.ensureLoaded();
     PlatformStore.init();
@@ -114,6 +116,11 @@ struct Index {
 
   onAppBackgroundChanged(): void {
     Handedness.setActive(!this.appInBackground);
+  }
+
+  private onMotionPreferenceChanged(): void {
+    if (this.reduceMotion) this.finishHeroNavTransition();
+    AppNavStack.disableAnimation(this.reduceMotion);
   }
 
   aboutToDisappear(): void {
@@ -207,11 +214,11 @@ struct Index {
   private finishHeroNavTransition(token?: number): void {
     if (token !== undefined && token !== this.heroTransitionToken) return;
     const proxy: NavigationTransitionProxy | null = this.heroTransitionProxy;
-    if (proxy === null) return;
     this.heroTransitionProxy = null;
     AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, false);
     this.heroTransitionInputLocked = false;
     this.heroTransitionClock = 0;
+    if (proxy === null) return;
     try {
       proxy.finishTransition();
     } catch (e) {
@@ -225,6 +232,7 @@ struct Index {
 
   private heroNavTransition(_from: NavContentInfo, _to: NavContentInfo,
     operation: NavigationOperation): NavigationAnimatedTransition | undefined {
+    if (this.reduceMotion) return undefined;
     if (AppStorage.get<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY) !== true) return undefined;
     const duration: number = AppStorage.get<number>(HERO_NAV_TRANSITION_DURATION_KEY) ?? 360;
     // push 后目标页本身会阻断输入；pop 开始时来源页立即重新获得手势，必须额外冻结。
@@ -242,6 +250,11 @@ struct Index {
       },
       transition: (proxy: NavigationTransitionProxy): void => {
         this.heroTransitionProxy = proxy;
+        // 设置变更可能早于原生代理交付；迟到的转场也要立即收尾。
+        if (this.reduceMotion) {
+          this.finishHeroNavTransition();
+          return;
+        }
         const token: number = ++this.heroTransitionToken;
         transitionToken = token;
         this.heroTransitionClock = 0;
@@ -635,11 +648,12 @@ struct Index {
         .fillColor(this.currentTab === index ? this.accent :
           (this.isDark ? '#D1D4DA' : '#62676D'))
         .scale({ x: this.tabScale[index], y: this.tabScale[index] })
-        .animation({ duration: 260, curve: curves.springMotion(0.35, 0.7) })
+        .animation({ duration: MotionTokens.duration(MotionTokens.navigation, this.reduceMotion),
+          curve: this.reduceMotion ? Curve.Linear : curves.springMotion(0.35, 0.7) })
       Text(label)
         .fontSize(11)
         .fontWeight(this.currentTab === index ? FontWeight.Medium : FontWeight.Normal)
-        .fontColor(this.currentTab === index ? this.accent :
+        .fontColor(this.currentTab === index ? (this.isDark ? '#F5F6F8' : '#24272E') :
           (this.isDark ? '#D1D4DA' : '#62676D'))
     }
     .width('100%')
@@ -677,7 +691,7 @@ struct Index {
     .barHeight(0)
     .barOverlap(true)
     .scrollable(false)
-    .animationDuration(MotionTokens.navigation)
+    .animationDuration(MotionTokens.duration(MotionTokens.navigation, this.reduceMotion))
     .onChange((index: number): void => {
       this.currentTab = index;
       AppTheme.resetHeaderFade();
@@ -711,7 +725,7 @@ struct Index {
     // 左右滑动留给各页面内部的频道 Tabs（首页推荐/热门/直播，动态全部/视频/番剧）。
     .scrollable(false)
     .barBackgroundColor(AppTheme.floatBg(this.isDark, this.glassOn))
-    .animationDuration(MotionTokens.navigation)
+    .animationDuration(MotionTokens.duration(MotionTokens.navigation, this.reduceMotion))
     .animationMode(AnimationMode.CONTENT_FIRST)
     .onChange(() => {
       AppTheme.resetHeaderFade();
@@ -778,8 +792,8 @@ struct Index {
             this.DockNavigation()
           }
           .width(this.dockBarWidth())
-          // 材质仍由 HdsTabs 渲染，底层胶囊限制亮封面对深色导航文字的干扰。
-          .backgroundColor(this.glassOn && this.isDark ? '#CC101114' : Color.Transparent)
+          // 深浅色均加稳定底衬，保留玻璃材质，同时限制彩色封面对导航文字的干扰。
+          .backgroundColor(this.glassOn ? (this.isDark ? '#CC101114' : '#E6FFFFFF') : Color.Transparent)
           .borderRadius(DOCK_BAR_HEIGHT / 2)
           .alignItems(HorizontalAlign.Center)
         }

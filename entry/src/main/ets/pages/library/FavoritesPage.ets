@@ -120,6 +120,7 @@ export struct FavoritesPage {
   }
 
   async loadVideos(reset: boolean): Promise<void> {
+    if (this.editing && this.orderDirty) return;
     if (this.selected.id === 0 || (!reset && (this.videoLoading || !this.hasMore))) return;
     const generation: number = this.videoRequestGeneration;
     const folderId: number = this.selected.id;
@@ -147,9 +148,9 @@ export struct FavoritesPage {
   }
 
   goBack(): void {
+    if (this.actionBusy) return;
     if (this.editing) {
-      this.editing = false;
-      this.checkedAids = [];
+      this.toggleEdit();
       return;
     }
     if (this.selected.id > 0) {
@@ -269,10 +270,12 @@ export struct FavoritesPage {
 
   // ===== 夹内视频编辑模式：多选删除 / 批量移动 / 排序 =====
   private toggleEdit(): void {
+    if (this.actionBusy) return;
     if (this.editing && this.orderDirty) {
       // 退出编辑时提交排序（本地顺序已改，服务端同步）。
       this.saveVideoOrder().catch(() => {
       });
+      return;
     }
     this.editing = !this.editing;
     this.checkedAids = [];
@@ -281,6 +284,7 @@ export struct FavoritesPage {
 
   /** 编辑模式下上下调整视频顺序（只移动位置，不落库；退出时统一提交）。 */
   private moveVideo(index: number, delta: number): void {
+    if (this.actionBusy) return;
     const all: Array<VideoItem> = this.videosSource.getAll();
     const target: number = index + delta;
     if (target < 0 || target >= all.length) return;
@@ -298,17 +302,30 @@ export struct FavoritesPage {
 
   /** 提交收藏夹内视频排序：按当前列表顺序传 aid。 */
   private async saveVideoOrder(): Promise<void> {
-    if (this.selected.id <= 0) return;
+    if (this.selected.id <= 0 || this.actionBusy) return;
+    const folderId: number = this.selected.id;
+    const generation: number = this.videoRequestGeneration;
     const aids: Array<number> = this.videosSource.getAll().map((v: VideoItem) => v.aid);
-    if (aids.length < 2) {
+    this.actionBusy = true;
+    try {
+      if (aids.length >= 2) {
+        const result: ActionResult = await FavoriteApi.sortFavoriteVideos(folderId, aids);
+        if (generation !== this.videoRequestGeneration || this.selected.id !== folderId) return;
+        if (!result.ok) {
+          this.toast(result.message);
+          return;
+        }
+        this.toast('视频排序已保存');
+      }
+      this.editing = false;
+      this.checkedAids = [];
       this.orderDirty = false;
-      return;
-    }
-    const result: ActionResult = await FavoriteApi.sortFavoriteVideos(this.selected.id, aids);
-    if (result.ok) {
-      this.toast('视频排序已保存');
-    } else {
-      this.toast(result.message);
+    } catch (e) {
+      if (generation === this.videoRequestGeneration && this.selected.id === folderId) {
+        this.toast('排序保存失败，请重试');
+      }
+    } finally {
+      this.actionBusy = false;
     }
   }
 
@@ -317,6 +334,7 @@ export struct FavoritesPage {
   }
 
   private toggleChecked(aid: number, index: number): void {
+    if (this.actionBusy) return;
     if (this.isChecked(aid)) {
       this.checkedAids = this.checkedAids.filter((id: number) => id !== aid);
     } else {

@@ -25,6 +25,7 @@ interface CardMenuButtonItem {
 @Reusable
 @Component
 export struct VideoCard {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @Prop video: VideoItem = new VideoItem();
   /** 用户空间等紧凑网格隐藏 UP/分区行，复用同一封面和跳转逻辑。 */
   @Prop compact: boolean = false;
@@ -230,7 +231,7 @@ export struct VideoCard {
     .borderRadius(LayoutTokens.cardRadius)
     .clip(true)
     .border({ width: 0.6, color: this.isDark ? '#1FFFFFFF' : '#14000000' })
-    .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
+    .animation({ duration: MotionTokens.duration(MotionTokens.feedback, this.reduceMotion), curve: Curve.EaseOut })
     .stateStyles({
       pressed: {
         opacity: 0.92,
@@ -375,7 +376,7 @@ export struct VideoCard {
     .borderRadius(LayoutTokens.cardRadius)
     .clip(true)
     .border({ width: 0.6, color: this.isDark ? '#1FFFFFFF' : '#14000000' })
-    .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
+    .animation({ duration: MotionTokens.duration(MotionTokens.feedback, this.reduceMotion), curve: Curve.EaseOut })
     .stateStyles({
       pressed: {
         opacity: 0.9,
@@ -517,6 +518,10 @@ export struct VideoCard {
         // FeedCoverImage 使用统一列表规格；hero 传同一 URL 才能命中已解码纹理缓存。
         cover: biliImageThumbnail(this.video.cover, FEED_COVER_WIDTH),
       };
+      if (MotionTokens.isReduced()) {
+        AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param, false);
+        return;
+      }
       if (this.wholeCardTransition) {
         try {
           const rect = this.getUIContext().getComponentUtils().getRectangleById(this.cardId());

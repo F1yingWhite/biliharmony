@@ -1,4 +1,5 @@
 import { curves } from '@kit.ArkUI';
+import { MotionTokens } from '../../common/MotionTokens';
 import { Haptic } from '../../common/Haptic';
 
 /** 视频点赞/投币/收藏/分享共用的主题色与弹性反馈按钮。 */
@@ -57,17 +58,22 @@ export struct VideoActionItem {
     .onClick(() => {
       if (this.busy) return;
       Haptic.tap();
+      if (MotionTokens.isReduced()) {
+        this.iconScale = 1;
+        this.onTap();
+        return;
+      }
       // 颜色由父页乐观更新驱动（active 即时翻转）；这里只做两段式弹性反馈：
       // 选中先放大再回落，取消先缩小再回弹，两个方向都有完整动画。
       const activating: boolean = !this.active;
-      this.getUIContext().animateTo({ duration: 120, curve: Curve.EaseOut }, () => {
+      this.getUIContext().animateTo({ duration: MotionTokens.feedback, curve: Curve.EaseOut }, () => {
         this.iconScale = activating ? 1.12 : 0.94;
       });
       this.scheduleTimeout(() => {
         this.getUIContext().animateTo({ curve: curves.springMotion(0.35, 0.6) }, () => {
           this.iconScale = 1;
         });
-      }, 120);
+      }, MotionTokens.feedback);
       this.onTap();
     })
     .gesture(

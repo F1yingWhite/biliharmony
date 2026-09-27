@@ -7,6 +7,7 @@ import { MotionTokens } from '../common/MotionTokens';
 
 @Component
 export struct FilterChip {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   label: string = '';
   @Prop selected: boolean = false;
   /** 部分场景（搜索排序行）需要底部外边距与面板行距对齐 */
@@ -24,7 +25,7 @@ export struct FilterChip {
       .padding({ left: 12, right: 12, top: 5, bottom: 5 })
       .backgroundColor(this.selected ? this.accent : (this.isDark ? '#2E3136' : '#ECEEF0'))
       .borderRadius(14)
-      .animation({ duration: MotionTokens.content, curve: Curve.EaseOut })
+      .animation({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseOut })
     }
       .padding(0)
       .constraintSize({ minWidth: 44, minHeight: 44 })

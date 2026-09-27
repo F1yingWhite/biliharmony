@@ -15,6 +15,7 @@
 import { FrameCallback, UIContext } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { AppNavStack, ImageViewerSrcRect, releasePixelMap } from '../../common/AppRouter';
+import { MotionTokens } from '../../common/MotionTokens';
 
 /** 等下一次 VSync 已提交源矩形后再开始 hero，避免用固定延时猜首帧时机。 */
 export class HeroFrameCallback extends FrameCallback {
@@ -181,11 +182,30 @@ export class VideoHeroTransitionController {
     this.access.setHeroOpacity(1);
   }
 
+  /** 减少动效直接交还正文和导航；不排队零时长飞行，也不保留快照或数据闸门。 */
+  private completeWithoutMotion(): void {
+    const pending: image.PixelMap | null = AppStorage.get<image.PixelMap>(this.keys.snapshotKey) ?? null;
+    AppStorage.delete(this.keys.snapshotKey);
+    if (pending !== this.access.getWholeCardSnapshot()) releasePixelMap(pending);
+    this.resetForReuse();
+    this.access.setHeroSource('');
+    this.access.setFromWholeCard(false);
+    this.access.setFromRect(false);
+    this.openEntranceGate();
+    AppStorage.setOrCreate<boolean>(this.keys.activeKey, false);
+    AppStorage.setOrCreate<number>(this.keys.durationKey, 0);
+    this.finishHeroNavPop();
+  }
+
   /**
    * 华为官方 CardLongTakeTransition 的核心做法：目标页保持整屏布局，只缩放并裁剪外层容器；
    * 这样动画期间不会因为宽高连续变化而让播放器、标题和工具栏反复重排。
    */
   prepareWholeCardEntrance(): boolean {
+    if (MotionTokens.isReduced()) {
+      this.completeWithoutMotion();
+      return false;
+    }
     const rect: ImageViewerSrcRect | undefined = this.getCardRect();
     const snapshot: image.PixelMap | null = AppStorage.get<image.PixelMap>(this.keys.snapshotKey) ?? null;
     AppStorage.delete(this.keys.snapshotKey);
@@ -219,6 +239,10 @@ export class VideoHeroTransitionController {
 
   /** 关闭闸门：详情结果会一直等到入场动画结束（或兜底超时）。 */
   armEntranceGate(): void {
+    if (MotionTokens.isReduced()) {
+      this.completeWithoutMotion();
+      return;
+    }
     if (this.gateResolve !== null) return;
     this.gate = new Promise<void>((resolve: () => void) => {
       this.gateResolve = resolve;
@@ -253,9 +277,17 @@ export class VideoHeroTransitionController {
   }
 
   triggerWholeCardExpansion(): void {
+    if (MotionTokens.isReduced()) {
+      this.completeWithoutMotion();
+      return;
+    }
     if (!this.access.isFromWholeCard() || this.isDestroyed() || this.isClosing()) return;
     this.uiContext().postFrameCallback(new HeroFrameCallback(() => {
       if (this.isDestroyed() || this.isClosing()) return;
+      if (MotionTokens.isReduced()) {
+        this.completeWithoutMotion();
+        return;
+      }
       this.uiContext().animateTo({ duration: this.motion.wholeCardExpandMs, curve: Curve.EaseInOut, onFinish: () => {
         this.access.setWholeCardSnapshotOpacity(0);
         this.access.setWholeCardAnimating(false);
@@ -279,6 +311,10 @@ export class VideoHeroTransitionController {
 
   /** 有 srcRect 时，首帧只把一张独立封面放在源卡片封面上。 */
   prepareCardEntrance(): void {
+    if (MotionTokens.isReduced()) {
+      this.completeWithoutMotion();
+      return;
+    }
     const rect = this.getSrcRect();
     if (rect === undefined || rect.w <= 0 || rect.h <= 0) return;
     if (this.measureHeroRect() === undefined) return;
@@ -297,6 +333,10 @@ export class VideoHeroTransitionController {
 
   /** VSync 驱动封面飞向播放区；正文稍后淡入，不再出现缩小的完整详情页。 */
   triggerEntranceExpansion(): void {
+    if (MotionTokens.isReduced()) {
+      this.completeWithoutMotion();
+      return;
+    }
     if (!this.access.isEntranceArmed() || this.isDestroyed() || this.isClosing()) return;
     this.access.setEntranceArmed(false);
     const target: ImageViewerSrcRect | undefined = this.measureHeroRect();
@@ -308,6 +348,10 @@ export class VideoHeroTransitionController {
     }
     this.uiContext().postFrameCallback(new HeroFrameCallback(() => {
       if (this.isDestroyed() || this.isClosing()) return;
+      if (MotionTokens.isReduced()) {
+        this.completeWithoutMotion();
+        return;
+      }
       this.uiContext().animateTo({ duration: this.motion.cardFlightMs, curve: Curve.EaseOut, onFinish: () => {
         // 节点透明保活：返回时复用同一张已解码封面，避免重新创建 Image 导致卡顿。
         this.access.setHeroOpacity(0);
@@ -339,6 +383,11 @@ export class VideoHeroTransitionController {
 
   /** 镜面退出的动画主体（goBack 的 closing 防重入之后）：整卡收合或封面收回源卡片，最后兜底直接 pop。 */
   runCloseTransition(): void {
+    if (MotionTokens.isReduced()) {
+      this.completeWithoutMotion();
+      AppNavStack.pop(false);
+      return;
+    }
     if (this.isMirrorReturnDisabled()) {
       AppNavStack.pop();
       return;
@@ -358,6 +407,11 @@ export class VideoHeroTransitionController {
       this.access.setContentOpacity(1);
       this.access.setWholeCardAnimating(true);
       this.uiContext().postFrameCallback(new HeroFrameCallback(() => {
+        if (MotionTokens.isReduced()) {
+          this.completeWithoutMotion();
+          AppNavStack.pop(false);
+          return;
+        }
         this.beginHeroNavPop();
         this.uiContext().animateTo({ duration: this.motion.wholeCardCollapseMs, curve: Curve.EaseInOut,
           onFinish: () => {
@@ -393,6 +447,11 @@ export class VideoHeroTransitionController {
         this.access.setHeroVisible(true);
         this.access.setHeroOpacity(1);
         this.uiContext().postFrameCallback(new HeroFrameCallback(() => {
+          if (MotionTokens.isReduced()) {
+            this.completeWithoutMotion();
+            AppNavStack.pop(false);
+            return;
+          }
           this.beginHeroNavPop();
           this.uiContext().animateTo({ duration: this.motion.cardExitContentMs, curve: Curve.EaseOut }, () => {
             this.access.setContentOpacity(0);

@@ -344,7 +344,7 @@ export class DownloadCenter {
     await DownloadCenter.persist();
   }
 
-  /** 清理已完成/已失败/已中断的记录（不删除用户未导出的完成文件？删除文件本身）。 */
+  /** 清理已完成/已失败/已中断的记录及其本地文件；调用方需明确告知未导出文件也会删除。 */
   static async clearFinished(): Promise<void> {
     await DownloadCenter.ensureLoaded();
     const finished: Array<DownloadTaskItem> = DownloadCenter.tasks.filter((t: DownloadTaskItem): boolean =>

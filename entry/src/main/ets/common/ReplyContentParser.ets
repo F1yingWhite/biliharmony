@@ -73,7 +73,8 @@ function normalizeReplyWhitespace(value: string): string {
     // 除 CR/LF 外，接口历史数据里还可能混入 NEL、Unicode 行/段分隔符。
     .replace(/\r\n?|[\u0085\u2028\u2029]/g, '\n')
     // 双向控制符、软连字符等不可见字符不应参与排版或首尾判断。
-    .replace(/[\u00AD\u034F\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
+    // ZWNJ / ZWJ are semantic joiners (for scripts and composed emoji), not disposable spacing.
+    .replace(/[\u00AD\u034F\u061C\u180E\u200B\u200E\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
     // Hangul/Khmer filler、Braille blank 等字符视觉为空但会占一个全角宽度，统一折叠为空格。
     .replace(/[\u115F\u1160\u17B4\u17B5\u2800\u3164\uFFA0]/g, ' ')
     .replace(/[ \t\f\v\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+/g, ' ')

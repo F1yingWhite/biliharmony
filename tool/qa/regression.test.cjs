@@ -613,23 +613,48 @@ test('Playback: a source change during release prevents obsolete player recreati
 
 test('Search: new query starts immediately; old completion cannot replace results or clear loading', async () => {
   const pending = [];
-  const env = environment({ 'api/SearchApi': { SearchApi: { searchAll(keyword) { const d = deferred(); pending.push({ keyword, ...d }); return d.promise; } } } });
+  const env = environment({ 'api/SearchApi': { SearchApi: { searchAll(keyword, page) { const d = deferred(); pending.push({ keyword, page, ...d }); return d.promise; } } } });
   const { RequestEpoch } = env.load('common/RequestEpoch');
-  const Harness = env.methodHarness('pages/Search', '  async doSearch(', '  /** 综合搜索翻页合并',
-    "import { SearchApi } from '../api/SearchApi'; import { VIDEO_DURATION_OPTIONS, VIDEO_PUBTIME_OPTIONS } from '../model/Models';");
-  const view = Object.assign(new Harness(), { keyword: 'old', searchTab: 0, videoOrder: 'totalrank', filterDuration: 0, filterPubtime: 0, filterTids: 0, destroyed: false, searchRequests: new RequestEpoch(), applyAllTotals() {} });
+  const { BasicDataSource } = env.load('common/BasicDataSource');
+  const { SearchAllResult, SearchAllSection, SearchTypes, VideoItem } = env.load('model/Models');
+  const Harness = env.methodHarness('pages/Search', '  async doSearch(', '  submitSearch(): void {',
+    "import { SearchApi } from '../api/SearchApi'; import { SearchTypes, SearchAllSection, VIDEO_DURATION_OPTIONS, VIDEO_PUBTIME_OPTIONS } from '../model/Models';");
+  const response = (bvid, aid, total) => {
+    const video = Object.assign(new VideoItem(), { bvid, aid });
+    const section = Object.assign(new SearchAllSection(), { type: SearchTypes.video, videos: [video] });
+    return Object.assign(new SearchAllResult(), { sections: [section], totals: new Map([[SearchTypes.video, total]]) });
+  };
+  const oldResult = response('BVold', 1, 10);
+  const newResult = response('BVnew', 2, 2);
+  const view = Object.assign(new Harness(), { keyword: 'old', resultKeyword: 'old', searchTab: 0, videoOrder: 'totalrank',
+    filterDuration: 0, filterPubtime: 0, filterTids: 0, destroyed: false, searchRequests: new RequestEpoch(),
+    allSections: [], allVideoSource: new BasicDataSource(), videoTotal: -1, allPage: 1, searchTabStates: new Map() });
   const first = view.doSearch(true);
   view.keyword = 'new';
+  view.resultKeyword = 'new';
   const second = view.doSearch(true);
-  assert.deepEqual(pending.map(x => x.keyword), ['old', 'new']);
-  pending[0].resolve({ sections: ['old'], totals: new Map() });
+  assert.deepEqual(pending.map(x => [x.keyword, x.page]), [['old', 1], ['new', 1]]);
+  pending[0].resolve(oldResult);
   await first;
-  assert.equal(view.allSections, undefined);
+  assert.deepEqual(view.allSections, []);
+  assert.equal(view.allVideoSource.totalCount(), 0);
+  assert.equal(view.videoTotal, -1);
+  assert.equal(view.allPage, 1);
   assert.equal(view.loading, true);
-  pending[1].resolve({ sections: ['new'], totals: new Map() });
+  assert.equal(view.searchInflight, true);
+  pending[1].resolve(newResult);
   await second;
-  assert.deepEqual(view.allSections, ['new']);
+  // doSearch catches failures: checking metadata/loading alone can pass even if rendering data failed.
+  assert.equal(view.searchError, '');
+  assert.equal(view.moreError, '');
+  assert.deepEqual(view.allSections, newResult.sections);
+  assert.deepEqual(view.allVideoSource.getAll().map(v => [v.bvid, v.aid]), [['BVnew', 2]]);
+  assert.equal(view.videoTotal, 2);
+  assert.equal(view.allPage, 2);
+  assert.equal(view.hasMoreResults, true);
   assert.equal(view.loading, false);
+  assert.equal(view.loadingMore, false);
+  assert.equal(view.searchInflight, false);
 });
 
 test('History API: network/auth/malformed responses differ from a successful empty list', async () => {
@@ -1119,16 +1144,28 @@ test('YouTube: continuation parsing accepts both containers and rejects garbage'
   assert.equal(YouTubeApi.parseContinuation('{}').videos.length,0);
   assert.throws(()=>YouTubeApi.parseContinuation('<!doctype html>'),/翻页数据/);
 });
+// Preferences putSync updates only the open instance. Only flush publishes durable
+// data, and each newly opened instance starts from that durable snapshot.
+function listPreferencesFixture() {
+  const disk = new Map();
+  const prefs = {getPreferences: async () => {
+    const values = new Map(disk);
+    return {getSync: (key, fallback) => values.has(key) ? values.get(key) : fallback,
+      putSync: (key, value) => values.set(key, value),
+      flush: async () => {for (const [key, value] of values) disk.set(key, value);}};
+  }};
+  return {disk, prefs};
+}
+
 test('Search history: each platform keeps its own list, deduplicated and capped', async () => {
   // 需求：YouTube 侧要有和哔哩哔哩对等的本地搜索历史，但两边不能混存。
-  const disk=new Map();
-  const prefs={getPreferences:async()=>({getSync:(k,d)=>disk.has(k)?disk.get(k):d,
-    putSync:(k,v)=>{disk.set(k,v);},flush:async()=>{}})};
+  const {disk, prefs}=listPreferencesFixture();
   const env=environment({'@kit.AbilityKit':{common:{}},'@kit.ArkData':{preferences:prefs}});
   const {YouTubeSearchHistoryStore}=env.load('common/YouTubeSearchHistoryStore');
   const {SearchHistoryStore}=env.load('common/SearchHistoryStore');
   YouTubeSearchHistoryStore.init({});
   SearchHistoryStore.init({});
+  await YouTubeSearchHistoryStore.ensureLoaded();await SearchHistoryStore.ensureLoaded();
 
   YouTubeSearchHistoryStore.add('blender');
   YouTubeSearchHistoryStore.add('音乐');
@@ -1149,8 +1186,19 @@ test('Search history: each platform keeps its own list, deduplicated and capped'
   assert.equal(YouTubeSearchHistoryStore.items().length,20);
   assert.equal(YouTubeSearchHistoryStore.items()[0],'kw24');
   assert.deepEqual(YouTubeSearchHistoryStore.remove('kw24')[0],'kw23');
-  // 落盘的是同一份内容，重启后能读回来。
-  assert.deepEqual(await YouTubeSearchHistoryStore.ensureLoaded(),YouTubeSearchHistoryStore.items());
+  const youtubeExpected=await YouTubeSearchHistoryStore.ensureLoaded();
+  const biliExpected=await SearchHistoryStore.ensureLoaded();
+  // 等待生产端 400ms flush 防抖；全新模块与 AppStorage 必须只靠磁盘恢复。
+  await new Promise(resolve=>setTimeout(resolve,450));
+  assert.ok(disk.has('youtubeSearchHistoryJson'),'search history must reach durable storage');
+  assert.deepEqual(JSON.parse(disk.get('youtubeSearchHistoryJson')??'null'),youtubeExpected);
+  assert.deepEqual(JSON.parse(disk.get('searchHistoryJson')??'null'),biliExpected);
+  const restarted=environment({'@kit.AbilityKit':{common:{}},'@kit.ArkData':{preferences:prefs}});
+  const youtubeRestored=restarted.load('common/YouTubeSearchHistoryStore').YouTubeSearchHistoryStore;
+  const biliRestored=restarted.load('common/SearchHistoryStore').SearchHistoryStore;
+  youtubeRestored.init({});biliRestored.init({});
+  assert.deepEqual(await youtubeRestored.ensureLoaded(),youtubeExpected);
+  assert.deepEqual(await biliRestored.ensureLoaded(),biliExpected);
 });
 
 test('YouTube: search suggestions come from the public JSON endpoint and fail soft', async () => {
@@ -1181,9 +1229,7 @@ test('YouTube: search suggestions come from the public JSON endpoint and fail so
 });
 test('Watch later: the local list is newest-first, deduplicated and account-free', async () => {
   // 需求：YouTube 侧的「稍后观看」在游客范围内可用——只存 id 与公开元数据，不涉及取流。
-  const disk=new Map();
-  const prefs={getPreferences:async()=>({getSync:(k,d)=>disk.has(k)?disk.get(k):d,
-    putSync:(k,v)=>{disk.set(k,v);},flush:async()=>{}})};
+  const {disk, prefs}=listPreferencesFixture();
   const env=environment({'@kit.AbilityKit':{common:{}},'@kit.ArkData':{preferences:prefs}});
   const {YouTubeWatchLaterStore}=env.load('common/YouTubeWatchLaterStore');
   const make=(id,title)=>({id,title,channel:'频道',
@@ -1208,9 +1254,21 @@ test('Watch later: the local list is newest-first, deduplicated and account-free
   assert.equal(YouTubeWatchLaterStore.count(),1);
   assert.deepEqual((await YouTubeWatchLaterStore.ensureLoaded()).map(v=>v.id),['aqz-KE-bpKQ']);
 
+  await new Promise(resolve=>setTimeout(resolve,450));
+  const expected=JSON.parse(JSON.stringify(YouTubeWatchLaterStore.list()));
+  assert.ok(disk.has('youtubeWatchLaterJson'),'watch later must reach durable storage');
+  assert.deepEqual(JSON.parse(disk.get('youtubeWatchLaterJson')??'null'),expected);
+  const restarted=environment({'@kit.AbilityKit':{common:{}},'@kit.ArkData':{preferences:prefs}});
+  const restored=restarted.load('common/YouTubeWatchLaterStore').YouTubeWatchLaterStore;
+  restored.init({});
+  assert.deepEqual(JSON.parse(JSON.stringify(await restored.ensureLoaded())),expected);
+  assert.equal(restored.contains('aqz-KE-bpKQ'),true);
+
   YouTubeWatchLaterStore.clear();
   assert.equal(YouTubeWatchLaterStore.count(),0);
   assert.equal(env.storage.get('youtubeWatchLaterCount'),0);
+  await new Promise(resolve=>setTimeout(resolve,450));
+  assert.equal(disk.get('youtubeWatchLaterJson'),'[]','clearing must flush the empty list');
 
   // 落盘内容损坏时按空列表处理，不能让本地列表把启动带崩。
   const broken=new Map([['youtubeWatchLaterJson','{not json']]);
@@ -1223,9 +1281,7 @@ test('Watch later: the local list is newest-first, deduplicated and account-free
 });
 test('Watch history: local, newest-first, capped, and independent from watch later', async () => {
   // 本地观看历史：打开详情即记录，同样不需要账号；上限比稍后观看大（流水 vs 待办）。
-  const disk=new Map();
-  const prefs={getPreferences:async()=>({getSync:(k,d)=>disk.has(k)?disk.get(k):d,
-    putSync:(k,v)=>{disk.set(k,v);},flush:async()=>{}})};
+  const {disk, prefs}=listPreferencesFixture();
   const env=environment({'@kit.AbilityKit':{common:{}},'@kit.ArkData':{preferences:prefs}});
   const {YouTubeHistoryStore}=env.load('common/YouTubeHistoryStore');
   const {YouTubeWatchLaterStore}=env.load('common/YouTubeWatchLaterStore');
@@ -1258,6 +1314,17 @@ test('Watch history: local, newest-first, capped, and independent from watch lat
   for(let i=0;i<205;i++) YouTubeHistoryStore.record(make('id'+String(i).padStart(9,'0'),'t'+String(i)));
   assert.equal(YouTubeHistoryStore.count(),200);
   assert.equal(YouTubeHistoryStore.list()[0].title,'t204');
+  await YouTubeHistoryStore.ensureLoaded();await YouTubeWatchLaterStore.ensureLoaded();
+  await new Promise(resolve=>setTimeout(resolve,450));
+  const expected=JSON.parse(JSON.stringify(YouTubeHistoryStore.list()));
+  assert.ok(disk.has('youtubeHistoryJson'),'watch history must reach durable storage');
+  assert.deepEqual(JSON.parse(disk.get('youtubeHistoryJson')??'null'),expected);
+  const restarted=environment({'@kit.AbilityKit':{common:{}},'@kit.ArkData':{preferences:prefs}});
+  const historyRestored=restarted.load('common/YouTubeHistoryStore').YouTubeHistoryStore;
+  const laterRestored=restarted.load('common/YouTubeWatchLaterStore').YouTubeWatchLaterStore;
+  historyRestored.init({});laterRestored.init({});
+  assert.deepEqual(JSON.parse(JSON.stringify(await historyRestored.ensureLoaded())),expected);
+  assert.deepEqual((await laterRestored.ensureLoaded()).map(v=>v.id),['xOXolSQcEb4']);
 });
 test('Platform: switching platforms invalidates in-flight work and persists the choice', () => {
   const env=environment(themeMocks());
@@ -1473,9 +1540,13 @@ test('emote disk cache survives a fresh service instance and deduplicates simult
 });
 
 test('automatic audio alignment preserves video buffer and cancels stale pause completion', async () => {
-  const Harness = environment().methodHarness('components/player/PlayerView',
+  const env = environment();
+  const Harness = env.methodHarness('components/player/PlayerView',
     '  private gateAudioStart(', '  async changeQuality(');
+  const Policy = env.methodHarness('components/player/PlayerView',
+    '  private canStartPlayback():', '  private setBackgroundPlayback(');
   const view = new Harness();
+  view.canStartPlayback = Policy.prototype.canStartPlayback;
   let videoSeeks = 0, audioSeeks = 0, plays = 0;
   const pause = deferred();
   view.player = {currentTime: 5000, seek: () => videoSeeks++};

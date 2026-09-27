@@ -4,142 +4,99 @@
  * 由各页面用离屏 @Builder 渲染后经 componentSnapshot 截成图片。
  */
 import { image } from '@kit.ImageKit';
-import { fileIo as fs, fileUri } from '@kit.CoreFileKit';
-import { common } from '@kit.AbilityKit';
-import { systemShare } from '@kit.ShareKit';
-import { uniformTypeDescriptor as utd } from '@kit.ArkData';
-import { UIContext } from '@kit.ArkUI';
+import { UIContext, window } from '@kit.ArkUI';
 import { generateBarcode, scanCore } from '@kit.ScanKit';
-import { parseReplyContent, ReplyRenderPart } from '../../common/ReplyContentParser';
 import { ReplyItem } from '../../model/Models';
 import { CommentLog } from '../../common/CommentLog';
+import { ReplySharePage, ReplyShareLine, ReplyShareRun, REPLY_SHARE_BRAND,
+  REPLY_SHARE_WIDTH } from './ReplyShareLayout';
 
-/** 生成评论分享二维码；失败时返回 null，卡片退化为一行链接文字。 */
+/** 生成评论分享二维码；失败时返回 null，卡片使用 ArkUI QRCode 本地生成同一地址。 */
 export async function makeReplyQr(content: string): Promise<image.PixelMap | null> {
   try {
     return await generateBarcode.createBarcode(content, {
       scanType: scanCore.ScanType.QR_CODE,
       width: 240,
       height: 240,
-      margin: 1,
+      margin: 4,
       level: generateBarcode.ErrorCorrectionLevel.LEVEL_M,
     });
   } catch (e) {
     return null;
   }
 }
-/**
- * 优先等待在线图片全部解码后截图；头像/封面超时或失败时退化为当前渲染结果，
- * 不让单张网络图片阻断整条评论的分享流程。
- */
-export async function makeReplyShareSnapshot(uiContext: UIContext, builder: CustomBuilder): Promise<image.PixelMap> {
-  try {
-    return await uiContext.getComponentSnapshot().createFromBuilder(builder, 500, true);
-  } catch (e) {
-    CommentLog.warn('share.snapshot.retry', 'checkImageStatus=false error=' + CommentLog.errorText(e as Object));
-    return await uiContext.getComponentSnapshot().createFromBuilder(builder, 100, false);
-  }
+
+export class ReplyShareBounds {
+  width: number = REPLY_SHARE_WIDTH;
+  height: number = 720;
 }
 
-/**
- * 把分享卡截图写入临时缓存并调起系统分享面板；面板结束后自动回收临时文件。
- * 截图 PixelMap 仅供打包 PNG/JPEG 使用，函数结束时（含失败路径）统一释放，调用方无需再管。
- */
-export async function sharePixelMapAsImage(context: common.UIAbilityContext, pixelMap: image.PixelMap,
-  fileName: string): Promise<void> {
+/** Offscreen builder roots inherit the actual app window, including split-screen dimensions. */
+export async function getReplyShareBounds(uiContext: UIContext): Promise<ReplyShareBounds> {
+  const name: string | undefined = uiContext.getWindowName();
+  const host = uiContext.getHostContext();
+  if (host === undefined) throw new Error('无法获取当前窗口，请重试');
+  const appWindow: window.Window = name !== undefined && name.length > 0 ? window.findWindow(name) :
+    await window.getLastWindow(host);
+  const rect: window.Rect = appWindow.getWindowProperties().windowRect;
+  const bounds: ReplyShareBounds = new ReplyShareBounds();
+  // Leave room for window insets and native root rounding; scale only changes raster resolution.
+  bounds.width = Math.min(REPLY_SHARE_WIDTH, Math.floor(uiContext.px2vp(rect.width) - 24));
+  bounds.height = Math.floor(uiContext.px2vp(rect.height) - 96);
+  if (bounds.width < 280 || bounds.height < 500) {
+    throw new Error('当前窗口过小，请放大窗口后生成分享图片');
+  }
+  return bounds;
+}
+
+async function validateReplyShareSnapshot(pixelMap: image.PixelMap, width: number,
+  height: number): Promise<image.PixelMap> {
   try {
-    const packer: image.ImagePacker = image.createImagePacker();
-    let buffer: ArrayBuffer;
+    const info: image.ImageInfo = await pixelMap.getImageInfo();
+    if (Math.abs(info.size.width - Math.round(width)) <= 1 &&
+      Math.abs(info.size.height - Math.round(height)) <= 1) return pixelMap;
+  } catch (e) {
+    CommentLog.warn('share.snapshot.size', CommentLog.errorText(e as Object));
+  }
+  try { await pixelMap.release(); } catch (e) {}
+  throw new Error('评论图片尺寸不完整，请重试');
+}
+/**
+ * 等待在线图片全部解码后截图；重试后仍不完整则明确失败，避免生成缺少附图的成功分享图。
+ */
+export async function makeReplyShareSnapshot(uiContext: UIContext, builder: CustomBuilder,
+  height: number = 720, width: number = REPLY_SHARE_WIDTH): Promise<image.PixelMap> {
+  let maxWidth: number = 4096;
+  let maxHeight: number = 4096;
+  try {
+    const limit = uiContext.getComponentSnapshot().getSizeLimitation();
+    if (limit.maxWidth > 0) maxWidth = limit.maxWidth;
+    if (limit.maxHeight > 0) maxHeight = limit.maxHeight;
+  } catch (e) {
+    // Older devices do not expose the limit query; keep a conservative pixel-size fallback.
+  }
+  const scale: number = Math.min(1, maxWidth / uiContext.vp2px(width),
+    maxHeight / uiContext.vp2px(Math.max(1, height)));
+  let pixelMap: image.PixelMap;
+  try {
+    pixelMap = await uiContext.getComponentSnapshot().createFromBuilder(builder, 500, true,
+      { waitUntilRenderFinished: true, scale: scale });
+  } catch (e) {
+    CommentLog.warn('share.snapshot.retry', 'images not ready error=' + CommentLog.errorText(e as Object));
     try {
-      buffer = await packer.packToData(pixelMap, { format: 'image/png', quality: 100 });
-    } finally {
-      await packer.release();
-    }
-    const path: string = context.cacheDir + '/' + fileName + '.png';
-    const thumbPath: string = context.cacheDir + '/' + fileName + '_thumb.jpg';
-    const file: fs.File = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-    try {
-      fs.writeSync(file.fd, buffer);
-    } finally {
-      fs.closeSync(file);
-    }
-    // 生成 JPEG 缩略图作为分享面板的预览图（thumbnailUri 缺省时系统会用
-    // 通用图标占位，观感就是"分享的是一个 logo"）。缩略图 < 32KB 才可传给
-    // thumbnail 字段，这里用 thumbnailUri 指向缓存文件，避免尺寸限制。
-    let thumbnailUri: string = '';
-    try {
-      const thumbPacker: image.ImagePacker = image.createImagePacker();
-      let thumbBuffer: ArrayBuffer;
-      try {
-        thumbBuffer = await thumbPacker.packToData(pixelMap, { format: 'image/jpeg', quality: 82 });
-      } finally {
-        await thumbPacker.release();
-      }
-      const thumbFile: fs.File = fs.openSync(thumbPath,
-        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-      try {
-        fs.writeSync(thumbFile.fd, thumbBuffer);
-      } finally {
-        fs.closeSync(thumbFile);
-      }
-      thumbnailUri = fileUri.getUriFromPath(thumbPath);
-    } catch (e) {
-      thumbnailUri = '';
-    }
-    const imageUri: string = fileUri.getUriFromPath(path);
-    const imageType: string = utd.getUniformDataTypeByFilenameExtension('.png', utd.UniformDataType.IMAGE);
-    const data: systemShare.SharedData = new systemShare.SharedData({
-      utd: imageType,
-      title: '分享评论',
-      uri: imageUri,
-      thumbnailUri,
-      description: '来自哔哩哔哩的评论',
-    });
-    const controller: systemShare.ShareController = new systemShare.ShareController(data);
-    let cleanupScheduled: boolean = false;
-    const removeTemporaryFiles = (): void => {
-      try {
-        fs.unlinkSync(path);
-      } catch (e) {
-      }
-      try {
-        fs.unlinkSync(thumbPath);
-      } catch (e) {
-      }
-    };
-    const scheduleCleanup = (): void => {
-      if (cleanupScheduled) return;
-      cleanupScheduled = true;
-      // 给接收方留出读取 URI 的时间；文件只短暂存在，不再成为长期缓存。
-      setTimeout(removeTemporaryFiles, 10000);
-    };
-    controller.on('shareCompleted', scheduleCleanup);
-    controller.on('dismiss', scheduleCleanup);
-    try {
-      await controller.show(context, {
-        selectionMode: systemShare.SelectionMode.SINGLE,
-        previewMode: systemShare.SharePreviewMode.DETAIL,
-      });
-      // 极端情况下系统不回调完成/关闭事件，也最多保留五分钟；下次启动还有遗留清理兜底。
-      setTimeout(removeTemporaryFiles, 5 * 60 * 1000);
-    } catch (e) {
-      removeTemporaryFiles();
-      const error: Error = e as Error;
-      CommentLog.error('share.panel.error', 'uri=' + imageUri + ' error=' + CommentLog.errorText(error));
-      throw error;
-    }
-  } finally {
-    try {
-      pixelMap.release();
-    } catch (e) {
-      // 已释放的截图忽略。
+      pixelMap = await uiContext.getComponentSnapshot().createFromBuilder(builder, 1500, true,
+        { waitUntilRenderFinished: true, scale: scale });
+    } catch (retryError) {
+      throw new Error('评论图片未加载完整，请稍后重试');
     }
   }
+  return validateReplyShareSnapshot(pixelMap, uiContext.vp2px(width) * scale, uiContext.vp2px(height) * scale);
 }
 
 @Component
 export struct ReplyShareCard {
   @Prop item: ReplyItem = new ReplyItem();
+  @Prop page: ReplySharePage = new ReplySharePage();
   /** 所属稿件/动态的 UP 主 mid；作者是本人时名字旁标注"UP主"。 */
   @Prop upMid: number = 0;
   @Prop qr: image.PixelMap | null = null;
@@ -149,17 +106,6 @@ export struct ReplyShareCard {
   @Prop sourceTitle: string = '';
   @Prop sourceUpName: string = '';
   @Prop scanHint: string = '长按扫码查看内容';
-
-  private pictureSize(): number {
-    const count: number = Math.min(this.item.pictures.length, 3);
-    if (count === 1) {
-      return 218;
-    }
-    if (count === 2) {
-      return 150;
-    }
-    return 98;
-  }
 
   private shareDate(): string {
     const d: Date = new Date();
@@ -182,63 +128,65 @@ export struct ReplyShareCard {
         Column({ space: 4 }) {
           Row({ space: 5 }) {
             Text(this.item.uname)
-              .fontSize(18)
+              .fontSize('18vp')
               .fontWeight(FontWeight.Medium)
               .fontColor('#18191C')
+              .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+              .layoutWeight(1)
             if (this.upMid > 0 && this.item.mid === this.upMid) {
               Text('UP主')
-                .fontSize(9)
+                .fontSize('9vp')
                 .fontColor('#FB7299')
                 .padding({ left: 4, right: 4, top: 1, bottom: 1 })
                 .borderRadius(3)
                 .backgroundColor('#1AFB7299')
             }
           }
+          .width('100%')
           Text('发表了评论')
-            .fontSize(14)
+            .fontSize('14vp')
             .fontColor('#9499A0')
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
       }
       .width('100%')
+      .height(50)
       .alignItems(VerticalAlign.Center)
 
-      // 正文（固定白底卡片，文字恒为深色）。用 Text + Span 渲染富文本，
-      // maxLines=6 截断长评论，防止分享图被拉成超长条。
-      Text() {
-        ForEach(parseReplyContent(this.item), (part: ReplyRenderPart) => {
-          if (part.image.length > 0) {
-            ImageSpan(part.image)
-              .width(part.imageSize > 1 ? 30 : 18)
-              .height(part.imageSize > 1 ? 30 : 18)
-              .verticalAlign(ImageSpanAlignment.CENTER)
-          } else {
-            Span(part.text)
-              .fontSize(19)
-              .fontColor(part.mentionMid > 0 || part.seekSeconds >= 0 || part.bvid.length > 0 || part.aid > 0 ||
-                part.url.length > 0 ?
-                '#008AC5' : '#18191C')
+      // 按原生字体测量结果逐行排版；每页尺寸限制在当前窗口可截图范围内。
+      Column() {
+        ForEach(this.page.lines, (line: ReplyShareLine, lineIndex: number) => {
+          Text() {
+            ForEach(line.runs, (run: ReplyShareRun, runIndex: number) => {
+              if (run.image.length > 0) {
+                ImageSpan(run.image).width(run.imageSize).height(run.imageSize)
+                  .verticalAlign(ImageSpanAlignment.CENTER)
+              } else {
+                Span(run.text).fontSize('19vp').fontColor(run.linked ? '#008AC5' : '#18191C')
+              }
+            }, (_run: ReplyShareRun, runIndex: number) => String(runIndex))
           }
-        }, (part: ReplyRenderPart) => part.key)
+          .fontSize('19vp').lineHeight(32).height(line.height).width('100%')
+          .maxLines(1).minFontScale(1).maxFontScale(1)
+        }, (_line: ReplyShareLine, lineIndex: number) => String(lineIndex))
       }
-      .fontSize(19)
-      .lineHeight(29)
       .width('100%')
-      .maxLines(6)
-      .textOverflow({ overflow: TextOverflow.Ellipsis })
+      .height(this.page.lines.length * 32)
       .margin({ top: 20 })
 
-      // 评论附图：最多 3 张。
-      if (this.item.pictures.length > 0) {
-        Row({ space: 6 }) {
-          ForEach(this.item.pictures.slice(0, 3), (pic: string) => {
-            Image(pic)
-              .width(this.pictureSize())
-              .height(this.pictureSize())
-              .objectFit(ImageFit.Cover)
-              .borderRadius(7)
-          }, (pic: string) => pic)
+      // 每张附图完整包含在网格中；超过一页由布局规划继续输出，不裁切或遗漏。
+      if (this.page.pictures.length > 0) {
+        Column({ space: 6 }) {
+          ForEach(this.page.pictures.filter((_pic: string, index: number) => index % 3 === 0),
+            (_pic: string, row: number) => {
+              Row({ space: 10 }) {
+                ForEach(this.page.pictures.slice(row * 3, row * 3 + 3), (pic: string, column: number) => {
+                  Image(pic).width(this.page.pictureSize).height(this.page.pictureSize).objectFit(ImageFit.Contain)
+                    .backgroundColor('#F5F7F9').borderRadius(7)
+                }, (_pic: string, column: number) => String(column))
+              }.width('100%').height(this.page.pictureSize)
+            }, (_pic: string, row: number) => String(row))
         }
         .width('100%')
         .margin({ top: 16 })
@@ -247,13 +195,15 @@ export struct ReplyShareCard {
       // UP 主赞过标记（官方样式：一行灰字）
       if (this.item.upLiked) {
         Text('UP主觉得很赞')
-          .fontSize(14)
+          .fontSize('14vp')
           .fontColor('#9499A0')
           .width('100%')
+          .height(20)
           .margin({ top: 12 })
       }
 
       // 来源内容卡：封面 + 标题 + UP 主（对齐官方分享图的视频卡）
+      Column() {
       if (this.sourceTitle.length > 0) {
         Row({ space: 12 }) {
           if (this.sourceCover.length > 0) {
@@ -265,19 +215,19 @@ export struct ReplyShareCard {
           }
           Column({ space: 6 }) {
             Text(this.sourceTitle)
-              .fontSize(15)
+              .fontSize('15vp')
               .fontColor('#18191C')
               .maxLines(2)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
             if (this.sourceUpName.length > 0) {
               Row({ space: 4 }) {
                 Text('UP')
-                  .fontSize(9)
+                  .fontSize('9vp')
                   .fontColor('#9499A0')
                   .padding({ left: 3, right: 3 })
                   .border({ width: 0.5, color: '#9499A0', radius: 3 })
                 Text(this.sourceUpName)
-                  .fontSize(12)
+                  .fontSize('12vp')
                   .fontColor('#9499A0')
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -289,44 +239,51 @@ export struct ReplyShareCard {
           .layoutWeight(1)
         }
         .width('100%')
+        .height(86)
         .padding(10)
         .backgroundColor('#F5F7F9')
         .borderRadius(8)
         .margin({ top: 18 })
       }
+      }.width('100%').height(104)
 
       // 底部：App 标识 + 提示文案 + 二维码
       Row() {
         Image($r('app.media.bilix_logo'))
-          .width(104)
+          .width(Math.min(96, (this.page.width - 48) * 0.27))
           .height(42)
           .objectFit(ImageFit.Contain)
-        Blank()
+          .renderMode(ImageRenderMode.Template)
+          .fillColor(REPLY_SHARE_BRAND)
         Column({ space: 2 }) {
-          Text('保存图片至相册')
-            .fontSize(14)
-            .fontColor('#61666D')
-          Text(this.qr !== null ? this.scanHint : this.linkLabel)
-            .fontSize(14)
+          Text('扫码查看原评论')
+            .fontSize('12vp')
             .fontColor('#61666D')
           Text('分享于' + this.shareDate())
-            .fontSize(11)
+            .fontSize('11vp')
             .fontColor('#9499A0')
         }
+        .layoutWeight(1)
         .alignItems(HorizontalAlign.End)
         .margin({ right: 8 })
-        if (this.qr !== null) {
-          Image(this.qr)
-            .width(78)
-            .height(78)
-            .objectFit(ImageFit.Contain)
-        }
+        Stack() {
+          if (this.qr !== null) {
+            Image(this.qr).width(78).height(78).objectFit(ImageFit.Contain)
+          } else {
+            // ScanKit 不可用时仍由 ArkUI 本地生成二维码，不能退化为缺失链接的空白。
+            QRCode(this.linkLabel).width(78).height(78).color('#18191C').backgroundColor('#FFFFFF')
+          }
+        }.width(88).height(88).backgroundColor('#FFFFFF')
       }
       .width('100%')
+      .height(88)
       .alignItems(VerticalAlign.Center)
       .margin({ top: 26 })
+      Text(this.page.total > 1 ? '第 ' + String(this.page.number) + ' / ' + String(this.page.total) + ' 页' : '来自哔哩哔哩')
+        .fontSize('10vp').fontColor('#9499A0').width('100%').height(20).textAlign(TextAlign.End)
     }
-    .width(380)
+    .width(this.page.width)
+    .height(this.page.height)
     .padding({ left: 24, right: 24, top: 26, bottom: 22 })
     .borderRadius(26)
     .backgroundColor('#FFFFFF')

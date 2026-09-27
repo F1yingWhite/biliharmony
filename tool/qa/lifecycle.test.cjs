@@ -163,11 +163,12 @@ function environment(mocks = {}) {
       }
       throw new Error('Missing platform mock: ' + name);
     };
-    new Function('require', 'module', 'exports', 'AppStorage', 'PersistentStorage', 'Builder', code)(
+    new Function('require', 'module', 'exports', 'AppStorage', 'PersistentStorage', 'Builder', 'RefreshStatus', code)(
       localRequire, module, module.exports,
       { get: key => storage.get(key), setOrCreate: (key, value) => storage.set(key, value) },
       { persistProp() {} },
-      (target) => target
+      (target) => target,
+      { Inactive: 0 }
     );
     return module.exports;
   }
@@ -624,13 +625,15 @@ test('dynamic category change supersedes an inflight feed', async () => {
   const env=environment({'api/DynamicApi':{DynamicApi:{getDynamicFeed:(offset,type)=>{
     calls.push(type);return calls.length===1?old.promise:latest.promise;
   }}}});
-  const Change=env.methodHarness('views/DynamicView',ANCHOR.dynChangeTypeStart,ANCHOR.dynChipStart);
+  const Change=env.methodHarness('views/DynamicView',ANCHOR.dynChangeTypeStart,ANCHOR.dynChipStart,
+    "import { BasicDataSource } from '../common/BasicDataSource';");
   const Load=env.methodHarness('views/DynamicView',ANCHOR.dynLoadFeedStart,ANCHOR.dynLoadFeedEnd,
     "import { DynamicApi } from '../api/DynamicApi';");
   const p=new Change();p.loadFeed=Load.prototype.loadFeed;
   Object.assign(p,{feedEpoch:epoch(env),dynType:'all',feedLoading:false,dynTab:0,hostMid:0,
     dynHasMore:true,dynOffset:'',dynSource:source(env),dynCount:0,
-    typeItems:new Map(),typeOffset:new Map(),typeHasMore:new Map()});
+    typeItems:new Map(),typeOffset:new Map(),typeHasMore:new Map(),typeSources:new Map(),typeStates:new Map(),
+    dynTypes:['all','video','pgc','article'],feedLoaded:false});
   const first=p.loadFeed(false);p.dynTab=1;p.changeDynType('video');
   old.resolve({items:[{dynId:'old'}],offset:'old',hasMore:false});await first;
   assert.equal(p.dynType,'video');assert.equal(p.feedLoading,true);assert.deepEqual(calls,['all','video']);
@@ -916,7 +919,7 @@ test('search pagination: a failed page keeps results; retry reaches a finite end
   const Harness = env.methodHarness('pages/Search', '  async doSearch(', '  /** 综合搜索翻页合并',
     "import { SearchApi } from '../api/SearchApi';");
   const page = new Harness();
-  Object.assign(page, { keyword: 'test', destroyed: false, searchInflight: false,
+  Object.assign(page, { keyword: 'test', resultKeyword: 'test', searchTabStates: new Map(), destroyed: false, searchInflight: false,
     searchRequests: epoch(env), searchTab: 6, userPage: 1, userOrder: '', userType: 0,
     userSource: source(env), hasMoreResults: true, searchError: '', moreError: '' });
   await page.doSearch(true); assert.equal(page.hasMoreResults, true);
@@ -979,7 +982,8 @@ test('dynamic detail: failed continuation preserves comments and retries the sam
 
 test('image return: zoomed picture starts a hero from its current transform', () => {
   const env = environment();
-  const Parent = env.methodHarness('pages/ImageViewer', '  goBack(): void {', '  private finishBack():');
+  const Parent = env.methodHarness('pages/ImageViewer', '  goBack(): void {', '  private finishBack():',
+    "import { MotionTokens } from '../common/MotionTokens';");
   const parent = new Parent(); let flights = 0;
   Object.assign(parent, {closing: false, interactionReady: true, currentZoomed: true,
     resetZoomForExit: false, finishBack: () => flights++});
@@ -987,7 +991,8 @@ test('image return: zoomed picture starts a hero from its current transform', ()
   assert.equal(parent.resetZoomForExit, true);
   assert.equal(parent.exitWasZoomed, true);
   assert.equal(flights, 0);
-  const Child = env.methodHarness('pages/ImageViewer', '  private prepareExit(): void {', '  private clampScale(');
+  const Child = env.methodHarness('pages/ImageViewer', '  private prepareExit(): void {', '  private clampScale(',
+    "import { MotionTokens } from '../common/MotionTokens';");
   const child = new Child(); let start;
   Object.assign(child, {exitRequested: true, useSystemGeometry: false,
     scaleValue: 3, offsetX: 100, offsetY: -50,
@@ -999,7 +1004,8 @@ test('image return: zoomed picture starts a hero from its current transform', ()
 });
 test('shared image exit resets zoom and pops within the same animation transaction', () => {
   const Child = environment().methodHarness('pages/ImageViewer',
-    '  private prepareExit(): void {', '  private clampScale(');
+    '  private prepareExit(): void {', '  private clampScale(',
+    "import { MotionTokens } from '../common/MotionTokens';");
   const child = new Child(); let finished = 0, duration = 0, start;
   Object.assign(child, {exitRequested: true, useSystemGeometry: true,
     scaleValue: 2.5, offsetX: 50, offsetY: -20,
@@ -1017,7 +1023,8 @@ test('shared image exit resets zoom and pops within the same animation transacti
 });
 test('manual image hero starts from the zoomed position and keeps the source thumbnail target', () => {
   const Exit = environment().methodHarness('pages/ImageViewer',
-    '  private finishBack(): void {', '  private startHeroExitFlight():');
+    '  private finishBack(): void {', '  private startHeroExitFlight():',
+    "import { MotionTokens } from '../common/MotionTokens';");
   const page = new Exit(); let captured;
   Object.assign(page, {exitStarted: false, exitWasZoomed: true, exitScale: 3,
     exitOffsetX: 50, exitOffsetY: -20, heroFallbackTimer: -1,

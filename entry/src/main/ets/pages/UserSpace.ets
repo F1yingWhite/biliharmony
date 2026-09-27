@@ -33,6 +33,7 @@ const ARC_ORDERS: Array<Record<string, string>> = [
 
 @Component
 export struct UserSpacePage {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   param: UserSpaceParam = { mid: 0 };
   @State info: UserSpaceInfo = new UserSpaceInfo();
   @State stat: UserStat = new UserStat();
@@ -258,6 +259,11 @@ export struct UserSpacePage {
     if (images.length === 0 && this.info.topPhoto.length > 0) images.push(this.info.topPhoto);
     if (images.length === 0) return;
     const initialIndex: number = Math.min(this.headerIndex, images.length - 1);
+    if (MotionTokens.isReduced()) {
+      const viewer: ImageViewerParam = { images: images, initialIndex: initialIndex };
+      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
+      return;
+    }
     const param: ImageViewerParam = {
       images: images,
       initialIndex: initialIndex,
@@ -1025,7 +1031,7 @@ export struct UserSpacePage {
               .scrollable(true)
               .cachedMaxCount(1, TabsCacheMode.CACHE_BOTH_SIDE)
               .animationMode(AnimationMode.CONTENT_FIRST)
-              .animationDuration(MotionTokens.navigation)
+              .animationDuration(MotionTokens.duration(MotionTokens.navigation, this.reduceMotion))
               .animationCurve(Curve.EaseInOut)
               .onAnimationStart((index: number, targetIndex: number, extraInfo: TabsAnimationEvent) => {
                 this.visualSpaceTab = targetIndex;

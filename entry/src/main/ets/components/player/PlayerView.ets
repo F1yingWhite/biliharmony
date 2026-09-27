@@ -1,3 +1,4 @@
+import { MotionTokens } from '../../common/MotionTokens';
 import { VideoReportDialog } from '../VideoReportDialog';
 import { PlayerQualityPreference } from '../../common/PlayerQualityPreference';
 import { AVVolumePanel } from '@kit.AudioKit';
@@ -73,6 +74,7 @@ interface ReportButtonItem {
 }
 @Component
 export struct PlayerView {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @Prop videoUrl: string = '';
   @Prop videoUrls: Array<string> = [];
   @Prop audioUrls: Array<string> = [];
@@ -458,7 +460,8 @@ export struct PlayerView {
         (resume: boolean, targetMs: number): void => {
           this.seekRecoveryAttempts = 0;
           const video: media.AVPlayer | null = this.player;
-          if (resume && video !== null && this.prepared) {
+          const resumeAllowed: boolean = resume && this.canStartPlayback();
+          if (resumeAllowed && video !== null && this.prepared) {
             try {
               // seek 后恢复播放同样静音等目标帧：新位置开始推进前不放声。
               const actualTargetMs: number = video.currentTime >= 0 ? video.currentTime : targetMs;
@@ -478,7 +481,7 @@ export struct PlayerView {
           this.seekLocked = false;
           this.seekTargetCtl.show(-1);
           // 播放中的 seek 要等新位置首个 timeUpdate 再撤遮罩/缓冲；暂停态可直接显示定位帧。
-          if (!resume) this.buffering = false;
+          if (!resumeAllowed) this.buffering = false;
         },
         (video: media.AVPlayer | null, targetMs: number): void => {
           if (video !== null) this.recoverPlayersAfterSeekStall(video, targetMs);
@@ -757,7 +760,13 @@ if (this.runtimeSources.length === 0) {
       // 画中画异步启动期间也可能先收到后台通知，必须保留双轨播放。
       if (this.pipActive || this.pipStarting || this.pipRestoring) return;
       if (this.backgroundPlaybackEnabled) this.enterBackgroundAudioOnly();
-      else if (this.playing) this.togglePlay();
+      else {
+        // 准备/换源/seek 中也要撤销自动恢复意图，不能只暂停已经 playing 的实例。
+        this.shouldPlayAfterPrepare = false;
+        if (this.seekCtl !== null) this.seekCtl.seekResumePlaying = false;
+        if (this.playing) this.togglePlay();
+        else this.cancelAudioGate();
+      }
     } else {
       // 从桌面/任务列表回到视频页时，系统不一定发出 ABOUT_TO_RESTORE。
       // 主动交还画面给页面，并取消仍在启动的浮窗，避免窗口继续覆盖播放器。
@@ -774,6 +783,12 @@ if (this.runtimeSources.length === 0) {
     this.dmClock.release();
     this.resetDanmakuAt(this.playheadSec);
     if (this.playing && !this.seekLocked) this.spawnDanmaku(this.playheadSec);
+  }
+
+  /** 每次实际起播都读取最新策略，覆盖 Watch 先到、prepare/seek/native 事件后到的时序。 */
+  private canStartPlayback(): boolean {
+    return !this.destroyed && (!this.appInBackground || this.backgroundPlaybackEnabled ||
+      this.pipActive || this.pipStarting || this.pipRestoring);
   }
 
   private setBackgroundPlayback(next: boolean): void {
@@ -1619,6 +1634,25 @@ if (this.runtimeSources.length === 0) {
           }
           this.tryStartPreparedPlayers();
         } else if (state === 'playing') {
+          // play() 已提交后才进后台时，原生 playing 事件仍可能迟到。
+          if (!this.canStartPlayback()) {
+            this.shouldPlayAfterPrepare = false;
+            this.playing = false;
+            this.showControls = true;
+            this.buffering = false;
+            this.cancelAudioGate();
+            this.cancelFirstFrameMute(true);
+            try { p.pause().catch(() => {}); } catch (e) {}
+            const audio: media.AVPlayer | null = this.audioPlayer;
+            if (audio !== null && this.audioPrepared && audio.state === 'playing') {
+              try { audio.pause().catch(() => {}); } catch (e) {}
+            }
+            this.dmClock.pause();
+            this.onPlayingChange(false);
+            this.updateAVSessionPlaybackState();
+            Immersive.setKeepScreenOn(false);
+            return;
+          }
           this.backgroundVideoResumePending = false;
           this.resumeTransitionActive = false;
           this.playing = true;
@@ -1894,6 +1928,10 @@ if (this.runtimeSources.length === 0) {
           // 倍速不被音频解码器支持时，设置入口会统一回退到 1x。
         }
         this.tryStartPreparedPlayers();
+      } else if (state === 'playing' && !this.canStartPlayback()) {
+        // 音轨 play 的原生完成也可能晚于后台通知，单独阻止迟到的声音。
+        this.cancelAudioGate();
+        try { audio.pause().catch(() => {}); } catch (e) {}
       } else if (state === 'completed' && this.backgroundAudioOnly) {
         this.playing = false;
         this.showControls = true;
@@ -2028,6 +2066,7 @@ if (this.runtimeSources.length === 0) {
   private tryStartPreparedPlayers(): void {
     const video: media.AVPlayer | null = this.player;
     if (video === null || !this.prepared) return;
+    if (!this.canStartPlayback()) this.shouldPlayAfterPrepare = false;
     const audio: media.AVPlayer | null = this.audioPlayer;
     if (audio !== null && !this.audioPrepared) return;
     // 清除可能残留的上一次起播静音（重建/换源路径会重新武装）。
@@ -2116,7 +2155,7 @@ if (this.runtimeSources.length === 0) {
     this.audioGateSeekPending = false;
     this.audioGateSeekTargetMs = -1;
     this.audioStartPending = false;
-    if (this.audioPlayer !== audio || !this.audioPrepared || !this.playing) return;
+    if (this.audioPlayer !== audio || !this.audioPrepared || !this.playing || !this.canStartPlayback()) return;
     try {
       this.restoreUserVolume();
       audio.play();
@@ -2572,7 +2611,7 @@ if (this.runtimeSources.length === 0) {
         // 底层状态不允许暂停时保持原 UI，等待 stateChange 校准。
       }
     } else {
-      if (this.appInBackground && !this.backgroundPlaybackEnabled && !this.pipActive && !this.pipStarting) return;
+      if (!this.canStartPlayback()) return;
       if (this.appInBackground && !this.pipActive && !this.pipStarting &&
         this.audioPlayer !== null && this.audioPrepared) {
         try {
@@ -2670,7 +2709,7 @@ if (this.runtimeSources.length === 0) {
 
   private async recoverPlayersAfterSeekStall(stalledVideo: media.AVPlayer, targetMs: number): Promise<void> {
     if (this.player !== stalledVideo) return;
-    const resume: boolean = this.seekCtl?.seekResumePlaying ?? false;
+    const resume: boolean = (this.seekCtl?.seekResumePlaying ?? false) && this.canStartPlayback();
     if (this.seekRecoveryAttempts >= 1) {
       this.seekCtl?.cancel();
       this.cancelAudioGate();
@@ -2839,7 +2878,7 @@ if (this.runtimeSources.length === 0) {
     if (this.moreSheetPage === 'menu' && page !== 'menu') {
       this.settingsOpenedDirectly = false;
     }
-    this.getUIContext().animateTo({ duration: 240, curve: Curve.EaseOut }, () => {
+    this.getUIContext().animateTo({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseOut }, () => {
       this.moreSheetPage = page;
     });
   }
@@ -3597,7 +3636,7 @@ if (this.runtimeSources.length === 0) {
           .objectFit(ImageFit.Cover)
           .hitTestBehavior(HitTestMode.None)
           .opacity(this.firstFrameShown ? 0 : 1)
-          .animation({ duration: 200, curve: Curve.EaseOut })
+          .animation({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseOut })
       }
 
       // seek 超过 180ms 时，仅复用本次拖动已经解出的目标预览帧；没有预览则保留

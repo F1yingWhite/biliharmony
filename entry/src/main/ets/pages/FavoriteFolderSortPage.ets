@@ -15,6 +15,7 @@ import { FavoriteApi } from '../api/FavoriteApi';
 
 @Component
 export struct FavoriteFolderSortPage {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   /** FavoritesPage 传入的自建文件夹列表（已去除默认收藏夹）。 */
   param: FavSortParam = { folders: [] };
   @State sort: Array<FavoriteFolderItem> = [];
@@ -33,7 +34,7 @@ export struct FavoriteFolderSortPage {
     const next: Array<FavoriteFolderItem> = this.sort.slice();
     const item: FavoriteFolderItem = next.splice(index, 1)[0];
     next.splice(target, 0, item);
-    this.getUIContext().animateTo({ duration: MotionTokens.content, curve: Curve.EaseOut }, () => {
+    this.getUIContext().animateTo({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseOut }, () => {
       this.sort = next;
     });
   }

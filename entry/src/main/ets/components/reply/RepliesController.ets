@@ -20,7 +20,13 @@ import { RequestEpoch } from '../../common/RequestEpoch';
 import { ReplyCloneResult, mutateReplyInArray, mutatedReplyClone } from '../../common/ReplyMutation';
 import { ReplyData, ReplyItem } from '../../model/Models';
 import { CommentApi } from '../../api/CommentApi';
-import { makeReplyQr, makeReplyShareSnapshot, sharePixelMapAsImage } from './ReplyShareCard';
+import { getReplyShareBounds, ReplyShareBounds, makeReplyQr, makeReplyShareSnapshot } from './ReplyShareCard';
+import { planReplySharePages, resolveReplyShareEmotes, ReplySharePage } from './ReplyShareLayout';
+import { EmoteImageCache } from '../../common/EmoteImageCache';
+import { ReplyShareImageFile, saveReplyShareImage, showReplyShareImages,
+  removeReplyShareImages } from './ReplyShareExport';
+
+let replyShareSequence: number = 0;
 
 /**
  * 页面评论编排状态的读写面：@State 留在页面，控制器经闭包读写。
@@ -134,6 +140,8 @@ export class RepliesController {
   // 评论分享卡离屏渲染用的待截内容；只在生成分享图期间短暂赋值。
   private shareCardItem: ReplyItem = new ReplyItem();
   private shareCardQr: image.PixelMap | null = null;
+  private shareCardLink: string = '';
+  private shareCardPage: ReplySharePage = new ReplySharePage();
   private shareCardBusy: boolean = false;
 
   constructor(access: RepliesAccess, clearOnSort: boolean) {
@@ -320,7 +328,7 @@ export class RepliesController {
   /**
    * 评论分享：离屏渲染分享卡 → 截成 PNG → 系统分享面板（对齐 B 站"评论分享成图片"）。 */
   share(item: ReplyItem): void {
-    if (this.shareCardBusy) return;
+    if (this.shareCardBusy || this.access.isDestroyed()) return;
     this.shareCardBusy = true;
     this.access.toast('正在生成分享图片…');
     const link: string = this.access.buildShareLink(item);
@@ -333,16 +341,57 @@ export class RepliesController {
     }
     const context: common.UIAbilityContext = host;
     const uiContext: UIContext = this.access.getUIContext();
+    const files: Array<ReplyShareImageFile> = [];
+    const session: string = String(Date.now()) + '_' + String(++replyShareSequence);
     (async () => {
       this.shareCardItem = item;
+      if (!/^https:\/\/(www\.|t\.)?bilibili\.com\//.test(link)) {
+        throw new Error('评论链接无效，无法生成二维码');
+      }
+      this.shareCardLink = link;
       this.shareCardQr = await makeReplyQr(link);
-      const pixelMap: image.PixelMap = await makeReplyShareSnapshot(uiContext,
-        (): void => { this.access.renderShareCard(); });
-      await sharePixelMapAsImage(context, pixelMap, 'reply_share_' + String(item.rpid));
+      if (this.access.isDestroyed()) return;
+      const imageSources: Map<string, string> = await resolveReplyShareEmotes(item,
+        (url: string): Promise<string> => EmoteImageCache.ensure(url));
+      if (this.access.isDestroyed()) return;
+      const bounds: ReplyShareBounds = await getReplyShareBounds(uiContext);
+      const widths: Map<string, number> = new Map<string, number>();
+      const pages: Array<ReplySharePage> = planReplySharePages(item, (text: string, fontSize: number): number => {
+        const key: string = String(fontSize) + ':' + text;
+        const cached: number | undefined = widths.get(key);
+        if (cached !== undefined) return cached;
+        const measured: SizeOptions = uiContext.getMeasureUtils().measureTextSize({
+          // The exported body fixes its font scale at 1; measure the same physical vp size.
+          textContent: text, fontSize: String(fontSize) + 'vp',
+        });
+        const width: number = uiContext.px2vp(Number(measured.width));
+        if (!Number.isFinite(width)) throw new Error('无法测量评论排版');
+        widths.set(key, width);
+        return width;
+      }, bounds.height, imageSources, bounds.width);
+      for (let i: number = 0; i < pages.length; i++) {
+        if (this.access.isDestroyed()) {
+          removeReplyShareImages(files);
+          return;
+        }
+        this.shareCardPage = pages[i];
+        const pixelMap: image.PixelMap = await makeReplyShareSnapshot(uiContext,
+          (): void => { this.access.renderShareCard(); }, pages[i].height, pages[i].width);
+        const name: string = 'reply_share_' + String(item.rpid) + '_' + session + '_' + String(i + 1);
+        files.push(await saveReplyShareImage(context, pixelMap, name));
+      }
+      if (this.access.isDestroyed()) removeReplyShareImages(files);
+      else await showReplyShareImages(context, files);
     })().catch((e: Object) => {
-      this.access.onShareFailed(item, link, e);
+      removeReplyShareImages(files);
+      if (this.access.isDestroyed()) return;
+      if ((e as Error).message === '评论图片未加载完整，请稍后重试' ||
+        (e as Error).message === '评论图片尺寸不完整，请重试' ||
+        (e as Error).message === '当前窗口过小，请放大窗口后生成分享图片') {
+        this.access.toast((e as Error).message);
+      } else this.access.onShareFailed(item, link, e);
     }).finally(() => {
-      // 截图 PixelMap 已在 sharePixelMapAsImage 内释放；二维码只服务本次渲染，一并回收。
+      // 截图 PixelMap 已逐页在 saveReplyShareImage 内释放；二维码只服务本次渲染，一并回收。
       this.releaseShareCard();
       this.shareCardBusy = false;
     });
@@ -351,12 +400,13 @@ export class RepliesController {
   /** 释放分享卡二维码并复位；分享流程结束/页面销毁时调用，防止 PixelMap 滞留。 */
   releaseShareCard(): void {
     if (this.shareCardQr !== null) {
+      const qr: image.PixelMap = this.shareCardQr;
+      this.shareCardQr = null;
       try {
-        this.shareCardQr.release();
+        qr.release().catch(() => {});
       } catch (e) {
         // 已释放的二维码忽略。
       }
-      this.shareCardQr = null;
     }
   }
 
@@ -367,6 +417,14 @@ export class RepliesController {
 
   shareQr(): image.PixelMap | null {
     return this.shareCardQr;
+  }
+
+  shareLink(): string {
+    return this.shareCardLink;
+  }
+
+  sharePage(): ReplySharePage {
+    return this.shareCardPage;
   }
 
   /** 打开楼中楼：写入根节点与初始预览楼层，并复位游标与续拉标记。 */

@@ -3,7 +3,8 @@ import { LoadingView } from '../components/LoadingView';
 import { BasicDataSource } from '../common/BasicDataSource';
 /** 动态详情：首屏复用 feed 对象，随后从 detail 接口补齐正文、表情和评论 subject。 */
 import { AppNavStack, DynamicDetailParam, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
-  ImageViewerSrcRect, NAV_LOGIN } from '../common/AppRouter';
+  HERO_NAV_TRANSITION_FINISH_REQUEST_KEY, ImageViewerSrcRect, NAV_LOGIN } from '../common/AppRouter';
+import { MotionTokens } from '../common/MotionTokens';
 import { DynamicItem, ReplyItem } from '../model/Models';
 import { ActionResult, BiliApi } from '../api/BiliApi';
 import { Immersive } from '../common/Immersive';
@@ -137,7 +138,8 @@ export struct DynamicDetailPage {
       if (this.param.focusComments === true && !this.focusPerformed) {
         this.focusPerformed = true;
         setTimeout(() => {
-          if (!this.destroyed) this.scroller.scrollTo({ xOffset: 0, yOffset: this.commentsOffset, animation: true });
+          if (!this.destroyed) this.scroller.scrollTo({ xOffset: 0, yOffset: this.commentsOffset,
+            animation: !MotionTokens.isReduced() });
         }, 80);
       }
     },
@@ -192,6 +194,7 @@ export struct DynamicDetailPage {
   }
 
   private prepareEntrance(): void {
+    if (MotionTokens.isReduced()) { this.finishWithoutMotion(); return; }
     const rect: ImageViewerSrcRect | undefined = this.param.srcRect;
     if (rect === undefined || rect.w <= 0 || rect.h <= 0) return;
     try {
@@ -218,11 +221,13 @@ export struct DynamicDetailPage {
   }
 
   private triggerEntrance(): void {
+    if (MotionTokens.isReduced()) { this.finishWithoutMotion(); return; }
     if (!this.entranceArmed || this.closing) return;
     this.entranceArmed = false;
     const target: ImageViewerSrcRect = this.targetCardRect();
     this.getUIContext().postFrameCallback(new DynamicHeroFrameCallback(() => {
       if (this.closing) return;
+      if (MotionTokens.isReduced()) { this.finishWithoutMotion(); return; }
       this.getUIContext().animateTo({ duration: 340, curve: Curve.EaseOut, onFinish: () => {
         this.heroVisible = false;
       } }, () => {
@@ -246,9 +251,25 @@ export struct DynamicDetailPage {
     this.goBack();
   }
 
+  private finishWithoutMotion(): void {
+    this.entryFromRect = false;
+    this.entranceArmed = false;
+    this.heroVisible = false;
+    this.contentOpacity = 1;
+    AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, false);
+    AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 0);
+    const request: number = AppStorage.get<number>(HERO_NAV_TRANSITION_FINISH_REQUEST_KEY) ?? 0;
+    AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_FINISH_REQUEST_KEY, request + 1);
+  }
+
   private goBack(): void {
     if (this.closing) return;
     this.closing = true;
+    if (MotionTokens.isReduced()) {
+      this.finishWithoutMotion();
+      AppNavStack.pop(false);
+      return;
+    }
     const rect: ImageViewerSrcRect | undefined = this.param.srcRect;
     if (this.entryFromRect && rect !== undefined) {
       const start: ImageViewerSrcRect = this.targetCardRect();
@@ -264,6 +285,11 @@ export struct DynamicDetailPage {
       this.heroVisible = true;
       this.contentOpacity = 0;
       this.getUIContext().postFrameCallback(new DynamicHeroFrameCallback(() => {
+        if (MotionTokens.isReduced()) {
+          this.finishWithoutMotion();
+          AppNavStack.pop(false);
+          return;
+        }
         AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
         AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 380);
         AppNavStack.pop();
@@ -463,7 +489,8 @@ export struct DynamicDetailPage {
       item: this.replies.shareItem(),
       upMid: this.item.mid,
       qr: this.replies.shareQr(),
-      linkLabel: 't.bilibili.com/' + this.item.dynId,
+      page: this.replies.sharePage(),
+      linkLabel: this.replies.shareLink(),
       sourceCover: this.item.cover,
       sourceTitle: this.item.title.length > 0 ? this.item.title : this.item.content,
       sourceUpName: this.item.uname,

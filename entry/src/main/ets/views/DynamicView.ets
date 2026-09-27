@@ -14,6 +14,7 @@ import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATI
     UserSpaceParam, NAV_BANGUMI_DETAIL, BangumiDetailParam, setHeroBgSnapshot, NAV_SEARCH } from '../common/AppRouter';
 import { ActionResult } from '../api/BiliApi';
 import { UserStore } from '../services/auth/UserStore';
+import { AuthSession } from '../services/auth/AuthSession';
 import { LoadingView } from '../components/LoadingView';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { formatCount, formatRelativeTime } from '../common/Utils';
@@ -44,6 +45,17 @@ const DYN_MAX_IMAGES: number = 9;
 interface ReportButtonItem {
   text: string;
   color: string;
+}
+
+interface DynamicFeedState {
+  count: number;
+  loaded: boolean;
+  loading: boolean;
+  errorText: string;
+  needsLogin: boolean;
+  moreFailed: boolean;
+  retryReset: boolean;
+  hasMore: boolean;
 }
 
 class DynamicContentPart {
@@ -194,7 +206,7 @@ export struct DynCard {
    *  主页底部 Tabs 内是 Navigation 根页面，geometryTransition 不生效，该场景走 srcRect 矩形放大 push。 */
   @Prop sharedImageTransition: boolean = true;
   /**
-   * 图片 id / 共享元素转场 id 前缀：动态分类 Tabs 四个页签常驻且共用同一 dynSource，
+   * 图片 id / 共享元素转场 id 前缀：同一动态可能同时存在于不同分类页签中，
    * 同一动态会渲染出多张同 id 缩略图；getRectangleById 命中离屏页签的图时，
    * 看图入场便从错误的矩形（常是相邻页签方向）放大。各容器传唯一前缀区分。
    */
@@ -208,6 +220,8 @@ export struct DynCard {
   @State likeCount: number = 0;
   @State forwardCount: number = 0;
   @State actionBusy: boolean = false;
+  private actionGeneration: number = 0;
+  private actionItem: DynamicItem | null = null;
   /** 表情图本地缓存映射：原网络 URL → cacheDir 内本地路径（落盘缓存，离线可显示）。 */
   @State emoteLocal: Map<string, string> = new Map<string, string>();
   /** 确认加载失败的表情 URL：回退渲染 [表情名] 文字，避免行内空白块。 */
@@ -218,6 +232,7 @@ export struct DynCard {
   @State gridWidth: number = 0;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   // 表情表加载完成后版本号 +1：引用它的 build 会重跑，拆分缓存键也随之失效。
   @StorageProp('emoteResolverVersion') emoteVer: number = 0;
   private hydrateGeneration: number = 0;
@@ -228,6 +243,7 @@ export struct DynCard {
   }
 
   aboutToReuse(params: Record<string, Object>): void {
+    this.actionGeneration++;
     // 复用实例直接换数据，避免整卡重建（LazyForEach 滚动性能）。
     const next: DynamicItem | undefined = params.item as DynamicItem | undefined;
     if (next !== undefined) {
@@ -244,6 +260,8 @@ export struct DynCard {
 
   aboutToDisappear(): void {
     this.hydrateGeneration++;
+    this.actionGeneration++;
+    this.actionBusy = false;
   }
 
   onItemChanged(): void {
@@ -251,6 +269,12 @@ export struct DynCard {
   }
 
   private syncFromItem(): void {
+    // @Watch 也会收到本卡乐观字段写入；仅模型引用变化才撤销旧卡片操作。
+    if (this.actionItem !== this.item) {
+      this.actionGeneration++;
+      this.actionBusy = false;
+      this.actionItem = this.item;
+    }
     this.liked = this.item.liked;
     this.likeCount = this.item.like;
     this.forwardCount = this.item.forward;
@@ -365,6 +389,13 @@ export struct DynCard {
     if (this.item.dynId.length === 0) return;
     // 点赞期间卡片可能被复用成另一条动态：本地状态只允许写回同一 dynId 的卡片，跨卡写入会串卡。
     const dynId: string = this.item.dynId;
+    const item: DynamicItem = this.item;
+    this.actionItem = item;
+    const generation: number = ++this.actionGeneration;
+    const session: number = AuthSession.version;
+    const onLikeResult: (dynId: string, liked: boolean, count: number) => void = this.onLikeResult;
+    const isCurrent = (): boolean => this.actionGeneration === generation &&
+      AuthSession.version === session && this.item === item;
     const next: boolean = this.liked ? false : true;
     const prevLiked: boolean = this.liked;
     const prevCount: number = this.likeCount;
@@ -377,31 +408,31 @@ export struct DynCard {
     this.actionBusy = true;
     try {
       const result: ActionResult = await DynamicApi.likeDynamic(dynId, next);
-      const sameItem: boolean = this.item.dynId === dynId;
+      if (AuthSession.version !== session) return;
       if (result.ok === false) {
-        if (sameItem) {
+        if (isCurrent()) {
           this.liked = prevLiked;
           this.likeCount = prevCount;
           this.item.liked = prevLiked;
           this.item.like = prevCount;
+          this.toast(result.message);
         }
-        this.toast(result.message);
       } else {
         // 接口成功才回写数据源真身：卡片复用重建（aboutToReuse → syncFromItem）从数据源回读，
         // 不回写则点赞态会随回收滚动回退。回调按 dynId 定位，卡片即使已复用也不受影响。
-        this.onLikeResult(dynId, next, nextCount);
-        this.toast(next ? '点赞成功' : '已取消点赞');
+        onLikeResult(dynId, next, nextCount);
+        if (isCurrent()) this.toast(next ? '点赞成功' : '已取消点赞');
       }
     } catch (e) {
-      if (this.item.dynId === dynId) {
+      if (isCurrent()) {
         this.liked = prevLiked;
         this.likeCount = prevCount;
         this.item.liked = prevLiked;
         this.item.like = prevCount;
+        this.toast('网络异常，请稍后重试');
       }
-      this.toast('网络异常，请稍后重试');
     } finally {
-      this.actionBusy = false;
+      if (this.actionGeneration === generation && this.item === item) this.actionBusy = false;
     }
   }
 
@@ -412,9 +443,16 @@ export struct DynCard {
       return;
     }
     if (this.item.dynId.length === 0) return;
+    const item: DynamicItem = this.item;
+    this.actionItem = item;
+    const generation: number = ++this.actionGeneration;
+    const session: number = AuthSession.version;
+    const isCurrent = (): boolean => this.actionGeneration === generation &&
+      AuthSession.version === session && this.item === item;
     this.actionBusy = true;
     try {
-      const result: ActionResult = await DynamicApi.repostDynamic(this.item.dynId);
+      const result: ActionResult = await DynamicApi.repostDynamic(item.dynId);
+      if (!isCurrent()) return;
       if (result.ok) {
         this.forwardCount++;
         this.item.forward = this.forwardCount;
@@ -423,9 +461,9 @@ export struct DynCard {
         this.toast(result.message);
       }
     } catch (e) {
-      this.toast('网络异常，请稍后重试');
+      if (isCurrent()) this.toast('网络异常，请稍后重试');
     } finally {
-      this.actionBusy = false;
+      if (this.actionGeneration === generation && this.item === item) this.actionBusy = false;
     }
   }
 
@@ -480,7 +518,8 @@ export struct DynCard {
           .objectFit(ImageFit.Cover)
           .borderRadius(8)
           .id(this.imgId(item.dynId, 0))
-          .geometryTransition(this.imgTransitionId(item.dynId, 0))
+          .geometryTransition(this.reduceMotion ? 'dynamic-reduced-' + this.imgTransitionId(item.dynId, 0) :
+            this.imgTransitionId(item.dynId, 0))
           .onClick(() => {
             this.openItemImage(item, 0);
           })
@@ -496,7 +535,8 @@ export struct DynCard {
                 .aspectRatio(1)
                 .objectFit(ImageFit.Cover)
                 .id(this.imgId(item.dynId, index))
-                .geometryTransition(this.imgTransitionId(item.dynId, index))
+                .geometryTransition(this.reduceMotion ? 'dynamic-reduced-' + this.imgTransitionId(item.dynId, index) :
+                  this.imgTransitionId(item.dynId, index))
               if (index === 8 && item.images.length > 9) {
                 Column() {
                   Text('+' + String(item.images.length - 9))
@@ -541,6 +581,11 @@ export struct DynCard {
 
   private openDetail(focusComments: boolean = false): void {
     if (this.detailMode || this.item.dynId.length === 0) return;
+    if (MotionTokens.isReduced()) {
+      const direct: DynamicDetailParam = { item: this.item as Object, focusComments: focusComments };
+      AppNavStack.pushPathByName(NAV_DYNAMIC_DETAIL, direct, false);
+      return;
+    }
     let srcRect: ImageViewerSrcRect | undefined = undefined;
     try {
       const area = this.getUIContext().getComponentUtils().getRectangleById(this.cardId());
@@ -609,6 +654,10 @@ export struct DynCard {
       // 保留入场放大，返回使用普通出栈，避免详情页缩回后因目标节点缺失而悬停。
       mirrorHeroReturn: false,
     };
+    if (MotionTokens.isReduced()) {
+      AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param, false);
+      return;
+    }
     try {
       const cardArea = this.getUIContext().getComponentUtils().getRectangleById(this.videoCardId(item));
       if (cardArea.size.width > 0 && cardArea.size.height > 0 &&
@@ -655,6 +704,11 @@ export struct DynCard {
 
   private openItemImage(item: DynamicItem, index: number): void {
     const images: Array<string> = item.images;
+    if (MotionTokens.isReduced()) {
+      const direct: ImageViewerParam = { images: images, initialIndex: index };
+      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, direct, false);
+      return;
+    }
     const rects: Array<ImageViewerSrcRect> = this.collectImageRects(item);
     const rect: ImageViewerSrcRect | undefined = index < rects.length && rects[index].w > 0 ? rects[index] : undefined;
     const ids: Array<string> = [];
@@ -936,7 +990,7 @@ export struct DynCard {
       }
 
       // 底部互动：点赞/评论/转发均可点，点赞与转发走登录态接口。
-      Row({ space: 24 }) {
+      Row({ space: 12 }) {
         Row({ space: 4 }) {
           Image(this.liked ? $r('app.media.ic_like_fill') : $r('app.media.ic_like'))
             .width(16)
@@ -946,7 +1000,12 @@ export struct DynCard {
             .fontSize(12)
             .fontColor(this.liked ? this.accent : '#9499A0')
         }
+        .height(44)
+        .constraintSize({ minWidth: 44 })
         .alignItems(VerticalAlign.Center)
+        .accessibilityGroup(true)
+        .accessibilityText((this.liked ? '取消点赞，' : '点赞，') + String(this.likeCount) + '个赞')
+        .accessibilitySelected(this.liked)
         .onClick(() => {
           this.toggleLike().catch(() => {
           });
@@ -960,8 +1019,11 @@ export struct DynCard {
             .fontSize(12)
             .fontColor('#9499A0')
         }
+        .height(44)
+        .constraintSize({ minWidth: 44 })
         .alignItems(VerticalAlign.Center)
-        .padding({ top: 5, bottom: 5 })
+        .accessibilityGroup(true)
+        .accessibilityText('查看评论，' + String(this.item.comment) + '条评论')
         .onClick(() => {
           this.openDetail(true);
         })
@@ -974,7 +1036,11 @@ export struct DynCard {
             .fontSize(12)
             .fontColor('#9499A0')
         }
+        .height(44)
+        .constraintSize({ minWidth: 44 })
         .alignItems(VerticalAlign.Center)
+        .accessibilityGroup(true)
+        .accessibilityText('转发动态，' + String(this.forwardCount) + '次转发')
         .onClick(() => {
           this.forwardDynamic().catch(() => {
           });
@@ -988,8 +1054,12 @@ export struct DynCard {
             .height(16)
             .fillColor('#9499A0')
         }
+        .width(44)
+        .height(44)
         .alignItems(VerticalAlign.Center)
-        .padding({ top: 5, bottom: 5 })
+        .justifyContent(FlexAlign.End)
+        .accessibilityGroup(true)
+        .accessibilityText('举报动态')
         .onClick(() => {
           this.promptReportDynamic();
         })
@@ -1062,8 +1132,10 @@ export struct DynamicView {
   @State dynTab: number = 0;
   @State dynHasMore: boolean = true;
   @State feedLoading: boolean = false;
+  private feedLoaded: boolean = false;
   @State refreshing: boolean = false;
   @State refreshStatus: RefreshStatus = RefreshStatus.Inactive;
+  private refreshOperation: number = 0;
   @State dynCount: number = 0;
   @State errorText: string = '';
   // 发布动态（纯文字 / 图文）面板状态
@@ -1094,6 +1166,7 @@ export struct DynamicView {
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @StorageProp('headerFade') fade: number = 0;
   /** 惯用手侧：分类胶囊上滑让位的方向依据（左手头像在左，胶囊向右让位）。 */
   @StorageProp(Handedness.KEY_SIDE) handSide: string = Handedness.RIGHT;
@@ -1105,6 +1178,9 @@ export struct DynamicView {
   private typeItems: Map<string, Array<DynamicItem>> = new Map<string, Array<DynamicItem>>();
   private typeOffset: Map<string, string> = new Map<string, string>();
   private typeHasMore: Map<string, boolean> = new Map<string, boolean>();
+  /** 每页数据源保持稳定，横滑时离场页和入场页同时展示自己的内容。 */
+  private typeSources: Map<string, BasicDataSource<DynamicItem>> = new Map<string, BasicDataSource<DynamicItem>>();
+  private typeStates: Map<string, DynamicFeedState> = new Map<string, DynamicFeedState>();
   private initializing: boolean = false;
   /** 初始化期间收到登录广播时补跑一次，避免 Tabs 保活页面永久停在旧登录态。 */
   private initPending: boolean = false;
@@ -1114,7 +1190,13 @@ export struct DynamicView {
     // 关注列表与直播角标属于账号数据，切换账号时必须清空并重新拉取。
     this.accountGeneration++;
     this.feedEpoch.invalidate();
+    this.refreshOperation++;
+    this.refreshing = false;
+    this.refreshStatus = RefreshStatus.Inactive;
     this.feedLoading = false;
+    this.feedLoaded = false;
+    this.typeSources.forEach((source: BasicDataSource<DynamicItem>) => source.clear());
+    this.typeStates.clear();
     this.dynSource.clear();
     this.dynCount = 0;
     this.dynOffset = '';
@@ -1142,7 +1224,8 @@ export struct DynamicView {
 
   /** 惯用手切换：只驱动气泡位移动画，不触发动态列表刷新。 */
   private onComposeHandSideChanged(): void {
-    this.getUIContext().animateTo({ duration: 320, curve: Curve.EaseInOut }, () => {
+    this.getUIContext().animateTo({ duration: MotionTokens.duration(MotionTokens.navigation, this.reduceMotion),
+      curve: Curve.EaseInOut }, () => {
       this.composeHandPosition = this.composeHandSide === Handedness.LEFT ? 1 : 0;
     });
   }
@@ -1203,6 +1286,7 @@ export struct DynamicView {
       this.dynCount = this.dynSource.totalCount();
       this.dynOffset = page.offset;
       this.dynHasMore = page.hasMore;
+      this.feedLoaded = true;
     } catch (e) {
       if (!this.feedEpoch.isCurrent(epoch)) return;
       this.feedNeedsLogin = (e as Error).message === '登录已失效，请重新登录后查看动态';
@@ -1227,17 +1311,20 @@ export struct DynamicView {
    * 点赞结果回写数据源真身：DynCard 的 @Prop item 是深拷贝，卡片内改动不进入 dynSource，
    * 卡片被回收再复用时 syncFromItem 会从数据源回读旧值导致点赞态回退。这里按 dynId 找到
    * 真身原地重赋值字段即可——触发点赞的卡片保持乐观 UI，无需 notifyItemChanged 重绑
-   * （四个分类页签共用同一 dynSource，原地修改对全部页签的后续复用生效）。
+   * 在途点赞可能跨越分类切换，因此同时更新各分类已缓存的模型，后续复用不会回退。
    */
   private handleLikeResult(dynId: string, liked: boolean, count: number): void {
-    const items: Array<DynamicItem> = this.dynSource.getAll();
-    for (let i: number = 0; i < items.length; i++) {
-      if (items[i].dynId === dynId) {
-        items[i].liked = liked;
-        items[i].like = count;
-        return;
+    const sources: Set<BasicDataSource<DynamicItem>> = new Set<BasicDataSource<DynamicItem>>([this.dynSource]);
+    this.typeSources.forEach((source: BasicDataSource<DynamicItem>) => sources.add(source));
+    sources.forEach((source: BasicDataSource<DynamicItem>) => {
+      const items: Array<DynamicItem> = source.getAll();
+      for (let i: number = 0; i < items.length; i++) {
+        if (items[i].dynId === dynId) {
+          items[i].liked = liked;
+          items[i].like = count;
+        }
       }
-    }
+    });
   }
 
   /** 并行拉取关注 UP 主第一页，仅作横滑栏展示，失败静默（不影响动态主流程）。 */
@@ -1293,12 +1380,13 @@ export struct DynamicView {
   }
 
   private onRefresh(): void {
+    const operation: number = ++this.refreshOperation;
     this.refreshing = true;
     this.loadFeed(true)
       .catch(() => {
       })
       .finally(() => {
-        this.refreshing = false;
+        if (operation === this.refreshOperation) this.refreshing = false;
       });
   }
 
@@ -1330,7 +1418,7 @@ export struct DynamicView {
     // 与首页 RefreshIndicator 完全同位置。
     .margin({ top: this.embedded ? 0 : Immersive.statusBarHeight() + 88 })
     .opacity(this.refreshStatus === RefreshStatus.Refresh || this.refreshing ? 1 : 0)
-    .animation({ duration: 120, curve: Curve.EaseOut })
+    .animation({ duration: MotionTokens.duration(MotionTokens.feedback, this.reduceMotion), curve: Curve.EaseOut })
     .hitTestBehavior(HitTestMode.None)
   }
 
@@ -1358,19 +1446,39 @@ export struct DynamicView {
 
   private changeDynType(type: string): void {
     if (this.dynType === type) return;
+    // 选中态改变之后，原生 Tabs 动画仍会继续渲染离场页。
+    this.typeStates.set(this.dynType, this.pageState(this.dynTypes.indexOf(this.dynType)));
+    this.typeSources.set(this.dynType, this.dynSource);
+    // 缓存命中不会发新请求，也必须先让旧分类的首屏/分页失效。
+    // 分类切换清除旧请求的展示状态，旧刷新 finally 不能收起新分类的刷新提示。
+    this.feedEpoch.invalidate();
+    this.refreshOperation++;
+    this.feedLoading = false;
+    this.feedMoreFailed = false;
+    this.feedNeedsLogin = false;
+    this.feedRetryReset = false;
+    this.errorText = '';
+    this.refreshing = false;
+    this.refreshStatus = RefreshStatus.Inactive;
     // 当前列表快照进缓存（同一数组引用，含已追加的分页）。
     this.typeItems.set(this.dynType, this.dynSource.getAll());
     this.typeOffset.set(this.dynType, this.dynOffset);
     this.typeHasMore.set(this.dynType, this.dynHasMore);
+    this.dynSource = this.pageSource(this.dynTypes.indexOf(type));
     this.dynType = type;
     const cached: Array<DynamicItem> | undefined = this.typeItems.get(type);
-    if (cached !== undefined && cached.length > 0) {
+    const state: DynamicFeedState | undefined = this.typeStates.get(type);
+    this.feedLoaded = state?.loaded ?? false;
+    if (cached !== undefined && (cached.length > 0 || this.feedLoaded)) {
       // 看过的分类：即时恢复，不重拉不闪烁。
       this.dynSource.reset(cached);
       this.dynOffset = this.typeOffset.get(type) ?? '';
       this.dynHasMore = this.typeHasMore.get(type) ?? true;
       this.dynCount = this.dynSource.totalCount();
-      this.errorText = '';
+      this.errorText = state?.errorText ?? '';
+      this.feedMoreFailed = state?.moreFailed ?? false;
+      this.feedNeedsLogin = state?.needsLogin ?? false;
+      this.feedRetryReset = state?.retryReset ?? false;
       return;
     }
     // 首次进入的分类才清空重拉。
@@ -1381,6 +1489,41 @@ export struct DynamicView {
     this.errorText = '';
     this.loadFeed(true).catch(() => {
     });
+  }
+
+  private pageSource(tabIdx: number): BasicDataSource<DynamicItem> {
+    const type: string = this.dynTypes[tabIdx] ?? 'all';
+    if (type === this.dynType) return this.dynSource;
+    let source: BasicDataSource<DynamicItem> | undefined = this.typeSources.get(type);
+    if (source === undefined) {
+      source = new BasicDataSource<DynamicItem>();
+      source.reset(this.typeItems.get(type) ?? []);
+      this.typeSources.set(type, source);
+    }
+    return source;
+  }
+
+  private pageState(tabIdx: number): DynamicFeedState {
+    const type: string = this.dynTypes[tabIdx] ?? 'all';
+    if (type === this.dynType) {
+      return { count: this.dynCount, loaded: this.feedLoaded, loading: this.feedLoading,
+        errorText: this.errorText, needsLogin: this.feedNeedsLogin, moreFailed: this.feedMoreFailed,
+        retryReset: this.feedRetryReset, hasMore: this.dynHasMore };
+    }
+    const cached: DynamicFeedState | undefined = this.typeStates.get(type);
+    if (cached !== undefined) {
+      return { count: cached.count, loaded: cached.loaded,
+        loading: cached.count === 0 && !cached.loaded && cached.errorText.length === 0,
+        errorText: cached.errorText, needsLogin: cached.needsLogin, moreFailed: cached.moreFailed,
+        retryReset: cached.retryReset, hasMore: cached.hasMore };
+    }
+    const count: number = this.pageSource(tabIdx).totalCount();
+    return { count: count, loaded: count > 0, loading: count === 0, errorText: '',
+      needsLogin: false, moreFailed: false, retryReset: false, hasMore: this.typeHasMore.get(type) ?? true };
+  }
+
+  private isActivePage(tabIdx: number): boolean {
+    return this.dynTypes[tabIdx] === this.dynType;
   }
 
   @Builder
@@ -1396,7 +1539,7 @@ export struct DynamicView {
     .height(30)
     .borderRadius(15)
     .backgroundColor(this.dynType === type ? (this.isDark ? '#34363C' : '#FFFFFF') : Color.Transparent)
-    .animation({ duration: 180, curve: Curve.EaseOut })
+    .animation({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseOut })
     .onClick(() => {
       this.tapVibrate();
       const index: number = this.dynTypes.indexOf(type);
@@ -1561,24 +1704,24 @@ export struct DynamicView {
 
   @Builder
   DynBody(tabIdx: number) {
-    if (this.loading) {
+    if (this.loading && this.pageState(tabIdx).count === 0) {
       LoadingView({ skeleton: 'social', loading: true })
         .margin({ top: this.embedded ? 4 : Immersive.statusBarHeight() + 86 })
     } else if (!this.login) {
       this.LoginPrompt()
-    } else if (this.dynCount === 0) {
+    } else if (this.pageState(tabIdx).count === 0) {
       LoadingView({ skeleton: 'social',
-        loading: this.feedLoading,
-        empty: this.feedLoading ? false : this.errorText.length === 0,
+        loading: this.pageState(tabIdx).loading,
+        empty: this.pageState(tabIdx).loading ? false : this.pageState(tabIdx).errorText.length === 0,
         emptyText: this.hostMid > 0 ? '该用户暂时没有发布动态' :
-          (this.dynType === 'all' ? '暂时没有动态，去关注一些UP主吧' : '该分类下暂无动态'),
-        errorText: this.errorText,
-        retryText: this.feedNeedsLogin ? '去登录' : '重新加载',
-        onRetry: () => this.recoverFeed(),
+          (this.dynTypes[tabIdx] === 'all' ? '暂时没有动态，去关注一些UP主吧' : '该分类下暂无动态'),
+        errorText: this.pageState(tabIdx).errorText,
+        retryText: this.pageState(tabIdx).needsLogin ? '去登录' : '重新加载',
+        onRetry: () => { if (this.isActivePage(tabIdx)) this.recoverFeed(); },
       })
       .margin({ top: this.embedded ? 4 : Immersive.statusBarHeight() + 86 })
     } else {
-      Refresh({ refreshing: $$this.refreshing, builder: this.DynRefreshHeader() }) {
+      Refresh({ refreshing: this.isActivePage(tabIdx) && this.refreshing, builder: this.DynRefreshHeader() }) {
         List({ space: 10 }) {
           if (this.followed.length > 0 && !this.embedded && this.hostMid <= 0) {
             ListItem() {
@@ -1600,7 +1743,7 @@ export struct DynamicView {
               .padding({ top: 10, bottom: 2 })
             }
           }
-          LazyForEach(this.dynSource, (item: DynamicItem) => {
+          LazyForEach(this.pageSource(tabIdx), (item: DynamicItem) => {
             ListItem() {
               // 主页底部 Tabs 里的动态流（Navigation 根页面）走 push + srcRect 矩形放大看图。
               // onLikeResult 闭包只引用父级 this，按 dynId 回写数据源，复用不捕获过期索引。
@@ -1613,14 +1756,15 @@ export struct DynamicView {
           }, (item: DynamicItem) => item.dynId)
           ListItem() {
             LoadMoreFooter({
-              loading: this.feedLoading,
-              hasMore: this.dynHasMore || this.feedMoreFailed,
-              moreText: this.feedNeedsLogin ? '登录已失效，去登录' : (this.feedMoreFailed ? '加载失败，点击重试' : '继续加载动态'),
+              loading: this.pageState(tabIdx).loading,
+              hasMore: this.pageState(tabIdx).hasMore || this.pageState(tabIdx).moreFailed,
+              moreText: this.pageState(tabIdx).needsLogin ? '登录已失效，去登录' :
+                (this.pageState(tabIdx).moreFailed ? '加载失败，点击重试' : '继续加载动态'),
               endText: '—— 动态到底啦 ——',
               fixedHeight: 52,
               spinnerSize: 22,
               clickable: true,
-              onLoadMore: () => this.recoverFeed(),
+              onLoadMore: () => { if (this.isActivePage(tabIdx)) this.recoverFeed(); },
             })
           }
         }
@@ -1640,18 +1784,18 @@ export struct DynamicView {
           scrollBackward: this.embedded ? NestedScrollMode.SELF_FIRST : NestedScrollMode.SELF_ONLY,
         })
         .onDidScroll((offset: number) => {
-          if (!this.embedded) AppTheme.updateHeaderFade(offset);
+          if (this.isActivePage(tabIdx) && !this.embedded) AppTheme.updateHeaderFade(offset);
         })
         .onReachEnd(() => {
-          if (!this.feedMoreFailed) this.loadFeed(false);
+          if (this.isActivePage(tabIdx) && !this.feedMoreFailed) this.loadFeed(false);
         })
       }
       .refreshOffset(56)
       .pullDownRatio(undefined)
       .onStateChange((status: RefreshStatus) => {
-        this.refreshStatus = status;
+        if (this.isActivePage(tabIdx)) this.refreshStatus = status;
       })
-      .onRefreshing(() => this.onRefresh())
+      .onRefreshing(() => { if (this.isActivePage(tabIdx)) this.onRefresh(); })
     }
   }
 
@@ -1873,7 +2017,7 @@ export struct DynamicView {
       .barHeight(0)
       .cachedMaxCount(1, TabsCacheMode.CACHE_BOTH_SIDE)
       .animationMode(AnimationMode.CONTENT_FIRST)
-      .animationDuration(MotionTokens.content)
+      .animationDuration(MotionTokens.duration(MotionTokens.content, this.reduceMotion))
       .animationCurve(Curve.EaseOut)
       .onChange((index: number) => {
         this.dynTab = index;

@@ -1,3 +1,4 @@
+import { MotionTokens } from '../../common/MotionTokens';
 import { VideoChapter } from '../../api/BiliApi';
 import { formatDuration } from '../../common/Utils';
 import { SubtitleTrack, VideoQualityOption } from '../../model/Models';
@@ -5,6 +6,7 @@ import { SubtitleTrack, VideoQualityOption } from '../../model/Models';
 /** 播放器底部设置面板。业务状态由 PlayerView 持有，本组件仅渲染并回传用户选择。 */
 @Component
 export struct PlayerSettingsPanel {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @Prop which: number = 0;
   @Prop fullscreen: boolean = false;
   @Prop embedded: boolean = false;
@@ -502,10 +504,10 @@ export struct PlayerSettingsPanel {
     .border(this.embedded ? { width: 0 } :
       { width: { top: this.which === 0 ? 0.5 : 0 }, color: this.darkMode() ? '#333333' : '#EEEEEE' })
     .align(this.embedded ? Alignment.Top : Alignment.Bottom)
-    .transition(this.embedded ? TransitionEffect.IDENTITY :
+    .transition(this.embedded ? TransitionEffect.IDENTITY : this.reduceMotion ? MotionTokens.appear(true) :
       TransitionEffect.asymmetric(
         TransitionEffect.opacity(0).combine(TransitionEffect.translate({ y: 24 }))
-          .animation({ duration: 200, curve: Curve.EaseOut }),
-        TransitionEffect.opacity(0).animation({ duration: 150, curve: Curve.EaseIn })))
+          .animation({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseOut }),
+        TransitionEffect.opacity(0).animation({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseIn })))
   }
 }

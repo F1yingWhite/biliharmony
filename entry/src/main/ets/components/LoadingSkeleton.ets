@@ -1,8 +1,10 @@
 import { LayoutTokens } from '../common/LayoutTokens';
+import { MotionTokens } from '../common/MotionTokens';
 
 /** 只在可见的首屏加载期间做轻微呼吸；整组共用动画，不为每一条占位启动计时器。 */
 @Component
 export struct LoadingSkeleton {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) @Watch('onMotionPreferenceChanged') reduceMotion: boolean = false;
   @Prop layout: string = 'list';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @State widthVp: number = 400;
@@ -13,11 +15,17 @@ export struct LoadingSkeleton {
     if (this.visible === visible) return;
     this.visible = visible;
     this.getUIContext().animateTo({ duration: 0 }, () => { this.pulse = 1; });
-    if (visible) {
+    if (visible && !this.reduceMotion) {
       // 三次柔和呼吸后静止，慢请求不让整页持续闪动。
       this.getUIContext().animateTo({ duration: 1000, iterations: 3, playMode: PlayMode.Alternate,
         curve: Curve.EaseInOut }, () => { this.pulse = 0.55; });
     }
+  }
+
+  private onMotionPreferenceChanged(): void {
+    const visible: boolean = this.visible;
+    this.visible = !visible;
+    this.setVisible(visible);
   }
 
   aboutToDisappear(): void {
@@ -32,14 +40,20 @@ export struct LoadingSkeleton {
 
   @Builder
   GridCard() {
-    Column({ space: 10 }) {
-      Row().width('100%').aspectRatio(4 / 3)
+    Column() {
+      Row().width('100%').aspectRatio(16 / 9)
         .backgroundColor(this.isDark ? '#333842' : '#E3E6EC')
-      Column({ space: 8 }) {
-        this.Bar('92%', 13)
-        this.Bar('72%', 13)
-        this.Bar('44%', 10)
-      }.width('100%').alignItems(HorizontalAlign.Start).padding({ left: 12, right: 12, bottom: 26 })
+      Column() {
+        Column({ space: 8 }) {
+          this.Bar('92%', 13)
+          this.Bar('72%', 13)
+        }.width('100%').height(40).alignItems(HorizontalAlign.Start)
+        Row({ space: 5 }) {
+          this.Bar(20, 20)
+          this.Bar('54%', 10)
+        }.width('100%').height(LayoutTokens.cardMetaHeight).margin({ top: 7 })
+      }.width('100%').alignItems(HorizontalAlign.Start)
+        .padding({ left: 10, right: 8, top: 8, bottom: 7 })
     }
     .layoutWeight(1).borderRadius(LayoutTokens.cardRadius).clip(true)
     .backgroundColor(this.isDark ? '#24272E' : '#FFFFFF')
@@ -115,7 +129,8 @@ export struct LoadingSkeleton {
   }
 
   build() {
-    Column({ space: this.layout === 'mediaList' ? 0 : (this.layout === 'grid' || this.layout === 'poster' ? 12 : 8) }) {
+    Column({ space: this.layout === 'mediaList' ? 0 :
+      (this.layout === 'grid' ? LayoutTokens.feedGap : (this.layout === 'poster' ? 12 : 8)) }) {
       if (this.layout === 'mediaList') {
         ForEach([0, 1, 2, 3, 4, 5], (row: number) => {
           this.MediaRow()
@@ -162,7 +177,7 @@ export struct LoadingSkeleton {
         }, (row: number) => String(row))
       } else if (this.layout === 'grid') {
         ForEach([0, 1, 2], (row: number) => {
-          Row({ space: 12 }) {
+          Row({ space: LayoutTokens.feedGap }) {
             ForEach([0, 1, 2, 3, 4].slice(0, LayoutTokens.feedColumns(this.widthVp)), (column: number) => {
               this.GridCard()
             }, (column: number) => String(column))
@@ -178,8 +193,10 @@ export struct LoadingSkeleton {
       }
     }
     .width('100%')
-    .padding({ left: this.layout === 'mediaList' ? 0 : (this.layout === 'poster' ? 12 : (this.widthVp >= 600 ? 24 : 16)),
-      right: this.layout === 'mediaList' ? 0 : (this.widthVp >= 600 ? 24 : 16),
+    .padding({ left: this.layout === 'mediaList' ? 0 : (this.layout === 'grid' ?
+      LayoutTokens.horizontalPadding(this.widthVp) : (this.layout === 'poster' ? 12 : (this.widthVp >= 600 ? 24 : 16))),
+      right: this.layout === 'mediaList' ? 0 : (this.layout === 'grid' ?
+        LayoutTokens.horizontalPadding(this.widthVp) : (this.widthVp >= 600 ? 24 : 16)),
       top: this.layout === 'poster' || this.layout === 'mediaList' ? 0 : 8, bottom: 16 })
     .opacity(this.pulse)
     .clip(true)

@@ -252,7 +252,7 @@ export struct DownloadCenterPage {
               .fontSize(12)
               .fontColor(AppTheme.DANGER)
               .onClick(() => {
-                this.confirm('清理已完成/失败的任务记录？', (): void => {
+                this.confirm('删除已完成、失败或中断的任务及本地下载文件？未导出的文件也会删除，已导出的副本不受影响。', (): void => {
                   DownloadCenter.clearFinished().then(() => this.refreshTasks())
                     .catch(() => this.toast('清理失败'));
                 });

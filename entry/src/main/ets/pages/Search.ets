@@ -33,9 +33,18 @@ import { LayoutTokens } from '../common/LayoutTokens';
 import { inputMethod } from '@kit.IMEKit';
 import { SearchApi } from '../api/SearchApi';
 
+interface SearchTabState {
+  queryKey: string;
+  loaded: boolean;
+  hasMore: boolean;
+  error: string;
+  moreError: string;
+}
+
 @Component
 export struct SearchPage {
   @State keyword: string = '';
+  /** 仅提交搜索时更新；输入框草稿不参与现有结果的分类、排序或分页。 */
   @State resultKeyword: string = '';
   @State hotList: Array<HotSearchItem> = [];
   @State trendingList: Array<HotSearchItem> = [];
@@ -95,6 +104,9 @@ export struct SearchPage {
   // 结果请求防重入；destroyed 阻止销毁后异步回调写 @State
   private searchInflight: boolean = false;
   private searchRequests: RequestEpoch = new RequestEpoch();
+  private searchTabStates: Map<number, SearchTabState> = new Map<number, SearchTabState>();
+  /** Tabs 的双向绑定会先改 searchTab，单独保留已呈现分类用于识别真正的切换。 */
+  private activeSearchTab: number = 0;
   private destroyed: boolean = false;
 
   async aboutToAppear(): Promise<void> {
@@ -157,6 +169,8 @@ export struct SearchPage {
     if (value.length === 0) {
       // 清空输入回到热搜/历史首页面；searching 若不复位，结果 Tabs 会一直霸屏。
       this.searching = false;
+      this.resultKeyword = '';
+      this.searchTabStates.clear();
       this.searchRequests.invalidate();
       this.searchInflight = false;
       this.loading = false;
@@ -196,28 +210,27 @@ export struct SearchPage {
   }
 
   async doSearch(reset: boolean): Promise<void> {
-    const kw: string = this.keyword.trim();
+    const kw: string = this.resultKeyword.trim();
     if (kw.length === 0) {
       return;
     }
     if (this.destroyed || (!reset && (this.searchInflight || this.hasMoreResults === false))) return;
+    const tab: number = this.searchTab;
+    const state: SearchTabState = this.searchState(tab);
+    this.activeSearchTab = tab;
     const request: number = this.searchRequests.next();
-    this.resultKeyword = kw;
     this.searchInflight = true;
-    this.searchError = '';
-    this.moreError = '';
-    if (reset) this.hasMoreResults = true;
+    state.error = '';
+    state.moreError = '';
+    this.applySearchState(state);
     this.showSuggest = false;
     this.searching = true;
     this.loading = reset;
     this.loadingMore = !reset;
     try {
-      if (this.searchTab === 0) {
+      if (tab === 0) {
         // 综合：聚合分区混排；page>1 只返回视频分区，追加进已有视频分区
-        if (reset) {
-          this.allPage = 1;
-        }
-        const page: number = this.allPage;
+        const page: number = reset ? 1 : this.allPage;
         const pubtimeBegin: number = this.filterPubtime > 0 ?
           Math.floor(Date.now() / 1000) - VIDEO_PUBTIME_OPTIONS[this.filterPubtime].value : 0;
         const res: SearchAllResult = await SearchApi.searchAll(kw, page, this.videoOrder,
@@ -243,11 +256,8 @@ export struct SearchPage {
           count + (section.type === SearchTypes.video ? section.videos.length : 0), 0);
         this.hasMoreResults = incomingVideos > 0 && (this.videoTotal <= 0 || loadedVideos < this.videoTotal);
         this.allPage = page + 1;
-      } else if (this.searchTab === 1) {
-        if (reset) {
-          this.videoPage = 1;
-        }
-        const page: number = this.videoPage;
+      } else if (tab === 1) {
+        const page: number = reset ? 1 : this.videoPage;
         // 发布时间筛选：客户端换算为秒级时间戳起点
         let pubtimeBegin: number = 0;
         if (this.filterPubtime > 0) {
@@ -272,17 +282,10 @@ export struct SearchPage {
         this.hasMoreResults = res.videos.length > 0 && this.resultsSource.totalCount() < res.numResults;
         this.videoTotal = res.numResults;
         this.videoPage = page + 1;
-      } else if (this.searchTab === 2 || this.searchTab === 3) {
+      } else if (tab === 2 || tab === 3) {
         // 番剧 / 影视：同一接口不同 search_type
-        const isBangumi: boolean = this.searchTab === 2;
-        if (reset) {
-          if (isBangumi) {
-            this.bangumiPage = 1;
-          } else {
-            this.ftPage = 1;
-          }
-        }
-        const page: number = isBangumi ? this.bangumiPage : this.ftPage;
+        const isBangumi: boolean = tab === 2;
+        const page: number = reset ? 1 : (isBangumi ? this.bangumiPage : this.ftPage);
         const res: PgcSearchResult = await SearchApi.searchMedia(kw,
           isBangumi ? SearchTypes.mediaBangumi : SearchTypes.mediaFt, page);
         if (this.destroyed || !this.searchRequests.isCurrent(request)) {
@@ -301,11 +304,8 @@ export struct SearchPage {
           this.ftTotal = res.numResults;
           this.ftPage = page + 1;
         }
-      } else if (this.searchTab === 4) {
-        if (reset) {
-          this.livePage = 1;
-        }
-        const page: number = this.livePage;
+      } else if (tab === 4) {
+        const page: number = reset ? 1 : this.livePage;
         const res: LiveSearchResult = await SearchApi.searchLiveRooms(kw, page, this.liveOrder);
         if (this.destroyed || !this.searchRequests.isCurrent(request)) {
           return;
@@ -318,11 +318,8 @@ export struct SearchPage {
         this.hasMoreResults = res.rooms.length > 0 && this.liveSource.totalCount() < res.numResults;
         this.liveTotal = res.numResults;
         this.livePage = page + 1;
-      } else if (this.searchTab === 5) {
-        if (reset) {
-          this.articlePage = 1;
-        }
-        const page: number = this.articlePage;
+      } else if (tab === 5) {
+        const page: number = reset ? 1 : this.articlePage;
         const res: ArticleSearchResult = await SearchApi.searchArticles(kw, page);
         if (this.destroyed || !this.searchRequests.isCurrent(request)) {
           return;
@@ -336,10 +333,7 @@ export struct SearchPage {
         this.articleTotal = res.numResults;
         this.articlePage = page + 1;
       } else {
-        if (reset) {
-          this.userPage = 1;
-        }
-        const page: number = this.userPage;
+        const page: number = reset ? 1 : this.userPage;
         const res: UserSearchResult = await SearchApi.searchUsers(kw, page, this.userOrder, this.userType);
         if (this.destroyed || !this.searchRequests.isCurrent(request)) {
           return;
@@ -353,19 +347,50 @@ export struct SearchPage {
         this.userTotal = res.numResults;
         this.userPage = page + 1;
       }
+      state.loaded = true;
+      state.hasMore = this.hasMoreResults;
     } catch (e) {
       if (!this.destroyed && this.searchRequests.isCurrent(request)) {
         const message: string = e instanceof Error ? e.message : '搜索失败，请重试';
-        if (reset) this.searchError = message;
-        else this.moreError = message;
+        if (reset) state.error = message;
+        else state.moreError = message;
       }
     } finally {
       if (!this.destroyed && this.searchRequests.isCurrent(request)) {
+        this.applySearchState(state);
         this.searchInflight = false;
         this.loading = false;
         this.loadingMore = false;
       }
     }
+  }
+
+  /** 综合与视频共用筛选项；缓存必须同时匹配已提交关键词和当前分类的查询选项。 */
+  private searchQueryKey(tab: number): string {
+    let options: string = '';
+    if (tab === 0 || tab === 1) {
+      options = this.videoOrder + ':' + String(this.filterDuration) + ':' + String(this.filterPubtime) + ':' + String(this.filterTids);
+    } else if (tab === 6) {
+      options = this.userOrder + ':' + String(this.userType);
+    } else if (tab === 4) {
+      options = this.liveOrder;
+    }
+    return this.resultKeyword + '\u0000' + options;
+  }
+
+  private searchState(tab: number): SearchTabState {
+    const queryKey: string = this.searchQueryKey(tab);
+    const cached: SearchTabState | undefined = this.searchTabStates.get(tab);
+    if (cached !== undefined && cached.queryKey === queryKey) return cached;
+    const state: SearchTabState = { queryKey: queryKey, loaded: false, hasMore: true, error: '', moreError: '' };
+    this.searchTabStates.set(tab, state);
+    return state;
+  }
+
+  private applySearchState(state: SearchTabState): void {
+    this.hasMoreResults = state.hasMore;
+    this.searchError = state.error;
+    this.moreError = state.moreError;
   }
 
   /** 收集分区数组中视频分区的全部稿件（综合 Tab 视频懒加载数据源的数据来源）。 */
@@ -458,6 +483,9 @@ export struct SearchPage {
       this.keyword = this.suggestedKeyword;
     }
     if (this.keyword.trim().length === 0) return;
+    this.resultKeyword = this.keyword.trim();
+    this.searchTabStates.clear();
+    this.activeSearchTab = 0;
     // 结果页露出前收起输入法，避免键盘遮挡半屏结果列表。
     inputMethod.getController().hideTextInput().catch(() => {
     });
@@ -534,16 +562,16 @@ export struct SearchPage {
 
   onTabChanged(index: number): void {
     this.searchTab = index;
-    // 切到未加载过的 Tab 时拉取首屏
-    const needLoad: boolean =
-      (index === 0 && this.allSections.length === 0) ||
-      (index === 1 && this.resultsSource.isEmpty()) ||
-      (index === 2 && this.bangumiSource.isEmpty()) ||
-      (index === 3 && this.ftSource.isEmpty()) ||
-      (index === 4 && this.liveSource.isEmpty()) ||
-      (index === 5 && this.articleSource.isEmpty()) ||
-      (index === 6 && this.userSource.isEmpty());
-    if (needLoad) {
+    if (this.activeSearchTab === index) return;
+    // 即便目标分类已有缓存，也要失效旧分类请求，防止其迟到结果覆盖当前 loading/错误/到底状态。
+    this.searchRequests.invalidate();
+    this.searchInflight = false;
+    this.loading = false;
+    this.loadingMore = false;
+    this.activeSearchTab = index;
+    const state: SearchTabState = this.searchState(index);
+    this.applySearchState(state);
+    if (!state.loaded && state.error.length === 0) {
       this.doSearch(true).catch(() => {
       });
     }

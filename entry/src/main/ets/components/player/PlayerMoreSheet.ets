@@ -1,3 +1,4 @@
+import { MotionTokens } from '../../common/MotionTokens';
 /**
  * 播放器“⋮”展开页（对齐官方版式）：常用操作栏 + 设置卡（倍速/播放模式/定时关闭/后台听视频/字幕/弹幕设置/镜像翻转/清晰度/播放设置）+ 反馈卡（我不想看/举报）。投屏与播放反馈无可用公开接口，入口已移除。
  */
@@ -5,6 +6,7 @@ import { LocalVideoFilter } from '../../common/LocalVideoFilter';
 
 @Component
 export struct PlayerMoreSheet {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @Prop forceDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
@@ -259,13 +261,13 @@ export struct PlayerMoreSheet {
                   .renderMode(ImageRenderMode.Template)
                   .fillColor(this.subColor())
                   .rotate({ angle: this.timerExpanded ? 90 : 0 })
-                  .animation({ duration: 200, curve: Curve.EaseOut })
+                  .animation({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseOut })
               }
               .width('100%')
               .padding({ left: 16, right: 16, top: 13, bottom: this.timerExpanded ? 4 : 13 })
-              .animation({ duration: 220, curve: Curve.EaseOut })
+              .animation({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseOut })
               .onClick(() => {
-                this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseOut }, () => {
+                this.getUIContext().animateTo({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseOut }, () => {
                   this.timerExpanded = !this.timerExpanded;
                 });
               })
@@ -280,7 +282,7 @@ export struct PlayerMoreSheet {
                 .width('100%')
                 .padding({ left: 16, right: 16, bottom: 13 })
                 .margin({ left: 57 })
-                .transition(TransitionEffect.opacity(0.3).combine(
+                .transition(this.reduceMotion ? MotionTokens.appear(true) : TransitionEffect.opacity(0.3).combine(
                   TransitionEffect.scale({ x: 1, y: 0, centerX: '0%', centerY: '0%' })))
               }
             }

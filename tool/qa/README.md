@@ -14,19 +14,20 @@
 无需设备的服务回归：
 
 ```bash
-/Applications/DevEco-Studio.app/Contents/tools/node/bin/node --test --test-timeout=10000 tool/qa/regression.test.cjs tool/qa/lifecycle.test.cjs tool/qa/danmaku.test.cjs tool/qa/parity.test.cjs
+/Applications/DevEco-Studio.app/Contents/tools/node/bin/node --test --test-timeout=20000 tool/qa/*.test.cjs
 ```
 
 Windows（DevEco 装在 `D:\DevEco Studio`）等价命令，`ARKTS_TEST_TYPESCRIPT` 指向 DevEco 自带 TypeScript：
 
 ```powershell
 $env:ARKTS_TEST_TYPESCRIPT = 'D:\DevEco Studio\tools\hvigor\hvigor\node_modules\typescript'
-& 'D:\DevEco Studio\tools\node\node.exe' --test --test-timeout=20000 `
-  tool/qa/regression.test.cjs tool/qa/lifecycle.test.cjs tool/qa/danmaku.test.cjs tool/qa/parity.test.cjs
+& 'D:\DevEco Studio\tools\node\node.exe' --test --test-timeout=20000 tool/qa/*.test.cjs
 ```
 
-预期 **128 项全部通过**。这两组命令在 Windows 的受限沙箱下会因 `spawn EPERM` 失败
-（Node `--test` 需要管道捕获子进程输出），需在允许管道/完整访问的终端里运行。
+使用 DevEco 自带 Node 24 或支持测试文件通配符的新版 Node，预期全部通过。
+通配符同时纳入分享、持久化竞争、分类、收藏排序及减少动效专项，避免显式旧清单漏跑新增回归。
+部分 Windows 受限环境可能出现 `spawn EPERM`（Node `--test` 需要创建子进程和管道）；
+此时应在允许相关进程权限的终端里运行，不能将装载失败视为业务缺陷证据。
 
 > **锚点维护**：`methodHarness` 按源码文本切片抽取生产方法，锚点集中在
 > `lifecycle.test.cjs` 的 `ANCHOR` 常量里。改动被切片的方法签名或紧邻注释后，

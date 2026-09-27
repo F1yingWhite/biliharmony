@@ -4,6 +4,7 @@ import { MotionTokens } from '../common/MotionTokens';
 /** 通用加载、空态和错误状态；已知内容结构的页面传入 skeleton。 */
 @Component
 export struct LoadingView {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @Prop loading: boolean = true;
   @Prop empty: boolean = false;
   @Prop emptyText: string = '暂无内容';
@@ -42,9 +43,9 @@ export struct LoadingView {
           }
         }
         .width('100%').padding({ left: 28, right: 28, top: 40, bottom: 32 })
-        .transition(MotionTokens.appear())
+        .transition(MotionTokens.appear(this.reduceMotion))
       }
     }.width('100%')
-    .transition(MotionTokens.appear())
+    .transition(MotionTokens.appear(this.reduceMotion))
   }
 }

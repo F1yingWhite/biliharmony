@@ -37,6 +37,11 @@ export abstract class PreferencesCollection<T> {
   private store: preferences.Preferences | null = null;
   private ready: Promise<void> | null = null;
   private flushTimer: number = -1;
+  private restored: boolean = false;
+  private pendingWrite: boolean = false;
+  /** 恢复前的删除意图也适用于尚未读到的磁盘条目。 */
+  private pendingDeletedKeys: Set<string> = new Set<string>();
+  private discardPendingRestore: boolean = false;
 
   protected constructor(spec: PreferencesListSpec, decoder: PreferencesDecoder<T>) {
     this.prefName = spec.prefName;
@@ -63,8 +68,13 @@ export abstract class PreferencesCollection<T> {
 
   /** 由 EntryAbility 在 onCreate 调用：启动异步恢复，写入方靠 ready 门闩等它完成。 */
   init(context: common.UIAbilityContext): void {
+    if (this.ready !== null) return;
     this.onInit();
-    this.ready = this.restore(context);
+    this.ready = this.restore(context).then(() => {
+      // then 总在 ready 赋值之后运行：getPreferences 同步抛错也不会把复位覆盖掉。
+      // 成功保持幂等，临时打开/读取失败则允许调用方再次 init。
+      if (!this.restored) this.ready = null;
+    });
   }
 
   async ensureLoaded(): Promise<Array<T>> {
@@ -81,7 +91,20 @@ export abstract class PreferencesCollection<T> {
     this.cache = items.slice(0, this.maxItems);
     const raw: string = JSON.stringify(this.cache);
     this.onChanged(raw);
-    this.persist(raw);
+    this.pendingWrite = true;
+    this.persist();
+  }
+
+  /** 显式删除必须记住 key：条目可能仍在恢复中的磁盘副本里。 */
+  protected removeKey(key: string): void {
+    if (!this.restored) this.pendingDeletedKeys.add(key);
+    this.replace(this.cache.filter((item: T): boolean => this.keyOf(item) !== key));
+  }
+
+  /** 清空后只保留后续新写入，不能再用启动时的旧副本补回。 */
+  protected clearItems(): void {
+    if (!this.restored) this.discardPendingRestore = true;
+    this.replace([]);
   }
 
   /** 立即写穿（不走防抖）：仅用于恢复时把旧副本迁移成权威副本这类一次性写入。 */
@@ -110,7 +133,8 @@ export abstract class PreferencesCollection<T> {
     }
     for (const item of disk) {
       const key: string = this.keyOf(item);
-      if (key.length === 0 || seen.has(key)) continue;
+      if (this.discardPendingRestore || this.pendingDeletedKeys.has(key) ||
+        key.length === 0 || seen.has(key)) continue;
       seen.add(key);
       merged.push(item);
     }
@@ -151,18 +175,27 @@ export abstract class PreferencesCollection<T> {
       // 磁盘只补缺失项，避免刚记下的内容被旧数据顶掉。
       this.cache = this.merge(this.cache, this.parseList(diskRaw));
       this.onRestored(diskRaw);
+      this.restored = true;
+      this.pendingDeletedKeys.clear();
+      this.discardPendingRestore = false;
+      // init 之前发生的写入没有 ready 可等，在恢复完成后补写合并结果。
+      if (this.pendingWrite) this.persist();
     } catch (e) {
+      this.store = null;
       // Preferences 不可用时继续使用内存缓存：列表功能降级，不影响其它功能。
+      // 保留待写入与删除/清空意图，下一次 init 成功后再合并和持久化。
     }
   }
 
   /** putSync 即时更新内存副本，flush 尾部防抖合并磁盘写；未就绪时等 ready 门闩再写。 */
-  private async persist(raw: string): Promise<void> {
+  private async persist(): Promise<void> {
     if (this.ready !== null) await this.ready;
     const store: preferences.Preferences | null = this.store;
     if (store === null) return;
     try {
-      store.putSync(this.storageKey, raw);
+      // 必须在 ready 后取快照；恢复前捕获 raw 会把刚合并回来的旧条目覆盖掉。
+      store.putSync(this.storageKey, JSON.stringify(this.cache));
+      this.pendingWrite = false;
     } catch (e) {
       return;
     }
