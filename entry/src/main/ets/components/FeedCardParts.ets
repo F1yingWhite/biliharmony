@@ -4,7 +4,7 @@ import { KeywordSpans } from './KeywordSpans';
  * 封面图、底部渐变遮罩、标题文本。参数按引用（$$）传递，
  * 保证卡片 @Reusable 复用时新数据能驱动这些公共块刷新。
  */
-import { biliImageThumbnail } from '../common/ImageUrl';
+import { biliImageThumbnail, FEED_COVER_WIDTH } from '../common/ImageUrl';
 
 export interface FeedCoverParam {
   cover: string;
@@ -25,9 +25,9 @@ export interface FeedTitleParam {
 /** 4:3 封面，下载解码期间保留与真实封面同尺寸的主题底色。 */
 @Builder
 export function FeedCoverImage($$: FeedCoverParam) {
-  // 缩略图 URL（按双列卡宽 900w 出图）：信息流大批量卡片只拉几 KB~几十 KB 的 webp，
+  // 缩略图 URL（双列列表使用统一的 720w 规格）：信息流大批量卡片只拉几 KB~几十 KB 的 webp，
   // 相比原图（可能 1920px+ 的 jpg/png）显著省内存与 IO；@Reusable 复用时换 URL 依旧异步加载。
-  Image($$.cover.length > 0 ? biliImageThumbnail($$.cover, 900) : $$.cover)
+  Image($$.cover.length > 0 ? biliImageThumbnail($$.cover, FEED_COVER_WIDTH) : $$.cover)
     .width('100%')
     // 对齐原生 B 站首页双列卡片的封面比例（16:9 太扁）。
     .aspectRatio(4 / 3)
@@ -55,7 +55,7 @@ export function FeedGradientMask($$: FeedMaskParam) {
 /** 卡片标题（14 号中粗，两行截断） */
 @Builder
 export function FeedCardTitle($$: FeedTitleParam) {
-  Text() { KeywordSpans($$.title, $$.highlightKeyword ?? '', $$.isDark) }
+  Text() { KeywordSpans({ text: $$.title, keyword: $$.highlightKeyword ?? '', isDark: $$.isDark }) }
     .width('100%')
     .fontSize(14)
     .lineHeight(19)

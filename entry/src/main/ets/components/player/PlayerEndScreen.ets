@@ -1,5 +1,6 @@
 import { formatCount, formatDuration } from '../../common/Utils';
 import { VideoItem } from '../../model/Models';
+import { biliImageThumbnail } from '../../common/ImageUrl';
 
 @Component
 export struct PlayerEndScreen {
@@ -45,7 +46,7 @@ export struct PlayerEndScreen {
   private RecommendationCard(item: VideoItem) {
     Column({ space: 7 }) {
       Stack({ alignContent: Alignment.BottomStart }) {
-        Image(item.cover).width('100%').height('100%').objectFit(ImageFit.Cover)
+        Image(biliImageThumbnail(item.cover, 600)).width('100%').height('100%').objectFit(ImageFit.Cover)
         Column().width('100%').height(20)
           .linearGradient({ angle: 90, colors: [['#00000000', 0.0], ['#CC000000', 1.0]] })
         Row({ space: 8 }) {
@@ -85,7 +86,7 @@ export struct PlayerEndScreen {
       Text('推荐视频').fontSize(13).fontColor('#8E9399').width('100%').margin({ bottom: 8 })
       Row({ space: 10 }) {
         Stack({ alignContent: Alignment.BottomEnd }) {
-          Image(this.cover).width(96).height(54).objectFit(ImageFit.Cover)
+          Image(biliImageThumbnail(this.cover, 320)).width(96).height(54).objectFit(ImageFit.Cover)
           Stack({ alignContent: Alignment.Center }) {
             Image($r('app.media.ic_play')).width(22).height(22)
               .renderMode(ImageRenderMode.Template).fillColor('#E6FFFFFF')
@@ -160,7 +161,7 @@ export struct PlayerEndScreen {
           this.ActionCell($r('app.media.ic_refresh'), '重播', '#DDE0E4', this.onReplay)
           this.ActionCell(this.liked ? $r('app.media.ic_like_fill') : $r('app.media.ic_like'), '点赞',
             this.liked ? this.accent : '#DDE0E4', this.onLike)
-          this.ActionCell($r('app.media.bilix_icon_dislike'), '不喜欢',
+          this.ActionCell($r('app.media.ic_dislike'), '不喜欢',
             this.disliked ? this.accent : '#DDE0E4', this.onDislike)
           this.ActionCell($r('app.media.ic_coin'), '投币', this.coined ? this.accent : '#DDE0E4', this.onCoin)
           this.ActionCell(this.favorited ? $r('app.media.ic_favorite_fill') : $r('app.media.ic_favorite'), '收藏',

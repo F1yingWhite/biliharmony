@@ -31,6 +31,8 @@ export class ReplyItem {
   disliked: boolean = false;
   /** UP 主赞过这条评论（up_action.like）；分享图展示"UP主觉得很赞"。 */
   upLiked: boolean = false;
+  /** UP 主置顶标记（reply_control.is_up_top）。 */
+  isUpTop: boolean = false;
   ctime: number = 0;
   count: number = 0;
   level: number = 0;
@@ -67,6 +69,7 @@ export class ReplyItem {
     r.liked = this.liked;
     r.disliked = this.disliked;
     r.upLiked = this.upLiked;
+    r.isUpTop = this.isUpTop;
     r.ctime = this.ctime;
     r.count = this.count;
     r.level = this.level;
@@ -117,6 +120,7 @@ export class ReplyItem {
     r.level = asNumber(levelInfo['current_level'], 0);
     const replyControl: Record<string, Object> = asObject(j['reply_control']);
     r.location = str(replyControl, 'location', '');
+    r.isUpTop = asBool(replyControl['is_up_top'], false);
     const pendant: Record<string, Object> = asObject(member['pendant']);
     const sailingForPendant: Record<string, Object> = asObject(member['user_sailing']);
     const sailingPendant: Record<string, Object> = asObject(sailingForPendant['pendant']);

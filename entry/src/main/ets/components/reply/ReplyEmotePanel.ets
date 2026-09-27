@@ -62,14 +62,16 @@ export struct ReplyEmotePanel {
 
   /** 预取当前正在看的那个表情包的图片（其余包等被切到再下载）。 */
   private primeCurrentPackage(): void {
+    // 分类栏也使用同一份磁盘缓存，不能把未选中包的图标直接交给网络 Image。
+    for (let i: number = 0; i < this.packages.length; i++) {
+      this.primeOne(this.packages[i].icon);
+    }
     const index: number = this.currentIndex;
     if (index < 0 || index >= this.packages.length) return;
     const pkg: BiliEmotePackage = this.packages[index];
-    if (pkg.icon.length > 0) this.primeOne(pkg.icon);
     for (let j: number = 0; j < pkg.emotes.length; j++) {
       const emote: BiliEmote = pkg.emotes[j];
-      if (emote.url.length > 0) this.primeOne(emote.url);
-      if (emote.gifUrl.length > 0) this.primeOne(emote.gifUrl);
+      this.primeOne(emote.gifUrl.length > 0 ? emote.gifUrl : emote.url);
     }
   }
 
@@ -95,7 +97,10 @@ export struct ReplyEmotePanel {
   private imageSrc(url: string): string {
     if (url.length === 0) return '';
     const local: string | undefined = this.emoteLocal.get(url);
-    return local !== undefined && local.length > 0 ? local : url;
+    if (local !== undefined && local.length > 0) return local;
+    const cached: string = EmoteImageCache.localPathOf(url);
+    // 下载完成前保持占位，避免 Image 与缓存下载器对同一网址各请求一次。
+    return cached !== url ? cached : '';
   }
 
   private contentHeight(): number {

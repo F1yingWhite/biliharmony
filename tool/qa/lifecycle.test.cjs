@@ -42,16 +42,16 @@ const ANCHOR = {
   dynLoadFeedStart: '  async loadFeed(reset: boolean): Promise<void> {',
   /** 关注 UP 横滑栏拉取，紧跟在 loadFeed 之后的成员。 */
   dynLoadFeedEnd: '  /** 并行拉取',
-  /** VideoDetail：视频页评论换根。签名无 private，end 是 mutateReplyItem 的文档注释。 */
-  videoLoadRepliesStart: '  async loadReplies(reset: boolean): Promise<void> {',
-  /** VideoDetail：紧随 loadReplies 的合并去重成员，用于只切评论加载逻辑本身。 */
-  videoLoadRepliesEnd: '  mergeUniqueReplies',
-  /** BangumiDetail / DynamicDetail：PGC 与动态详情评论换根，均为 private。 */
-  privateLoadRepliesStart: '  private async loadReplies(reset: boolean): Promise<void> {',
-  /** 三个页面共用的 mutateReplyItem 文档注释首行。 */
-  replyMutationComment: '  /**\n   * 评论项状态修改统一入口：',
-  /** DynamicDetail：紧随 loadReplies 之后的排序切换成员。 */
-  changeReplySortStart: '  private changeReplySort(mode: number): void {',
+  // 三页评论编排已收敛到 components/reply/RepliesController（原 VideoDetail/DynamicDetail/
+  // BangumiDetail 内联的 loadReplies/changeReplySort/loadThreadReplies/mutateReplyItem）。
+  /** 主评论分页加载，紧随其后的排序切换成员。 */
+  repliesLoadStart: '  async load(reset: boolean): Promise<void> {',
+  repliesChangeSortStart: '  changeReplySort(mode: number): void {',
+  /** 楼中楼分页加载，紧随其后的 mutate 成员。 */
+  repliesLoadThreadStart: '  async loadThread(reset: boolean, allowPrefetch: boolean = true): Promise<void> {',
+  repliesMutateStart: '  mutate(rpid: number, mutate: (target: ReplyItem) => void): ReplyItem | null {',
+  /** stampServerRevs 定义在 mutate 之后；加载切片要用到它，end 锚点取 share 签名。 */
+  repliesShareStart: '  share(item: ReplyItem): void {',
 };
 
 function deferred() {
@@ -74,12 +74,20 @@ function environment(mocks = {}) {
         return load(path.relative(root, path.resolve(path.dirname(filename), name)).replaceAll('\\', '/'));
       }
       if (name in mocks) return mocks[name];
+      // LiveDanmakuClient 等模块引用 hilog：Node 沙箱以静默实现兜底。
+      if (name === '@kit.CryptoArchitectureKit') return { cryptoFramework: {} };
+      if (name === '@kit.ArkWeb') return { webview: {} };
+      if (name === '@kit.PerformanceAnalysisKit') {
+        const noop = () => {};
+        return { hilog: { debug: noop, info: noop, warn: noop, error: noop } };
+      }
       throw new Error('Missing platform mock: ' + name);
     };
-    new Function('require', 'module', 'exports', 'AppStorage', 'PersistentStorage', code)(
+    new Function('require', 'module', 'exports', 'AppStorage', 'PersistentStorage', 'Builder', code)(
       localRequire, module, module.exports,
       { get: key => storage.get(key), setOrCreate: (key, value) => storage.set(key, value) },
-      { persistProp() {} }
+      { persistProp() {} },
+      (target) => target
     );
     return module.exports;
   }
@@ -112,14 +120,92 @@ function source(env, items = []) {
   s.reset(items); return s;
 }
 
+// ---------------------------------------------------------------------------
+// RepliesController 的页面 access 装配（与各页面的注入闭包逐项对应）。
+// state 模拟留在页面的 @State 字段（断言从 state 读取，等价于改造前直接读页面字段）；
+// p 承接控制器的游标/代际等内部量与 replySource 等页面数据源。
+// ---------------------------------------------------------------------------
+
+/** DynamicDetail / BangumiDetail 共用的楼中楼合并口径：reset 整表替换 + concat 追加。 */
+function replaceOrConcatMerge(current, incoming, reset) {
+  return reset ? (incoming.length > 0 ? incoming : current) : current.concat(incoming);
+}
+
+/** 构造指定页面等价的 RepliesAccess；page ∈ 'VideoDetail' | 'DynamicDetail' | 'BangumiDetail'。 */
+function repliesAccess(page, state, p) {
+  const video = page === 'VideoDetail';
+  return {
+    isDestroyed: () => state.destroyed,
+    toast: () => {},
+    getUIContext: () => ({}),
+    resolveOid: () => (video ? state.aid : page === 'BangumiDetail' ? state.oid : state.commentId),
+    resolveType: () => (page === 'DynamicDetail' ? state.commentType : 1),
+    canLoadReplies: () => page !== 'DynamicDetail' || (state.commentId > 0 && state.commentType > 0),
+    getMainSource: () => p.replySource,
+    getSortMode: () => state.replySortMode,
+    setSortMode: value => { state.replySortMode = value; },
+    // 视频页的 loading/hasMore 字段叫 replyLoading/replyHasMore，动态/番剧叫 repliesLoading/repliesHasMore。
+    getRepliesLoading: () => (video ? state.replyLoading : state.repliesLoading),
+    setRepliesLoading: value => { if (video) state.replyLoading = value; else state.repliesLoading = value; },
+    getRepliesHasMore: () => (video ? state.replyHasMore : state.repliesHasMore),
+    setRepliesHasMore: value => { if (video) state.replyHasMore = value; else state.repliesHasMore = value; },
+    // 视频页的响应式计数叫 replyItemCount，动态/番剧叫 repliesCount。
+    getRepliesCount: () => (video ? state.replyItemCount : state.repliesCount),
+    setRepliesCount: value => { if (video) state.replyItemCount = value; else state.repliesCount = value; },
+    clearRepliesError: reset => {
+      if (video) { state.replyLoadError = ''; return; }
+      state.repliesMoreFailed = false;
+      if (reset) state.repliesFailed = false;
+    },
+    showRepliesError: () => {
+      if (video) { state.replyLoadError = '评论加载失败，请检查网络后重试'; return; }
+      if (state.repliesCount === 0) state.repliesFailed = true;
+      else state.repliesMoreFailed = true;
+    },
+    applyRepliesReset: items => {
+      if (video) { p.replySource.reset(p.mergeUniqueReplies(p.localSentReplies, p.sanitizeReplies(items))); return; }
+      p.replySource.reset(items);
+    },
+    applyRepliesAppend: items => {
+      if (video) { p.appendUniqueReplies(p.replySource, items); return; }
+      p.replySource.append(items);
+    },
+    getThreadRoot: () => state.threadRoot,
+    setThreadRoot: root => { state.threadRoot = root; },
+    getThreadReplies: () => state.threadReplies,
+    setThreadReplies: list => { state.threadReplies = list; },
+    getThreadLoading: () => state.threadLoading,
+    setThreadLoading: value => { state.threadLoading = value; },
+    getThreadHasMore: () => state.threadHasMore,
+    setThreadHasMore: value => { state.threadHasMore = value; },
+    // 动态/番剧在守卫里校验面板仍打开；视频页校验根节点与 aid 均未变。
+    isThreadStale: (root, oid) => video
+      ? state.threadRoot.rpid !== root || state.aid !== oid
+      : !state.threadOpen || state.threadRoot.rpid !== root,
+    // 视频页按 rpid 合并保留预览楼层；动态/番剧 reset 整表替换 + concat 追加。
+    mergeThreadReplies: (current, incoming, reset) => video
+      ? p.mergeUniqueReplies(current, incoming)
+      : replaceOrConcatMerge(current, incoming, reset),
+    onThreadError: () => {},
+    bumpVersion: () => { state.version = (state.version || 0) + 1; },
+    getVersion: () => state.version || 0,
+    buildShareLink: () => '',
+    renderShareCard: () => {},
+    ensureShareContext: () => true,
+    onShareFailed: () => {},
+  };
+}
+
 test('recommendation reset supersedes old pagination and preserves new loading state', async () => {
   const old = deferred(), latest = deferred(); let calls = 0;
   const env = environment({'api/FeedApi': {FeedApi: {getRecommend: () => ++calls === 1 ? old.promise : latest.promise}}});
   const Harness = env.methodHarness('views/HomeView', '  async loadRecommend(', '  async loadHot(',
     "import { FeedApi } from '../api/FeedApi';");
   const p = new Harness();
-  Object.assign(p, {recEpoch:epoch(env), recFetching:false, recHasMore:true, recIdx:10,
-    recSource:source(env, [{aid:1}]), recCount:1});
+  Object.assign(p, {recEpoch:epoch(env), recFetching:false, recHasMore:true,
+    recSource:source(env, [{aid:1}]), recCount:1,
+    // 曝光窗口为独立行为，本用例注入恒等桩，聚焦 reset/epoch 语义。
+    filterSeen: l => l, rememberSeen: () => {}, dedupVideos: (_source, list) => list});
   const first = p.loadRecommend(false), reset = p.loadRecommend(true);
   old.resolve([]); await first;
   assert.equal(calls, 2); assert.equal(p.recFetching, true); assert.equal(p.recHasMore, true);
@@ -139,8 +225,8 @@ function qrHarness(api) {
 
 test('old QR expiry cannot stop a refreshed QR or clear its inflight guard', async () => {
   const old = deferred(), latest = deferred(); let calls = 0;
-  const p = qrHarness({getTVCode:async()=>({authCode:'NEW',url:'new-qr'}),
-    pollTVCode:()=>++calls === 1 ? old.promise : latest.promise});
+  const p = qrHarness({getWebQRCode:async()=>({qrcodeKey:'NEW',url:'new-qr'}),
+    pollWebQRCode:()=>++calls === 1 ? old.promise : latest.promise});
   try {
     const first = p.poll(); await p.requestCode(); const second = p.poll();
     old.resolve({code:86038}); await first;
@@ -152,19 +238,19 @@ test('old QR expiry cannot stop a refreshed QR or clear its inflight guard', asy
 
 test('out-of-order QR creation cannot replace the newer code', async () => {
   const old = deferred(), latest = deferred(); let calls=0;
-  const p=qrHarness({getTVCode:()=>++calls===1?old.promise:latest.promise});
+  const p=qrHarness({getWebQRCode:()=>++calls===1?old.promise:latest.promise});
   try {
     const a=p.requestCode(), b=p.requestCode();
-    latest.resolve({authCode:'NEW',url:'new'}); await b;
-    old.resolve({authCode:'OLD',url:'old'}); await a;
+    latest.resolve({qrcodeKey:'NEW',url:'new'}); await b;
+    old.resolve({qrcodeKey:'OLD',url:'old'}); await a;
     assert.equal(p.authCode,'NEW'); assert.equal(p.qrUrl,'new');
   } finally {p.stopPoll();}
 });
 
 test('stopping QR polling ignores a late login success', async () => {
-  const pending=deferred(); const p=qrHarness({pollTVCode:()=>pending.promise});
+  const pending=deferred(); const p=qrHarness({pollWebQRCode:()=>pending.promise});
   const running=p.poll(); p.stopPoll(); p.tab=1;
-  pending.resolve({code:0,cookies:[],accessToken:''}); await running;
+  pending.resolve({code:0,refreshToken:'r'}); await running;
   assert.equal(p.loggedIn,false);
 });
 
@@ -312,7 +398,8 @@ test('dynamic category change supersedes an inflight feed', async () => {
     "import { DynamicApi } from '../api/DynamicApi';");
   const p=new Change();p.loadFeed=Load.prototype.loadFeed;
   Object.assign(p,{feedEpoch:epoch(env),dynType:'all',feedLoading:false,dynTab:0,hostMid:0,
-    dynHasMore:true,dynOffset:'',dynSource:source(env),dynCount:0});
+    dynHasMore:true,dynOffset:'',dynSource:source(env),dynCount:0,
+    typeItems:new Map(),typeOffset:new Map(),typeHasMore:new Map()});
   const first=p.loadFeed(false);p.dynTab=1;p.changeDynType('video');
   old.resolve({items:[{dynId:'old'}],offset:'old',hasMore:false});await first;
   assert.equal(p.dynType,'video');assert.equal(p.feedLoading,true);assert.deepEqual(calls,['all','video']);
@@ -338,24 +425,84 @@ for (const page of ['VideoDetail','DynamicDetail','BangumiDetail']) {
     const old=deferred(),latest=deferred();const calls=[];
     const env=environment({'api/CommentApi':{CommentApi:{getReplyReplies:(oid,type,root)=>{
       calls.push(root);return root===100?old.promise:latest.promise;
-    }}}});
-    const video=page==='VideoDetail';
-    const Harness=env.methodHarness('pages/'+page,
-      video?'  async loadThreadReplies(':'  private async loadThreadReplies(',
-      video?'  @Builder\n  VideoThreadEmotePanel()':'  private sentThreadReply(',
-      "import { CommentApi } from '../api/CommentApi'; const CommentLog={warn(){},info(){},error(){},elapsed(){return 0;}};");
-    const p=new Harness();Object.assign(p,{threadEpoch:epoch(env),threadLoading:false,threadHasMore:true,
-      threadCursor:'',threadAllReplies:[],threadReplies:[],threadPrefetchCount:0,threadOpen:true,
-      replyThreadRoot:{rpid:100,count:2},threadRoot:{rpid:100,count:2},detail:{aid:1},
-      item:{commentId:1,commentType:17},replyOid:()=>1,destroyed:false,mergeUniqueReplies:(a,b)=>a.concat(b)});
-    const first=p.loadThreadReplies(true,false);
-    p.replyThreadRoot={rpid:200,count:2};p.threadRoot={rpid:200,count:2};
-    const second=p.loadThreadReplies(true,false);
+    }}},'@kit.PerformanceAnalysisKit':{hilog:{}},'BuildProfile':{DEBUG:false}});
+    const Harness=env.methodHarness('components/reply/RepliesController',
+      ANCHOR.repliesLoadThreadStart, ANCHOR.repliesShareStart,
+      "import { CommentApi } from '../../api/CommentApi';\nimport { mutateReplyInArray, mutatedReplyClone } from '../../common/ReplyMutation';");
+    const p=new Harness();
+    p.deliveredRevCeiling=0;
+    p.replySource=source(env,[]);
+    const state={destroyed:false,threadLoading:false,threadHasMore:true,threadOpen:true,
+      threadRoot:{rpid:100,count:2},threadReplies:[],aid:1,oid:1,commentId:1,commentType:17};
+    p.threadEpoch=epoch(env);
+    p.threadCursor=''; // 控制器内部量由构造函数初始化；切片装配时手动补齐
+    if (page==='VideoDetail') p.mergeUniqueReplies=(a,b)=>a.concat(b);
+    p.access=repliesAccess(page,state,p);
+    const first=p.loadThread(true,false);
+    state.threadRoot={rpid:200,count:2};
+    const second=p.loadThread(true,false);
     old.resolve({replies:[{rpid:101,rootRpid:100}],cursor:'old',hasMore:false});await first;
-    assert.equal(p.threadLoading,true);assert.equal(p.threadCursor,'');assert.deepEqual(calls,[100,200]);
+    assert.equal(state.threadLoading,true);assert.equal(p.threadCursor,'');assert.deepEqual(calls,[100,200]);
     latest.resolve({replies:[{rpid:201,rootRpid:200}],cursor:'new',hasMore:true});await second;
-    assert.deepEqual((video?p.threadAllReplies:p.threadReplies).map(r=>r.rootRpid),[200]);
-    assert.equal(p.threadCursor,'new');assert.equal(p.threadLoading,false);
+    assert.deepEqual(state.threadReplies.map(r=>r.rootRpid),[200]);
+    assert.equal(p.threadCursor,'new');assert.equal(state.threadLoading,false);
+  });
+}
+
+for (const page of ['VideoDetail','DynamicDetail','BangumiDetail']) {
+  test(`${page} fresh server replies outrank local rev so like mirrors resync (desync regression)`, async () => {
+    // 用户报告：本地点赞后重进页面，点赞态错乱/丢失。根因：服务端解析条目 rev 恒为 0，
+    // ReplyCard 的镜像守卫（只接受 rev 严格更大的更新）会拒绝同会话内的所有服务端真值刷新。
+    // 修复后加载交付必须携带单调递增 rev：高于此前交付值与数据源现存值。
+    let serverReplies = [];
+    const env = environment({'api/CommentApi': {CommentApi: {
+      getReplies: async () => ({replies: serverReplies, cursor: '', hasMore: false}),
+      getReplyReplies: async () => ({replies: [], cursor: '', hasMore: false})}},
+      '@kit.PerformanceAnalysisKit':{hilog:{}},'BuildProfile':{DEBUG:false}});
+    const Models = env.load('model/Models');
+    // 服务端解析产物是 ReplyItem 实例（mutate 依赖其 clone 方法），不能用普通对象。
+    const makeReply = (rpid, liked, like) => {
+      const it = new Models.ReplyItem();
+      it.rpid = rpid; it.liked = liked; it.like = like; it.rev = 0;
+      return it;
+    };
+    const Harness = env.methodHarness('components/reply/RepliesController',
+      ANCHOR.repliesLoadStart, ANCHOR.repliesShareStart,
+      "import { CommentApi } from '../../api/CommentApi';\nimport { mutateReplyInArray, mutatedReplyClone } from '../../common/ReplyMutation';");
+    const p = new Harness();
+    p.deliveredRevCeiling = 0;
+    p.replyCursor = '';
+    p.repliesRetryReset = false;
+    p.repliesEpoch = epoch(env);
+    const state = {destroyed: false, aid: 42, oid: 42, commentId: 42, commentType: 17,
+      replyLoading: false, replyHasMore: true, replyItemCount: 0, replySortMode: 0, replyLoadError: '',
+      threadRoot: {rpid: 0, rev: 0}, threadReplies: []};
+    p.access = repliesAccess(page, state, p);
+    p.replySource = source(env, []);
+    p.mergeUniqueReplies = (a, b) => a.concat(b);
+    p.sanitizeReplies = items => items;
+    p.localSentReplies = [];
+    p.appendUniqueReplies = (src, items) => { for (const it of items) src.append(it); };
+    // 首屏：服务端说未点赞。
+    serverReplies = [makeReply(11, false, 5)];
+    await p.load(true);
+    let row = p.replySource.getAll()[0];
+    const revAfterLoad = row.rev;
+    assert.ok(revAfterLoad > 0, 'server items must be stamped above raw parse rev 0');
+    // 本地点赞：数据源克隆 rev+1（等价于卡片镜像推进到同一值）。
+    p.mutate(11, target => { target.liked = true; target.like = 6; });
+    row = p.replySource.getAll()[0];
+    assert.equal(row.liked, true);
+    const revAfterTap = row.rev;
+    assert.equal(revAfterTap, revAfterLoad + 1);
+    // 同会话重载：服务端真值（已点赞）以更高 rev 交付，必须能通过镜像守卫刷新卡片。
+    serverReplies = [makeReply(11, true, 6)];
+    await p.load(true);
+    row = p.replySource.getAll()[0];
+    assert.equal(row.liked, true, 'server truth must survive the reload');
+    assert.ok(row.rev > revAfterTap, 'fresh server truth must outrank the card mirror rev');
+    // 旧代快照（重载前的旧对象，rev 更低）依然必须被守卫拒绝。
+    assert.ok(revAfterTap > revAfterLoad);
   });
 }
 
@@ -365,7 +512,7 @@ test('recommendation empty batches remain retryable and duplicate batches do not
   let calls = 0;
   const env = environment({'api/FeedApi': {FeedApi: {getRecommend: async () => { calls++; return batches.shift(); }}}});
   const Harness = env.methodHarness('views/HomeView', '  private dedupVideos(', '  async loadHot(',
-    "import { FeedApi } from '../api/FeedApi';");
+    "import { FeedApi } from '../api/FeedApi'; const LocalVideoFilter={filterVideos:(l)=>l};");
   const p = new Harness();
   Object.assign(p, {recEpoch: epoch(env), recFetching: false, recHasMore: true, recIdx: 0,
     recError: '', recSource: source(env, [{aid: 1, bvid: 'BV1'}]), recCount: 1});
@@ -455,16 +602,20 @@ for (const [file, method] of [['RelationList', 'getRelationUsers'], ['BlackListP
     const Harness = env.methodHarness('pages/' + file, '  private async load(', '  private openUser(',
       "import { UserApi } from '../api/UserApi';");
     const view = new Harness();
-    Object.assign(view, { param: { mid: 1, mode: 'following' }, users: [{ mid: 1 }], total: 4,
+    // 关注/粉丝与黑名单已改造为 BasicDataSource 增量 append，这里注入真实数据源并按行数断言。
+    Object.assign(view, { param: { mid: 1, mode: 'following' }, usersSource: source(env, [{ mid: 1 }]),
+      userCount: 1, total: 4,
       page: 2, loading: false, failed: false, destroyed: false, hasMore: true, requestEpoch: epoch(env) });
     await view.load(false);
-    assert.equal(view.failed, true); assert.equal(view.page, 2); assert.equal(view.users.length, 1);
+    assert.equal(view.failed, true); assert.equal(view.page, 2);
+    assert.equal(view.usersSource.totalCount(), 1); assert.equal(view.userCount, 1);
     await view.load(false);
-    assert.deepEqual(pages, [2, 2]); assert.equal(view.failed, false); assert.equal(view.users.length, 2);
+    assert.deepEqual(pages, [2, 2]); assert.equal(view.failed, false);
+    assert.equal(view.usersSource.totalCount(), 2); assert.equal(view.userCount, 2);
     const old = view.load(false);
     view.requestEpoch.invalidate(); view.destroyed = true;
     pending.resolve({ users: [{ mid: 3 }], total: 4 }); await old;
-    assert.equal(view.users.length, 2);
+    assert.equal(view.usersSource.totalCount(), 2); assert.equal(view.userCount, 2);
   });
 }
 
@@ -569,28 +720,33 @@ test('dynamic detail: failed continuation preserves comments and retries the sam
     if (calls.length === 1) throw new Error('offline');
     return {replies: [{rpid: 2}], cursor: '3', hasMore: false};
   }}}});
-  const Harness = env.methodHarness('pages/DynamicDetail', ANCHOR.privateLoadRepliesStart, ANCHOR.changeReplySortStart,
-    "import { CommentApi } from '../api/CommentApi';");
+  const Harness = env.methodHarness('components/reply/RepliesController', ANCHOR.repliesLoadStart,
+    ANCHOR.repliesChangeSortStart, "import { CommentApi } from '../../api/CommentApi';");
   const page = new Harness();
-  Object.assign(page, {destroyed: false, repliesLoading: false, repliesFailed: false,
-    repliesMoreFailed: false, repliesEpoch: epoch(env), item: {commentId: 1, commentType: 11},
-    repliesHasMore: true, replies: [{rpid: 1}], replyCursor: '2', replySortMode: 3, param: {}});
-  await page.loadReplies(false);
-  assert.equal(page.repliesMoreFailed, true);
-  assert.equal(page.repliesFailed, false);
+  const state = {destroyed: false, repliesLoading: false, repliesFailed: false, repliesMoreFailed: false,
+    repliesHasMore: true, repliesCount: 1, replySortMode: 3, commentId: 1, commentType: 11,
+    threadRoot: {rpid: 0}, threadReplies: [], threadLoading: false, threadHasMore: true, threadOpen: false};
+  page.repliesEpoch = epoch(env);
+  page.replySource = source(env, [{rpid: 1}]);
+  page.stampServerRevs = items => items;
+  page.replyCursor = '2';
+  page.access = repliesAccess('DynamicDetail', state, page);
+  await page.load(false);
+  assert.equal(state.repliesMoreFailed, true);
+  assert.equal(state.repliesFailed, false);
   assert.equal(page.replyCursor, '2');
-  assert.deepEqual(page.replies, [{rpid: 1}]);
-  await page.loadReplies(false);
+  assert.deepEqual(page.replySource.getAll(), [{rpid: 1}]);
+  await page.load(false);
   assert.deepEqual(calls, ['2', '2']);
-  assert.deepEqual(page.replies, [{rpid: 1}, {rpid: 2}]);
-  assert.equal(page.repliesMoreFailed, false);
-  assert.equal(page.repliesHasMore, false);
-  await page.loadReplies(false);
+  assert.deepEqual(page.replySource.getAll(), [{rpid: 1}, {rpid: 2}]);
+  assert.equal(state.repliesMoreFailed, false);
+  assert.equal(state.repliesHasMore, false);
+  await page.load(false);
   assert.equal(calls.length, 2);
 });
 
 
-test('image return: zoomed image restores its transform before starting the return transition', () => {
+test('image return: zoomed picture starts a hero from its current transform', () => {
   const env = environment();
   const Parent = env.methodHarness('pages/ImageViewer', '  goBack(): void {', '  private finishBack():');
   const parent = new Parent(); let flights = 0;
@@ -598,25 +754,57 @@ test('image return: zoomed image restores its transform before starting the retu
     resetZoomForExit: false, finishBack: () => flights++});
   parent.goBack();
   assert.equal(parent.resetZoomForExit, true);
-  assert.equal(flights, 0);
-  parent.goBack();
+  assert.equal(parent.exitWasZoomed, true);
   assert.equal(flights, 0);
   const Child = env.methodHarness('pages/ImageViewer', '  private prepareExit(): void {', '  private clampScale(');
-  const child = new Child(); let finish;
-  Object.assign(child, {exitRequested: true, scaleValue: 3, offsetX: 100, offsetY: -50,
-    getUIContext: () => ({animateTo: (options, update) => {update(); finish = options.onFinish;}}),
-    onZoomChange: value => {parent.currentZoomed = value;}, onExitReady: () => parent.finishBack()});
-  global.Curve = {EaseOut: 0};
+  const child = new Child(); let start;
+  Object.assign(child, {exitRequested: true, useSystemGeometry: false,
+    scaleValue: 3, offsetX: 100, offsetY: -50,
+    onExitReady: (scale, x, y) => {start = [scale, x, y]; parent.finishBack();}});
+  child.prepareExit();
+  assert.deepEqual(start, [3, 100, -50]);
+  assert.deepEqual([child.scaleValue, child.offsetX, child.offsetY], [3, 100, -50]);
+  assert.equal(flights, 1);
+});
+test('shared image exit resets zoom and pops within the same animation transaction', () => {
+  const Child = environment().methodHarness('pages/ImageViewer',
+    '  private prepareExit(): void {', '  private clampScale(');
+  const child = new Child(); let finished = 0, duration = 0, start;
+  Object.assign(child, {exitRequested: true, useSystemGeometry: true,
+    scaleValue: 2.5, offsetX: 50, offsetY: -20,
+    getUIContext: () => ({animateTo: (options, update) => {
+      duration = options.duration; update(); finished++;
+    }}),
+    onExitReady: (scale, x, y) => {start = [scale, x, y]; assert.equal(finished, 0);}});
+  global.Curve = {EaseInOut: 0};
   try {
     child.prepareExit();
+    assert.equal(duration, 300);
+    assert.deepEqual(start, [2.5, 50, -20]);
     assert.deepEqual([child.scaleValue, child.offsetX, child.offsetY], [1, 0, 0]);
-    assert.equal(flights, 0);
-    finish();
-    assert.equal(flights, 1);
-    assert.equal(parent.currentZoomed, false);
   } finally {delete global.Curve;}
 });
-
+test('manual image hero starts from the zoomed position and keeps the source thumbnail target', () => {
+  const Exit = environment().methodHarness('pages/ImageViewer',
+    '  private finishBack(): void {', '  private startHeroExitFlight():');
+  const page = new Exit(); let captured;
+  Object.assign(page, {exitStarted: false, exitWasZoomed: true, exitScale: 3,
+    exitOffsetX: 50, exitOffsetY: -20, heroFallbackTimer: -1,
+    interactionReadyTimer: -1, heroHandoffTimer: -1, heroExitTimer: -1,
+    param: {initialIndex: 0}, currentIndex: 0, naturalSizes: new Map([[0, {w: 1000, h: 500}]]),
+    entryFromRect: true, heroVisible: false, heroSource: '',
+    hasSystemGeometryTransition: () => false,
+    exitSourceRectFor: () => ({x: 8, y: 9, w: 70, h: 40}),
+    containRect: () => ({x: 10, y: 20, w: 200, h: 100}),
+    freezeCurrentGifFrame: rect => {captured = rect;},
+    sourcePreviewFor: () => 'preview'});
+  page.finishBack();
+  assert.deepEqual(captured, {x: -140, y: -100, w: 600, h: 300});
+  assert.deepEqual([page.heroX, page.heroY, page.heroWidth, page.heroHeight], [-140, -100, 600, 300]);
+  assert.deepEqual(page.heroExitTarget, {x: 8, y: 9, w: 70, h: 40});
+  assert.equal(page.heroExitPending, true);
+  clearTimeout(page.heroExitTimer);
+});
 
 test('live quality: failed requests preserve playback and release busy state; late failure stays silent', async () => {
   let task = Promise.resolve(null); const notices = [];
@@ -713,80 +901,97 @@ test('timeline: year boundary stays chronological and episode numbers use the pu
 
 function bangumiRepliesHarness(api) {
   const env = environment({'api/CommentApi': {CommentApi: api}});
-  const Harness = env.methodHarness('pages/BangumiDetail', ANCHOR.privateLoadRepliesStart,
-    ANCHOR.replyMutationComment, "import { CommentApi } from '../api/CommentApi';");
+  const Harness = env.methodHarness('components/reply/RepliesController', ANCHOR.repliesLoadStart,
+    ANCHOR.repliesMutateStart, "import { CommentApi } from '../../api/CommentApi';");
   const p = new Harness();
-  Object.assign(p, {destroyed:false, repliesEpoch:epoch(env), replies:[], repliesLoading:false,
-    repliesFailed:false, repliesMoreFailed:false, repliesHasMore:true, replyCursor:'', replySortMode:3,
-    oid:1, replyOid() {return this.oid;}});
-  return p;
+  const state = {destroyed:false, repliesLoading:false, repliesFailed:false, repliesMoreFailed:false,
+    repliesHasMore:true, repliesCount:0, replySortMode:3, oid:1,
+    threadRoot:{rpid:0}, threadReplies:[], threadLoading:false, threadHasMore:true, threadOpen:false};
+  p.repliesEpoch = epoch(env);
+  p.replySource = source(env);
+  p.stampServerRevs = items => items;
+  // 番剧切排序清空列表与游标（构造参数不在切片内，装配时补齐页面取值）。
+  p.clearOnSort = true;
+  p.access = repliesAccess('BangumiDetail', state, p);
+  return {p, state};
 }
 
 test('PGC episode and sort changes supersede pending comments without old loading writes', async () => {
   const old=deferred(), latest=deferred(); const calls=[];
-  const p=bangumiRepliesHarness({getReplies:(oid,type,cursor,mode)=> {
+  const {p, state}=bangumiRepliesHarness({getReplies:(oid,type,cursor,mode)=> {
     calls.push({oid,mode}); return calls.length===1 ? old.promise : latest.promise;
   }});
-  const first=p.loadReplies(true);
-  p.oid=2; p.changeReplySort(2);
+  const first=p.load(true);
+  state.oid=2; p.changeReplySort(2);
   assert.deepEqual(calls,[{oid:1,mode:3},{oid:2,mode:2}]);
   old.resolve({replies:[{rpid:1}],cursor:'old',hasMore:false}); await first;
-  assert.deepEqual(p.replies,[]); assert.equal(p.repliesLoading,true);
+  assert.deepEqual(p.replySource.getAll(),[]); assert.equal(state.repliesLoading,true);
   latest.resolve({replies:[{rpid:2}],cursor:'new',hasMore:true}); await tick();
-  assert.deepEqual(p.replies,[{rpid:2}]); assert.equal(p.replyCursor,'new');
-  assert.equal(p.repliesLoading,false);
+  assert.deepEqual(p.replySource.getAll(),[{rpid:2}]); assert.equal(p.replyCursor,'new');
+  assert.equal(state.repliesLoading,false);
 });
 
 test('PGC failed pagination preserves comments and cursor for same-page retry', async () => {
   const cursors=[];
-  const p=bangumiRepliesHarness({getReplies:async(oid,type,cursor)=> {
+  const {p, state}=bangumiRepliesHarness({getReplies:async(oid,type,cursor)=> {
     cursors.push(cursor); if(cursors.length===1) throw Error('offline');
     return {replies:[{rpid:2}],cursor:'end',hasMore:false};
   }});
-  p.replies=[{rpid:1}]; p.replyCursor='next';
-  await p.loadReplies(false);
-  assert.deepEqual(p.replies,[{rpid:1}]); assert.equal(p.repliesMoreFailed,true);
-  assert.equal(p.repliesFailed,false); assert.equal(p.replyCursor,'next');
-  await p.loadReplies(false);
-  assert.deepEqual(cursors,['next','next']); assert.deepEqual(p.replies,[{rpid:1},{rpid:2}]);
-  assert.equal(p.repliesMoreFailed,false); assert.equal(p.repliesHasMore,false);
+  p.replySource.reset([{rpid:1}]); state.repliesCount=1; p.replyCursor='next';
+  await p.load(false);
+  assert.deepEqual(p.replySource.getAll(),[{rpid:1}]); assert.equal(state.repliesMoreFailed,true);
+  assert.equal(state.repliesFailed,false); assert.equal(p.replyCursor,'next');
+  await p.load(false);
+  assert.deepEqual(cursors,['next','next']); assert.deepEqual(p.replySource.getAll(),[{rpid:1},{rpid:2}]);
+  assert.equal(state.repliesMoreFailed,false); assert.equal(state.repliesHasMore,false);
 });
 
 function videoRepliesHarness(api) {
   const env=environment({'api/CommentApi':{CommentApi:api}});
-  const Harness=env.methodHarness('pages/VideoDetail',ANCHOR.videoLoadRepliesStart,ANCHOR.videoLoadRepliesEnd,
-    "import { CommentApi } from '../api/CommentApi'; const CommentLog={info(){},warn(){},error(){},elapsed(){return 0},errorText(){return ''}};");
+  const Harness=env.methodHarness('components/reply/RepliesController',ANCHOR.repliesLoadStart,
+    ANCHOR.repliesLoadThreadStart,"import { CommentApi } from '../../api/CommentApi';");
   const p=new Harness();
-  Object.assign(p,{destroyed:false,repliesEpoch:epoch(env),detail:{aid:1},replyLoading:false,
-    replyLoadError:'',replyHasMore:true,replyCursor:'next',replySortMode:3,replyPrefetchCount:5,
-    replySource:source(env,[{rpid:1}]),localSentReplies:[],
-    sanitizeReplies:items=>items,mergeUniqueReplies:(a,b)=>a.concat(b),
-    appendUniqueReplies:(s,items)=>s.reset(s.getAll().concat(items))});
-  return p;
+  const state={destroyed:false, replyLoading:false, replyLoadError:'', replyHasMore:true, replySortMode:3,
+    replyItemCount:1, aid:1, threadRoot:{rpid:0}, threadReplies:[], threadLoading:false,
+    threadHasMore:true, threadOpen:false};
+  p.repliesEpoch=epoch(env);
+  p.replySource=source(env,[{rpid:1}]);
+  p.replyCursor='next'; // 控制器内部量由构造函数初始化；切片装配时手动补齐
+  p.threadCursor='';
+  p.localSentReplies=[];
+  p.sanitizeReplies=items=>items;
+  p.mergeUniqueReplies=(a,b)=>a.concat(b);
+  p.appendUniqueReplies=(s,items)=>s.reset(s.getAll().concat(items));
+  // 切片不含 stampServerRevs（定义在 mutate 之后），本组断言与打桩无关，恒等桩即可。
+  p.stampServerRevs=items=>items;
+  // 视频页切排序清空列表与游标（构造参数不在切片内，装配时补齐页面取值）。
+  p.clearOnSort=true;
+  p.access=repliesAccess('VideoDetail',state,p);
+  return {p,state};
 }
 
 test('video comments: latest sort wins while an earlier page fails', async()=>{
   const old=deferred(), latest=deferred();const modes=[];
-  const p=videoRepliesHarness({getReplies:(oid,type,cursor,mode)=>{
+  const {p,state}=videoRepliesHarness({getReplies:(oid,type,cursor,mode)=>{
     modes.push(mode);return modes.length===1?old.promise:latest.promise;
   }});
-  const pending=p.loadReplies(false);p.changeReplySort(2);
+  const pending=p.load(false);p.changeReplySort(2);
   old.reject(Error('offline'));await pending;
-  assert.deepEqual(modes,[3,2]);assert.equal(p.replyLoading,true);assert.equal(p.replyLoadError,'');
+  assert.deepEqual(modes,[3,2]);assert.equal(state.replyLoading,true);assert.equal(state.replyLoadError,'');
   latest.resolve({replies:[{rpid:2}],cursor:'done',hasMore:false});await tick();
-  assert.deepEqual(p.replySource.getAll(),[{rpid:2}]);assert.equal(p.replyLoading,false);
+  assert.deepEqual(p.replySource.getAll(),[{rpid:2}]);assert.equal(state.replyLoading,false);
 });
 
 test('video comments: pagination error retains content and retries the same cursor',async()=>{
-  const cursors=[];const p=videoRepliesHarness({getReplies:async(oid,type,cursor)=>{
+  const cursors=[];const {p,state}=videoRepliesHarness({getReplies:async(oid,type,cursor)=>{
     cursors.push(cursor);if(cursors.length===1)throw Error('offline');
     return {replies:[{rpid:2}],cursor:'done',hasMore:false};
   }});
-  await p.loadReplies(false);
-  assert.ok(p.replyLoadError);assert.deepEqual(p.replySource.getAll(),[{rpid:1}]);
-  assert.equal(p.replyCursor,'next');assert.equal(p.replyLoading,false);
-  await p.loadReplies(false);
-  assert.deepEqual(cursors,['next','next']);assert.equal(p.replyLoadError,'');
+  await p.load(false);
+  assert.ok(state.replyLoadError);assert.deepEqual(p.replySource.getAll(),[{rpid:1}]);
+  assert.equal(p.replyCursor,'next');assert.equal(state.replyLoading,false);
+  await p.load(false);
+  assert.deepEqual(cursors,['next','next']);assert.equal(state.replyLoadError,'');
   assert.deepEqual(p.replySource.getAll(),[{rpid:1},{rpid:2}]);
 });
 
@@ -838,15 +1043,23 @@ test('article spacing: drops styled empty paragraphs but retains text and inline
 test('dynamic comments: sorting during loading drops the old response',async()=>{
   const old=deferred(),latest=deferred();let calls=0;
   const env=environment({'api/CommentApi':{CommentApi:{getReplies:()=>++calls===1?old.promise:latest.promise}}});
-  const Harness=env.methodHarness('pages/DynamicDetail',ANCHOR.privateLoadRepliesStart,ANCHOR.replyMutationComment,
-    "import { CommentApi } from '../api/CommentApi';");
-  const p=new Harness();Object.assign(p,{destroyed:false,repliesEpoch:epoch(env),repliesLoading:false,
-    item:{commentId:1,commentType:11},repliesHasMore:true,replies:[],replyCursor:'',replySortMode:3,param:{}});
-  const pending=p.loadReplies(true);p.changeReplySort(2);
+  const Harness=env.methodHarness('components/reply/RepliesController',ANCHOR.repliesLoadStart,
+    ANCHOR.repliesMutateStart,"import { CommentApi } from '../../api/CommentApi';");
+  const p=new Harness();
+  const state={destroyed:false,repliesLoading:false,repliesFailed:false,repliesMoreFailed:false,
+    repliesHasMore:true,repliesCount:0,replySortMode:3,commentId:1,commentType:11,
+    threadRoot:{rpid:0},threadReplies:[],threadLoading:false,threadHasMore:true,threadOpen:false};
+  p.repliesEpoch=epoch(env);
+  p.replySource=source(env);
+  p.stampServerRevs=items=>items;
+  // 动态页切排序特意不清列表（构造参数不在切片内，装配时补齐页面取值）。
+  p.clearOnSort=false;
+  p.access=repliesAccess('DynamicDetail',state,p);
+  const pending=p.load(true);p.changeReplySort(2);
   old.resolve({replies:[{rpid:1}],cursor:'old',hasMore:false});await pending;
-  assert.equal(calls,2);assert.deepEqual(p.replies,[]);assert.equal(p.repliesLoading,true);
+  assert.equal(calls,2);assert.deepEqual(p.replySource.getAll(),[]);assert.equal(state.repliesLoading,true);
   latest.resolve({replies:[{rpid:2}],cursor:'new',hasMore:false});await tick();
-  assert.deepEqual(p.replies,[{rpid:2}]);assert.equal(p.replyCursor,'new');assert.equal(p.repliesLoading,false);
+  assert.deepEqual(p.replySource.getAll(),[{rpid:2}]);assert.equal(p.replyCursor,'new');assert.equal(state.repliesLoading,false);
 });
 
 test('dynamic comments: changing sort keeps visible rows until replacement and preserves them on failure',async()=>{
@@ -854,17 +1067,26 @@ test('dynamic comments: changing sort keeps visible rows until replacement and p
   const env=environment({'api/CommentApi':{CommentApi:{getReplies:(id,type,cursor,mode)=>{
     calls.push({cursor,mode});return calls.length===1?failed.promise:retry.promise;
   }}}});
-  const Harness=env.methodHarness('pages/DynamicDetail',ANCHOR.privateLoadRepliesStart,ANCHOR.replyMutationComment,
-    "import { CommentApi } from '../api/CommentApi';");
-  const p=new Harness();Object.assign(p,{destroyed:false,repliesEpoch:epoch(env),repliesLoading:false,
-    item:{commentId:1,commentType:11},repliesHasMore:false,replies:[{rpid:9}],replyCursor:'old',replySortMode:3,param:{}});
-  p.changeReplySort(2);assert.deepEqual(p.replies,[{rpid:9}]);assert.equal(p.repliesLoading,true);
+  const Harness=env.methodHarness('components/reply/RepliesController',ANCHOR.repliesLoadStart,
+    ANCHOR.repliesMutateStart,"import { CommentApi } from '../../api/CommentApi';");
+  const p=new Harness();
+  const state={destroyed:false,repliesLoading:false,repliesFailed:false,repliesMoreFailed:false,
+    repliesHasMore:false,repliesCount:1,replySortMode:3,commentId:1,commentType:11,
+    threadRoot:{rpid:0},threadReplies:[],threadLoading:false,threadHasMore:true,threadOpen:false};
+  p.repliesEpoch=epoch(env);
+  p.replySource=source(env,[{rpid:9}]);
+  p.replyCursor='old';
+  p.stampServerRevs=items=>items;
+  // 动态页切排序特意不清列表（构造参数不在切片内，装配时补齐页面取值）。
+  p.clearOnSort=false;
+  p.access=repliesAccess('DynamicDetail',state,p);
+  p.changeReplySort(2);assert.deepEqual(p.replySource.getAll(),[{rpid:9}]);assert.equal(state.repliesLoading,true);
   failed.reject(Error('offline'));await tick();
-  assert.deepEqual(p.replies,[{rpid:9}]);assert.equal(p.replyCursor,'old');
-  assert.equal(p.repliesMoreFailed,true);assert.equal(p.repliesRetryReset,true);
-  const pending=p.loadReplies(p.repliesMoreFailed&&p.repliesRetryReset);
+  assert.deepEqual(p.replySource.getAll(),[{rpid:9}]);assert.equal(p.replyCursor,'old');
+  assert.equal(state.repliesMoreFailed,true);assert.equal(p.repliesRetryReset,true);
+  const pending=p.load(state.repliesMoreFailed&&p.repliesRetryReset);
   retry.resolve({replies:[{rpid:10}],cursor:'new',hasMore:true});await pending;
-  assert.deepEqual(calls,[{cursor:'',mode:2},{cursor:'',mode:2}]);assert.deepEqual(p.replies,[{rpid:10}]);
+  assert.deepEqual(calls,[{cursor:'',mode:2},{cursor:'',mode:2}]);assert.deepEqual(p.replySource.getAll(),[{rpid:10}]);
 });
 
 test('dynamic feed: failed continuation keeps cards and offset, then retries the same page',async()=>{
@@ -900,4 +1122,41 @@ test('dynamic recovery: expired login navigates to login while pagination retain
   p.recoverFeed();assert.equal(globalThis.__dynamicLoginCount,1);assert.deepEqual(resets,[]);
   p.feedNeedsLogin=false;p.recoverFeed();assert.deepEqual(resets,[false]);
   delete globalThis.__dynamicLoginCount;
+});
+
+
+test('feed filtering never restores a hidden item or drops the following visible item', () => {
+  const env = environment();
+  const Harness = env.methodHarness('views/HomeView', '  private dedupVideos(', '  // ===== 近期曝光窗口',
+    "const LocalVideoFilter={filterVideos:(items)=>items.filter(item=>item.aid!==2)};");
+  const p = new Harness();
+  const rows = [{aid:2,bvid:'BV2'}, {aid:3,bvid:'BV3'}, {aid:3,bvid:'BV3'}, {aid:4,bvid:'BV4'}];
+  assert.deepEqual(p.dedupVideos(source(env, [{aid:4,bvid:'BV4'}]), rows).map(v=>v.aid), [3]);
+  assert.deepEqual(p.dedupVideos(source(env, [{aid:4,bvid:'BV4'}]), rows, true).map(v=>v.aid), [3,4]);
+});
+
+test('refresh skips filtered batches and replaces the old feed with the first usable batch', async () => {
+  const batches = [[{aid:2,bvid:'BV2'}], [{aid:3,bvid:'BV3'},{aid:3,bvid:'BV3'}]];
+  const env = environment({'api/FeedApi': {FeedApi: {getRecommend: async () => batches.shift() || []}}});
+  const Harness = env.methodHarness('views/HomeView', '  private dedupVideos(', '  async loadHot(',
+    "import { FeedApi } from '../api/FeedApi'; const LocalVideoFilter={filterVideos:(items)=>items.filter(item=>item.aid!==2)};");
+  const p = new Harness();
+  Object.assign(p, {recEpoch:epoch(env), recFetching:false, recSource:source(env,[{aid:1,bvid:'BV1'}]), recCount:1});
+  await p.loadRecommend(true);
+  assert.deepEqual(p.recSource.getAll().map(v=>v.aid), [3]);
+  assert.equal(p.recCount,1);
+});
+
+test('removing one feed item preserves other objects and sends only a delete notification', () => {
+  const env=environment();
+  const a={aid:1},b={aid:2},c={aid:3};
+  const data=source(env,[a,b,c]);
+  const events=[];
+  data.registerDataChangeListener({onDataDelete:i=>events.push(['delete',i]),onDataReloaded:()=>events.push(['reload'])});
+  data.removeAt(1);
+  data.removeAt(-1);
+  data.removeAt(9);
+  assert.deepEqual(data.getAll(),[a,c]);
+  assert.equal(data.getData(1),c);
+  assert.deepEqual(events,[['delete',1]]);
 });

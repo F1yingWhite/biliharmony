@@ -14,6 +14,46 @@ import { BasicDataSource } from '../common/BasicDataSource';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { SearchApi } from '../api/SearchApi';
 
+/** 每周必看一期数据（含期次文案），整链缓存的最小快照。 */
+class WeeklySnapshot {
+  label: string = '';
+  videos: Array<VideoItem> = [];
+}
+
+/**
+ * 榜单数据日内基本稳定：10 分钟 TTL 内存缓存 + 单飞 + 刷新失败回退旧值。
+ * 此前每次进页都全量重取，翻来翻去会重复下载同样的榜单。
+ */
+class RankCache<T> {
+  private static readonly TTL_MS: number = 10 * 60 * 1000;
+  private value: T | null = null;
+  private at: number = 0;
+  private pending: Promise<T> | null = null;
+
+  async get(loader: () => Promise<T>): Promise<T> {
+    if (this.value !== null && Date.now() - this.at < RankCache.TTL_MS) {
+      return this.value;
+    }
+    if (this.pending !== null) return this.pending;
+    const task: Promise<T> = loader().then((next: T): T => {
+      this.value = next;
+      this.at = Date.now();
+      return next;
+    }).catch((e: Error): T => {
+      // 过期刷新失败时回退旧值：离线重进页面仍能看到上次的榜单。
+      if (this.value !== null) return this.value;
+      throw e;
+    }).finally((): void => {
+      this.pending = null;
+    });
+    this.pending = task;
+    return task;
+  }
+}
+
+const rankListCache: RankCache<Array<VideoItem>> = new RankCache<Array<VideoItem>>();
+const weeklyRankCache: RankCache<WeeklySnapshot> = new RankCache<WeeklySnapshot>();
+
 @Component
 export struct RankPage {
   @State preciousPage: number = 0;
@@ -60,7 +100,8 @@ export struct RankPage {
     this.rankLoading = true;
     this.rankError = '';
     try {
-      const list: Array<VideoItem> = await SearchApi.getRankVideos(0);
+      const list: Array<VideoItem> = await rankListCache.get((): Promise<Array<VideoItem>> =>
+        SearchApi.getRankVideos(0));
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
       this.rankSource.reset(list);
       this.rankCount = this.rankSource.totalCount();
@@ -85,18 +126,20 @@ export struct RankPage {
     this.weeklyLoading = true;
     this.weeklyError = '';
     try {
-      const series: Array<PopularSeriesItem> = await SearchApi.getPopularSeriesList();
+      const snapshot: WeeklySnapshot = await weeklyRankCache.get(async (): Promise<WeeklySnapshot> => {
+        const series: Array<PopularSeriesItem> = await SearchApi.getPopularSeriesList();
+        if (series.length === 0) throw new Error('empty series');
+        const data: PopularSeriesData = await SearchApi.getPopularSeriesOne(series[0].number);
+        const next: WeeklySnapshot = new WeeklySnapshot();
+        next.label = data.label.length > 0 ? data.label : series[0].name;
+        next.videos = data.videos;
+        return next;
+      });
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
-      if (series.length === 0) {
-        this.weeklyError = '每周必看加载失败，请检查网络后重试';
-        return;
-      }
-      const data: PopularSeriesData = await SearchApi.getPopularSeriesOne(series[0].number);
-      if (this.destroyed || generation !== this.lifecycleGeneration) return;
-      this.weeklyLabel = data.label.length > 0 ? data.label : series[0].name;
-      this.weeklySource.reset(data.videos);
+      this.weeklyLabel = snapshot.label;
+      this.weeklySource.reset(snapshot.videos);
       this.weeklyCount = this.weeklySource.totalCount();
-      if (data.videos.length === 0) {
+      if (snapshot.videos.length === 0) {
         this.weeklyError = '每周必看加载失败，请检查网络后重试';
       }
     } catch (e) {

@@ -4,11 +4,12 @@ import { Haptic } from '../../common/Haptic';
 /** 视频点赞/投币/收藏/分享共用的主题色与弹性反馈按钮。 */
 @Component
 export struct VideoActionItem {
-  @Prop icon: Resource = $r('app.media.bilix_icon_like');
+  @Prop icon: Resource = $r('app.media.ic_like');
   @Prop value: string = '';
+  @Prop label: string = '';
   @Prop active: boolean = false;
-  /** 激活时替换用的实心图标（如点踩激活换实心下按手）；useActiveIcon 为 false 时始终用 icon。 */
-  activeIcon: Resource = $r('app.media.bilix_icon_like');
+  /** 激活时替换用的实心图标（点赞、收藏使用同轮廓的填充态）；useActiveIcon 为 false 时始终用 icon。 */
+  activeIcon: Resource = $r('app.media.ic_like');
   useActiveIcon: boolean = false;
   @Prop busy: boolean = false;
   onTap: () => void = () => {};
@@ -47,11 +48,12 @@ export struct VideoActionItem {
         .fillColor(this.active ? this.accent : (this.isDark ? '#C8C8CC' : '#5A5F66'))
         .scale({ x: this.iconScale, y: this.iconScale })
       Text(this.value)
-        .fontSize(11)
+        .fontSize(12)
         .fontColor(this.active ? this.accent : (this.isDark ? '#C8C8CC' : '#5A5F66'))
     }
     .layoutWeight(1)
-    .padding({ top: 8, bottom: 8 })
+    .padding({ top: 10, bottom: 10 })
+    .accessibilityText(this.label + (this.active ? '，已选中' : '') + (this.busy ? '，处理中' : ''))
     .onClick(() => {
       if (this.busy) return;
       Haptic.tap();
@@ -59,7 +61,7 @@ export struct VideoActionItem {
       // 选中先放大再回落，取消先缩小再回弹，两个方向都有完整动画。
       const activating: boolean = !this.active;
       this.getUIContext().animateTo({ duration: 120, curve: Curve.EaseOut }, () => {
-        this.iconScale = activating ? 1.3 : 0.78;
+        this.iconScale = activating ? 1.12 : 0.94;
       });
       this.scheduleTimeout(() => {
         this.getUIContext().animateTo({ curve: curves.springMotion(0.35, 0.6) }, () => {

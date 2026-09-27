@@ -24,6 +24,8 @@ export struct PlayerSettingsPanel {
   @Prop blockTopDm: boolean = false;
   @Prop blockBottomDm: boolean = false;
   @Prop blockColorDm: boolean = false;
+  @Prop dmMerge: boolean = false;
+  @Prop dmMergeCount: boolean = true;
   @Prop qualityOptions: Array<VideoQualityOption> = [];
   @Prop activeQuality: number = 0;
   @Prop chapters: Array<VideoChapter> = [];
@@ -32,8 +34,10 @@ export struct PlayerSettingsPanel {
   @Prop subtitles: Array<SubtitleTrack> = [];
   @Prop subtitleIndex: number = -1;
   @Prop subtitleOn: boolean = false;
+  @Prop subtitleScale: number = 1.0;
   @Prop dmFilterRulesCount: number = 0;
   onSubtitleChange: (index: number) => void = () => {};
+  onSubtitleScaleChange: (scale: number) => void = () => {};
   onDmFilterTap: () => void = () => {};
   onBlockAdvancedToggle: (next: boolean) => void = () => {};
   onResetDanmaku: () => void = () => {};
@@ -45,6 +49,8 @@ export struct PlayerSettingsPanel {
   onDmDensityChange: (value: number) => void = () => {};
   onDmBlockLevelChange: (value: number) => void = () => {};
   onToggleDmBlock: (kind: string) => void = () => {};
+  onDmMergeChange: (next: boolean) => void = () => {};
+  onDmMergeCountChange: (next: boolean) => void = () => {};
   onQualityChange: (qn: number) => void = () => {};
   onChapterChange: (seconds: number) => void = () => {};
   onSpeedChange: (rate: number) => void = () => {};
@@ -229,6 +235,20 @@ export struct PlayerSettingsPanel {
       .onClick(() => this.onSpeedChange(rate))
   }
 
+  @Builder
+  ScaleChip(label: string, scale: number) {
+    Text(label)
+      .layoutWeight(1)
+      .textAlign(TextAlign.Center)
+      .fontSize(13)
+      .fontWeight(Math.abs(this.subtitleScale - scale) < 0.01 ? FontWeight.Medium : FontWeight.Normal)
+      .fontColor(Math.abs(this.subtitleScale - scale) < 0.01 ? '#FFFFFF' : this.subColor())
+      .padding({ top: 8, bottom: 8 })
+      .borderRadius(16)
+      .backgroundColor(Math.abs(this.subtitleScale - scale) < 0.01 ? this.accent : this.unselectedBg())
+      .onClick(() => this.onSubtitleScaleChange(scale))
+  }
+
   build() {
     Column({ space: this.which === 0 ? 2 : 8 }) {
       if (this.which === 0) {
@@ -289,22 +309,19 @@ export struct PlayerSettingsPanel {
               this.DmTypeIcon($r('app.media.ic_dm_color'), '彩色', this.blockColorDm, () => this.onToggleDmBlock('color'))
               this.DmTypeIcon($r('app.media.ic_dm_advanced'), '高级', this.dmBlockLevel > 0,
                 () => this.onBlockAdvancedToggle(this.dmBlockLevel <= 0))
-              this.DmTypeIcon($r('app.media.ic_dm_count'), '计数', false, () => this.stubToast('功能暂未开放'))
+              this.DmTypeIcon($r('app.media.ic_dm_count'), '计数', this.dmMerge && this.dmMergeCount,
+                () => this.onDmMergeCountChange(!(this.dmMergeCount)))
             }
             .width('100%')
             .padding({ left: 10, right: 10, bottom: 14 })
             this.DmDivider()
-            this.DmSwitchRow('重复弹幕隐藏', '大量内容相同的弹幕会被隐藏', false, (next: boolean): void => {
-              if (next) this.stubToast('功能暂未开放');
-            })
+            this.DmSwitchRow('重复弹幕隐藏', '相同内容的弹幕只显示一条（可带 ×N 计数）', this.dmMerge,
+              (next: boolean): void => this.onDmMergeChange(next))
             this.DmDivider()
             this.DmSwitchRow('字幕防挡', '底部弹幕会被隐藏', this.blockBottomDm, (): void => {
               this.onToggleDmBlock('bottom');
             })
-            this.DmDivider()
-            this.DmSwitchRow('人像防挡', '人像不会被弹幕遮挡', false, (next: boolean): void => {
-              if (next) this.stubToast('功能暂未开放');
-            })
+
           }
           .width('100%')
           .borderRadius(14)
@@ -404,6 +421,17 @@ export struct PlayerSettingsPanel {
         .scrollBar(BarState.Off)
       } else if (this.which === 4) {
         Text('CC 字幕').fontSize(14).fontWeight(FontWeight.Bold).fontColor(this.titleColor()).width('100%')
+        Row({ space: 7 }) {
+          Text('字号')
+            .fontSize(13)
+            .fontColor(this.subColor())
+          this.ScaleChip('小', 0.75)
+          this.ScaleChip('标准', 1.0)
+          this.ScaleChip('大', 1.25)
+          this.ScaleChip('特大', 1.5)
+        }
+        .width('100%')
+        .margin({ top: 8, bottom: 10 })
         List({ space: 6 }) {
           ListItem() {
             Row({ space: 8 }) {

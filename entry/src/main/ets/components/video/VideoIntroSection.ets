@@ -1,6 +1,9 @@
 import { BasicDataSource } from '../../common/BasicDataSource';
 import { colorWithAlpha, formatCount, formatDate } from '../../common/Utils';
+import { biliImageThumbnail } from '../../common/ImageUrl';
 import { UgcSeasonEpisode, VideoDetail, VideoItem, VideoPage } from '../../model/Models';
+import { VideoTagInfo } from '../../api/BiliApi';
+import { pasteboard } from '@kit.BasicServicesKit';
 import { RelatedVideoRow } from './VideoRelatedRow';
 import { VideoActionItem } from './VideoActionItem';
 
@@ -27,11 +30,19 @@ export struct VideoIntroSection {
   @Prop pageSwitchingCid: number = 0;
   @Prop ugcPanelOpen: boolean = false;
   @Prop ugcCount: number = 0;
-  @Prop related: Array<VideoItem> = [];
+  /** 全视频空降标签（如「商业推广」）：显示在标题前；空串不显示。 */
+  @Prop tags: Array<VideoTagInfo> = [];
+  onTagTap: (tag: VideoTagInfo) => void = () => {};
+  @Prop sponsorTag: string = '';
+  @Prop sponsorTagColor: string = '#008A5C';
+  /** 相关推荐行数：relatedSource 是普通属性（父组件持有），空态/尾footer 依赖此响应式计数。 */
+  @Prop relatedCount: number = 0;
   @Prop relatedLoading: boolean = false;
   @Prop relatedLoadError: string = '';
   scroller: Scroller = new Scroller();
   ugcSource: BasicDataSource<UgcSeasonEpisode> = new BasicDataSource<UgcSeasonEpisode>();
+  /** 相关推荐懒加载数据源：无限追加的推荐行必须虚拟化，Scroll+ForEach 全量常驻会随页数线性吃满内存。 */
+  relatedSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
   onOpenUp: () => void = () => {};
   onFollow: () => void = () => {};
   onLike: () => void = () => {};
@@ -97,32 +108,88 @@ export struct VideoIntroSection {
   @Builder
   private Actions() {
     Row() {
-      VideoActionItem({ icon: $r('app.media.bilix_icon_like'), value: formatCount(this.likeCount),
-        active: this.liked, busy: this.actionBusy, onTap: this.onLike, onLongPress: this.onTriple })
-      VideoActionItem({ icon: $r('app.media.bilix_icon_dislike'), value: '不喜欢',
+      VideoActionItem({ icon: $r('app.media.ic_like'), label: '点赞', value: formatCount(this.likeCount),
+        activeIcon: $r('app.media.ic_like_fill'), useActiveIcon: true, active: this.liked, busy: this.actionBusy, onTap: this.onLike, onLongPress: this.onTriple })
+      VideoActionItem({ icon: $r('app.media.ic_dislike'), label: '不喜欢', value: '不喜欢',
         active: this.disliked, busy: this.actionBusy, onTap: this.onDislike })
-      VideoActionItem({ icon: $r('app.media.bilix_icon_coin'), value: formatCount(this.coinCount),
+      VideoActionItem({ icon: $r('app.media.ic_coin'), label: '投币', value: formatCount(this.coinCount),
         active: this.coinCountByMe > 0, busy: this.actionBusy, onTap: this.onCoin })
-      VideoActionItem({ icon: $r('app.media.bilix_icon_fav'), value: formatCount(this.favoriteCount),
-        active: this.favorited, busy: this.actionBusy, onTap: this.onFavorite, onLongPress: this.onFavoritePick })
-      VideoActionItem({ icon: $r('app.media.bilix_icon_share'), value: formatCount(this.detail.share),
+      VideoActionItem({ icon: $r('app.media.ic_favorite'), label: '收藏', value: formatCount(this.favoriteCount),
+        activeIcon: $r('app.media.ic_favorite_fill'), useActiveIcon: true, active: this.favorited, busy: this.actionBusy, onTap: this.onFavorite, onLongPress: this.onFavoritePick })
+      VideoActionItem({ icon: $r('app.media.ic_share'), label: '分享', value: formatCount(this.detail.share),
         active: false, busy: this.actionBusy, onTap: this.onShare })
-    }.width('100%').border({ width: { top: 0.5, bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
+    }.width('100%')
   }
 
+  /** 官方版式：标题右侧 ∨/∧ 展开箭头；展开后显示 BV 号、简介与 TAG。 */
   @Builder
-  private DescriptionAndEpisodes() {
-    Column({ space: 8 }) {
-      Text('简介').fontSize(14).fontWeight(FontWeight.Bold)
-        .fontColor(this.isDark ? '#E6E6E6' : '#18191C').width('100%')
-      Text(this.detail.desc.length > 0 ? this.detail.desc : 'UP主没有填写简介')
-        .fontSize(13).fontColor(this.isDark ? '#B0B0B0' : '#5A5F66').width('100%').lineHeight(20)
-        .maxLines(this.descExpanded ? 10000 : 8).textOverflow({ overflow: TextOverflow.Ellipsis })
-        .onAreaChange((_oldValue: Area, newValue: Area) => this.onDescAreaChange(newValue.width))
-      if (this.descNeedsExpand) {
-        Text(this.descExpanded ? '收起' : '展开全文').fontSize(12).fontColor(this.accent)
-          .width('100%').textAlign(TextAlign.End).onClick(this.onToggleDescription)
+  private TitleBlock() {
+    Row({ space: 6 }) {
+      if (this.sponsorTag.length > 0) {
+        Text(this.sponsorTag)
+          .fontSize(11).fontColor('#FFFFFF')
+          .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+          .borderRadius(4)
+          .backgroundColor(this.sponsorTagColor)
+          .margin({ top: 3 })
+          .flexShrink(0)
       }
+      Text(this.detail.title).fontSize(16).fontWeight(FontWeight.Medium)
+        .fontColor(this.isDark ? '#FFFFFF' : '#18191C').layoutWeight(1).lineHeight(23)
+        .maxLines(this.descExpanded ? 10000 : 1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      Image($r('app.media.ic_arrow_right'))
+        .width(14).height(14)
+        .renderMode(ImageRenderMode.Template)
+        .fillColor(this.isDark ? '#8A8F99' : '#9499A0')
+        .rotate({ angle: this.descExpanded ? -90 : 90 })
+        .flexShrink(0)
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Top)
+    .onClick(this.onToggleDescription)
+  }
+
+  /** 展开区：BV 号 + 简介全文 + TAG 胶囊（对齐官方「收起状态不展示简介」）。 */
+  @Builder
+  private ExpandedDescription() {
+    Column({ space: 10 }) {
+      if (this.detail.bvid.length > 0) {
+        Text(this.detail.bvid).fontSize(12).fontColor(this.isDark ? '#8A8F99' : '#9499A0')
+          .width('100%')
+          .onClick(() => {
+            const data: pasteboard.PasteData =
+              pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.detail.bvid);
+            pasteboard.getSystemPasteboard().setData(data).then(() => {
+              this.getUIContext().getPromptAction().showToast({ message: 'BV 号已复制' });
+            }).catch(() => {
+            });
+          })
+      }
+      Text(this.detail.desc.length > 0 ? this.detail.desc : 'UP主没有填写简介')
+        .fontSize(13).fontColor(this.isDark ? '#B0B0B0' : '#5A5F66').width('100%').lineHeight(21)
+      if (this.tags.length > 0) {
+        Flex({ wrap: FlexWrap.Wrap }) {
+          ForEach(this.tags, (tag: VideoTagInfo, index: number) => {
+            Text(tag.name)
+              .fontSize(12)
+              .fontColor(this.isDark ? '#C9CDD4' : '#61666D')
+              .padding({ left: 12, right: 12, top: 5, bottom: 5 })
+              .borderRadius(15)
+              .backgroundColor(this.isDark ? '#2A2C31' : '#F1F2F3')
+              .margin({ right: 8, bottom: 8 })
+              .onClick(() => this.onTagTap(tag))
+          }, (tag: VideoTagInfo, index: number) => String(tag.tagId) + '-' + String(index))
+        }
+        .width('100%')
+      }
+    }.width('100%').alignItems(HorizontalAlign.Start)
+  }
+
+  /** 分P / 合集选集（官方常驻，不随简介展开态变化）。 */
+  @Builder
+  private EpisodesSections() {
+    Column({ space: 8 }) {
       if (this.detail.pages.length > 1) {
         Column() {
           ForEach(this.detail.pages, (page: VideoPage, index: number) => {
@@ -153,7 +220,8 @@ export struct VideoIntroSection {
                 ListItem() {
                   Row({ space: 8 }) {
                     if (episode.cover.length > 0) {
-                      Image(episode.cover).width(72).height(42).objectFit(ImageFit.Cover).borderRadius(5)
+                      Image(biliImageThumbnail(episode.cover, 240)).width(72).height(42).objectFit(ImageFit.Cover)
+                        .borderRadius(5).alt($r('app.media.placeholder_cover'))
                     }
                     Text(episode.sectionTitle.length > 0 ? episode.sectionTitle + ' · ' + episode.title : episode.title)
                       .fontSize(12).fontColor(this.isDark ? '#D0D0D0' : '#222222').maxLines(2).layoutWeight(1)
@@ -170,43 +238,62 @@ export struct VideoIntroSection {
   }
 
   @Builder
-  private Related() {
+  private RelatedHeader() {
     Column({ space: 4 }) {
       Text('相关推荐').fontSize(15).fontWeight(FontWeight.Bold)
         .fontColor(this.isDark ? '#FFFFFF' : '#18191C').width('100%').padding({ top: 6, bottom: 4 })
-      if (this.related.length === 0) {
+      if (this.relatedCount === 0) {
         Text(this.relatedLoading ? '相关推荐加载中…' : this.relatedLoadError)
           .fontSize(12).fontColor(this.relatedLoadError.length > 0 ? this.accent : '#9499A0')
           .width('100%').padding({ top: 12, bottom: 12 })
           .onClick(() => { if (!this.relatedLoading) this.onLoadMoreRelated(); })
-      } else {
-        ForEach(this.related, (item: VideoItem) => {
+      }
+    }.width('100%').alignItems(HorizontalAlign.Start)
+  }
+
+  build() {
+    List({ space: 4, scroller: this.scroller }) {
+      ListItem() {
+        Column({ space: 12 }) {
+          this.OwnerHeader()
+          this.TitleBlock()
+          this.Metadata()
+          if (this.descExpanded) {
+            this.ExpandedDescription()
+          }
+          this.Actions()
+          this.EpisodesSections()
+        }.width('100%')
+      }.margin({ top: 14, bottom: 8 })
+
+      ListItem() {
+        this.RelatedHeader()
+      }
+
+      LazyForEach(this.relatedSource, (item: VideoItem) => {
+        ListItem() {
           RelatedVideoRow({ item: item, onOpen: this.onOpenRelated,
             onReport: this.onReportRelated, onHide: this.onHideRelated })
-        }, (item: VideoItem) => item.bvid + String(item.aid))
-        if (this.relatedLoading || this.relatedLoadError.length > 0) {
+        }
+      }, (item: VideoItem) => item.bvid + String(item.aid))
+
+      if (this.relatedCount > 0 && (this.relatedLoading || this.relatedLoadError.length > 0)) {
+        ListItem() {
           Text(this.relatedLoading ? '正在刷新更多推荐…' : this.relatedLoadError)
             .fontSize(12).fontColor(this.relatedLoadError.length > 0 ? this.accent : '#9499A0')
             .width('100%').textAlign(TextAlign.Center).padding({ top: 12, bottom: 12 })
             .onClick(this.onLoadMoreRelated)
         }
       }
-    }.width('100%').alignItems(HorizontalAlign.Start)
-  }
 
-  build() {
-    Scroll(this.scroller) {
-      Column({ space: 12 }) {
-        this.OwnerHeader()
-        Text(this.detail.title).fontSize(17).fontWeight(FontWeight.Bold)
-          .fontColor(this.isDark ? '#FFFFFF' : '#18191C').width('100%').lineHeight(24)
-        this.Metadata()
-        this.Actions()
-        this.DescriptionAndEpisodes()
-        this.Related()
-      }.width('100%').padding(14)
+      // 尾部留白对齐原 Scroll 内边距；空态时也保证"点击刷新"文案不贴底。
+      ListItem() {
+        Column().width('100%').height(10)
+      }
     }
-    .width('100%').height('100%').scrollBar(BarState.Off).align(Alignment.Top)
+    .width('100%').height('100%').scrollBar(BarState.Off).edgeEffect(EdgeEffect.None)
+    .cachedCount(4)
+    .padding({ left: 14, right: 14 })
     .onScrollFrameBegin((offset: number, state: ScrollState) => {
       return { offsetRemain: this.onScrollFrame(offset, this.scroller, state) };
     })

@@ -22,6 +22,7 @@ import { FeedApi } from '../api/FeedApi';
 import { LiveApi } from '../api/LiveApi';
 import { Haptic } from '../common/Haptic';
 import { Handedness } from '../common/Handedness';
+import { LocalVideoFilter } from '../common/LocalVideoFilter';
 import { HeaderBackdrop } from '../components/GlassHeaderBar';
 
 /** 频道保持可见，搜索收起时上移；单独订阅滚动值，避免重建信息流。 */
@@ -72,7 +73,6 @@ export struct HomeView {
   @State viewportWidth: number = 360;
   @State loadingMore: boolean = false;
   // 每频道独立的分页游标 / 错误文案 / 到底标记，互不串台
-  @State recIdx: number = 0;
   @State hotPage: number = 1;
   @State livePage: number = 1;
   @State recError: string = '';
@@ -90,6 +90,8 @@ export struct HomeView {
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
   @StorageProp('loginVersion') @Watch('onLoginChanged') loginVersion: number = 0;
+  // 推荐源切换（Web 个性化 / App 推流）：切换即重开会话重载首页。
+  @StorageProp('recommendMode') @Watch('onRecommendModeChanged') recommendMode: string = 'web';
   private tabsController: TabsController = new TabsController();
   private recScroller: Scroller = new Scroller();
   private hotScroller: Scroller = new Scroller();
@@ -103,7 +105,8 @@ export struct HomeView {
   private hotFetching: boolean = false;
   private liveFetching: boolean = false;
   private readonly refreshTriggerOffset: number = 56;
-  private readonly homeGap: number = 12;
+  // 竖向行距与双列横向槽距共用（用户反馈 12 偏松，收紧到 8）。
+  private readonly homeGap: number = 8;
 
   async aboutToAppear(): Promise<void> {
     // 切到首页 Tab 时强制回到顶部状态，避免残留 fade 导致搜索栏和搜索球同时出现。
@@ -122,8 +125,26 @@ export struct HomeView {
     this.recFetching = false;
     this.recSource.clear();
     this.recCount = 0;
+    // 换账号后曝光窗口不再适用：新账号的推荐是另一套候选。
+    this.clearSeenWindow();
+    FeedApi.resetRecommendSession();
     try {
       await UserStore.ensureLoaded();
+      await this.loadRecommend(true);
+    } catch (e) {
+      if (this.recSource.isEmpty()) this.recError = '推荐加载失败，请检查网络后重试';
+    }
+  }
+
+  /** 推荐源切换（Web / App 推流）：清列表并重开会话立即生效。 */
+  private async onRecommendModeChanged(): Promise<void> {
+    this.recEpoch.invalidate();
+    this.recFetching = false;
+    this.recSource.clear();
+    this.recCount = 0;
+    this.clearSeenWindow();
+    FeedApi.resetRecommendSession();
+    try {
       await this.loadRecommend(true);
     } catch (e) {
       if (this.recSource.isEmpty()) this.recError = '推荐加载失败，请检查网络后重试';
@@ -139,35 +160,83 @@ export struct HomeView {
     }
   }
 
-  /** 本地从当前列表移除，不代表服务端推荐偏好已更新。 */
+  /** 本地隐藏：从当前列表移除并写入持久化「不想看」，后续 feed 分页与相关推荐不再出现该稿。 */
   private dislikeLocal(item: VideoItem, feedTab: number): void {
     const source: BasicDataSource<VideoItem> = feedTab === 0 ? this.recSource : this.hotSource;
     const key: number = item.aid;
     if (key <= 0) return;
-    source.reset(source.getAll().filter((v: VideoItem) => v.aid !== key));
+    for (let index: number = source.totalCount() - 1; index >= 0; index--) {
+      if (source.getData(index).aid === key) source.removeAt(index);
+    }
+    if (feedTab === 0) this.recCount = source.totalCount();
+    else this.hotCount = source.totalCount();
+    LocalVideoFilter.hide(key).catch(() => {
+      // 持久化失败时保留会话级隐藏效果，不打断用户。
+    });
     try {
-      this.getUIContext().getPromptAction().showToast({ message: '已从当前列表隐藏' });
+      this.getUIContext().getPromptAction().showToast({ message: '已隐藏该视频，将不再出现在首页与相关推荐' });
     } catch (e) {
       // 弹 toast 失败忽略。
     }
   }
 
   /** 追加前按 key 去重：B 站推荐/热门可能返回已在列表中的视频，避免 LazyForEach 重复 key。 */
-  private dedupVideos(source: BasicDataSource<VideoItem>, incoming: Array<VideoItem>): Array<VideoItem> {
+  private dedupVideos(source: BasicDataSource<VideoItem>, incoming: Array<VideoItem>, reset: boolean = false): Array<VideoItem> {
+    // 本地「不想看」持久化黑名单先过滤（直播卡片 aid=0 不受影响）。
+    const filtered: Array<VideoItem> = LocalVideoFilter.filterVideos(incoming);
     const seen: Set<string> = new Set<string>();
-    const base: Array<VideoItem> = source.getAll();
+    const base: Array<VideoItem> = reset ? [] : source.getAll();
     for (let i: number = 0; i < base.length; i++) {
       seen.add(base[i].bvid.length > 0 ? base[i].bvid : 'a' + String(base[i].aid));
     }
     const out: Array<VideoItem> = [];
-    for (let i: number = 0; i < incoming.length; i++) {
-      const key: string = incoming[i].bvid.length > 0 ? incoming[i].bvid : 'a' + String(incoming[i].aid);
+    for (let i: number = 0; i < filtered.length; i++) {
+      const key: string = filtered[i].bvid.length > 0 ? filtered[i].bvid : 'a' + String(filtered[i].aid);
       if (!seen.has(key)) {
         seen.add(key);
+        out.push(filtered[i]);
+      }
+    }
+    return out;
+  }
+
+  // ===== 近期曝光窗口：跨刷新记忆最近看过的推荐，服务端重复下发时本地兜底过滤 =====
+  private readonly seenWindow: Array<string> = [];
+  private readonly seenSet: Set<string> = new Set<string>();
+  private readonly seenWindowMax: number = 400;
+
+  private videoKeyOf(item: VideoItem): string {
+    return item.bvid.length > 0 ? item.bvid : 'a' + String(item.aid);
+  }
+
+  /** 过滤掉近期曝光窗口内的视频（不清窗口，仅读取）。 */
+  private filterSeen(incoming: Array<VideoItem>): Array<VideoItem> {
+    const out: Array<VideoItem> = [];
+    for (let i: number = 0; i < incoming.length; i++) {
+      if (!this.seenSet.has(this.videoKeyOf(incoming[i]))) {
         out.push(incoming[i]);
       }
     }
     return out;
+  }
+
+  private rememberSeen(items: Array<VideoItem>): void {
+    for (let i: number = 0; i < items.length; i++) {
+      const key: string = this.videoKeyOf(items[i]);
+      if (!this.seenSet.has(key)) {
+        this.seenSet.add(key);
+        this.seenWindow.push(key);
+      }
+    }
+    while (this.seenWindow.length > this.seenWindowMax) {
+      const oldest: string | undefined = this.seenWindow.shift();
+      if (oldest !== undefined) this.seenSet.delete(oldest);
+    }
+  }
+
+  private clearSeenWindow(): void {
+    this.seenWindow.length = 0;
+    this.seenSet.clear();
   }
 
   private dedupLive(source: BasicDataSource<LiveRoomItem>, incoming: Array<LiveRoomItem>): Array<LiveRoomItem> {
@@ -196,12 +265,13 @@ export struct HomeView {
       // 推荐不是有限列表。空响应也可能来自网络失败、过滤或服务端暂时没有候选。
       // 每轮最多尝试三批，既能跳过重复页，也不会在异常时无限请求。
       for (let attempt: number = 0; attempt < 3; attempt++) {
-        const idx: number = this.recIdx;
-        const list: Array<VideoItem> = await FeedApi.getRecommend(idx);
+        // reset 只作用于第一帧（开新会话）；重试翻页沿用同一会话继续向后要。
+        const list: Array<VideoItem> = await FeedApi.getRecommend(reset && attempt === 0);
         if (!this.recEpoch.isCurrent(epoch)) return;
-        this.recIdx = idx + Math.max(1, list.length);
-        const fresh: Array<VideoItem> = reset ? list : this.dedupVideos(this.recSource, list);
+        const unseen: Array<VideoItem> = this.filterSeen(list);
+        const fresh: Array<VideoItem> = this.dedupVideos(this.recSource, unseen, reset);
         if (fresh.length === 0) continue;
+        this.rememberSeen(fresh);
         if (reset) this.recSource.reset(fresh);
         else this.recSource.append(fresh);
         this.recCount = this.recSource.totalCount();
@@ -241,7 +311,7 @@ export struct HomeView {
         this.hotHasMore = false;
       }
       if (reset) {
-        this.hotSource.reset(list);
+        this.hotSource.reset(this.dedupVideos(this.hotSource, list, true));
       } else {
         this.hotSource.append(this.dedupVideos(this.hotSource, list));
       }
@@ -346,6 +416,10 @@ export struct HomeView {
     .height(35)
     .borderRadius(18)
     .backgroundColor(this.visualTab === index ? (this.isDark ? '#EE34363C' : '#F2FFFFFF') : Color.Transparent)
+    // BewlyBewly 同款悬浮胶囊：选中片带柔和投影，与页面底色分层
+    .shadow(this.visualTab === index ? {
+      radius: 10, color: this.isDark ? '#40000000' : '#1E4A5568', offsetX: 0, offsetY: 2,
+    } : { radius: 0, color: Color.Transparent, offsetX: 0, offsetY: 0 })
     .accessibilityText(label)
     .accessibilitySelected(this.visualTab === index)
     .animation({ duration: 180, curve: Curve.EaseOut })
@@ -356,7 +430,10 @@ export struct HomeView {
   }
 
   private switchTab(index: number): void {
-    this.tabsController.changeIndex(index);
+    // 点击频道即时换内容：直接改 index 绑定（不产生横向滑动动画），
+    // 选中胶囊自身仍有 180ms 微动效；手势滑动切页才走 Tabs 的滑动动画。
+    this.visualTab = index;
+    this.tab = index;
     if (index === 0 && this.recSource.isEmpty()) {
       this.loadRecommend(true).catch(() => {
       });
@@ -377,7 +454,7 @@ export struct HomeView {
       this.SubTabItem('直播', 2)
       Blank()
       Row({ space: 4 }) {
-        Image($r('app.media.ic_sort')).width(15).height(15)
+        Image($r('app.media.ic_categories')).width(15).height(15)
           .fillColor(this.isDark ? '#B4B6BE' : '#737985')
         Text('分区').fontSize(12).fontColor(this.isDark ? '#B4B6BE' : '#737985')
       }
@@ -490,8 +567,8 @@ export struct HomeView {
       if (feedTab === 1) {
         Row({ space: 8 }) {
           this.DiscoveryEntry($r('app.media.ic_hot'), '排行榜', NAV_RANK, '#EF8858')
-          this.DiscoveryEntry($r('app.media.ic_sort'), '分区频道', NAV_ZONE, '#6B97D4')
-          this.DiscoveryEntry($r('app.media.ic_favorite'), '番剧索引', NAV_BANGUMI_INDEX, this.accent)
+          this.DiscoveryEntry($r('app.media.ic_categories'), '分区频道', NAV_ZONE, '#6B97D4')
+          this.DiscoveryEntry($r('app.media.ic_categories'), '番剧索引', NAV_BANGUMI_INDEX, this.accent)
         }.width('100%')
       }
     }
@@ -671,8 +748,8 @@ export struct HomeView {
       .barHeight(0)
       .cachedMaxCount(1, TabsCacheMode.CACHE_BOTH_SIDE)
       .animationMode(AnimationMode.CONTENT_FIRST)
-      .animationDuration(MotionTokens.navigation)
-      .animationCurve(Curve.EaseInOut)
+      .animationDuration(MotionTokens.content)
+      .animationCurve(Curve.EaseOut)
       .onAnimationStart((index: number, targetIndex: number, extraInfo: TabsAnimationEvent) => {
         this.visualTab = targetIndex;
         AppTheme.resetHeaderFade();

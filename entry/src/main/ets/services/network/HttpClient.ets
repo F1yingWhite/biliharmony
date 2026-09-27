@@ -8,6 +8,7 @@ import { asObject, asString } from '../../common/Utils';
 import { Constants } from '../../common/Constants';
 import { CredentialPolicy } from './CredentialPolicy';
 import { AuthSession } from '../auth/AuthSession';
+import { parseJsonAsync } from './JsonParseTask';
 
 export class HttpResponse {
   status: number;
@@ -47,25 +48,61 @@ export class HttpResponse {
     }
   }
 
-  /** 解析 JSON body，失败返回空对象 */
-  json(): Record<string, Object> {
+  /** 解析后缓存：大响应（首页 feed/搜索/评论）常被 json()/getData()/failureText() 多次读取，
+   *  每次都全量 JSON.parse 会成倍放大主线程开销（ArkTS 的 JSON.parse 相对较慢）。
+   *  大 body 在返回调用方前经 taskpool 预热（adoptParsed 注入），首次读取即命中缓存。 */
+  private parsedOnce: boolean = false;
+  private parsedObject: Record<string, Object> = {} as Record<string, Object>;
+  private parsedArrayBody: Array<Object> = [] as Array<Object>;
+
+  /** 单次解析同时填充对象/数组两个视图，json() 与 jsonArray() 混用不再重复 parse。 */
+  private ensureParsed(): void {
+    if (this.parsedOnce) return;
+    this.parsedOnce = true;
     try {
       const parsed: Object = JSON.parse(this.body) as Object;
-      return asObject(parsed);
+      this.parsedObject = asObject(parsed);
+      this.parsedArrayBody = Array.isArray(parsed) ? parsed as Array<Object> : [] as Array<Object>;
     } catch (e) {
-      return {} as Record<string, Object>;
+      this.parsedObject = {} as Record<string, Object>;
+      this.parsedArrayBody = [] as Array<Object>;
     }
+  }
+
+  /** taskpool 预热结果注入：后台线程解析好的对象树直接进缓存，主线程零解析。 */
+  adoptParsed(parsed: Object): void {
+    this.parsedOnce = true;
+    this.parsedObject = asObject(parsed);
+    this.parsedArrayBody = Array.isArray(parsed) ? parsed as Array<Object> : [] as Array<Object>;
+  }
+
+  /** 解析 JSON body，失败返回空对象 */
+  json(): Record<string, Object> {
+    this.ensureParsed();
+    return this.parsedObject;
   }
 
   /** 解析 JSON 数组 body；body 非数组（如 JSON 对象）时返回空数组 */
   jsonArray(): Array<Object> {
-    try {
-      const parsed: Object = JSON.parse(this.body) as Object;
-      return Array.isArray(parsed) ? parsed as Array<Object> : [] as Array<Object>;
-    } catch (e) {
-      return [] as Array<Object>;
-    }
+    this.ensureParsed();
+    return this.parsedArrayBody;
   }
+}
+
+/**
+ * 并发请求优先级（SDK HttpRequestOptions.priority，取值 1~1000，默认 1）。
+ * 系统网络栈在并发请求之间按该值排序，因此首屏关键请求必须高于增强能力，
+ * 否则「表情包 / UP 投稿数 / 空降片段」会和「播放地址 / 评论首屏」排队抢带宽。
+ */
+export class RequestPriority {
+  /** 首屏阻塞项：播放地址、稿件详情、番剧详情。 */
+  static readonly CRITICAL: number = 900;
+  /** 首屏可见内容：评论首屏、互动与关注状态。 */
+  static readonly HIGH: number = 600;
+  /** 默认档：普通列表、分页、弹幕等非抢占性请求。 */
+  static readonly NORMAL: number = 300;
+  /** 增强能力：统计数字、表情包、空降片段、拖动预览、封面取色。 */
+  static readonly LOW: number = 100;
 }
 
 /** 每次请求独立保存错误，避免并发请求覆盖诊断信息。 */
@@ -141,6 +178,10 @@ export class HttpClient {
   private static appAccessToken: string = '';
   private static initialized: boolean = false;
   private static buvidReady: boolean = false;
+  /** 上一次 buvid 拉取失败的时间戳（Date.now()）；0 表示当前不在失败冷却期。 */
+  private static buvidFailedAt: number = 0;
+  /** 失败冷却期：期内不再重试 SPI 拉取，直接用兜底 buvid 放行请求。 */
+  private static readonly BUVID_FAILURE_COOLDOWN: number = 30000;
   /** 并发请求共用同一次 SPI 拉取；调用方必须等待 Promise 完成。 */
   private static buvidPromise: Promise<void> | null = null;
 
@@ -212,6 +253,13 @@ export class HttpClient {
   /** 从官方 spi 接口拉取真实 buvid3/buvid4（acc/info 等接口无真实 buvid 会被 -352 风控拒绝）。 */
   private static async ensureBuvid(): Promise<void> {
     if (HttpClient.buvidReady) return;
+    // 失败冷却：fetchBuvid 吞掉错误且连接/读取各等 8s 超时；若无冷却，网络不可用期间每个
+    // 受信请求都会先串行等一次超时才放行。冷却期内沿用兜底 buvid 直接放行——与既有失败路径
+    // （拉取失败后照常发请求）完全一致，对调用方零感知；30s 后才允许重试一次。
+    if (HttpClient.buvidFailedAt > 0 &&
+      Date.now() - HttpClient.buvidFailedAt < HttpClient.BUVID_FAILURE_COOLDOWN) {
+      return;
+    }
     if (HttpClient.buvidPromise !== null) {
       await HttpClient.buvidPromise;
       return;
@@ -220,6 +268,9 @@ export class HttpClient {
     HttpClient.buvidPromise = task;
     try {
       await task;
+      // fetchBuvid 内部不抛错：拉取后仍无真实 buvid 即视为本次失败，进入冷却；成功则清除。
+      if (HttpClient.buvidReady) HttpClient.buvidFailedAt = 0;
+      else HttpClient.buvidFailedAt = Date.now();
     } finally {
       if (HttpClient.buvidPromise === task) HttpClient.buvidPromise = null;
     }
@@ -354,7 +405,8 @@ export class HttpClient {
 
   /** 保留平台错误码；不记录可能包含 Cookie、签名或个人数据的异常文本和 URL。 */
   private static async execute(url: string, method: http.RequestMethod, dataType: http.HttpDataType,
-    extraHeaders?: Record<string, string>, body?: string): Promise<HttpExecution> {
+    extraHeaders?: Record<string, string>, body?: string | ArrayBuffer,
+    priority: number = RequestPriority.NORMAL): Promise<HttpExecution> {
     const request: http.HttpRequest = http.createHttp();
     try {
       const trusted: boolean = CredentialPolicy.allows(url);
@@ -372,6 +424,8 @@ export class HttpClient {
         expectDataType: dataType,
         // 带凭证的 API 禁止自动跨域重定向；公共资源仍可使用 CDN 重定向。
         maxRedirects: trusted ? 0 : 5,
+        // 并发调度优先级：默认 NORMAL，首屏关键请求由调用方提到 CRITICAL。
+        priority: priority,
       };
       if (body !== undefined) {
         options.extraData = body;
@@ -392,38 +446,93 @@ export class HttpClient {
     }
   }
 
-  static async get(url: string, extraHeaders?: Record<string, string>): Promise<HttpResponse> {
+  static async get(url: string, extraHeaders?: Record<string, string>,
+    priority: number = RequestPriority.NORMAL): Promise<HttpResponse> {
     HttpClient.ensureInit();
     const trusted: boolean = CredentialPolicy.allows(url);
     const session: number = AuthSession.version;
     if (trusted) await HttpClient.ensureBuvid();
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
     const execution: HttpExecution =
-      await HttpClient.execute(url, http.RequestMethod.GET, http.HttpDataType.STRING, extraHeaders);
+      await HttpClient.execute(url, http.RequestMethod.GET, http.HttpDataType.STRING, extraHeaders, undefined, priority);
     const resp: http.HttpResponse | null = execution.response;
     if (resp === null) {
       return new HttpResponse(-1, '', {}, execution.transportCode);
     }
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
     if (trusted) HttpClient.absorbCookies(resp.header);
-    return new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>);
+    return HttpClient.prewarmParse(
+      new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>));
   }
 
-  static async post(url: string, body?: string, extraHeaders?: Record<string, string>): Promise<HttpResponse> {
+  static async post(url: string, body?: string, extraHeaders?: Record<string, string>,
+    priority: number = RequestPriority.NORMAL): Promise<HttpResponse> {
     HttpClient.ensureInit();
     const trusted: boolean = CredentialPolicy.allows(url);
     const session: number = AuthSession.version;
     if (trusted) await HttpClient.ensureBuvid();
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
     const execution: HttpExecution =
-      await HttpClient.execute(url, http.RequestMethod.POST, http.HttpDataType.STRING, extraHeaders, body ?? '');
+      await HttpClient.execute(url, http.RequestMethod.POST, http.HttpDataType.STRING, extraHeaders, body ?? '', priority);
     const resp: http.HttpResponse | null = execution.response;
     if (resp === null) {
       return new HttpResponse(-1, '', {}, execution.transportCode);
     }
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
     if (trusted) HttpClient.absorbCookies(resp.header);
-    return new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>);
+    return HttpClient.prewarmParse(
+      new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>));
+  }
+
+  /** 超过该长度的 body 才值得一次 taskpool 往返；小响应主线程解析更便宜。 */
+  private static readonly ASYNC_PARSE_THRESHOLD: number = 32 * 1024;
+
+  /**
+   * 二进制 POST（multipart 上传等）：body 原样字节发送，Content-Type 由调用方显式给定。
+   * 凭证/buvid/session 语义与 post() 完全一致。
+   */
+  static async postBinary(url: string, contentType: string, body: ArrayBuffer,
+    extraHeaders?: Record<string, string>, priority: number = RequestPriority.NORMAL)
+    : Promise<HttpResponse> {
+    HttpClient.ensureInit();
+    const trusted: boolean = CredentialPolicy.allows(url);
+    const session: number = AuthSession.version;
+    if (trusted) await HttpClient.ensureBuvid();
+    if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
+    const headers: Record<string, string> = { 'Content-Type': contentType };
+    if (extraHeaders) {
+      const keys: Array<string> = Object.keys(extraHeaders);
+      for (let i: number = 0; i < keys.length; i++) {
+        headers[keys[i]] = extraHeaders[keys[i]];
+      }
+    }
+    const execution: HttpExecution =
+      await HttpClient.execute(url, http.RequestMethod.POST, http.HttpDataType.STRING, headers, body, priority);
+    const resp: http.HttpResponse | null = execution.response;
+    if (resp === null) {
+      return new HttpResponse(-1, '', {}, execution.transportCode);
+    }
+    if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
+    if (trusted) HttpClient.absorbCookies(resp.header);
+    return HttpClient.prewarmParse(
+      new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>));
+  }
+
+  /**
+   * 大 JSON 响应在返回调用方前先经 taskpool 预热解析：解析搬进后台线程，
+   * 首屏与翻页帧不再被最长 10~40ms 的主线程 JSON.parse 阻塞。
+   * 仅对看起来是 JSON 的 body 生效（风险控制 HTML 等大页面不进线程池白跑一趟）；
+   * 后台解析失败自动回退主线程同步解析，调用方无感。
+   */
+  private static async prewarmParse(resp: HttpResponse): Promise<HttpResponse> {
+    const body: string = resp.body;
+    if (body.length < HttpClient.ASYNC_PARSE_THRESHOLD) return resp;
+    const head: string = body.length > 32 ? body.substring(0, 32) : body;
+    const trimmed: string = head.trimStart();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return resp;
+    const parsed: Object | null = await parseJsonAsync(body);
+    if (parsed !== null) resp.adoptParsed(parsed);
+    return resp;
   }
 
   /** 合并两个 header 表（ArkTS 不支持对象展开） */
@@ -441,19 +550,21 @@ export class HttpClient {
   }
 
   /** 下载二进制数据（用于图片取色等） */
-  static async getBytes(url: string, extraHeaders?: Record<string, string>): Promise<ArrayBuffer> {
+  static async getBytes(url: string, extraHeaders?: Record<string, string>,
+    priority: number = RequestPriority.NORMAL): Promise<ArrayBuffer> {
     HttpClient.ensureInit();
     const execution: HttpExecution =
-      await HttpClient.execute(url, http.RequestMethod.GET, http.HttpDataType.ARRAY_BUFFER, extraHeaders);
+      await HttpClient.execute(url, http.RequestMethod.GET, http.HttpDataType.ARRAY_BUFFER, extraHeaders, undefined, priority);
     const resp: http.HttpResponse | null = execution.response;
     return resp === null ? new ArrayBuffer(0) : resp.result as ArrayBuffer;
   }
 
   /** 下载二进制数据并校验 HTTP 状态（弹幕分段等需要区分失败以回退的场景）；失败返回 null */
-  static async getBinary(url: string, extraHeaders?: Record<string, string>): Promise<ArrayBuffer | null> {
+  static async getBinary(url: string, extraHeaders?: Record<string, string>,
+    priority: number = RequestPriority.NORMAL): Promise<ArrayBuffer | null> {
     HttpClient.ensureInit();
     const execution: HttpExecution =
-      await HttpClient.execute(url, http.RequestMethod.GET, http.HttpDataType.ARRAY_BUFFER, extraHeaders);
+      await HttpClient.execute(url, http.RequestMethod.GET, http.HttpDataType.ARRAY_BUFFER, extraHeaders, undefined, priority);
     const resp: http.HttpResponse | null = execution.response;
     if (resp === null || resp.responseCode < 200 || resp.responseCode >= 300) {
       return null;

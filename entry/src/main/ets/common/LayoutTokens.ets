@@ -3,6 +3,11 @@
  * 页面只表达“信息流 / 阅读 / 普通页面”语义，不再各自散落屏宽断点和最大宽度。
  */
 export class LayoutTokens {
+  /** 视频网格卡片与骨架共用的视觉尺度。 */
+  static readonly cardRadius: number = 14;
+  static readonly cardMetaHeight: number = 36;
+  static readonly cardMetaFontSize: number = 12;
+  static readonly cardControlSize: number = 36;
   static readonly phonePadding: number = 10;
   static readonly widePadding: number = 18;
   static readonly readingMaxWidth: number = 760;

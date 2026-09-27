@@ -41,88 +41,99 @@ export async function makeReplyShareSnapshot(uiContext: UIContext, builder: Cust
   }
 }
 
-/** 把分享卡截图写入临时缓存并调起系统分享面板；面板结束后自动回收临时文件。 */
+/**
+ * 把分享卡截图写入临时缓存并调起系统分享面板；面板结束后自动回收临时文件。
+ * 截图 PixelMap 仅供打包 PNG/JPEG 使用，函数结束时（含失败路径）统一释放，调用方无需再管。
+ */
 export async function sharePixelMapAsImage(context: common.UIAbilityContext, pixelMap: image.PixelMap,
   fileName: string): Promise<void> {
-  const packer: image.ImagePacker = image.createImagePacker();
-  let buffer: ArrayBuffer;
   try {
-    buffer = await packer.packToData(pixelMap, { format: 'image/png', quality: 100 });
-  } finally {
-    await packer.release();
-  }
-  const path: string = context.cacheDir + '/' + fileName + '.png';
-  const thumbPath: string = context.cacheDir + '/' + fileName + '_thumb.jpg';
-  const file: fs.File = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-  try {
-    fs.writeSync(file.fd, buffer);
-  } finally {
-    fs.closeSync(file);
-  }
-  // 生成 JPEG 缩略图作为分享面板的预览图（thumbnailUri 缺省时系统会用
-  // 通用图标占位，观感就是"分享的是一个 logo"）。缩略图 < 32KB 才可传给
-  // thumbnail 字段，这里用 thumbnailUri 指向缓存文件，避免尺寸限制。
-  let thumbnailUri: string = '';
-  try {
-    const thumbPacker: image.ImagePacker = image.createImagePacker();
-    let thumbBuffer: ArrayBuffer;
+    const packer: image.ImagePacker = image.createImagePacker();
+    let buffer: ArrayBuffer;
     try {
-      thumbBuffer = await thumbPacker.packToData(pixelMap, { format: 'image/jpeg', quality: 82 });
+      buffer = await packer.packToData(pixelMap, { format: 'image/png', quality: 100 });
     } finally {
-      await thumbPacker.release();
+      await packer.release();
     }
-    const thumbFile: fs.File = fs.openSync(thumbPath,
-      fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+    const path: string = context.cacheDir + '/' + fileName + '.png';
+    const thumbPath: string = context.cacheDir + '/' + fileName + '_thumb.jpg';
+    const file: fs.File = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
     try {
-      fs.writeSync(thumbFile.fd, thumbBuffer);
+      fs.writeSync(file.fd, buffer);
     } finally {
-      fs.closeSync(thumbFile);
+      fs.closeSync(file);
     }
-    thumbnailUri = fileUri.getUriFromPath(thumbPath);
-  } catch (e) {
-    thumbnailUri = '';
-  }
-  const imageUri: string = fileUri.getUriFromPath(path);
-  const imageType: string = utd.getUniformDataTypeByFilenameExtension('.png', utd.UniformDataType.IMAGE);
-  const data: systemShare.SharedData = new systemShare.SharedData({
-    utd: imageType,
-    title: '分享评论',
-    uri: imageUri,
-    thumbnailUri,
-    description: '来自哔哩哔哩的评论',
-  });
-  const controller: systemShare.ShareController = new systemShare.ShareController(data);
-  let cleanupScheduled: boolean = false;
-  const removeTemporaryFiles = (): void => {
+    // 生成 JPEG 缩略图作为分享面板的预览图（thumbnailUri 缺省时系统会用
+    // 通用图标占位，观感就是"分享的是一个 logo"）。缩略图 < 32KB 才可传给
+    // thumbnail 字段，这里用 thumbnailUri 指向缓存文件，避免尺寸限制。
+    let thumbnailUri: string = '';
     try {
-      fs.unlinkSync(path);
+      const thumbPacker: image.ImagePacker = image.createImagePacker();
+      let thumbBuffer: ArrayBuffer;
+      try {
+        thumbBuffer = await thumbPacker.packToData(pixelMap, { format: 'image/jpeg', quality: 82 });
+      } finally {
+        await thumbPacker.release();
+      }
+      const thumbFile: fs.File = fs.openSync(thumbPath,
+        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(thumbFile.fd, thumbBuffer);
+      } finally {
+        fs.closeSync(thumbFile);
+      }
+      thumbnailUri = fileUri.getUriFromPath(thumbPath);
     } catch (e) {
+      thumbnailUri = '';
     }
-    try {
-      fs.unlinkSync(thumbPath);
-    } catch (e) {
-    }
-  };
-  const scheduleCleanup = (): void => {
-    if (cleanupScheduled) return;
-    cleanupScheduled = true;
-    // 给接收方留出读取 URI 的时间；文件只短暂存在，不再成为长期缓存。
-    setTimeout(removeTemporaryFiles, 10000);
-  };
-  controller.on('shareCompleted', scheduleCleanup);
-  controller.on('dismiss', scheduleCleanup);
-  try {
-    await controller.show(context, {
-      selectionMode: systemShare.SelectionMode.SINGLE,
-      previewMode: systemShare.SharePreviewMode.DETAIL,
+    const imageUri: string = fileUri.getUriFromPath(path);
+    const imageType: string = utd.getUniformDataTypeByFilenameExtension('.png', utd.UniformDataType.IMAGE);
+    const data: systemShare.SharedData = new systemShare.SharedData({
+      utd: imageType,
+      title: '分享评论',
+      uri: imageUri,
+      thumbnailUri,
+      description: '来自哔哩哔哩的评论',
     });
-    // 极端情况下系统不回调完成/关闭事件，也最多保留五分钟；下次启动还有遗留清理兜底。
-    setTimeout(removeTemporaryFiles, 5 * 60 * 1000);
-  } catch (e) {
-    removeTemporaryFiles();
-    const error: Error = e as Error;
-    CommentLog.error('share.panel.error', 'uri=' + imageUri + ' error=' + CommentLog.errorText(error));
-    throw error;
+    const controller: systemShare.ShareController = new systemShare.ShareController(data);
+    let cleanupScheduled: boolean = false;
+    const removeTemporaryFiles = (): void => {
+      try {
+        fs.unlinkSync(path);
+      } catch (e) {
+      }
+      try {
+        fs.unlinkSync(thumbPath);
+      } catch (e) {
+      }
+    };
+    const scheduleCleanup = (): void => {
+      if (cleanupScheduled) return;
+      cleanupScheduled = true;
+      // 给接收方留出读取 URI 的时间；文件只短暂存在，不再成为长期缓存。
+      setTimeout(removeTemporaryFiles, 10000);
+    };
+    controller.on('shareCompleted', scheduleCleanup);
+    controller.on('dismiss', scheduleCleanup);
+    try {
+      await controller.show(context, {
+        selectionMode: systemShare.SelectionMode.SINGLE,
+        previewMode: systemShare.SharePreviewMode.DETAIL,
+      });
+      // 极端情况下系统不回调完成/关闭事件，也最多保留五分钟；下次启动还有遗留清理兜底。
+      setTimeout(removeTemporaryFiles, 5 * 60 * 1000);
+    } catch (e) {
+      removeTemporaryFiles();
+      const error: Error = e as Error;
+      CommentLog.error('share.panel.error', 'uri=' + imageUri + ' error=' + CommentLog.errorText(error));
+      throw error;
+    }
+  } finally {
+    try {
+      pixelMap.release();
+    } catch (e) {
+      // 已释放的截图忽略。
+    }
   }
 }
 

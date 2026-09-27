@@ -32,6 +32,18 @@ export class TVPollResult {
   accessToken: string = '';
 }
 
+export class WebQrCode {
+  qrcodeKey: string = '';
+  url: string = '';
+}
+
+export class WebQrPollResult {
+  code: number = -1;
+  message: string = '';
+  /** 登录成功时下发，Cookie 自动续期（CookieRefresher）必需。 */
+  refreshToken: string = '';
+}
+
 export class LoginWebKey {
   hash: string = '';
   key: string = '';
@@ -50,9 +62,61 @@ export class SmsSendResult {
   message: string = '';
   captchaKey: string = '';
   needCaptcha: boolean = false;
+  /** -352 类风控时下发的验证凭证：走 gaia-vgate + 极验滑块后携 grisk_id 重试。 */
+  vVoucher: string = '';
+}
+
+export class GaiaRegisterResult {
+  token: string = '';
+  gt: string = '';
+  challenge: string = '';
+}
+
+export class GaiaValidateResult {
+  ok: boolean = false;
+  griskId: string = '';
+}
+
+/** 极验校验三元组（滑块通过后由 Web 容器回传）。 */
+export class GeetestAnswer {
+  challenge: string = '';
+  validate: string = '';
+  seccode: string = '';
 }
 
 export class AuthApi {
+  /**
+   * Web 扫码登录：与 TV 扫码相比，轮询确认后经 Set-Cookie 下发完整 Web Cookie，
+   * 并在响应体返回 refresh_token —— 这是 Cookie 自动续期（CookieRefresher）的前提。
+   */
+  static async getWebQRCode(): Promise<WebQrCode | null> {
+    const resp: HttpResponse = await HttpClient.get(Api.webQrGenerate, Constants.webHeaders);
+    const data: Record<string, Object> | null = getData(resp);
+    if (data === null) return null;
+    const result: WebQrCode = new WebQrCode();
+    result.url = asString(data['url'], '');
+    result.qrcodeKey = asString(data['qrcode_key'], '');
+    return result.url.length > 0 && result.qrcodeKey.length > 0 ? result : null;
+  }
+
+  static async pollWebQRCode(qrcodeKey: string): Promise<WebQrPollResult> {
+    const result: WebQrPollResult = new WebQrPollResult();
+    const resp: HttpResponse = await HttpClient.get(
+      Api.webQrPoll + '?' + HttpClient.buildQuery({ 'qrcode_key': qrcodeKey }), Constants.webHeaders);
+    if (!resp.ok) {
+      result.message = resp.status < 0 ? resp.transportMessage : '网络请求失败 (' + String(resp.status) + ')';
+      return result;
+    }
+    const json: Record<string, Object> = resp.json();
+    const data: Record<string, Object> = asObject(json['data']);
+    result.code = asNumber(data['code'], -1);
+    result.message = asString(data['message'], '');
+    if (result.code === 0) {
+      result.refreshToken = asString(data['refresh_token'], '');
+    }
+    return result;
+  }
+
   static async getTVCode(): Promise<TVCodeResult | null> {
     const params: Record<string, string> = {
       'local_id': '0', 'platform': 'android', 'mobi_app': 'android_hd',
@@ -73,6 +137,13 @@ export class AuthApi {
     await appSign(params);
     const resp: HttpResponse = await HttpClient.post(Api.qrcodePoll, HttpClient.buildQuery(params),
       HttpClient.merge(Constants.appHeaders, {}));
+    if (!resp.ok) {
+      const result: TVPollResult = new TVPollResult();
+      // code 默认 0 会被调用方（Login.poll 以 code===0 判定登录成功）误判，网络失败必须置非 0。
+      result.code = resp.status < 0 ? -1 : resp.status;
+      result.message = resp.status < 0 ? resp.transportMessage : '网络请求失败 (' + String(resp.status) + ')';
+      return result;
+    }
     const json: Record<string, Object> = resp.json();
     const result: TVPollResult = new TVPollResult();
     result.code = asNumber(json['code'], -1);
@@ -130,7 +201,8 @@ export class AuthApi {
     return parseLoginResult(resp, result);
   }
 
-  static async sendSmsCode(tel: string): Promise<SmsSendResult> {
+  static async sendSmsCode(tel: string, gaiaToken: string = '',
+    geetest: GeetestAnswer | null = null): Promise<SmsSendResult> {
     const result: SmsSendResult = new SmsSendResult();
     const buvid: string = HttpClient.buvid;
     const params: Record<string, string> = {
@@ -139,14 +211,71 @@ export class AuthApi {
       'mobi_app': 'android_hd', 'platform': 'android', 's_locale': 'zh_CN',
       'statistics': Constants.statistics, 'tel': tel,
     };
+    if (gaiaToken.length > 0) params['recaptcha_token'] = gaiaToken;
+    if (geetest !== null) {
+      params['gee_challenge'] = geetest.challenge;
+      params['gee_validate'] = geetest.validate;
+      params['gee_seccode'] = geetest.seccode;
+    }
     await appSign(params);
     const resp: HttpResponse = await HttpClient.post(Api.smsSend, HttpClient.buildQuery(params), AuthApi.loginHeaders());
+    if (!resp.ok) {
+      // 网络失败时 resp.json() 静默返回 {}，必须先行拦截给出可读文案（code 保持默认 -1 即失败）。
+      result.message = resp.status < 0 ? resp.transportMessage : '网络请求失败 (' + String(resp.status) + ')';
+      return result;
+    }
     const json: Record<string, Object> = resp.json();
     result.code = asNumber(json['code'], -1);
     result.message = asString(json['message'], '');
     const data: Record<string, Object> = asObject(json['data']);
     result.needCaptcha = asString(data['recaptcha_url'], '').length > 0;
+    result.vVoucher = asString(data['v_voucher'], '');
     if (result.code === 0 && !result.needCaptcha) result.captchaKey = asString(data['captcha_key'], '');
+    return result;
+  }
+
+  /** gaia-vgate 注册：用风控响应里的 v_voucher 换取极验 gt/challenge 与验证 token。 */
+  static async gaiaVgateRegister(vVoucher: string): Promise<GaiaRegisterResult | null> {
+    for (let i: number = 0; i < Api.gaiaVgateRegisterList.length; i++) {
+      const resp: HttpResponse = await HttpClient.post(Api.gaiaVgateRegisterList[i],
+        HttpClient.buildQuery({ 'v_voucher': vVoucher }), AuthApi.loginHeaders());
+      if (!resp.ok) continue;
+      const json: Record<string, Object> = resp.json();
+      const code: number = asNumber(json['code'], -1);
+      if (code === -404) continue;
+      if (code !== 0) return null;
+      const data: Record<string, Object> = asObject(json['data']);
+      const geetest: Record<string, Object> = asObject(data['geetest']);
+      const result: GaiaRegisterResult = new GaiaRegisterResult();
+      result.token = asString(data['token'], '');
+      result.gt = asString(geetest['gt'], '');
+      result.challenge = asString(geetest['challenge'], '');
+      if (result.token.length > 0 && result.gt.length > 0 && result.challenge.length > 0) return result;
+      return null;
+    }
+    return null;
+  }
+
+  /** gaia-vgate 校验：滑块答案换取 grisk_id（重试原请求时作为 recaptcha_token 携带）。 */
+  static async gaiaVgateValidate(token: string, answer: GeetestAnswer): Promise<GaiaValidateResult> {
+    const result: GaiaValidateResult = new GaiaValidateResult();
+    const params: Record<string, string> = {
+      'challenge': answer.challenge, 'seccode': answer.seccode,
+      'token': token, 'validate': answer.validate,
+    };
+    for (let i: number = 0; i < Api.gaiaVgateValidateList.length; i++) {
+      const resp: HttpResponse = await HttpClient.post(Api.gaiaVgateValidateList[i],
+        HttpClient.buildQuery(params), AuthApi.loginHeaders());
+      if (!resp.ok) continue;
+      const json: Record<string, Object> = resp.json();
+      const code: number = asNumber(json['code'], -1);
+      if (code === -404) continue;
+      if (code !== 0) return result;
+      const data: Record<string, Object> = asObject(json['data']);
+      result.ok = asNumber(data['is_valid'], 0) === 1;
+      result.griskId = asString(data['grisk_id'], '');
+      return result;
+    }
     return result;
   }
 
@@ -189,6 +318,11 @@ async function getLoginDeviceId(): Promise<string> {
 }
 
 function parseLoginResult(resp: HttpResponse, result: LoginResult): LoginResult {
+  if (!resp.ok) {
+    // 网络失败时 resp.json() 静默返回 {}，会表现为“空白错误”；拦截后透出真实原因（code 保持默认 -1）。
+    result.message = resp.status < 0 ? resp.transportMessage : '网络请求失败 (' + String(resp.status) + ')';
+    return result;
+  }
   const json: Record<string, Object> = resp.json();
   result.code = asNumber(json['code'], -1);
   result.message = asString(json['message'], '');

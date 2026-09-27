@@ -15,8 +15,8 @@
 #     ./emu.sh logs              查看启动日志
 # ============================================================
 set -uo pipefail
-E=/home/xuyihan/ohos-sdk/command-line-tools/emulator/Emulator
-HDC=/home/xuyihan/ohos-sdk/command-line-tools/sdk/default/openharmony/toolchains/hdc
+E=/home/ohos-builder/ohos-sdk/command-line-tools/emulator/Emulator
+HDC=/home/ohos-builder/ohos-sdk/command-line-tools/sdk/default/openharmony/toolchains/hdc
 INSTANCE=bili_dev
 PORT=15556
 OSV="HarmonyOS 6.1.1(24)"

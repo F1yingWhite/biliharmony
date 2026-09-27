@@ -1,5 +1,16 @@
+/**
+ * YouTube 公开页面/接口读取与解析。
+ * 大 JSON（ytInitialData / InnerTube 响应）的提取与解析在 taskpool 后台线程执行
+ * （核心在 YouTubeParseCore.ets，任务封装在 YouTubeParseTasks.ets），
+ * 本文件只负责网络请求、把可跨线程的结果映射为 UI 模型、以及 InnerTube 配置缓存。
+ */
+import { collections } from '@kit.ArkTS';
 import { HttpClient, HttpResponse } from '../services/network/HttpClient';
-import { asObject, asString, formatDuration } from '../common/Utils';
+import { parseSearchPageAsync, parseContinuationAsync, parseCommentsAsync, parseDetailPageAsync,
+  SendableYtComment, SendableYtCommentPage, SendableYtFilterGroup, SendableYtSearchPage,
+  SendableYtVideo, SendableYtWatchPage } from './YouTubeParseTasks';
+import { extractInitialObject, parseContinuationCore, parseCommentsCore, parseDetailPageCore,
+  parseFiltersCore, parseSearchPageCore } from './YouTubeParseCore';
 
 /** YouTube 身份独立于 B 站的 aid / bvid / cid。只读取公开元数据，不提取媒体地址。 */
 export class YouTubeVideo {
@@ -78,20 +89,6 @@ interface InnerTubeRequest {
   continuation: string;
 }
 
-/** 取一组缩略图里的第一个地址（YouTube 按尺寸从小到大排列，首个足够列表使用）。 */
-function thumbnailUrl(node: Object | undefined): string {
-  const list: Object = asObject(node)['thumbnails'];
-  if (!Array.isArray(list) || (list as Array<Object>).length === 0) return '';
-  return asString(asObject((list as Array<Object>)[0])['url']);
-}
-
-function textValue(value: Object | undefined): string {
-  const node: Record<string, Object> = asObject(value);
-  if (typeof node['simpleText'] === 'string') return asString(node['simpleText']);
-  if (!Array.isArray(node['runs'])) return '';
-  return (node['runs'] as Array<Object>).map((run: Object) => asString(asObject(run)['text'])).join('');
-}
-
 export class YouTubeApi {
   /**
    * 请求公开页面时声明桌面版 UA。不带 UA 会被 YouTube 判为不可信客户端并返回
@@ -132,137 +129,120 @@ export class YouTubeApi {
     return query !== null ? query[1] : '';
   }
 
-  /** 扫描 JSON 的字符串/括号边界；标题中的分号、花括号不会截断数据。绝不执行远端脚本。 */
+  /** 扫描 JSON 的字符串/括号边界（实现与 worker 解析核心共用）。 */
   static initialObject(html: string, variable: string): Record<string, Object> | null {
-    const pattern: RegExp = new RegExp('(?:var\\s+' + variable + '|window\\["' + variable + '"\\])\\s*=\\s*');
-    const match: RegExpMatchArray | null = html.match(pattern);
-    if (match === null || match.index === undefined) return null;
-    const start: number = match.index + match[0].length;
-    if (html[start] !== '{') return null;
-    let depth: number = 0;
-    let quoted: boolean = false;
-    let escaped: boolean = false;
-    for (let i: number = start; i < html.length; i++) {
-      const c: string = html[i];
-      if (quoted) {
-        if (escaped) escaped = false;
-        else if (c === '\\') escaped = true;
-        else if (c === '"') quoted = false;
-      } else if (c === '"') quoted = true;
-      else if (c === '{') depth++;
-      else if (c === '}' && --depth === 0) {
-        try { return asObject(JSON.parse(html.substring(start, i + 1)) as Object); }
-        catch (_) { return null; }
+    return extractInitialObject(html, variable);
+  }
+
+  // ===== 可跨线程解析结果 → UI 模型 =====
+
+  private static toVideo(s: SendableYtVideo): YouTubeVideo {
+    const video: YouTubeVideo = new YouTubeVideo();
+    video.id = s.id;
+    video.title = s.title;
+    video.channel = s.channel;
+    video.thumbnail = s.thumbnail;
+    video.duration = s.duration;
+    video.views = s.views;
+    video.published = s.published;
+    video.description = s.description;
+    video.notice = s.notice;
+    video.channelAvatar = s.channelAvatar;
+    video.subscribers = s.subscribers;
+    return video;
+  }
+
+  private static toFilterGroups(groups: collections.Array<SendableYtFilterGroup>): Array<YouTubeSearchFilterGroup> {
+    const out: Array<YouTubeSearchFilterGroup> = [];
+    for (let i: number = 0; i < groups.length; i++) {
+      const group: SendableYtFilterGroup = groups[i];
+      const target: YouTubeSearchFilterGroup = new YouTubeSearchFilterGroup();
+      target.title = group.title;
+      for (let j: number = 0; j < group.filters.length; j++) {
+        const filter: YouTubeSearchFilter = new YouTubeSearchFilter();
+        filter.label = group.filters[j].label;
+        filter.params = group.filters[j].params;
+        target.filters.push(filter);
       }
+      out.push(target);
     }
-    return null;
+    return out;
   }
 
-  private static collect(node: Object, videos: Array<YouTubeVideo>, seen: Set<string>, depth: number): void {
-    if (depth > 40 || node === null || typeof node !== 'object') return;
-    if (Array.isArray(node)) {
-      for (const item of node as Array<Object>) YouTubeApi.collect(item, videos, seen, depth + 1);
-      return;
-    }
-    const record: Record<string, Object> = asObject(node);
-    // 广告位、推荐搜索词和频道卡片不冒充视频结果。
-    if (record['adSlotRenderer'] !== undefined || record['promotedSparklesWebRenderer'] !== undefined) return;
-    if (record['videoRenderer'] !== undefined) {
-      const data: Record<string, Object> = asObject(record['videoRenderer']);
-      const id: string = asString(data['videoId']);
-      if (!YouTubeApi.validId(id) || seen.has(id)) return;
-      const video: YouTubeVideo = new YouTubeVideo();
-      video.id = id;
-      video.title = textValue(data['title']);
-      if (video.title.length === 0) return;
-      video.channel = textValue(data['ownerText']) || textValue(data['longBylineText']);
-      video.thumbnail = 'https://i.ytimg.com/vi/' + id + '/hqdefault.jpg';
-      video.duration = textValue(data['lengthText']);
-      video.views = textValue(data['viewCountText']);
-      video.published = textValue(data['publishedTimeText']);
-      const snippets: Object = data['detailedMetadataSnippets'];
-      if (Array.isArray(snippets) && (snippets as Array<Object>).length > 0) {
-        video.description = textValue(asObject((snippets as Array<Object>)[0])['snippetText']);
-      }
-      seen.add(id);
-      videos.push(video);
-      return;
-    }
-    for (const key of Object.keys(record)) YouTubeApi.collect(record[key], videos, seen, depth + 1);
-  }
-
-  /**
-   * 搜索结果列表的下一页 token。位置固定：primaryContents → sectionListRenderer →
-   * contents 末尾的 continuationItemRenderer。取不到就返回空串——列表如实收尾，
-   * 不伪造"还有更多"。
-   */
-  private static searchContinuation(initial: Record<string, Object>): string {
-    const primary: Record<string, Object> = asObject(asObject(asObject(initial['contents'])
-      ['twoColumnSearchResultsRenderer'])['primaryContents']);
-    const sections: Object = asObject(primary['sectionListRenderer'])['contents'];
-    if (!Array.isArray(sections)) return '';
-    for (const section of sections as Array<Object>) {
-      // 注意：asObject 只兜住自己那一层，中间层缺失时索引结果仍是 undefined，
-      // 必须把索引结果再包一次，否则这里会抛 TypeError 而不是返回空 token。
-      const endpoint: Record<string, Object> =
-        asObject(asObject(asObject(section)['continuationItemRenderer'])['continuationEndpoint']);
-      const token: string = asString(asObject(endpoint['continuationCommand'])['token']);
-      if (token.length > 0) return token;
-    }
-    return '';
-  }
-
-  static parseSearchPage(html: string): YouTubeSearchPage {
-    const initial: Record<string, Object> | null = YouTubeApi.initialObject(html, 'ytInitialData');
-    if (initial === null || initial['contents'] === undefined) {
-      throw new Error('YouTube 返回了验证页或页面格式已变化，请稍后重试');
-    }
+  private static toSearchPage(s: SendableYtSearchPage): YouTubeSearchPage {
     const page: YouTubeSearchPage = new YouTubeSearchPage();
-    YouTubeApi.collect(initial['contents'], page.videos, new Set<string>(), 0);
-    page.continuation = YouTubeApi.searchContinuation(initial);
+    for (let i: number = 0; i < s.videos.length; i++) {
+      page.videos.push(YouTubeApi.toVideo(s.videos[i]));
+    }
+    page.continuation = s.continuation;
+    page.filters = YouTubeApi.toFilterGroups(s.filters);
     return page;
   }
 
-  /**
-   * 搜索筛选定义：页面把「类型 / 时长 / 上传时间 / 功能 / 排序」放在搜索框旁边的
-   * 过滤弹层里（searchFilterOptionsDialogRenderer）。只读取 label 与 params，
-   * 不解释 params 的内容——回传时原样带上即可。
-   */
-  static parseFilters(html: string): Array<YouTubeSearchFilterGroup> {
-    const initial: Record<string, Object> | null = YouTubeApi.initialObject(html, 'ytInitialData');
-    if (initial === null) return [];
-    const header: Record<string, Object> = asObject(asObject(initial['header'])['searchHeaderRenderer']);
-    const button: Record<string, Object> = asObject(asObject(header['searchFilterButton'])['buttonRenderer']);
-    // 每一层索引的结果都要再包一次 asObject：索引出来的是 Object，不能直接当 Record 用。
-    const dialog: Record<string, Object> = asObject(
-      asObject(asObject(asObject(button['command'])['openPopupAction'])['popup'])
-        ['searchFilterOptionsDialogRenderer']);
-    const groups: Object = asObject(dialog)['groups'];
-    const out: Array<YouTubeSearchFilterGroup> = [];
-    if (!Array.isArray(groups)) return out;
-    for (const entry of groups as Array<Object>) {
-      const group: Record<string, Object> = asObject(asObject(entry)['searchFilterGroupRenderer']);
-      const filters: Object = group['filters'];
-      if (!Array.isArray(filters)) continue;
-      const parsed: YouTubeSearchFilterGroup = new YouTubeSearchFilterGroup();
-      parsed.title = textValue(group['title']);
-      for (const item of filters as Array<Object>) {
-        const renderer: Record<string, Object> = asObject(asObject(item)['searchFilterRenderer']);
-        const endpoint: Record<string, Object> = asObject(asObject(renderer['navigationEndpoint'])['searchEndpoint']);
-        const filter: YouTubeSearchFilter = new YouTubeSearchFilter();
-        filter.label = textValue(renderer['label']);
-        filter.params = asString(endpoint['params']);
-        if (filter.label.length > 0 && filter.params.length > 0) parsed.filters.push(filter);
-      }
-      if (parsed.filters.length > 0) out.push(parsed);
+  private static toCommentPage(s: SendableYtCommentPage): YouTubeCommentPage {
+    const page: YouTubeCommentPage = new YouTubeCommentPage();
+    for (let i: number = 0; i < s.comments.length; i++) {
+      const source: SendableYtComment = s.comments[i];
+      const comment: YouTubeComment = new YouTubeComment();
+      comment.id = source.id;
+      comment.author = source.author;
+      comment.avatar = source.avatar;
+      comment.text = source.text;
+      comment.likes = source.likes;
+      comment.published = source.published;
+      page.comments.push(comment);
     }
-    return out;
+    page.continuation = s.continuation;
+    page.total = s.total;
+    return page;
+  }
+
+  private static toWatchPage(s: SendableYtWatchPage): YouTubeWatchPage {
+    const page: YouTubeWatchPage = new YouTubeWatchPage();
+    page.video = YouTubeApi.toVideo(s.video);
+    for (let i: number = 0; i < s.related.length; i++) {
+      page.related.push(YouTubeApi.toVideo(s.related[i]));
+    }
+    page.commentToken = s.commentToken;
+    return page;
+  }
+
+  /** 记住本次页面下发的 InnerTube 配置，返回是否可用（不可用时调用方须关闭翻页/评论）。 */
+  private static applyInnerTube(apiKey: string, clientVersion: string): boolean {
+    if (apiKey.length === 0 || clientVersion.length === 0) return false;
+    YouTubeApi.innerApiKey = apiKey;
+    YouTubeApi.innerClientVersion = clientVersion;
+    return true;
+  }
+
+  // ===== 同步解析入口（QA 测试与兼容调用；生产链路走异步 + taskpool） =====
+
+  static parseSearchPage(html: string): YouTubeSearchPage {
+    return YouTubeApi.toSearchPage(parseSearchPageCore(html));
+  }
+
+  static parseFilters(html: string): Array<YouTubeSearchFilterGroup> {
+    return YouTubeApi.toFilterGroups(parseFiltersCore(html));
   }
 
   /** 只取视频列表的兼容入口；翻页需要 continuation，请用 parseSearchPage。 */
   static parseSearch(html: string): Array<YouTubeVideo> {
     return YouTubeApi.parseSearchPage(html).videos;
   }
+
+  static parseContinuation(json: string): YouTubeSearchPage {
+    return YouTubeApi.toSearchPage(parseContinuationCore(json));
+  }
+
+  static parseComments(json: string): YouTubeCommentPage {
+    return YouTubeApi.toCommentPage(parseCommentsCore(json));
+  }
+
+  static parseDetailPage(html: string, id: string): YouTubeWatchPage {
+    return YouTubeApi.toWatchPage(parseDetailPageCore(html, id));
+  }
+
+  // ===== 网络请求（响应解析在 taskpool 执行） =====
 
   private static async page(url: string): Promise<string> {
     const response: HttpResponse = await HttpClient.get(url, {
@@ -321,25 +301,6 @@ export class YouTubeApi {
     }
   }
 
-  /** 从 ytcfg 里取字符串配置。 */
-  private static configString(html: string, key: string): string {
-    const match: RegExpMatchArray | null = html.match(new RegExp('"' + key + '"\\s*:\\s*"([^"]*)"'));
-    return match === null ? '' : match[1];
-  }
-
-  /**
-   * 记住本次页面下发的 InnerTube 配置，返回是否可用。
-   * 不可用时调用方必须关闭翻页/评论入口——宁可少一块，也不发注定无效的请求。
-   */
-  private static rememberInnerTube(html: string): boolean {
-    const key: string = YouTubeApi.configString(html, 'INNERTUBE_API_KEY');
-    const version: string = YouTubeApi.configString(html, 'INNERTUBE_CLIENT_VERSION');
-    if (key.length === 0 || version.length === 0) return false;
-    YouTubeApi.innerApiKey = key;
-    YouTubeApi.innerClientVersion = version;
-    return true;
-  }
-
   /**
    * 搜索。`filterParams` 来自上一页 `/results` 里的筛选项，必须原样回传（含 %3D 转义），
    * 不自己拼 protobuf，避免猜错含义。
@@ -350,51 +311,10 @@ export class YouTubeApi {
     const suffix: string = filterParams.length > 0 ? '&sp=' + filterParams : '';
     const html: string = await YouTubeApi.page(
       'https://www.youtube.com/results?search_query=' + encodeURIComponent(term) + suffix + '&hl=zh-CN');
-    const page: YouTubeSearchPage = YouTubeApi.parseSearchPage(html);
-    if (!YouTubeApi.rememberInnerTube(html)) page.continuation = '';
-    page.filters = YouTubeApi.parseFilters(html);
-    return page;
-  }
-
-  /**
-   * 解析 InnerTube 翻页响应。新老两种容器都兼容：
-   * onResponseReceivedCommands[].appendContinuationItemsAction / reloadContinuationItemsCommand，
-   * 以及旧版 continuationContents.sectionListContinuation。解析不到就是空页，不抛错。
-   */
-  static parseContinuation(json: string): YouTubeSearchPage {
-    const page: YouTubeSearchPage = new YouTubeSearchPage();
-    let data: Record<string, Object>;
-    try {
-      data = asObject(JSON.parse(json) as Object);
-    } catch (_) {
-      throw new Error('YouTube 返回了无法解析的翻页数据');
-    }
-    const lists: Array<Object> = [];
-    const commands: Object = data['onResponseReceivedCommands'];
-    if (Array.isArray(commands)) {
-      for (const command of commands as Array<Object>) {
-        const record: Record<string, Object> = asObject(command);
-        const append: Object = asObject(record['appendContinuationItemsAction'])['continuationItems'];
-        const reload: Object = asObject(record['reloadContinuationItemsCommand'])['continuationItems'];
-        if (Array.isArray(append)) lists.push(append);
-        if (Array.isArray(reload)) lists.push(reload);
-      }
-    }
-    if (lists.length === 0) {
-      const legacy: Object =
-        asObject(asObject(data['continuationContents'])['sectionListContinuation'])['contents'];
-      if (Array.isArray(legacy)) lists.push(legacy);
-    }
-    const seen: Set<string> = new Set<string>();
-    for (const list of lists) {
-      YouTubeApi.collect(list, page.videos, seen, 0);
-      for (const item of list as Array<Object>) {
-        const endpoint: Record<string, Object> =
-          asObject(asObject(asObject(item)['continuationItemRenderer'])['continuationEndpoint']);
-        const token: string = asString(asObject(endpoint['continuationCommand'])['token']);
-        if (token.length > 0) page.continuation = token;
-      }
-    }
+    // 单次 HTML 扫描产出视频/翻页/筛选/InnerTube 配置（旧实现提取+解析了两遍）。
+    const sendable: SendableYtSearchPage = await parseSearchPageAsync(html);
+    const page: YouTubeSearchPage = YouTubeApi.toSearchPage(sendable);
+    if (!YouTubeApi.applyInnerTube(sendable.innerApiKey, sendable.innerClientVersion)) page.continuation = '';
     return page;
   }
 
@@ -406,7 +326,7 @@ export class YouTubeApi {
     if (token.length === 0 || YouTubeApi.innerApiKey.length === 0) return new YouTubeSearchPage();
     const response: HttpResponse = await YouTubeApi.postInnerTube('youtubei/v1/search', token);
     YouTubeApi.ensureOk(response);
-    return YouTubeApi.parseContinuation(response.body);
+    return YouTubeApi.toSearchPage(await parseContinuationAsync(response.body));
   }
 
   /** 搜索翻页与评论共用同一份 InnerTube 请求形态；默认不下发代理，与历史行为一致。 */
@@ -441,72 +361,7 @@ export class YouTubeApi {
     if (token.length === 0 || YouTubeApi.innerApiKey.length === 0) return new YouTubeCommentPage();
     const response: HttpResponse = await YouTubeApi.postInnerTube('youtubei/v1/next', token);
     YouTubeApi.ensureOk(response);
-    return YouTubeApi.parseComments(response.body);
-  }
-
-  /**
-   * 评论正文不在 commentThreadRenderer 里，而在 frameworkUpdates 的 commentEntityPayload，
-   * 两边靠 commentKey / key 对应。取不到对应关系的那条直接跳过，不猜内容。
-   */
-  static parseComments(json: string): YouTubeCommentPage {
-    const page: YouTubeCommentPage = new YouTubeCommentPage();
-    let data: Record<string, Object>;
-    try {
-      data = asObject(JSON.parse(json) as Object);
-    } catch (_) {
-      throw new Error('YouTube 返回了无法解析的评论数据');
-    }
-    const contents: Array<Object> = [];
-    const endpoints: Object = data['onResponseReceivedEndpoints'];
-    if (Array.isArray(endpoints)) {
-      for (const endpoint of endpoints as Array<Object>) {
-        const action: Record<string, Object> = asObject(endpoint);
-        const append: Object = asObject(action['appendContinuationItemsAction'])['continuationItems'];
-        const reload: Object = asObject(action['reloadContinuationItemsCommand'])['continuationItems'];
-        if (Array.isArray(append)) for (const item of append as Array<Object>) contents.push(item);
-        if (Array.isArray(reload)) for (const item of reload as Array<Object>) contents.push(item);
-      }
-    }
-    const payloads: Map<string, Record<string, Object>> = new Map<string, Record<string, Object>>();
-    const mutations: Object = asObject(asObject(data['frameworkUpdates'])['entityBatchUpdate'])['mutations'];
-    if (Array.isArray(mutations)) {
-      for (const mutation of mutations as Array<Object>) {
-        const entity: Record<string, Object> =
-          asObject(asObject(asObject(mutation)['payload'])['commentEntityPayload']);
-        const key: string = asString(entity['key']);
-        if (key.length > 0) payloads.set(key, entity);
-      }
-    }
-    for (const item of contents) {
-      const record: Record<string, Object> = asObject(item);
-      if (record['commentsHeaderRenderer'] !== undefined) {
-        page.total = textValue(asObject(record['commentsHeaderRenderer'])['countText']);
-        continue;
-      }
-      if (record['continuationItemRenderer'] !== undefined) {
-        const endpoint: Record<string, Object> =
-          asObject(asObject(record['continuationItemRenderer'])['continuationEndpoint']);
-        const next: string = asString(asObject(endpoint['continuationCommand'])['token']);
-        if (next.length > 0) page.continuation = next;
-        continue;
-      }
-      const thread: Record<string, Object> = asObject(record['commentThreadRenderer']);
-      const viewModel: Record<string, Object> = asObject(asObject(thread['commentViewModel'])['commentViewModel']);
-      const entity: Record<string, Object> | undefined = payloads.get(asString(viewModel['commentKey']));
-      if (entity === undefined) continue;
-      const properties: Record<string, Object> = asObject(entity['properties']);
-      const author: Record<string, Object> = asObject(entity['author']);
-      const toolbar: Record<string, Object> = asObject(entity['toolbar']);
-      const comment: YouTubeComment = new YouTubeComment();
-      comment.id = asString(properties['commentId']);
-      comment.text = asString(asObject(properties['content'])['content']);
-      comment.published = asString(properties['publishedTime']);
-      comment.author = asString(author['displayName']);
-      comment.avatar = asString(author['avatarThumbnailUrl']);
-      comment.likes = asString(toolbar['likeCountNotliked']) || asString(toolbar['likeCountLiked']);
-      if (comment.text.length > 0) page.comments.push(comment);
-    }
-    return page;
+    return YouTubeApi.toCommentPage(await parseCommentsAsync(response.body));
   }
 
   static async detail(id: string): Promise<YouTubeVideo> {
@@ -517,161 +372,11 @@ export class YouTubeApi {
   static async detailPage(id: string): Promise<YouTubeWatchPage> {
     if (!YouTubeApi.validId(id)) throw new Error('无效的 YouTube 视频链接');
     const html: string = await YouTubeApi.page('https://www.youtube.com/watch?v=' + id + '&hl=zh-CN');
-    const page: YouTubeWatchPage = YouTubeApi.parseDetailPage(html, id);
+    const sendable: SendableYtWatchPage = await parseDetailPageAsync(html, id);
+    const page: YouTubeWatchPage = YouTubeApi.toWatchPage(sendable);
     // 评论要复用同一份 InnerTube 配置；拿不到就老实关掉评论入口，不发无效请求。
-    if (!YouTubeApi.rememberInnerTube(html)) page.commentToken = '';
+    if (!YouTubeApi.applyInnerTube(sendable.innerApiKey, sendable.innerClientVersion)) page.commentToken = '';
     return page;
-  }
-
-  static parseDetailPage(html: string, id: string): YouTubeWatchPage {
-    const result: YouTubeVideo = new YouTubeVideo();
-    const page: YouTubeWatchPage = new YouTubeWatchPage();
-    page.video = result;
-    const player: Record<string, Object> | null = YouTubeApi.initialObject(html, 'ytInitialPlayerResponse');
-    if (player === null) throw new Error('暂时无法读取视频详情，请稍后重试');
-    if (player === null) throw new Error('暂时无法读取视频详情，请稍后重试');
-    const data: Record<string, Object> = asObject(player['videoDetails']);
-    result.id = id;
-    result.title = asString(data['title']);
-    result.channel = asString(data['author']);
-    result.thumbnail = 'https://i.ytimg.com/vi/' + id + '/hqdefault.jpg';
-    result.description = asString(data['shortDescription']);
-    const seconds: number = Number(asString(data['lengthSeconds']));
-    if (seconds > 0) result.duration = formatDuration(seconds);
-    result.views = asString(data['viewCount']);
-    if (result.views.length > 0) result.views += ' 次观看';
-    // 即使匿名取流被要求登录，公开 watch 页的标题、作者、简介通常仍然可读。
-    const initial: Record<string, Object> | null = YouTubeApi.initialObject(html, 'ytInitialData');
-    if (initial !== null) {
-      const watch: Record<string, Object> = asObject(asObject(initial['contents'])['twoColumnWatchNextResults']);
-      const content: Object = asObject(asObject(watch['results'])['results'])['contents'];
-      if (Array.isArray(content)) {
-        for (const item of content as Array<Object>) {
-          const section: Record<string, Object> = asObject(item);
-          const primary: Record<string, Object> = asObject(section['videoPrimaryInfoRenderer']);
-          const secondary: Record<string, Object> = asObject(section['videoSecondaryInfoRenderer']);
-          if (result.title.length === 0) result.title = textValue(primary['title']);
-          if (result.views.length === 0) result.views = textValue(asObject(asObject(primary['viewCount'])['videoViewCountRenderer'])['viewCount']);
-          if (result.published.length === 0) result.published = textValue(primary['dateText']);
-          const owner: Record<string, Object> = asObject(asObject(secondary['owner'])['videoOwnerRenderer']);
-          if (result.channel.length === 0) result.channel = textValue(owner['title']);
-          if (result.channelAvatar.length === 0) result.channelAvatar = thumbnailUrl(owner['thumbnail']);
-          if (result.subscribers.length === 0) result.subscribers = textValue(owner['subscriberCountText']);
-          if (result.description.length === 0) result.description = asString(asObject(secondary['attributedDescription'])['content']) || textValue(secondary['description']);
-        }
-      }
-    }
-    if (result.title.length === 0) {
-      const status: Record<string, Object> = asObject(player['playabilityStatus']);
-      throw new Error(asString(status['reason']) || '视频详情不可用');
-    }
-    if (initial !== null) {
-      page.related = YouTubeApi.parseRelated(initial);
-      page.commentToken = YouTubeApi.parseCommentToken(initial);
-    }
-    return page;
-  }
-
-  /**
-   * 相关推荐：新版用 lockupViewModel（旧版 compactVideoRenderer 也兼容）。
-   * 位置固定在 secondaryResults，不做全页扫描——播放器推荐位的数据结构会变。
-   */
-  private static parseRelated(initial: Record<string, Object>): Array<YouTubeVideo> {
-    const watch: Record<string, Object> = asObject(asObject(initial['contents'])['twoColumnWatchNextResults']);
-    const secondary: Record<string, Object> = asObject(asObject(watch['secondaryResults'])['secondaryResults']);
-    const results: Object = secondary['results'];
-    const videos: Array<YouTubeVideo> = [];
-    const seen: Set<string> = new Set<string>();
-    if (Array.isArray(results)) {
-      YouTubeApi.collectLockups(results as Array<Object>, videos, seen, 0);
-      YouTubeApi.collect(results as Array<Object>, videos, seen, 0);
-    }
-    return videos;
-  }
-
-  /** lockupViewModel → YouTubeVideo：标题/频道/观看数/时长都在 metadata 与 overlays 里。 */
-  private static collectLockups(node: Object, videos: Array<YouTubeVideo>, seen: Set<string>, depth: number): void {
-    if (depth > 30 || node === null || typeof node !== 'object') return;
-    if (Array.isArray(node)) {
-      for (const item of node as Array<Object>) YouTubeApi.collectLockups(item, videos, seen, depth + 1);
-      return;
-    }
-    const record: Record<string, Object> = asObject(node);
-    if (record['lockupViewModel'] !== undefined) {
-      const lockup: Record<string, Object> = asObject(record['lockupViewModel']);
-      const id: string = asString(lockup['contentId']);
-      if (YouTubeApi.validId(id) && !seen.has(id)) {
-        const metadata: Record<string, Object> = asObject(asObject(lockup['metadata'])['lockupMetadataViewModel']);
-        const video: YouTubeVideo = new YouTubeVideo();
-        video.id = id;
-        video.title = asString(asObject(metadata['title'])['content']);
-        video.thumbnail = 'https://i.ytimg.com/vi/' + id + '/hqdefault.jpg';
-        video.duration = YouTubeApi.lockupDuration(lockup);
-        YouTubeApi.fillLockupMetadata(metadata, video);
-        if (video.title.length > 0) {
-          seen.add(id);
-          videos.push(video);
-        }
-      }
-    }
-    for (const key of Object.keys(record)) YouTubeApi.collectLockups(record[key], videos, seen, depth + 1);
-  }
-
-  /** 封面右下角的时长角标。 */
-  private static lockupDuration(lockup: Record<string, Object>): string {
-    const overlays: Object = asObject(asObject(lockup['contentImage'])['thumbnailViewModel'])['overlays'];
-    if (!Array.isArray(overlays)) return '';
-    for (const overlay of overlays as Array<Object>) {
-      const badges: Object = asObject(asObject(overlay)['thumbnailBottomOverlayViewModel'])['badges'];
-      if (!Array.isArray(badges)) continue;
-      for (const badge of badges as Array<Object>) {
-        const text: string = asString(asObject(asObject(badge)['thumbnailBadgeViewModel'])['text']);
-        if (text.length > 0) return text;
-      }
-    }
-    return '';
-  }
-
-  /** metadataRows：第一段是频道名，其余是观看数/发布时间。 */
-  private static fillLockupMetadata(metadata: Record<string, Object>, video: YouTubeVideo): void {
-    const rows: Object = asObject(metadata['metadata'])['contentMetadataViewModel'];
-    const list: Object = asObject(rows)['metadataRows'];
-    if (!Array.isArray(list)) return;
-    const parts: Array<string> = [];
-    for (const row of list as Array<Object>) {
-      const items: Object = asObject(row)['metadataParts'];
-      if (!Array.isArray(items)) continue;
-      for (const part of items as Array<Object>) {
-        const text: string = asString(asObject(asObject(part)['text'])['content']);
-        if (text.length > 0) parts.push(text);
-      }
-    }
-    if (parts.length > 0) video.channel = parts[0];
-    if (parts.length > 1) {
-      video.views = parts[1];
-      if (parts.length > 2) video.published = parts[2];
-    }
-  }
-
-  /** 评论区入口：watch 页只给一个 continuation token，评论正文要再请求一次 InnerTube next。 */
-  private static parseCommentToken(initial: Record<string, Object>): string {
-    const watch: Record<string, Object> = asObject(asObject(initial['contents'])['twoColumnWatchNextResults']);
-    const content: Object = asObject(asObject(watch['results'])['results'])['contents'];
-    if (!Array.isArray(content)) return '';
-    for (const item of content as Array<Object>) {
-      const section: Record<string, Object> = asObject(asObject(item)['itemSectionRenderer']);
-      const identifier: string = asString(section['sectionIdentifier']);
-      if (identifier.indexOf('comment') < 0) continue;
-      const items: Object = section['contents'];
-      if (!Array.isArray(items)) continue;
-      for (const entry of items as Array<Object>) {
-        const endpoint: Record<string, Object> =
-          asObject(asObject(asObject(entry)['continuationItemRenderer'])['continuationEndpoint']);
-        const token: string = asString(asObject(endpoint['continuationCommand'])['token']);
-        if (token.length > 0) return token;
-      }
-    }
-    return '';
   }
 
   // 注：watch 页的 commentsHeaderRenderer.countText 是区块标题（「评论」）而不是数量，

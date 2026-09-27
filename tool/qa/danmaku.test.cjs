@@ -34,12 +34,22 @@ function environment(mocks = {}) {
         return load(path.relative(root, path.resolve(path.dirname(filename), name)).replaceAll('\\', '/'));
       }
       if (name in mocks) return mocks[name];
+      // LiveDanmakuClient 等模块引用 hilog：Node 沙箱以静默实现兜底。
+      if (name === '@kit.CryptoArchitectureKit') return { cryptoFramework: {} };
+      if (name === '@kit.ArkWeb') return { webview: {} };
+      if (name === '@kit.PerformanceAnalysisKit') {
+        const noop = () => {};
+        return { hilog: { debug: noop, info: noop, warn: noop, error: noop } };
+      }
       throw new Error('Missing platform mock: ' + name);
     };
-    new Function('require', 'module', 'exports', 'AppStorage', 'PersistentStorage', code)(
+    // Sendable/Concurrent 是 ArkTS 编译期语义（跨线程共享/并发任务）；Node 沙箱里以恒等装饰器替代。
+    new Function('require', 'module', 'exports', 'AppStorage', 'PersistentStorage', 'Sendable', 'Concurrent', code)(
       localRequire, module, module.exports,
       { get: key => storage.get(key), setOrCreate: (key, value) => storage.set(key, value) },
-      { persistProp() {} }
+      { persistProp() {} },
+      (target) => target,
+      (target) => target
     );
     return module.exports;
   }
@@ -134,7 +144,8 @@ function bytesField(field,bytes) {return [...varint((field<<3)|2),...varint(byte
 function intField(field,n) {return [...varint(field<<3),...varint(n)];}
 function protoParser() {
   const env=environment({'@kit.ArkTS':{util:{TextDecoder:{create:()=>({decodeToString:b=>new TextDecoder().decode(b)})}}}});
-  return env.load('common/DanmakuProto').parseDanmakuSegment;
+  // 解析核心已迁至 taskpool 任务文件（DanmakuProto 的 @Concurrent 薄封装）；纯函数在 DanmakuProtoCore。
+  return env.load('common/DanmakuProtoCore').decodeDanmakuSegBuffer;
 }
 
 test('protobuf unknown length-delimited fields cannot swallow subsequent comments or their content',()=>{
@@ -175,6 +186,63 @@ test('live overlap density drains a burst without the old 30-active and 48-pendi
   const r=liveRenderer(30);const timestamp=Math.floor(Date.now()/1000);
   r.pending=Array.from({length:180},(_,i)=>({id:String(i),timestamp,text:'实时弹幕',emotes:[],type:'danmaku'}));
   r.drainQueue();assert.equal(r.active.length,180);assert.equal(r.pending.length,0);
+});
+
+// 用户报告：直播间永远显示「重连中」而聊天靠历史轮询兜底照常流动。根因：解码核心是
+// 异步的（zlib 解压只有 Promise API），taskpool 任务返回未决 Promise 被真机运行时拒绝
+// （Can't return Promise in pending state），异常被入队 catch 吞掉、鉴权永不完成。
+// 现生产路径走长驻 Worker；当 Worker 不可用（创建失败/崩坏）时必须回退主线程同步解码，
+// 保证 op=8 鉴权仍然完成（onConnected(true)）。
+test('live danmaku auth completes via main-thread decode fallback when worker unavailable', async () => {
+  const env = environment({
+    '@kit.NetworkKit': { webSocket: {} },
+    '@kit.BasicServicesKit': { BusinessError: class {}, zlib: {} },
+    '@kit.ArkTS': { collections: { Array },
+      worker: { ThreadWorker: class {
+        constructor() { throw new Error('worker unavailable'); }
+      } },
+      util: {} },
+    'api/BiliApi': { BiliApi: {} },
+    'api/LiveApi': { LiveApi: {} },
+    'services/network/HttpClient': { HttpClient: { getCookie: () => '' } },
+  });
+  const { LiveDanmakuClient } = env.load('common/LiveDanmakuClient');
+  const client = new LiveDanmakuClient();
+  const seen = [];
+  client.onConnected = (value) => seen.push(value);
+  client.closed = false;
+  // op=8 鉴权回包：16 字节头（packetLength=16, headerLength=16, protocol=1, operation=8, seq=1）。
+  const buffer = new ArrayBuffer(16);
+  const view = new DataView(buffer);
+  view.setUint32(0, 16); view.setUint16(4, 16); view.setUint16(6, 1);
+  view.setUint32(8, 8); view.setUint32(12, 1);
+  await client.decodeAndDispatch(buffer, client.generation);
+  assert.deepEqual(seen, [true]);
+  client.stopHeartbeat();
+});
+
+// 真机 jscrash：宿主侧 on('message') 回调在不同 API 版本下可能是 MessageEvent 包装
+// （数据在 data 字段）也可能是裸响应；按裸数据取值时 events 为 undefined 直接崩掉应用。
+test('worker message handler accepts both raw payload and MessageEvent envelope', () => {
+  const env = environment({
+    '@kit.NetworkKit': { webSocket: {} },
+    '@kit.BasicServicesKit': { BusinessError: class {}, zlib: {} },
+    '@kit.ArkTS': { collections: { Array }, worker: {}, util: {} },
+    'api/BiliApi': { BiliApi: {} },
+    'api/LiveApi': { LiveApi: {} },
+    'services/network/HttpClient': { HttpClient: { getCookie: () => '' } },
+  });
+  const { LiveDanmakuClient } = env.load('common/LiveDanmakuClient');
+  const client = new LiveDanmakuClient();
+  const seen = [];
+  client.onConnected = (value) => seen.push(value);
+  client.closed = false;
+  const response = { seq: 1, generation: 0, events: [{ operation: 8, payload: null }] };
+  client.handleWorkerMessage(response);                     // 裸响应形态
+  client.handleWorkerMessage({ data: response });           // MessageEvent 包装形态
+  client.handleWorkerMessage({ data: { seq: 2 } });         // 坏包：不崩、不分发
+  assert.deepEqual(seen, [true, true]);
+  client.stopHeartbeat();
 });
 
 

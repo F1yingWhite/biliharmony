@@ -11,6 +11,14 @@
     {
       "name": "EntryAbility_label",
       "value": "哔哩哔哩"
+    },
+    {
+      "name": "card_continue_display",
+      "value": "继续观看"
+    },
+    {
+      "name": "card_continue_desc",
+      "value": "展示最近观看的视频，点击续播"
     }
   ]
 }

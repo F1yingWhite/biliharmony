@@ -42,6 +42,23 @@
         ]
       }
     ],
+    "extensionAbilities": [
+      {
+        "name": "EntryFormAbility",
+        "srcEntry": "./ets/entryformability/EntryFormAbility.ets",
+        "description": "$string:card_continue_desc",
+        "icon": "$media:app_layered_icon_20260814",
+        "label": "$string:card_continue_display",
+        "type": "form",
+        "exported": true,
+        "metadata": [
+          {
+            "name": "ohos.extension.form",
+            "resource": "$profile:form_config"
+          }
+        ]
+      }
+    ],
     "requestPermissions": [
       {
         "name": "ohos.permission.INTERNET"
@@ -54,6 +71,10 @@
       },
       {
         "name": "ohos.permission.KEEP_BACKGROUND_RUNNING"
+      },
+      // 开播提醒：reminderAgentManager 系统提醒（system_grant，安装即授予）。
+      {
+        "name": "ohos.permission.PUBLISH_AGENT_REMINDER"
       },
       // 智感握姿（操作手识别）：底部搜索入口据此贴到当前操作手一侧。
       // system_grant + normal 级权限，安装即授予、不弹权限框；能力缺失时 Handedness 静默降级。

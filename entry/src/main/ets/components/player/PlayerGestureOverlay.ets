@@ -1,4 +1,31 @@
 import { image } from '@kit.ImageKit';
+import { VideoChapter } from '../../api/BiliApi';
+import { chapterTitleAt } from './PlayerChapterSupport';
+
+/**
+ * 横滑预览时间的注入通道：预览时间状态由本叠层自持（@State scrubPreview），
+ * 父级手势回调经控制器写入，而不是写父级 @State——否则 3800 行的播放器结构体
+ * 会以手势采样频率（60~120Hz）全量重渲染，是横滑快进掉帧的主因。
+ */
+export interface PlayerScrubTarget {
+  showScrub: (value: number) => void;
+}
+
+export class PlayerScrubController {
+  private targets: Set<PlayerScrubTarget> = new Set<PlayerScrubTarget>();
+
+  attach(target: PlayerScrubTarget): void {
+    this.targets.add(target);
+  }
+
+  detach(target: PlayerScrubTarget): void {
+    this.targets.delete(target);
+  }
+
+  show(value: number): void {
+    this.targets.forEach((target: PlayerScrubTarget) => target.showScrub(value));
+  }
+}
 
 /** 在线人数、长按倍速、横滑预览、音量/亮度的轻量叠层。 */
 @Component
@@ -9,8 +36,9 @@ export struct PlayerGestureOverlay {
   @Prop showControls: boolean = false;
   @Prop fullscreen: boolean = false;
   @Prop holdSpeedActive: boolean = false;
-  @Prop gestureSeekPreview: number = -1;
   @Prop sliderSeekPreview: number = -1;
+  /** 视频侧传入章节表后，预览卡内按预览时间就地算章节名（横滑期间父级不重渲染，prop 会过期）。 */
+  @Prop chapters: Array<VideoChapter> = [];
   @Prop seekPreviewFrame: image.PixelMap | null = null;
   @Prop seekPreviewCover: string = '';
   @Prop seekPreviewSprite: string = '';
@@ -21,27 +49,25 @@ export struct PlayerGestureOverlay {
   @Prop gestureAdjustPercent: number = -1;
   @Prop panStartTime: number = 0;
   @Prop duration: number = 0;
-  /** 长按倍速：三个右向小三角逐个亮起的循环动画步（0/1/2）。 */
-  @State holdAnimStep: number = 0;
-  private holdAnimTimer: number = -1;
+  /** 父级经 scrubCtl 注入的横滑预览时间；-1 表示不在横滑中。 */
+  @State scrubPreview: number = -1;
+  scrubCtl: PlayerScrubController | null = null;
+  private scrubTarget: PlayerScrubTarget | null = null;
 
-  private startHoldAnimation(): void {
-    if (this.holdAnimTimer >= 0) return;
-    this.holdAnimTimer = setInterval(() => {
-      if (!this.holdSpeedActive) {
-        this.stopHoldAnimation();
-        return;
-      }
-      this.holdAnimStep = (this.holdAnimStep + 1) % 3;
-    }, 160);
+  aboutToAppear(): void {
+    const ctl: PlayerScrubController | null = this.scrubCtl;
+    if (ctl !== null) {
+      this.scrubTarget = { showScrub: (value: number): void => { this.scrubPreview = value; } };
+      ctl.attach(this.scrubTarget);
+    }
   }
 
-  private stopHoldAnimation(): void {
-    if (this.holdAnimTimer >= 0) {
-      clearInterval(this.holdAnimTimer);
-      this.holdAnimTimer = -1;
+  aboutToDisappear(): void {
+    const ctl: PlayerScrubController | null = this.scrubCtl;
+    if (ctl !== null && this.scrubTarget !== null) {
+      ctl.detach(this.scrubTarget);
+      this.scrubTarget = null;
     }
-    this.holdAnimStep = 0;
   }
 
   build() {
@@ -69,7 +95,15 @@ export struct PlayerGestureOverlay {
   }
 
   private seekPreviewTime(): number {
-    return this.sliderSeekPreview >= 0 ? this.sliderSeekPreview : this.gestureSeekPreview;
+    return this.sliderSeekPreview >= 0 ? this.sliderSeekPreview : this.scrubPreview;
+  }
+
+  /** 预览位置的章节名：视频侧按章节表就地计算（跟随预览时间）；直播侧无章节表，回退 prop。 */
+  private scrubChapterTitle(): string {
+    if (this.chapters.length > 0) {
+      return chapterTitleAt(this.chapters, this.seekPreviewTime(), this.duration);
+    }
+    return this.chapterTitle;
   }
 
   /** 拖动定位预览：图片保持 16:9，时间固定覆盖在底部，避免取帧完成时改变布局。 */
@@ -114,8 +148,8 @@ export struct PlayerGestureOverlay {
       .clip(true)
       .shadow({ radius: 5, color: '#77000000', offsetY: 1 })
 
-      if (this.chapterTitle.length > 0) {
-        Text(this.chapterTitle).fontSize(12).fontColor('#FFFFFF').maxLines(1)
+      if (this.scrubChapterTitle().length > 0) {
+        Text(this.scrubChapterTitle()).fontSize(12).fontColor('#FFFFFF').maxLines(1)
           .width(this.previewWidth()).textAlign(TextAlign.Center)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .textShadow({ radius: 3, color: '#CC000000', offsetX: 0, offsetY: 1 })
@@ -155,47 +189,53 @@ export struct PlayerGestureOverlay {
   HintBubble() {
     Row({ space: 10 }) {
       if (this.holdSpeedActive) {
-        Row({ space: 0 }) {
-          Image($r('app.media.ic_play'))
-            .width(13)
-            .height(16)
-            .fillColor(this.holdAnimStep === 0 ? '#FFFFFF' : '#70FFFFFF')
-            .animation({ duration: 120, curve: Curve.EaseOut })
-          Image($r('app.media.ic_play'))
-            .width(13)
-            .height(16)
-            .fillColor(this.holdAnimStep === 1 ? '#FFFFFF' : '#70FFFFFF')
-            .animation({ duration: 120, curve: Curve.EaseOut })
-          Image($r('app.media.ic_play'))
-            .width(13)
-            .height(16)
-            .fillColor(this.holdAnimStep === 2 ? '#FFFFFF' : '#70FFFFFF')
-            .animation({ duration: 120, curve: Curve.EaseOut })
-        }
+        HoldSpeedArrows()
         Text('倍速播放中')
           .fontSize(16)
           .fontWeight(FontWeight.Medium)
           .fontColor('#FFFFFF')
       } else {
-        Text((this.gestureAdjustKind === '亮度' ? '☀' : '♪') + ' ' + this.gestureAdjustPercent + '%')
-          .fontSize(12)
-          .fontWeight(FontWeight.Medium)
-          .fontColor('#FFFFFF')
+        Row({ space: 5 }) {
+          Image(this.gestureAdjustKind === '亮度' ? $r('app.media.ic_hud_sun') : $r('app.media.ic_hud_volume'))
+            .width(14).height(14)
+            .renderMode(ImageRenderMode.Template)
+            .fillColor('#FFFFFF')
+          Text(this.gestureAdjustPercent + '%')
+            .fontSize(13)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#FFFFFF')
+        }
+        .alignItems(VerticalAlign.Center)
       }
     }
     .padding({ left: 18, right: 18, top: 10, bottom: 10 })
     .borderRadius(8)
     .backgroundColor('#A6000000')
-    .backdropBlur(12)
     // 顶部居中：位置 x 用百分比锚左侧，translate 回移一半实现水平居中。
     .position({ x: '50%', y: this.fullscreen ? 18 : 12 })
     .translate({ x: '-50%' })
-    // 进入倍速态时启动动画；退出时停止并复位。
-    .onAppear(() => {
-      if (this.holdSpeedActive) this.startHoldAnimation();
-    })
-    .onDisAppear(() => {
-      this.stopHoldAnimation();
-    })
+
+  }
+}
+
+
+/** 小范围原生透明度动画，不用 JS 定时器刷新整个视频手势叠层。 */
+@Component
+struct HoldSpeedArrows {
+  @State shining: boolean = false;
+
+  build() {
+    Row({ space: 0 }) {
+      ForEach([0, 1, 2], (index: number) => {
+        Image($r('app.media.ic_play'))
+          .width(13)
+          .height(16)
+          .fillColor('#FFFFFF')
+          .opacity(this.shining ? 1 : 0.44)
+          .animation({ duration: 480, delay: index * 160, iterations: -1,
+            playMode: PlayMode.Alternate, curve: Curve.EaseInOut })
+      }, (index: number) => String(index))
+    }
+    .onAppear(() => { this.shining = true; })
   }
 }

@@ -1,35 +1,94 @@
 /** 参考官方 SC 标签栏：头像金额横排，点击标签展开对应卡片；播放画面持续可见。 */
 import { LiveChatMessage } from '../../model/LiveModels';
 
+/**
+ * 父页面持有的 SC 数据通道：合并进 @State 后 publish 直呼订阅者，
+ * 替代 @Prop messages 在每次 SC 合并时的整组深拷贝。订阅时立即补发当前快照，
+ * 晚创建的浮层（全屏时才挂载）不会错过已到达的 SC。
+ */
+export class LiveSuperChatFeed {
+  private latest: Array<LiveChatMessage> = [];
+  private sinks: Array<(list: Array<LiveChatMessage>) => void> = [];
+
+  count(): number {
+    return this.latest.length;
+  }
+
+  publish(list: Array<LiveChatMessage>): void {
+    this.latest = list;
+    for (let i: number = 0; i < this.sinks.length; i++) this.sinks[i](list);
+  }
+
+  subscribe(sink: (list: Array<LiveChatMessage>) => void): void {
+    this.sinks.push(sink);
+    sink(this.latest);
+  }
+
+  unsubscribe(sink: (list: Array<LiveChatMessage>) => void): void {
+    const at: number = this.sinks.indexOf(sink);
+    if (at >= 0) this.sinks.splice(at, 1);
+  }
+}
+
 @Component
 export struct LiveSuperChatShelf {
-  @Prop @Watch('refreshActive') messages: Array<LiveChatMessage> = [];
+  feed: LiveSuperChatFeed = new LiveSuperChatFeed();
   @Prop floating: boolean = false;
   @Prop panelHeight: number = 220;
   @State activeMessages: Array<LiveChatMessage> = [];
   @State @Watch('onSelectionChanged') selectedId: string = '';
   onExpandedChange: (expanded: boolean) => void = () => {};
+  /** 唯一的每秒变化量：倒计时文本由它驱动，activeMessages 只在到期边界真正改变集合时才换引用。 */
   @State nowSeconds: number = Math.floor(Date.now() / 1000);
+  private messages: Array<LiveChatMessage> = [];
+  private receive: ((list: Array<LiveChatMessage>) => void) | null = null;
   private timer: number = -1;
 
   aboutToAppear(): void {
-    this.refreshActive();
+    this.receive = (list: Array<LiveChatMessage>): void => {
+      this.messages = list;
+      this.refreshActive();
+    };
+    this.feed.subscribe(this.receive);
     this.timer = setInterval(() => this.refreshActive(), 1000);
   }
 
   aboutToDisappear(): void {
     if (this.timer >= 0) clearInterval(this.timer);
     this.timer = -1;
+    if (this.receive !== null) this.feed.unsubscribe(this.receive);
+    this.receive = null;
     this.onExpandedChange(false);
   }
 
   private refreshActive(): void {
     this.nowSeconds = Math.floor(Date.now() / 1000);
-    this.activeMessages = this.messages.filter((message: LiveChatMessage) =>
-      message.endTime <= 0 || message.endTime > this.nowSeconds);
-    if (!this.activeMessages.some((message: LiveChatMessage) => message.id === this.selectedId)) {
-      this.selectedId = '';
+    const next: Array<LiveChatMessage> = [];
+    const nextIds: Set<string> = new Set<string>();
+    for (let i: number = 0; i < this.messages.length; i++) {
+      const message: LiveChatMessage = this.messages[i];
+      if (message.endTime > 0 && message.endTime <= this.nowSeconds) continue;
+      next.push(message);
+      nextIds.add(message.id);
     }
+    const previous: Array<LiveChatMessage> = this.activeMessages;
+    const previousCount: number = previous ? previous.length : -1;
+    const selectionValid: boolean = this.selectedId.length === 0 || nextIds.has(this.selectedId);
+    if (this.sameActiveIds(previous, previousCount, nextIds)) {
+      // 每秒 tick 集合未变：只推进 nowSeconds 驱动倒计时，不换 activeMessages 引用、整列不重 diff。
+      if (!selectionValid) this.selectedId = '';
+      return;
+    }
+    this.activeMessages = next;
+    if (!selectionValid) this.selectedId = '';
+  }
+
+  private sameActiveIds(previous: Array<LiveChatMessage>, previousCount: number, nextIds: Set<string>): boolean {
+    if (previousCount !== nextIds.size) return false;
+    for (let i: number = 0; i < previous.length; i++) {
+      if (!nextIds.has(previous[i].id)) return false;
+    }
+    return true;
   }
 
   private onSelectionChanged(): void {

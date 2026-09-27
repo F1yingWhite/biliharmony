@@ -5,7 +5,9 @@
 import { VideoItem } from '../../model/Models';
 import { formatCount, formatDuration } from '../../common/Utils';
 import { Haptic } from '../../common/Haptic';
+import { biliImageThumbnail } from '../../common/ImageUrl';
 
+@Reusable
 @Component
 export struct RelatedVideoRow {
   @Prop item: VideoItem = new VideoItem();
@@ -15,15 +17,20 @@ export struct RelatedVideoRow {
   onReport: (item: VideoItem) => void = () => {};
   onHide: (item: VideoItem) => void = () => {};
 
+  aboutToReuse(params: Record<string, Object>): void {
+    this.item = params['item'] as VideoItem;
+  }
+
   build() {
     Row({ space: 10 }) {
       Row({ space: 10 }) {
         Stack({ alignContent: Alignment.BottomStart }) {
-          Image(this.item.cover)
+          Image(biliImageThumbnail(this.item.cover, 360))
             .width(120)
             .height(68)
             .objectFit(ImageFit.Cover)
             .borderRadius(6)
+            .alt($r('app.media.placeholder_cover'))
           Row({ space: 4 }) {
             // 高互动角标固定在左下角，时长固定在右下角，二者共享一行不会重叠。
             if (this.item.coin >= 10000 || this.item.share >= 10000) {
@@ -68,6 +75,12 @@ export struct RelatedVideoRow {
             .lineHeight(17)
           Column({ space: 5 }) {
             Row({ space: 4 }) {
+              if (this.item.like >= 5000) {
+                Text(formatCount(this.item.like) + '点赞')
+                  .fontSize(10)
+                  .fontColor('#FF7F24')
+                  .maxLines(1)
+              }
               Text('UP')
                 .fontSize(8)
                 .fontColor('#9499A0')
@@ -142,6 +155,8 @@ struct RelatedMoreDot {
         .fillColor('#9499A0')
     }
     .height(68)
+    .width(32)
+    .accessibilityText('更多视频操作')
     .padding({ right: 2, left: 2, top: 6, bottom: 6 })
     .onClick(() => {
       Haptic.light();
@@ -165,7 +180,7 @@ struct RelatedMoreDot {
   menu() {
     Column() {
       this.menuRow($r('app.media.ic_report_flag'), '举报', this.onReport)
-      this.menuRow($r('app.media.bilix_icon_dislike'), '不想看', this.onHide)
+      this.menuRow($r('app.media.ic_dislike'), '不想看', this.onHide)
     }
     .padding({ top: 6, bottom: 6 })
   }

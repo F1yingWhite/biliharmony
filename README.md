@@ -1,201 +1,149 @@
-# BiliHaromny（哔哩哔哩 · 鸿蒙原生版）
+<div align="center">
 
-基于开源 Flutter 项目 [PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus) 移植并扩展的**鸿蒙原生（HarmonyOS NEXT）哔哩哔哩第三方客户端**。
+# BiliHaromny
 
-- 语言/UI：ArkTS + ArkUI（声明式）
-- 目标 SDK：**HarmonyOS API 26**（compileSdkVersion / compatibleSdkVersion / targetSdkVersion = 26.0.0）
-- 构建：hvigor + ohpm（零第三方依赖，仅使用系统 Kit）
-- 工程根目录即 DevEco Studio 工程，可直接 Open 打开
+**HarmonyOS NEXT 原生第三方哔哩哔哩客户端**
 
-> 仅供学习交流使用。所有接口均来自 B 站官方公开 API，不提供任何破解内容。
->
-> 完整能力清单与更新历史见 [CHANGELOG.md](CHANGELOG.md)。
+从开源项目 [PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus) 移植并扩展，ArkTS / ArkUI 全原生实现 ——
+不是跨端套壳：系统 AVPlayer 播放、Canvas 自绘弹幕引擎、服务卡片 / 系统提醒 / 画中画等鸿蒙能力原生接入。
+
+`HarmonyOS API 26` · `ArkTS + ArkUI` · `零第三方依赖（仅系统 Kit）` · `QA 217 用例`
+
+<img src="docs/screenshots/home.jpg" width="260" alt="首页信息流"/>
+<img src="docs/screenshots/detail.jpg" width="260" alt="视频详情与弹幕播放器"/>
+<img src="docs/screenshots/live-room.jpg" width="260" alt="直播间实时弹幕"/>
+
+<img src="docs/screenshots/live.jpg" width="260" alt="直播频道"/>
+<img src="docs/screenshots/search.jpg" width="260" alt="搜索与热搜双榜"/>
+
+**[下载最新构建](https://github.com/F1yingWhite/biliharmony/releases/tag/latest)** · [更新日志](CHANGELOG.md) · [开发文档](docs/)
+
+</div>
+
+> ⚠️ 仅供学习交流使用。所有接口均来自 B 站官方公开 API，不提供任何破解内容；哔哩哔哩及相关商标归其权利人所有。
 
 ---
 
-## 功能
+## 这是什么
 
-### 浏览
+BiliHaromny 是为 HarmonyOS NEXT 打造的第三方 B 站客户端。项目以 [PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus)（Flutter）的功能与协议实现为蓝本，用 **ArkTS + ArkUI 从零重写为鸿蒙原生应用**：WBI / App 签名、DASH 播放、直播 WebSocket 弹幕等核心链路均为纯 ArkTS 实现，同时接入服务卡片、reminderAgent 系统提醒、画中画、沉浸式窗口等 HarmonyOS 原生能力。
 
-| 模块 | 说明 |
-| --- | --- |
-| 首页 | 推荐（app 端 `/x/v2/feed/index`）/ 热门（`/x/web-interface/popular`）/ **直播** 三频道，双列瀑布流、下拉刷新、触底加载、按键去重；**长按卡片「不感兴趣」**（本地隐藏，Web 无服务端不感兴趣接口）；热门频道顶部提供 **排行榜**（全站/每周必看/入站必刷）与 **分区频道** 入口（`pages/ZoneChannelPage.ets`） |
-| 搜索 | 热搜榜 + **趋势榜**（`x/v2/search/trending/ranking`，双榜点击直达搜索）、**搜索默认词**、搜索历史（本地持久化）、输入联想（防抖 + 乱序丢弃）；结果页 **综合/视频/番剧/影视/直播/专栏/用户** 七 Tab，综合聚合混排，视频排序 chips 与筛选面板，**用户类型筛选（全部/UP主/普通/认证）+ 粉丝数/等级排序**，番剧/影视进番剧详情页，直播进直播间，专栏进 App 内阅读页（Web 容器，`pages/ArticlePage.ets`） |
-| 动态 | 关注动态 feed：顶部**关注 UP 主横滑栏**（头像直达用户空间 + 直播中红角标）、表情图文混排、九宫格图片、转发展示、直播卡片直达直播间；**点赞/转发**、**全部分类筛选（全部/视频/番剧/专栏）**、**发布纯文字动态**、**动态举报**（卡片「⋯」原因选择） |
-| 视频详情 | 简介/评论/相关推荐，分 P、**UGC 合集选集 + 播完自动下一集**、视频章节、"N 人正在看"；**自动连播**（合集下一集，无合集时自动播「相关推荐」第一条，可开关） |
-| 用户空间 | Banner 氛围头部 + 资料卡，主页/动态/投稿三 Tab（投稿支持最新/最多播放/最多收藏排序），关注/取关、关注/粉丝列表 |
-| 动态详情 | 正文/表情/评论完整呈现，首屏复用 feed 对象直出，评论可点赞/点踩/楼中楼 |
-| 历史/收藏 | 观看历史（游标分页 + 观看进度 + **长按删除单条** + **一键清空**）、我的收藏（收藏夹/收藏集双分类）、**稍后再看**、**收藏夹管理（新建/重命名/删除/批量移动）**、**收藏夹排序**（根列表「排序」页）+ **夹内视频排序**（编辑模式 ↑↓ 调整，退出自动保存） |
-| 追番 | **我的追番/追剧列表**（「我的」入口，番剧/影视标签切换，点击进番剧详情，`pages/BangumiListPage.ets`；数据源 `x/space/bangumi/follow/list` 带 vmid；**踩过坑：pgc/web/follow/list 不返回数据、new_ep 是对象不能当字符串**）；**番剧索引**（按 番剧/国创/影视/剧集/纪录片 × 全部/连载中/已完结 筛选的三列聚合，`pages/BangumiIndexPage.ets`）；**新番时间表**（索引页右上「时间表」，`pgc/web/timeline` 前后排播组天、点集进详情，`pages/BangumiTimelinePage.ets`） |
-| 全屏看图 | 捏合缩放、拖动平移、共享元素转场、保存相册、系统分享；**3MB 以下图片打开直接加载原图**（大图仍先低清后手动切换，省内存 + 防白屏） |
+模块对应关系见 [docs/移植对照-PiliPlus.md](docs/移植对照-PiliPlus.md)。
 
-### 播放器
+## 功能速览
 
-| 能力 | 说明 |
-| --- | --- |
-| 播放 | 系统 AVPlayer + XComponent 渲染；**DASH（fnval=4048）音视频分流双播放器同步**，多 URL 容错；登录走 WBI playurl，游客试看 |
-| 弹幕 | Canvas 自绘弹幕引擎：滚动/顶部/底部、车道分配防碰撞、透明度/速度/字号/密度调节、分类屏蔽、**播放器内发弹幕**、**protobuf 分段加载**、**弹幕列表面板**、**屏上点击弹幕即可举报**（原因选择）、**屏蔽词/正则/屏蔽用户管理** |
-| 手势 | 双击播放暂停、长按 2x 倍速、横滑进度预览、上下滑音量/亮度 |
-| 控制 | 清晰度实时换源、倍速面板、横屏全屏、紧凑模式（详情页滚动使播放器变矮时自动精简控制条）、**CC 字幕轨道选择与开关** |
-| 特色 | **小电视空降助手**：11 类片段独立策略（关闭/标记/手动/自动）、`skip/mute/full/poi`、彩色进度条、空降撤销、赞踩、匿名投稿、社区身份与提醒；章节/分段刻度进度条 |
+### 🏠 浏览与发现
+- 首页 **推荐 / 热门 / 直播** 三频道，双列瀑布流、下拉刷新、触底分页；长按卡片「不感兴趣」（本地持久化黑名单，设置中可清空）
+- **排行榜**（全站 / 每周必看 / 入站必刷）、**分区频道**、**番剧索引**（番剧/国创/影视/剧集/纪录片 × 连载状态）、**新番时间表**（近一周排播，条目可设开播前 5 分钟系统提醒）
+- 搜索：热搜榜 + 趋势榜双榜、默认词、输入联想、本地历史；结果页 **综合 / 视频 / 番剧 / 影视 / 直播 / 专栏 / 用户** 七分类，视频排序筛选、用户类型筛选与排序
+- 动态：关注 UP 横滑栏（直播中角标直达直播间）、全部分类筛选、**发布文字 / 图文动态**、话题跳转搜索、举报
+- 个人数据：观看历史（进度 / 删除 / 清空）、稍后再看（多选批量删除）、收藏夹（新建 / 重命名 / 排序 / 批量移动）、我的追番
 
-### 直播
+### ▶️ 播放器
+- 系统 AVPlayer + XComponent，**DASH（fnval=4048）音视频分流双播放器同步**，多 URL 容错，清晰度实时换源；登录 WBI playurl，游客试看
+- **Canvas 自绘弹幕引擎**：滚动 / 顶部 / 底部、车道分配防碰撞、透明度 / 速度 / 字号 / 密度调节、分类与关键词（正则）屏蔽、protobuf 分段加载、弹幕列表、**重复弹幕合并计数**、屏上点击弹幕即可举报
+- **小电视空降助手**（类 SponsorBlock）：11 类片段独立策略（跳过 / 静音 / 标记 / 手动），彩色分段进度条、**高能热度条**、章节刻度、赞踩与匿名投稿
+- **CC 字幕**轨道选择与字号缩放、倍速面板、横屏全屏、紧凑模式、手势操作（双击暂停 / 长按 2x / 横滑进度预览 / 上下滑音量亮度）
+- **画中画**（PiPWindow）、后台播放（AVSession 长时任务）、**截图存相册**、自动连播、UGC 合集选集、番剧自动跳过片头
 
-- 低延迟 AVPlayer 直播流播放、画质切换、全屏
-- **WebSocket 弹幕客户端**（进房握手、心跳、断线重连）：实时弹幕/表情/醒目留言（SC），合帧缓冲渲染
-- 直播弹幕浮层复用视频同款 Canvas 分轨引擎；发弹幕走 HTTP 接口
-- **直播分区页**（`pages/LiveZonePage.ets`：一级分区网格 + 按人气排序的直播间列表，入口在首页直播频道顶部）
-- 入口：首页直播频道、动态直播卡片、用户空间开播状态
+### 📺 直播
+- 低延迟直播流播放、画质切换、全屏
+- **WebSocket 弹幕客户端**：进房握手、心跳、断线重连；实时弹幕、表情、**醒目留言（SC）**，合帧缓冲渲染
+- 直播分区页（一级分区网格 + 人气排序房间列表）
 
-### 互动（登录后）
+### 💬 互动（登录后）
+- 视频：点赞 / **长按一键三连** / 投币 / 收藏（快捷入默认夹，长按收藏夹多选）/ 关注 / 分享；官方版式视频详情页（折叠标题、TAG 胶囊、BV 复制、合集、相关推荐点赞角标）
+- 评论：发表、**楼中楼**、表情包面板、富文本解析（BV / 时间轴 / @提及）、**分享成图片卡片**、举报、删除自己的评论、UP 主置顶
+- 私信与通知：会话列表 / 聊天 / **会话置顶** / 举报；回复 / @我 / 赞 / 系统四类通知，未读角标、全部已读
+- 用户：关注分组（创建 / 重命名 / 删除）、黑名单管理、**追番状态标记**（想看 / 在看 / 看过）
 
-- 视频：赞/点踩、**长按点赞一键三连**（赞+币+藏，`x/web-interface/archive/like/triple`）、投币（1/2 币、可同时点赞）、收藏（单击快捷收藏到默认夹，**长按弹「选择收藏夹」多选面板**）、关注 UP 主、**关注分组**（用户空间「分组」面板）、系统分享 + 上报、**用户空间举报/拉黑入口**
-- 评论：发表、点赞/点踩、**楼中楼**（树形缩进/折叠 + 页内二级导航）、表情包面板、富文本解析（BV 号/时间轴跳转/@提及）、**评论分享成图片卡片**（截图 + 二维码）、**评论举报**（更多菜单 + 原因选择）、**删除自己的评论**（更多菜单红字 + 二次确认，主列表/楼中楼同步移除）
-- 私信：会话列表、聊天详情（游标分页）、自动已读、发送文字私信、**会话删除**（行右缘「⋯」）、**举报对方**（聊天页右上「举报」，`x/bplus/im/report/add`）；入口在首页头栏
-- 通知：回复/?@我/赞/系统四 Tab，未读角标，**长按删除单条通知**（`x/msgfeed/del`、`x/sys-msg/del_notify_list`）、**全部已读**（本地清角标，B 站无批量已读接口）
+### 👤 账号
+- 四种登录方式：**TV 扫码 / Web 扫码 / 密码（RSA 加密）/ 短信验证码（内置极验滑块）**
+- **Web Cookie 自动续期**（correspondPath 加密流程，鉴权失败自愈），refresh_token 持久化
+- 登录态本地持久化，Cookie 罐导入 / 导出
 
-### 账号
+### ⬇️ 下载中心
+- 视频 / 音频缓存队列：任务持久化、失败重试、进度管理
+- 一键导出：**MP4 / M4A / 弹幕 XML（12 段合并）/ CC 字幕 SRT / 封面**
 
-- 三种登录方式：**TV 扫码**（轮询 + Cookie 保存）、**密码**（RSA 公钥加密）、**短信验证码**
-- 登录态 Preferences 持久化，Cookie 罐导入/导出
-- **黑名单管理**（「我的」入口：已拉黑用户列表 + 一键解除，`pages/BlackListPage.ets`）
+### 🧩 鸿蒙原生能力
+- 桌面**「继续观看」服务卡片**（2x2 / 2x4，点击直接续播）
+- **开播系统提醒**（reminderAgent 日历提醒，免推送服务）
+- **宽屏 Navigation 分栏**（840vp+，外观设置实验开关）
+- **封面取色动态主题**（Material You 风格色调板）、玻璃拟态材质（可关闭降级）、沉浸式系统栏、深色模式 / 定时深色
+- 网络代理设置与本地隐私管理
 
-## 沉浸光感效果（重点）
+### 🌐 其他平台（实验性）
+- YouTube 浏览：搜索（联想 / 筛选）、频道行、相关推荐、本地稍后看与历史；详情页经 ArkWeb IFrame 播放，游客态
 
-1. **封面取色动态主题**：进入视频详情时下载封面 → PixelMap 采样 → 量化分桶提取主色/鲜艳色 → 生成 Material You 风格色调板，全局强调色随封面联动（顶部渐变、按钮、标签、Tab 图标实时变色）。
-2. **玻璃拟态（HarmonyOS 光感）**：浮层统一走 `backgroundBlurStyle` 系统材质（`AppTheme.floatBg/floatBlur` 全局设施）：顶部玻璃头栏、首页频道切换悬浮条、搜索胶囊、筛选/菜单弹层；底部导航用系统 `Tabs` 悬浮式 Dock（`barFloatingStyle` + `systemMaterial`）。毛玻璃可在设置中一键关闭降级为实底。
-3. **光效辉光**：主题色径向光晕（Logo 光晕、导航激活项辉光、Tab 发光指示条、播放区氛围光），柔化卡片投影，按压反馈动画。
-4. **沉浸式布局**：窗口级全屏 + 组件级 `expandSafeArea` 结合，状态栏/导航栏与页面同色一体化，图标深浅随栈顶页面自动切换；播放页横屏自动隐藏系统栏。
-5. **主题体系**：跟随系统/浅色/深色三档显示模式（同步原生 ColorMode），8 个预设主题色板 + 封面取色，背景/卡片/文字/分割线全部从种子色派生；所有主题设置持久化。卡片质感参考 BewlyCat 插件风格。
+## 安装
 
-## 目录结构
+1. 从 [Releases（tag=latest 滚动更新）](https://github.com/F1yingWhite/biliharmony/releases/tag/latest) 下载 HAP；
+2. 通过 DevEco Studio 或 `hdc install <path>.hap` 安装到 HarmonyOS NEXT（API 26+）真机 / 模拟器。
 
-    entry/src/main/ets/
-    ├── entryability/EntryAbility.ets   # 入口：主题初始化 + 沉浸式系统栏配色
-    ├── pages/                          # 路由页（Navigation/NavDestination）
-    │   ├── Index.ets                   # 主框架：Tabs 悬浮 Dock + 玻璃头栏
-    │   ├── VideoDetail.ets             # 视频详情（取色/播放器/互动/评论）
-    │   ├── Search.ets                  # 搜索（热搜/历史/联想/结果）
-    │   ├── Login.ets                   # 扫码/密码/短信登录
-    │   ├── LiveRoom.ets                # 直播间
-    │   ├── Messages.ets                # 私信会话 + 聊天
-    │   ├── UserSpace.ets               # 用户空间
-    │   ├── DynamicDetail.ets           # 动态详情
-    │   ├── ImageViewer.ets             # 全屏看图
-    │   ├── RelationList.ets            # 关注/粉丝列表
-    │   └── library/                    # 历史 / 稍后再看 / 收藏路由页
-    ├── views/                          # 主 Tab 视图
-    │   ├── HomeView.ets                # 推荐 / 热门 / 直播
-    │   ├── DynamicView.ets             # 动态（可内嵌用户空间页）
-    │   └── MineView.ets                # 我的（用户区/历史/收藏/外观设置）
-    ├── components/
-    │   ├── player/                     # 点播播放器、弹幕、手势与设置组件
-    │   ├── live/                       # 直播播放器、弹幕与房间卡片
-    │   ├── reply/                      # 评论卡片、编辑器、楼中楼与分享卡片
-    │   ├── video/                      # 视频卡片与投币/收藏操作面板
-    │   └── GlassHeaderBar / PageHeader / LoadingView 等通用 UI 件
-    ├── api/                            # 按视频/番剧/认证/用户等领域拆分的接口层
-    ├── model/                          # Models.ets 稳定导出入口 + 按领域拆分的模型
-    ├── services/
-    │   ├── network/                   # HTTP、凭证域名策略、明确区分成功/失败的 ApiResult
-    │   ├── auth/                      # 登录持久化与账号会话代际
-    │   ├── message/                   # 按账号隔离的未读消息缓存
-    │   ├── cache/                     # 远程资源缓存、限并发流式临时文件写入
-    │   ├── media/                     # 播放源协调、视频下载与 API 26 媒体保存
-    │   └── library/                   # 历史分页状态与失败重试
-    └── common/
-        ├── AppRouter.ets               # 全局 NavPathStack + 路由表 + 参数守卫
-        ├── WbiSign.ets / AppSign.ets / Md5.ets   # WBI / App 签名（纯 ArkTS MD5）
-        ├── RsaUtil.ets                 # 密码登录 RSA 加密（cryptoFramework）
-        ├── RequestEpoch.ets            # 可被更新操作取代的异步请求版本
-        ├── LiveDanmakuClient.ets       # 直播弹幕 WebSocket 客户端
-        ├── SearchHistoryStore.ets / HotSearchStore.ets  # 搜索历史/热搜
-        ├── ImageColor.ets / ColorUtil.ets / AppTheme.ets  # 取色 / 色调板 / 动态主题
-        ├── Immersive.ets               # 沉浸式窗口工具
-        ├── ReplyContentParser.ets / ReplyTree.ets  # 评论富文本解析 / 楼中楼构树
-        ├── PlayerCommandBus.ets        # 评论时间轴 → 播放器 seek 等跨组件命令
-        ├── ImageUrl.ets / Constants.ets / LayoutTokens.ets / BasicDataSource.ets / Utils.ets
-    └── resources/                      # 字符串 / 颜色 / 图标
-
-## 构建
+## 从源码构建
 
 ### DevEco Studio
 
-1. 打开工程根目录（本目录），SDK 需含 **HarmonyOS API 26**（工具 → SDK Manager）；本项目不兼容 API 24。
-2. File → Sync 后直接 Run（自动签名），或 Build → Build Hap(s)。
+打开工程根目录（需含 **HarmonyOS API 26** SDK，不兼容 API 24），File → Sync 后直接 Run（自动签名）。
 
-### 命令行（macOS，已配置 DevEco Studio）
+### 命令行（macOS，需已配置 DevEco Studio）
 
-    bash tool/build.sh                    # debug
-    bash tool/build.sh clean release      # release
+```bash
+bash tool/build.sh                    # debug（含签名配置时产物已签名）
+bash tool/build.sh clean release      # release
+```
 
-脚本内置全部环境变量（hvigor/npm 缓存收进工程 `.home/`），产物：
+产物：`entry/build/default/outputs/default/entry-default-*.hap`。脚本内置全部环境变量（hvigor/npm 缓存收进工程 `.home/`）；首次构建需要网络。
 
-    entry/build/default/outputs/default/entry-default-unsigned.hap
+### GitHub Actions
 
-> 首次构建需要网络（hvigor 会安装 pnpm）。签名请用 DevEco Studio 的自动签名；命令行产物为未签名 HAP。
+`.github/workflows/release-hap.yml` 在 push 到 main（或手动触发）后：跑全量 QA → `ubuntu-latest` + [ErBWs/setup-ohos](https://github.com/ErBWs/setup-ohos) 构建 release HAP → 发布到滚动 Release（附更新日志）。签名配置可通过仓库 Secret（`HARMONY_BUILD_PROFILE_B64`，base64 的 build-profile.json5）注入，构建后即清除、不入 Git。
 
-### GitHub Actions 自动构建
+## 测试
 
-`.github/workflows/release-hap.yml` 会在每次 push 后构建 release HAP，并将 HAP 和 SHA-256 校验文件保存为 30 天的 Actions Artifact；也可以在 Actions 页面手动触发。
+```bash
+node --test --test-timeout=10000 tool/qa/*.test.cjs
+```
 
-HarmonyOS API 26 工具链需要使用安装了 DevEco Studio 的 macOS ARM64 自托管 Runner。注册 Runner 时添加自定义标签 `biliharmony`，并确保 DevEco Studio 位于 `/Applications/DevEco-Studio.app`。
+217 个用例：核心逻辑（签名 / 解析 / 状态机 / 组件构建）以 TS 转译 + 平台 mock 在 Node 端回归，无需真机。CI 每次推送全量执行。
 
-默认会上传未签名 release HAP。若要同时生成可安装的签名 HAP，请确保签名文件在 Runner 上可访问，然后把本机 DevEco 自动签名生成的 `build-profile.json5` 加密保存为仓库 Secret：
+## 项目结构
 
-    /usr/bin/base64 < build-profile.json5 | tr -d '\n' | gh secret set HARMONY_BUILD_PROFILE_B64
-
-Workflow 只在构建期间恢复该配置，构建结束后会清除；签名配置与密码不会进入 Git 仓库。
-
-## 移植对照（PiliPlus → BiliHaromny）
-
-| PiliPlus (Flutter) | BiliHaromny (ArkTS) |
-| --- | --- |
-| lib/utils/wbi_sign.dart | common/WbiSign.ets |
-| lib/utils/app_sign.dart | common/AppSign.ets |
-| lib/http/init.dart + dio | services/network/HttpClient.ets（@ohos.net.http） |
-| lib/http/video.dart | BiliApi.getRecommendApp / getHot / getPlayUrl |
-| lib/http/reply.dart | BiliApi.getReplies / addReply + ReplyTree.ets |
-| lib/http/search.dart | BiliApi.search / searchByType / searchSuggest / getHotSearch |
-| lib/http/login.dart（扫码/密码/短信） | AuthApi.getTVCode / loginByPassword / loginBySms + RsaUtil.ets |
-| lib/http/live.dart + 弹幕 socket | BiliApi.getLive* + common/LiveDanmakuClient.ets |
-| lib/http/msg.dart | BiliApi.getMessageSessions / sendPrivateMessage |
-| lib/http/fav.dart / history | BiliApi.getFavorite* / getHistory |
-| lib/utils/theme_utils.dart（Material You） | common/ColorUtil.ets + AppTheme.ets |
-| mpv/media_kit 播放 | 系统 AVPlayer + 自研 Canvas 弹幕引擎 |
-| lib/models/* | model/Models.ets 导出入口 + model/* 领域模型 |
-
-原始 PiliPlus 工程保留在 `docs/ref/PiliPlus/` 目录作为对照参考；它是本地忽略的上游源码仓库，
-不会随 BiliHaromny 一起提交或打包。
-
-空降助手功能参考 [BilibiliSponsorBlock](https://github.com/hanydd/BilibiliSponsorBlock) 的公开协议、分类和交互设计原生实现；上游项目采用 GPL-3.0 许可证。
+```text
+entry/src/main/ets/
+├── entryability/EntryAbility.ets    # 入口：主题初始化、沉浸式系统栏、卡片深链、启动代理
+├── entryformability/                # 桌面「继续观看」服务卡片 FormExtensionAbility
+├── pages/                           # 路由页（视频详情 / 搜索 / 登录 / 直播间 / 私信 / 番剧 / 下载中心 …）
+├── views/                           # 主 Tab 视图（首页三频道 / 动态 / 我的 / YouTube 外壳）
+├── components/
+│   ├── player/                      # 播放器、弹幕引擎、手势、设置面板
+│   ├── live/                        # 直播播放器与房间卡片
+│   ├── reply/                       # 评论卡片、编辑器、楼中楼、分享卡片
+│   ├── video/                       # 视频卡片与投币 / 收藏面板
+│   └── …                            # 玻璃头栏、看图、加载态等通用件
+├── api/                             # 按领域拆分的接口层（WBI / App 签名在此封装）
+├── model/                           # 领域模型（Models.ets 稳定导出入口）
+├── services/                        # 网络 / 认证 / 媒体 / 缓存 / 消息 / 书架型数据
+└── common/                          # 路由、签名、取色主题、直播弹幕 WS、工具
+```
 
 ## 文档
 
-- `docs/UI与导航设计方案-v1.md` — UI 与导航设计方案（含实施状态与决策记录）
-- `docs/Roadmap-对照网页端.md` — 对照 B 站网页端的功能差距与实施优先级
-- `docs/ArkUI易错清单.md` — 本工程踩过的 ArkUI 坑与提交前自检清单（开发前必读）
-- `docs/ref/README.md` — 设计参考截图索引（BewlyCat / B 站官方 App）
-- `docs/ref/` — 参考截图素材
-- `docs/AUDIT_API_MODEL_REPORT.md` — API 层与模型层审计报告
-- `docs/API26_REFACTOR_REPORT.md` — API 26 规范审计与本轮重构结果
-- `docs/api/` — B 站 Web API 调研清单、发现快照与复现脚本
+- [CHANGELOG.md](CHANGELOG.md) — 版本历史与完整能力清单
+- [docs/移植对照-PiliPlus.md](docs/移植对照-PiliPlus.md) — 上游 Flutter 模块 ↔ ArkTS 实现对照
+- [docs/UI与导航设计方案-v1.md](docs/UI与导航设计方案-v1.md) — UI 与导航设计（含决策记录）
+- [docs/Roadmap-对照网页端.md](docs/Roadmap-对照网页端.md) — 对照 B 站网页端的功能差距
+- [docs/ArkUI易错清单.md](docs/ArkUI易错清单.md) — 本工程踩过的 ArkUI 坑与自检清单（开发前必读）
+- [docs/api/](docs/api/) — B 站 Web API 调研清单与复现脚本
 
-## 待完善（Roadmap）
+## 致谢
 
-- [x] 专栏文章阅读页（`pages/ArticlePage.ets`，App 内 Web 容器）
-- [x] 自动连播开关（播放器「更多功能」设置，UGC 合集播完自动下一集）
-- [x] 分区频道页（`pages/ZoneChannelPage.ets`，首页热门频道入口，点击分区进对应排行）
-- [x] 番剧索引页（`pages/BangumiIndexPage.ets`，番剧/国创/影视/剧集/纪录片 × 连载状态筛选聚合）+ **新番时间表**（右上入口，近一周番剧/国创排播，`pgc/web/timeline`）
-- [x] 用户类型筛选（搜索用户 Tab：全部/UP主/普通/认证，与粉丝数/等级排序并列）
-- [x] 动态顶部关注 UP 主横滑栏 + 直播中角标（`DynamicView`，批量状态查询，开播头像带红角标，**点击角标直达直播间**）
-- [x] 发布纯文字动态（`DynamicView` FAB + 输入面板）
-- [x] 主播开播提醒（轻量版：关注栏「直播中」角标；系统级推送/真机提醒待做）
-- [ ] 宽屏 Navigation 分栏（840vp 断点，待真机大屏）
-- [x] 自动连播/播完暂停设置（播放器「自动连播」开关；无合集时自动连播相关推荐第一条）；画中画/后台播放待真机（模拟器无 PiP 能力）
-- [ ] 历史弹幕（官方 API 已下线）、高级弹幕
-- [x] 弹幕举报（播放画面内点击弹幕即弹原因菜单）
-- [x] 评论举报、黑名单管理
-- [x] 直播分区页（`LiveZonePage`）；直播回放（官方无公开接口，不做）
-- [x] 定时深色切换（「我的」页开关 + 开始/结束时间选择，跨天时段，跟随系统模式下生效）
-- [ ] 直播礼物/送礼、离线缓存（视频下载，真机从容做）
+- [PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus) — 功能蓝本与协议实现参考
+- [BewlyBewly](https://github.com/BewlyBewly/BewlyBewly)（MIT）— 首页卡片设计、频道胶囊与分区图标集
+- [MingCute Icon](https://github.com/Richard9394/MingCute)（Apache-2.0，经 [Iconify](https://iconify.design) 分发）— 全局界面图标
+- [BilibiliSponsorBlock](https://github.com/hanydd/BilibiliSponsorBlock)（GPL-3.0）— 空降助手协议与交互设计
+
+## 已知边界
+
+不做消费类功能（大会员 / 充电 / 送礼）、创作中心、直播回放；历史弹幕与视频举报因官方无公开接口暂缺。画中画与宽屏分栏已实现，真机持续验收中。

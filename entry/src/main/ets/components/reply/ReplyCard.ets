@@ -30,10 +30,71 @@ interface ReportButtonItem {
 }
 
 /**
+ * 评论附图单元：先铺骨架底色，解码完成后淡入，失败时保留底色并提示。
+ * 骨架必须是 Image 之外独立的一层，才能覆盖"Image 还没有位图"的空白期；
+ * 底色同时保证图片被 LazyForEach 重建时不会出现瞬间空洞。
+ */
+@Component
+struct ReplyPictureCell {
+  @Prop cellId: string = '';
+  @Prop @Watch('onSourceChanged') source: string = '';
+  @Prop cellWidth: number = 92;
+  @Prop cellHeight: number = 92;
+  @StorageProp('isDarkMode') isDark: boolean = false;
+  @State shown: boolean = false;
+  @State failed: boolean = false;
+  onOpen: () => void = () => {};
+
+  private onSourceChanged(): void {
+    // 换图先回到骨架态：旧位图不能留在新图位置上。
+    this.shown = false;
+    this.failed = false;
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.Center }) {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor(this.isDark ? '#2A2C31' : '#E5E7EB')
+      Image(this.source)
+        .width('100%')
+        .height('100%')
+        .objectFit(ImageFit.Cover)
+        // 评论附图异步解码，长列表滚动不卡。
+        .syncLoad(false)
+        .opacity(this.shown ? 1 : 0)
+        .animation({ duration: 180, curve: Curve.EaseOut })
+        .onComplete(() => {
+          if (!this.shown) this.shown = true;
+        })
+        .onError(() => {
+          if (!this.failed) this.failed = true;
+        })
+      if (this.failed) {
+        Text('图片加载失败')
+          .fontSize(10)
+          .fontColor('#9499A0')
+      }
+    }
+    .width(this.cellWidth)
+    .height(this.cellHeight)
+    .borderRadius(6)
+    .clip(true)
+    .margin({ right: 5, bottom: 5 })
+    .id(this.cellId)
+    .priorityGesture(TapGesture().onAction(() => {
+      this.onOpen();
+    }))
+  }
+}
+
+/**
  * 视频评论、动态详情与回复列表共用的完整评论卡片。
  * 头像装扮、富文本、图片、@/空降/BV 跳转和点赞态都只能在这里实现，
  * 避免不同页面的评论能力与视觉继续分叉。
  */
+@Reusable
 @Component
 export struct ReplyCard {
   @Prop @Watch('onItemChanged') item: ReplyItem = new ReplyItem();
@@ -84,6 +145,33 @@ export struct ReplyCard {
   aboutToAppear(): void {
     this.destroyed = false;
     this.syncMirrorFromItem();
+    this.primeNameplate();
+  }
+
+  /**
+   * 复用重挂载：三个评论 LazyForEach 滚动回收时整卡复用，必须清掉随旧行遗留的瞬态——
+   * 镜像按新数据重建（无论框架先更新 @Prop 还是先回调本钩子都成立：直接读 params 里的
+   * 新 item，随后 @Watch 的 rpid/rev 守卫会兜底再同步一次），动画缩放与楼中楼高度测量
+   * 回到初始态，避免上一条评论的点赞动效/连接线残留。
+   */
+  aboutToReuse(params: Record<string, Object>): void {
+    this.destroyed = false;
+    this.likeTimers.forEach((id: number) => clearTimeout(id));
+    this.likeTimers.clear();
+    this.likeScale = 1;
+    this.dislikeScale = 1;
+    this.measuredThreadHeight = 72;
+    const next: Object | undefined = params['item'];
+    if (next instanceof ReplyItem) {
+      const fresh: ReplyItem = next as ReplyItem;
+      this.mirrorLiked = fresh.liked;
+      this.mirrorDisliked = fresh.disliked;
+      this.mirrorLike = fresh.like;
+      this.mirrorRpid = fresh.rpid;
+      this.mirrorRev = fresh.rev;
+    } else {
+      this.syncMirrorFromItem();
+    }
     this.primeNameplate();
   }
 
@@ -344,7 +432,24 @@ export struct ReplyCard {
     const isMine: boolean = UserStore.isLogin && UserStore.current !== null && UserStore.current.mid === this.item.mid;
     const darkText: string = this.isDark ? '#E6E6E6' : '#18191C';
     try {
-      if (isMine) {
+      const isOwner: boolean = this.upMid > 0 && UserStore.isLogin &&
+        UserStore.current !== null && UserStore.current.mid === this.upMid;
+      if (isMine && isOwner) {
+        // 视频 UP 主本人的评论：额外提供置顶/取消置顶。
+        this.getUIContext().getPromptAction().showActionMenu({
+          title: this.item.content.substring(0, Math.min(18, this.item.content.length)),
+          buttons: [
+            { text: '复制评论', color: darkText },
+            { text: this.item.isUpTop ? '取消置顶' : '置顶这条评论', color: darkText },
+            { text: '删除这条评论', color: AppTheme.DANGER },
+          ],
+        }).then((menuResult) => {
+          const pick: number = Number(menuResult.index);
+          if (pick === 0) this.copyComment();
+          else if (pick === 1) this.toggleTop();
+          else if (pick === 2) this.deleteOwnComment();
+        });
+      } else if (isMine) {
         this.getUIContext().getPromptAction().showActionMenu({
           title: this.item.content.substring(0, Math.min(18, this.item.content.length)),
           buttons: [
@@ -461,6 +566,18 @@ export struct ReplyCard {
     }
   }
 
+  /** UP 主置顶/取消置顶（仅视频 UP 本人可见入口）。 */
+  private toggleTop(): void {
+    CommentApi.topReply(this.item.oid, this.item.type, this.item.rpid, !this.item.isUpTop)
+      .then((r: ActionResult) => {
+        this.toast(r.message);
+        if (r.ok) this.item.isUpTop = !this.item.isUpTop;
+      })
+      .catch(() => {
+        this.toast('操作失败，请稍后重试');
+      });
+  }
+
   /** 删除自己的评论：二次确认后调服务端删除，成功交给宿主移除该行。 */
   private deleteOwnComment(): void {
     try {
@@ -573,16 +690,13 @@ export struct ReplyCard {
         if (this.item.pictures.length > 0) {
           Flex({ wrap: FlexWrap.Wrap }) {
             ForEach(this.item.pictures, (picture: string, index: number) => {
-              Image(biliImageThumbnail(picture, this.item.pictures.length === 1 ? 640 : 320))
-                .width(this.item.pictures.length === 1 ? 190 : 92)
-                .height(this.item.pictures.length === 1 ? 150 : 92)
-                .objectFit(ImageFit.Cover)
-                .borderRadius(6)
-                .margin({ right: 5, bottom: 5 })
-                .id(this.pictureId(index))
-                // 评论附图异步解码，长列表滚动不卡。
-                .syncLoad(false)
-                .priorityGesture(TapGesture().onAction(() => this.openPicture(index)))
+              ReplyPictureCell({
+                cellId: this.pictureId(index),
+                source: biliImageThumbnail(picture, this.item.pictures.length === 1 ? 640 : 320),
+                cellWidth: this.item.pictures.length === 1 ? 190 : 92,
+                cellHeight: this.item.pictures.length === 1 ? 150 : 92,
+                onOpen: (): void => this.openPicture(index),
+              })
             }, (picture: string, index: number) => picture + String(index))
           }
           .width('100%')

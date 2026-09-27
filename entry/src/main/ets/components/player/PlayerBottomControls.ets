@@ -1,7 +1,8 @@
-import { VideoChapter } from '../../api/BiliApi';
+import { HotPoint, VideoChapter } from '../../api/BiliApi';
 import { SponsorBlockSegment } from '../../common/SponsorBlock';
 import { formatDuration } from '../../common/Utils';
 import { PlayerProgressBar } from './PlayerProgressBar';
+import { PlayerScrubController, PlayerScrubTarget } from './PlayerGestureOverlay';
 
 /** 普通/横屏播放器底部控制条，状态切换通过回调交给 PlayerView。 */
 @Component
@@ -12,8 +13,34 @@ export struct PlayerBottomControls {
   @Prop sponsorEnabled: boolean = true;
   @Prop chapters: Array<VideoChapter> = [];
   @Prop sponsorSegments: Array<SponsorBlockSegment> = [];
+  @Prop hotPoints: Array<HotPoint> = [];
   @Prop progress: number = 0;
   @Prop duration: number = 0;
+  /** 横滑快进的待落点：进度条跟手显示它，seek 完成后宿主清零回落真实进度。 */
+  @State scrubPreview: number = -1;
+  scrubCtl: PlayerScrubController | null = null;
+  private scrubTarget: PlayerScrubTarget | null = null;
+
+  aboutToAppear(): void {
+    const ctl: PlayerScrubController | null = this.scrubCtl;
+    if (ctl !== null) {
+      this.scrubTarget = { showScrub: (value: number): void => { this.scrubPreview = value; } };
+      ctl.attach(this.scrubTarget);
+    }
+  }
+
+  aboutToDisappear(): void {
+    const ctl: PlayerScrubController | null = this.scrubCtl;
+    if (ctl !== null && this.scrubTarget !== null) {
+      ctl.detach(this.scrubTarget);
+      this.scrubTarget = null;
+    }
+  }
+
+  private displayProgress(): number {
+    return this.scrubPreview >= 0 ? this.scrubPreview : this.progress;
+  }
+
   @Prop qualityLoading: boolean = false;
   @Prop qualityLabel: string = '';
   @Prop playbackRate: number = 1;
@@ -48,13 +75,14 @@ export struct PlayerBottomControls {
       // 横屏：保留完整控制条，中间为弹幕输入区
       Column({ space: 6 }) {
         Row({ space: 10 }) {
-          Text(formatDuration(this.progress)).fontSize(11).fontColor('#FFFFFF')
+          Text(formatDuration(this.displayProgress())).fontSize(11).fontColor('#FFFFFF')
           PlayerProgressBar({
-            value: this.progress,
+            value: this.displayProgress(),
             duration: this.duration,
             compact: false,
             chapters: this.chapters,
             sponsorSegments: this.sponsorSegments,
+            hotPoints: this.hotPoints,
             onChange: (value: number, mode: SliderChangeMode) => this.onProgressChange(value, mode),
             onInteractionEnd: () => this.onProgressInteractionEnd(),
           })
@@ -126,13 +154,14 @@ export struct PlayerBottomControls {
         } else {
           this.IconButton($r('app.media.ic_play'), 22, 34, '#FFFFFF', () => this.onPlay())
         }
-        Text(formatDuration(this.progress)).fontSize(11).fontColor('#FFFFFF')
+        Text(formatDuration(this.displayProgress())).fontSize(11).fontColor('#FFFFFF')
         PlayerProgressBar({
-          value: this.progress,
+          value: this.displayProgress(),
           duration: this.duration,
           compact: false,
           chapters: this.chapters,
           sponsorSegments: this.sponsorSegments,
+          hotPoints: this.hotPoints,
           onChange: (value: number, mode: SliderChangeMode) => this.onProgressChange(value, mode),
           onInteractionEnd: () => this.onProgressInteractionEnd(),
         })

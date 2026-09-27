@@ -70,6 +70,8 @@ export function formatCount(n: number): string {
 
 // 时长 mm:ss 或 hh:mm:ss
 export function formatDuration(seconds: number): string {
+  // NaN/负数兜底：上游个别接口时长缺失时返回 NaN，不能渲染成 "NaN:NaN"。
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0:00';
   const s: number = Math.floor(seconds);
   const h: number = Math.floor(s / 3600);
   const m: number = Math.floor((s % 3600) / 60);

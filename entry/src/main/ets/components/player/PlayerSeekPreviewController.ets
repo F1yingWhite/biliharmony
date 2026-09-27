@@ -3,6 +3,7 @@ import { media } from '@kit.MediaKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { DEBUG } from 'BuildProfile';
 import { BiliApi, VideoShotData } from '../../api/BiliApi';
+import { HttpClient } from '../../services/network/HttpClient';
 
 export class PlayerSeekPreviewController {
   private shots: VideoShotData | null = null;
@@ -91,6 +92,48 @@ export class PlayerSeekPreviewController {
       if (generation === this.generation && aid === this.aid && bvid === this.bvid && cid === this.cid) {
         this.shotsLoading = false;
       }
+    }
+  }
+
+  /**
+   * 截图：取当前播放时刻最近的雪碧图帧并裁剪为独立 PixelMap。
+   * 优先复用预加载的 VideoShotData；未加载时现取一次。失败返回 null。
+   */
+  async captureAt(seconds: number): Promise<image.PixelMap | null> {
+    let shots: VideoShotData | null = this.shots;
+    if (shots === null) {
+      try {
+        shots = await BiliApi.getVideoShots(this.aid, this.bvid, this.cid);
+        this.shots = shots;
+      } catch (e) {
+        return null;
+      }
+    }
+    if (shots === null || shots.index.length === 0 || shots.images.length === 0) return null;
+    let left: number = 0;
+    let right: number = shots.index.length - 1;
+    while (left < right) {
+      const middle: number = Math.ceil((left + right) / 2);
+      if (shots.index[middle] <= seconds) left = middle;
+      else right = middle - 1;
+    }
+    const cellsPerImage: number = shots.xLen * shots.yLen;
+    const imageIndex: number = Math.min(shots.images.length - 1, Math.floor(left / cellsPerImage));
+    const cellIndex: number = left % cellsPerImage;
+    try {
+      const bytes: ArrayBuffer = await HttpClient.getBytes(shots.images[imageIndex]);
+      const source: image.ImageSource = image.createImageSource(bytes);
+      const sprite: image.PixelMap = await source.createPixelMap();
+      const info: image.ImageInfo = await sprite.getImageInfo();
+      const cellW: number = Math.floor(info.size.width / shots.xLen);
+      const cellH: number = Math.floor(info.size.height / shots.yLen);
+      if (cellW <= 0 || cellH <= 0) return null;
+      const col: number = cellIndex % shots.xLen;
+      const row: number = Math.floor(cellIndex / shots.xLen);
+      await sprite.crop({ x: col * cellW, y: row * cellH, size: { width: cellW, height: cellH } });
+      return sprite;
+    } catch (e) {
+      return null;
     }
   }
 

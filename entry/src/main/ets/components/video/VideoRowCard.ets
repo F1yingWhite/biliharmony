@@ -64,20 +64,20 @@ export struct VideoRowCard {
       .clip(true)
       Column({ space: this.compact ? 5 : this.contentSpace }) {
         if (this.compact) {
-          Text() { KeywordSpans(this.title, this.highlightKeyword, this.isDark) }
+          Text() { KeywordSpans({ text: this.title, keyword: this.highlightKeyword, isDark: this.isDark }) }
             .fontSize(14)
             .fontColor(this.isDark ? this.titleDarkColor : '#18191C')
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .lineHeight(19)
         } else {
-          Text() { KeywordSpans(this.title, this.highlightKeyword, this.isDark) }
+          Text() { KeywordSpans({ text: this.title, keyword: this.highlightKeyword, isDark: this.isDark }) }
             .fontSize(14)
             .fontColor(this.isDark ? this.titleDarkColor : '#18191C')
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
-        Text() { KeywordSpans(this.upName, this.highlightKeyword, this.isDark) }
+        Text() { KeywordSpans({ text: this.upName, keyword: this.highlightKeyword, isDark: this.isDark }) }
           .fontSize(11)
           .fontColor('#9499A0')
           .maxLines(1)

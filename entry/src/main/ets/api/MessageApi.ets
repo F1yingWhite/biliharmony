@@ -9,7 +9,8 @@ import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber, asBool, str, toHttps, randomString } from '../common/Utils';
 import { MessageSessionItem, MessageSessionPageData, PrivateMessageItem, PrivateMessagePageData,
   MsgFeedUnread, MsgNotifyItem, MsgNotifyPageData } from '../model/Models';
-import { ActionResult, actionWithCsrf, getData, webGet, webPost, failureText } from './internal/ApiCommon';
+import { ActionResult, actionWithCsrf, getData, webGet, webGetSigned, webPost,
+  failureText } from './internal/ApiCommon';
 
 export class MessageApi {
   static async getMessageSessions(beginTs: number = 0): Promise<MessageSessionPageData> {
@@ -19,8 +20,7 @@ export class MessageApi {
       'size': '30', 'build': '0', 'mobi_app': 'web',
     };
     if (beginTs > 0) params['begin_ts'] = String(beginTs);
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.sessionList, params, 'https://message.bilibili.com/');
+    const resp: HttpResponse = await webGetSigned(Api.sessionList, params, 'https://message.bilibili.com/');
     const data: Record<string, Object> | null = getData(resp);
     const result: MessageSessionPageData = new MessageSessionPageData();
     if (data === null) {
@@ -38,10 +38,12 @@ export class MessageApi {
       hilog.info(0x0000, 'BiliApi', 'getMessageSessions ok: sessions=%{public}d',
         asArray(data['session_list']).length);
     }
+    const pinnedTalker: number = asNumber(data['pin_talker_id'], 0);
     const list: Array<Object> = asArray(data['session_list']);
     const accountIds: Array<string> = [];
     for (let i: number = 0; i < list.length; i++) {
       const session: MessageSessionItem = MessageSessionItem.from(list[i]);
+      session.pinned = pinnedTalker > 0 && session.talkerId === pinnedTalker;
       result.sessions.push(session);
       if (session.name.length === 0 && session.talkerId > 0) accountIds.push(String(session.talkerId));
     }
@@ -91,6 +93,21 @@ export class MessageApi {
   }
 
   /** 删除私信会话（api.vc.bilibili.com 域，需 WBI 签名 + csrf）。 */
+  /** 置顶/取消置顶私信会话（pin_type: 1 = 置顶，2 = 取消）。 */
+  static async pinSession(talkerId: number, pin: boolean): Promise<ActionResult> {
+    return actionWithCsrf('登录状态缺少 CSRF，请重新登录', pin ? '已置顶' : '已取消置顶', '操作失败',
+      (csrf: string): Promise<HttpResponse> => {
+        const params: Record<string, string> = {
+          'talker_id': String(talkerId),
+          'pin_type': pin ? '1' : '2',
+          'csrf': csrf,
+          'csrf_token': csrf,
+        };
+        return HttpClient.post(Api.sessionPin, HttpClient.buildQuery(params),
+          HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+      });
+  }
+
   static async removeSession(talkerId: number): Promise<ActionResult> {
     if (talkerId <= 0) return new ActionResult(false, '会话参数无效');
     if (HttpClient.getCookie('SESSDATA').length === 0) {
@@ -121,8 +138,7 @@ export class MessageApi {
       'build': '0', 'mobi_app': 'web', 'web_location': '333.1296',
     };
     if (beginSeqno > 0) params['begin_seqno'] = String(beginSeqno);
-    await WbiSign.encWbi(params);
-    const resp: HttpResponse = await webGet(Api.sessionMessages, params, 'https://message.bilibili.com/');
+    const resp: HttpResponse = await webGetSigned(Api.sessionMessages, params, 'https://message.bilibili.com/');
     const data: Record<string, Object> | null = getData(resp);
     const result: PrivateMessagePageData = new PrivateMessagePageData();
     if (data === null) {
@@ -197,16 +213,21 @@ export class MessageApi {
 
   /**
    * 通知中心全部已读：回复/@/赞接口会在读取首屏时推进服务端已读状态；系统通知需额外上报游标。
-   * 任何一步失败都返回失败，调用方不能先清本地角标再用成功提示掩盖服务端失败。
+   * 四类首屏互不依赖，并行拉取（串行 5 个 RTT 在弱网下按钮要转 3-5 秒）；任何一步失败都返回失败，
+   * 调用方不能先清本地角标再用成功提示掩盖服务端失败。
    */
   static async markAllNotificationsRead(): Promise<ActionResult> {
     const kinds: Array<string> = ['reply', 'at', 'like'];
-    for (let i: number = 0; i < kinds.length; i++) {
-      const page: MsgNotifyPageData = await MessageApi.getMsgFeedNotify(kinds[i]);
-      if (page.error.length > 0) return new ActionResult(false, page.error);
+    const pages: Array<MsgNotifyPageData> = await Promise.all([
+      MessageApi.getMsgFeedNotify(kinds[0]),
+      MessageApi.getMsgFeedNotify(kinds[1]),
+      MessageApi.getMsgFeedNotify(kinds[2]),
+      MessageApi.getSysNotifications(),
+    ]);
+    for (let i: number = 0; i < pages.length; i++) {
+      if (pages[i].error.length > 0) return new ActionResult(false, pages[i].error);
     }
-    const sysPage: MsgNotifyPageData = await MessageApi.getSysNotifications();
-    if (sysPage.error.length > 0) return new ActionResult(false, sysPage.error);
+    const sysPage: MsgNotifyPageData = pages[3];
     if (sysPage.items.length > 0 && sysPage.items[0].sysCursor.length > 0) {
       const result: ActionResult = await MessageApi.updateSysMsgCursor(sysPage.items[0].sysCursor);
       if (!result.ok) return result;
@@ -256,13 +277,25 @@ export class MessageApi {
       result.items.push(item);
     }
     result.hasMore = !asBool(cursorObj['is_end'], true) && rawItems.length > 0;
-    MessageApi.fillMsgFeedCursor(resp.body, result);
+    // like 报文同时含 latest/total 两段 cursor，翻页游标取 total 段，扫描时需锚定 total 偏移。
+    MessageApi.fillMsgFeedCursor(resp.body, result, kind === 'like');
     return result;
   }
 
-  /** cursor.id/time 为 int64，从原始报文按字符串截取，避免 JSON.parse 丢失精度。 */
-  private static fillMsgFeedCursor(body: string, result: MsgNotifyPageData): void {
-    const idx: number = body.indexOf('"cursor"');
+  /**
+   * cursor.id/time 为 int64，从原始报文按字符串截取，避免 JSON.parse 丢失精度（故不用结构化解析取值）。
+   * 「收到的赞」报文里 latest 与 total 两段都带 "cursor"：先定位 "total" 键的偏移再在其后匹配，
+   * 否则 latest 在前时会取到最新一屏的游标，翻页重复读同一屏导致漏读；
+   * 锚定失败（旧格式无 total 段等）回退“第一个 cursor”的旧行为，reply/at 不受影响。
+   * 报文字符串值内的引号必然转义为 \"，因此带引号的 "total"/"cursor" 只可能是键名，不会误匹配正文。
+   */
+  private static fillMsgFeedCursor(body: string, result: MsgNotifyPageData, fromTotal: boolean = false): void {
+    let idx: number = body.indexOf('"cursor"');
+    if (fromTotal) {
+      const totalIdx: number = body.indexOf('"total"');
+      const totalCursorIdx: number = totalIdx >= 0 ? body.indexOf('"cursor"', totalIdx) : -1;
+      if (totalCursorIdx >= 0) idx = totalCursorIdx;
+    }
     if (idx < 0) return;
     const block: string = body.substring(idx, idx + 160);
     const idMatch: RegExpMatchArray | null = block.match(/"id":(\d+)/);

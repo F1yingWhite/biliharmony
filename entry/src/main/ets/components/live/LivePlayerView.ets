@@ -3,30 +3,78 @@ import { SystemMediaVolume } from '../player/SystemMediaVolume';
 import { PlayerGestureController } from '../player/PlayerGestureController';
 import { PlayerGestureOverlay } from '../player/PlayerGestureOverlay';
 /** 直播播放器：低延迟 AVPlayer、基础画质与视频同款 Canvas 分轨弹幕。 */
-import { LiveSuperChatShelf } from './LiveSuperChatShelf';
+import { LiveSuperChatFeed, LiveSuperChatShelf } from './LiveSuperChatShelf';
+import { LiveDanmakuClock } from './LiveDanmakuClock';
 import { media } from '@kit.MediaKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Immersive } from '../../common/Immersive';
 import { Constants } from '../../common/Constants';
 import { LiveChatMessage, LivePlayInfo, LiveQualityOption } from '../../model/LiveModels';
-import { LiveDanmakuRenderer } from './LiveDanmakuRenderer';
+import { LiveDanmakuFrameClock, LiveDanmakuRenderer } from './LiveDanmakuRenderer';
 import { PlayerSettingsPanel } from '../player/PlayerSettingsPanel';
 import { AppTheme, DanmakuSettings } from '../../common/AppTheme';
+
+/**
+ * 直播间 → 播放器的数据直通道：父页面持有引用并在合批边界直呼，
+ * 替代 messages/superChats/syncVersion 三个 @Prop 在每批聊天（最多 ~240 条）到达时的整组深拷贝。
+ * 播放器挂载前的快照留在通道里，挂载时用它建立弹幕增量基线。
+ */
+export class LivePlayerFeed {
+  /** 竖屏 SC 栏与全屏 SC 浮层共用同一条醒目留言通道。 */
+  readonly superChatFeed: LiveSuperChatFeed = new LiveSuperChatFeed();
+  private dm: LiveDanmakuRenderer | null = null;
+  private messages: Array<LiveChatMessage> = [];
+  private superChatCountSink: ((count: number) => void) | null = null;
+
+  /** 播放器挂载时接入渲染器；此前的消息快照保留在通道里供建立基线。 */
+  bindDm(renderer: LiveDanmakuRenderer): void {
+    this.dm = renderer;
+  }
+
+  /** 播放器订阅 SC 数量（控制全屏浮层显隐）；订阅即补发当前值。 */
+  bindSuperChatCount(sink: (count: number) => void): void {
+    this.superChatCountSink = sink;
+    sink(this.superChatFeed.count());
+  }
+
+  /** 当前消息全量快照（时间正序），供播放器挂载时建立增量基线。 */
+  currentMessages(): Array<LiveChatMessage> {
+    return this.messages;
+  }
+
+  /** 首屏历史/手动同步：整体重建弹幕基线（清待喷队列与已上屏画面）。 */
+  resetMessages(list: Array<LiveChatMessage>): void {
+    this.messages = list;
+    if (this.dm !== null) this.dm.resetBaseline(list);
+  }
+
+  /** 聊天合帧批次落库后的增量通知。 */
+  publishMessages(list: Array<LiveChatMessage>): void {
+    this.messages = list;
+    if (this.dm !== null) this.dm.onMessagesChanged(list);
+  }
+
+  /** SC 合并进页面 @State 后同步给所有浮层与数量角标。 */
+  publishSuperChats(list: Array<LiveChatMessage>): void {
+    this.superChatFeed.publish(list);
+    if (this.superChatCountSink !== null) this.superChatCountSink(list.length);
+  }
+}
 
 
 @Component
 export struct LivePlayerView {
   @Prop @Watch('onPlayInfoChanged') playInfo: LivePlayInfo = new LivePlayInfo();
-  @Prop @Watch('onMessagesChanged') messages: Array<LiveChatMessage> = [];
-  @Prop @Watch('onSyncVersionChanged') syncVersion: number = 0;
   @Prop title: string = '';
   @Prop retrying: boolean = false;
   onRetry: () => void = () => {};
-  @Prop superChats: Array<LiveChatMessage> = [];
+  feed: LivePlayerFeed = new LivePlayerFeed();
   @State viewportHeight: number = 240;
   @Prop uname: string = '';
   onQualityChange: (qn: number) => void = () => {};
   onFullscreenChange: (fullscreen: boolean) => void = () => {};
+  /** SC 数量经 feed 直呼更新，只作全屏浮层显隐的轻量状态（替代整组 superChats @Prop）。 */
+  @State superChatCount: number = 0;
   @State playing: boolean = false;
   @State prepared: boolean = false;
   @State buffering: boolean = true;
@@ -88,7 +136,27 @@ export struct LivePlayerView {
     AppStorage.setOrCreate<boolean>('livePlayerFullscreen', false);
     AppStorage.setOrCreate<number>('livePlayerExitRequest', 0);
     this.restoreDanmakuSettings();
-    this.dmRenderer.setBaseline(this.messages);
+    // DisplaySync 帧时钟注入渲染器；消息基线取自父页面直通道的当前快照。
+    // ArkTS 不做隐式结构化匹配：类实例不能直接赋给 LiveDanmakuFrameClock 接口参数，
+    // 显式构造接口对象字面量完成适配（时钟模块保持不依赖渲染器）。
+    const clock: LiveDanmakuClock = new LiveDanmakuClock({
+      canRender: (): boolean => this.dmRenderer.playing && this.dmRenderer.enabled,
+      hasWork: (): boolean => this.dmRenderer.hasWork(),
+      getFrameRate: (): number => this.dmRenderer.frameRate,
+      renderFrame: (frameTimeMs: number): void => this.dmRenderer.renderTick(frameTimeMs),
+    });
+    const frameClock: LiveDanmakuFrameClock = {
+      start: (): void => clock.start(),
+      stop: (): void => clock.stop(),
+      release: (): void => clock.release(),
+      frameRateChanged: (): void => clock.frameRateChanged(),
+    };
+    this.dmRenderer.attachClock(frameClock);
+    this.feed.bindDm(this.dmRenderer);
+    this.dmRenderer.setBaseline(this.feed.currentMessages());
+    this.feed.bindSuperChatCount((count: number): void => {
+      this.superChatCount = count;
+    });
   }
 
   aboutToDisappear(): void {
@@ -303,14 +371,6 @@ export struct LivePlayerView {
       if (this.playInfo.qualities[i].qn === this.playInfo.currentQn) return this.playInfo.qualities[i].label;
     }
     return '画质';
-  }
-
-  onMessagesChanged(): void {
-    this.dmRenderer.onMessagesChanged(this.messages);
-  }
-
-  onSyncVersionChanged(): void {
-    this.dmRenderer.resetBaseline(this.messages);
   }
 
   private toggleDanmaku(): void {
@@ -587,9 +647,9 @@ export struct LivePlayerView {
         gestureAdjustPercent: this.gestureAdjustPercent,
       })
 
-      if (this.fullscreen && this.controls && this.superChats.length > 0 && !this.showQuality && !this.showDmSettings) {
+      if (this.fullscreen && this.controls && this.superChatCount > 0 && !this.showQuality && !this.showDmSettings) {
         LiveSuperChatShelf({
-          messages: this.superChats,
+          feed: this.feed.superChatFeed,
           floating: true,
           onExpandedChange: (expanded: boolean) => {
             this.scExpanded = expanded;

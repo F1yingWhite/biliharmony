@@ -24,7 +24,7 @@ export struct GlassCapsuleSurface {
       gradientMask: { maskColor: Color.Transparent, maskHeight: 0 },
       systemMaterialEffect: {
         materialType: this.glassOn ? hdsMaterial.MaterialType.IMMERSIVE : hdsMaterial.MaterialType.NONE,
-        materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE,
+        materialLevel: hdsMaterial.MaterialLevel.GENTLE,
       },
     })
     .barBackgroundColor(this.glassOn ? Color.Transparent : (this.isDark ? '#292B32' : '#EDEFF2'))
@@ -48,13 +48,14 @@ export struct ImmersiveEdgeMask {
     Stack() {
       Column()
         .width('100%').height('100%')
-        .backgroundEffect({ radius: this.glassOn ? 56 : 0, saturation: 1.1,
-          color: this.glassOn ? (this.isDark ? '#1818191C' : '#18F1F3F5') :
+        // 柔和档光感：模糊半径与底色透明度都收敛（对齐应用商店式低调渐变）。
+        .backgroundEffect({ radius: this.glassOn ? 36 : 0, saturation: 1.05,
+          color: this.glassOn ? (this.isDark ? '#1218191C' : '#12F1F3F5') :
             (this.isDark ? '#F218191C' : '#F2F1F3F5') })
       Column()
         .width('100%').height('100%')
         .linearGradient({ angle: this.topEdge ? 180 : 0,
-          colors: [['#FFFFFFFF', 0], ['#FFFFFFFF', 0.5], ['#B3FFFFFF', 0.73], ['#00FFFFFF', 1]] })
+          colors: [['#FFFFFFFF', 0], ['#FFFFFFFF', 0.5], ['#99FFFFFF', 0.73], ['#00FFFFFF', 1]] })
         .blendMode(BlendMode.DST_IN)
     }
     .width('100%').height(this.maskHeight)

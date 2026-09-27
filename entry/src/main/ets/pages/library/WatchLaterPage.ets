@@ -25,6 +25,8 @@ export struct WatchLaterPage {
   @StorageProp('isDarkMode') isDark: boolean = false;
   private itemsSource: BasicDataSource<WatchLaterItem> = new BasicDataSource<WatchLaterItem>();
   private actionBusy: boolean = false;
+  @State selecting: boolean = false;
+  @State selectedAids: Set<number> = new Set<number>();
   private listEpoch: RequestEpoch = new RequestEpoch();
   private prepareEpoch: RequestEpoch = new RequestEpoch();
   private destroyed: boolean = false;
@@ -152,6 +154,77 @@ export struct WatchLaterPage {
     }
   }
 
+  private toggleSelect(aid: number): void {
+    const next: Set<number> = new Set<number>(this.selectedAids);
+    if (next.has(aid)) next.delete(aid);
+    else next.add(aid);
+    this.selectedAids = next;
+  }
+
+  private exitSelecting(): void {
+    this.selecting = false;
+    this.selectedAids = new Set<number>();
+  }
+
+  private confirmRemoveSelected(): void {
+    if (this.selectedAids.size === 0 || this.actionBusy) return;
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: '删除所选',
+        message: '确定删除选中的 ' + String(this.selectedAids.size) + ' 个视频吗？',
+        buttons: [
+          { text: '取消', color: '#9499A0' },
+          { text: '删除', color: this.accent },
+        ],
+      }).then((dialogResult) => {
+        if (dialogResult.index === 1) this.removeSelected().catch(() => {
+        });
+      });
+    } catch (e) {
+      // 弹窗失败不阻塞页面
+    }
+  }
+
+  /** 批量删除：delWatchLater 本就接受 aid 数组，一次请求完成。 */
+  private async removeSelected(): Promise<void> {
+    if (this.actionBusy) return;
+    const aids: Array<number> = Array.from(this.selectedAids);
+    this.actionBusy = true;
+    try {
+      const result: ActionResult = await HistoryApi.delWatchLater(aids);
+      if (!result.ok) {
+        this.toast(result.message);
+        return;
+      }
+      this.toast('已删除 ' + String(aids.length) + ' 个视频');
+      this.exitSelecting();
+      await this.load();
+    } catch (e) {
+      this.toast('网络异常，请稍后重试');
+    } finally {
+      this.actionBusy = false;
+    }
+  }
+
+  @Builder
+  HeaderSelectAction() {
+    if (this.selecting) {
+      Text('取消')
+        .fontSize(14)
+        .fontColor(this.accent)
+        .padding({ left: 12, right: 2, top: 6, bottom: 6 })
+        .onClick(() => this.exitSelecting())
+    } else if (this.itemCount > 0) {
+      Text('多选')
+        .fontSize(14)
+        .fontColor(this.accent)
+        .padding({ left: 12, right: 2, top: 6, bottom: 6 })
+        .onClick(() => {
+          this.selecting = true;
+        })
+    }
+  }
+
   @Builder
   ClearAction() {
     if (this.itemCount > 0) {
@@ -183,9 +256,10 @@ export struct WatchLaterPage {
   build() {
     Column() {
       PageHeader({
-        title: '稍后再看',
+        title: this.selecting ? '已选 ' + String(this.selectedAids.size) + ' 项' : '稍后再看',
         trailing: (): void => {
-          this.ClearAction()
+          if (this.selecting) this.HeaderSelectAction()
+          else this.ClearAction()
         },
       })
       if (this.itemCount === 0) {
@@ -197,6 +271,7 @@ export struct WatchLaterPage {
         List() {
           LazyForEach(this.itemsSource, (item: WatchLaterItem) => {
             ListItem() {
+              Stack({ alignContent: Alignment.Start }) {
               VideoRowCard({
                 cover: item.video.cover,
                 title: item.video.title,
@@ -206,12 +281,35 @@ export struct WatchLaterPage {
                   '已看到 ' + formatDuration(item.progress) : formatCount(item.video.play) + ' 播放',
                 titleDarkColor: '#F2F2F4',
                 onTap: () => {
+                  if (this.selecting) {
+                    this.toggleSelect(item.video.aid);
+                    return;
+                  }
                   const param: VideoDetailParam = { bvid: item.video.bvid, aid: item.video.aid, title: item.video.title };
                   AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
                 },
               })
+              if (this.selecting) {
+                Row({ space: 4 }) {
+                  Text(this.selectedAids.has(item.video.aid) ? '✓' : '')
+                    .fontSize(13)
+                    .fontColor('#FFFFFF')
+                    .width(22)
+                    .height(22)
+                    .textAlign(TextAlign.Center)
+                    .borderRadius(11)
+                    .backgroundColor(this.selectedAids.has(item.video.aid) ? this.accent : '#66FFFFFF')
+                    .border({ width: 1.5, color: '#FFFFFF' })
+                }
+                .width('100%')
+                .height('100%')
+                .alignItems(VerticalAlign.Center)
+                .padding({ left: 16 })
+                .onClick(() => this.toggleSelect(item.video.aid))
+              }
+              }
             }
-            .swipeAction({
+            .swipeAction(this.selecting ? undefined : {
               end: {
                 builder: () => {
                   this.SwipeDelete(item)
@@ -224,6 +322,21 @@ export struct WatchLaterPage {
         .padding({ left: 12, right: 12 })
         .cachedCount(5)
         .scrollBar(BarState.Off)
+        .blur(this.selecting ? 0 : undefined)
+      }
+      if (this.selecting) {
+        Row({ space: 12 }) {
+          Blank()
+          Button('删除所选（' + String(this.selectedAids.size) + '）')
+            .fontSize(14)
+            .fontColor('#FFFFFF')
+            .backgroundColor(this.selectedAids.size > 0 ? AppTheme.DANGER : '#999999')
+            .padding({ left: 18, right: 18, top: 9, bottom: 9 })
+            .onClick(() => this.confirmRemoveSelected())
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 8, bottom: 8 })
+        .backgroundColor(this.isDark ? '#26272B' : '#F5F6F7')
       }
     }
     .width('100%')

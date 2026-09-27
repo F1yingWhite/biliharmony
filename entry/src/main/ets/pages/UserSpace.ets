@@ -54,6 +54,8 @@ export struct UserSpacePage {
   @State groupList: Array<FollowTagItem> = [];
   @State groupLoading: boolean = false;
   @State groupNewName: string = '';
+  @State renameTagId: number = 0;
+  @State renameDraft: string = '';
   /** 当前 UP 勾选中的分组 id 数组（空 = 默认分组）；保存时用。 */
   @State groupChecked: Array<number> = [];
   @State spaceTab: number = 0;
@@ -103,7 +105,11 @@ export struct UserSpacePage {
     this.loading = true;
     this.errorText = '';
     try {
-      const info: UserSpaceInfo | null = await UserApi.getUserSpaceInfo(this.param.mid);
+      // 信息与统计只依赖 mid，并行取省一个 RTT；两者仍在同一条 async 链上 await——
+      // 异步 .then 在部分 nav 模式（返回后又 push）下不触发、stat 恒 0 的问题不复现。
+      const infoPromise: Promise<UserSpaceInfo | null> = UserApi.getUserSpaceInfo(this.param.mid);
+      const statPromise: Promise<UserStat> = UserApi.getUserStat(this.param.mid);
+      const info: UserSpaceInfo | null = await infoPromise;
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
       if (info === null) {
         this.errorText = '用户信息加载失败，请检查网络后重试';
@@ -111,9 +117,7 @@ export struct UserSpacePage {
       }
       this.info = info;
       this.prepareHeaderAssetCache();
-      // 统计放主流程 await：异步 .then 在部分 nav 模式（返回后又 push）下不触发，
-      // info 能显示而 stat 恒 0 就是这个原因——两者对齐到同一 async 链。
-      const stat: UserStat = await UserApi.getUserStat(this.param.mid);
+      const stat: UserStat = await statPromise;
       if (this.destroyed || generation !== this.lifecycleGeneration) return;
       this.stat = stat;
       this.statFollower = stat.follower;
@@ -722,6 +726,74 @@ export struct UserSpacePage {
     });
   }
 
+  /** 重载分组列表（重命名/删除后刷新）。 */
+  private async reloadGroupList(): Promise<void> {
+    const tags: Array<FollowTagItem> = await UserApi.getFollowTags();
+    this.groupList = tags;
+  }
+
+  /** 长按分组弹出重命名/删除操作菜单。 */
+  private promptGroupActions(tag: FollowTagItem): void {
+    try {
+      this.getUIContext().getPromptAction().showActionMenu({
+        title: tag.name,
+        buttons: [
+          { text: '重命名', color: this.isDark ? '#E6E6E6' : '#18191C' },
+          { text: '删除分组', color: AppTheme.DANGER },
+        ],
+      }).then((result) => {
+        const index: number = Number(result.index);
+        if (index === 0) {
+          this.renameTagId = tag.tagid;
+          this.renameDraft = tag.name;
+        } else if (index === 1) {
+          this.confirmDeleteGroup(tag);
+        }
+      });
+    } catch (e) {
+      // 弹窗失败忽略。
+    }
+  }
+
+  private confirmDeleteGroup(tag: FollowTagItem): void {
+    try {
+      this.getUIContext().getPromptAction().showActionMenu({
+        title: '删除「' + tag.name + '」？组内关注将回到默认分组',
+        buttons: [
+          { text: '取消', color: '#9499A0' },
+          { text: '删除', color: AppTheme.DANGER },
+        ],
+      }).then((result) => {
+        if (Number(result.index) !== 1) return;
+        UserApi.deleteFollowTag(tag.tagid).then((result: ActionResult) => {
+          this.toast(result.message);
+          if (result.ok) {
+            const next: Array<number> = this.groupChecked.filter((id: number) => id !== tag.tagid);
+            this.groupChecked = next;
+            this.reloadGroupList().catch(() => {
+            });
+          }
+        }).catch(() => this.toast('网络异常，操作失败'));
+      });
+    } catch (e) {
+      // 弹窗失败忽略。
+    }
+  }
+
+  private async submitRename(): Promise<void> {
+    const name: string = this.renameDraft.trim();
+    const tagId: number = this.renameTagId;
+    if (tagId <= 0 || name.length === 0) return;
+    const result: ActionResult = await UserApi.renameFollowTag(tagId, name);
+    this.toast(result.message);
+    if (result.ok) {
+      this.renameTagId = 0;
+      this.renameDraft = '';
+      await this.reloadGroupList().catch(() => {
+      });
+    }
+  }
+
   private async createGroup(): Promise<void> {
     const name: string = this.groupNewName.trim();
     if (name.length === 0) {
@@ -1007,6 +1079,28 @@ export struct UserSpacePage {
         if (this.groupLoading) {
           Text('加载中…').fontSize(13).fontColor('#9499A0').padding(14)
         } else {
+          if (this.renameTagId > 0) {
+            Row({ space: 8 }) {
+              TextInput({ placeholder: '新的分组名称', text: this.renameDraft })
+                .fontSize(13)
+                .layoutWeight(1)
+                .height(34)
+                .onChange((value: string) => this.renameDraft = value)
+              Text('保存')
+                .fontSize(13).fontColor(this.accent)
+                .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+                .onClick(() => this.submitRename().catch(() => {
+                }))
+              Text('取消')
+                .fontSize(13).fontColor('#9499A0')
+                .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+                .onClick(() => {
+                  this.renameTagId = 0;
+                  this.renameDraft = '';
+                })
+            }
+            .width('100%')
+          }
           List() {
             ForEach(this.groupList, (tag: FollowTagItem) => {
               ListItem() {
@@ -1029,6 +1123,8 @@ export struct UserSpacePage {
                 }
                 .width('100%').padding({ top: 8, bottom: 8 })
                 .onClick(() => this.toggleGroupChecked(tag.tagid))
+                .gesture(LongPressGesture({ repeat: false })
+                  .onAction(() => this.promptGroupActions(tag)))
               }
             }, (item: FollowTagItem) => String(item.tagid))
           }

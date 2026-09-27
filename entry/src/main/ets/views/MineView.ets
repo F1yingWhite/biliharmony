@@ -1,3 +1,4 @@
+import { NAV_APPEARANCE, NAV_PLAYBACK_SETTINGS } from '../common/AppRouter';
 /**
  * 我的视图：B 站风格布局——顶部用户区（头像/昵称/Lv/签名 + 关注/粉丝/获赞）
  * + 圆角分组功能列表；功能逻辑（深色模式/沉浸光感/主题色/退出登录/关于）不变
@@ -7,7 +8,7 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { common, bundleManager } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { DEBUG } from 'BuildProfile';
-import { AppNavStack, NAV_FAVORITES, NAV_HISTORY, NAV_LOGIN, NAV_RELATION_LIST, NAV_USER_SPACE, NAV_WATCH_LATER,
+import { AppNavStack, NAV_DOWNLOAD_CENTER, NAV_NETWORK_PRIVACY, NAV_FAVORITES, NAV_HISTORY, NAV_LOGIN, NAV_RELATION_LIST, NAV_USER_SPACE, NAV_WATCH_LATER,
   NAV_BANGUMI_LIST, NAV_BANGUMI_INDEX, NAV_BLACK_LIST,
   RelationListParam, UserSpaceParam } from '../common/AppRouter';
 import { UserInfo, UserStat } from '../model/Models';
@@ -32,29 +33,13 @@ export struct MineView {
   @State loading: boolean = true;
   @State user: UserInfo = new UserInfo();
   @State stat: UserStat = new UserStat();
-  @State autoDark: boolean = false;
   @State appVersion: string = '';
-  /** 定时深色：每分钟应用一次，跨时刻后自动切换明暗（无需重启）。 */
-  private autoTimer: number = -1;
-  /** 定时深色时段编辑（TimePicker 抽屉）状态；以小时/分钟数字存储，跨组件直接赋值驱动刷新。 */
-  @State showTimeEditor: boolean = false;
-  @State startHour: number = 19;
-  @State startMinute: number = 0;
-  @State endHour: number = 7;
-  @State endMinute: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('themeMode') themeMode: string = AppTheme.MODE_SYSTEM;
   @StorageProp('glassEnabled') glassOn: boolean = true;
   @StorageProp('loginVersion') @Watch('onLoginChanged') loginVer: number = 0;
   @StorageProp('userPendant') userPendant: string = '';
-
-  aboutToDisappear(): void {
-    if (this.autoTimer >= 0) {
-      clearInterval(this.autoTimer);
-      this.autoTimer = -1;
-    }
-  }
 
   onLoginChanged(): void {
     // 登录/登出广播：刷新用户信息（Tabs 保活，aboutToAppear 不会再触发）
@@ -64,65 +49,11 @@ export struct MineView {
 
   aboutToAppear(): void {
     this.loadAppVersion();
-    this.autoDark = AppTheme.isAutoDarkEnabled();
     this.init().catch(() => {
     });
-    if (this.autoTimer < 0) {
-      this.autoTimer = setInterval(() => {
-        AppTheme.applyAutoDark();
-        this.syncAutoDark();
-      }, 60 * 1000);
-    }
   }
-
-  private syncAutoDark(): void {
-    this.autoDark = AppTheme.isAutoDarkEnabled();
-  }
-
-  private autoDarkLabel(): string {
-    return AppTheme.getAutoDarkStart() + ' - ' + AppTheme.getAutoDarkEnd() + ' 自动深色';
-  }
-
-  private toggleTimeEditor(): void {
-    this.showTimeEditor = !this.showTimeEditor;
-    if (this.showTimeEditor) {
-      this.parseHHMM(AppTheme.getAutoDarkStart(), true);
-      this.parseHHMM(AppTheme.getAutoDarkEnd(), false);
-    }
-  }
-
-  private parseHHMM(hhmm: string, isStart: boolean): void {
-    const parts: Array<string> = hhmm.split(':');
-    const h: number = parts.length > 0 ? Number(parts[0]) : (isStart ? 19 : 7);
-    const m: number = parts.length > 1 ? Number(parts[1]) : 0;
-    if (isStart) {
-      this.startHour = Number.isNaN(h) ? 19 : h;
-      this.startMinute = Number.isNaN(m) ? 0 : m;
-    } else {
-      this.endHour = Number.isNaN(h) ? 7 : h;
-      this.endMinute = Number.isNaN(m) ? 0 : m;
-    }
-  }
-
-  private static pad2(v: number): string {
-    return v < 10 ? '0' + String(v) : String(v);
-  }
-
-  private formatHM(hour: number, minute: number): string {
-    return MineView.pad2(hour) + ':' + MineView.pad2(minute);
-  }
-
-  private commitTimeEditor(): void {
-    const s: string = this.formatHM(this.startHour, this.startMinute);
-    const e: string = this.formatHM(this.endHour, this.endMinute);
-    if (s === e) {
-      this.getUIContext().getPromptAction().showToast({ message: '开始与结束时间不能相同' });
-      return;
-    }
-    AppTheme.setAutoDarkWindow(s, e);
-    AppTheme.applyAutoDark();
-    this.showTimeEditor = false;
-  }
+  // 定时深色心跳已上移到 AppTheme.startAutoDarkTicker（EntryAbility 生命周期）：
+  // 旧实现在这里挂 60s 定时器，用户不进「我的」Tab 时定时深色完全不生效。
 
   private async loadAppVersion(): Promise<void> {
     if (this.appVersion.length > 0) return;
@@ -158,12 +89,6 @@ export struct MineView {
   /** 行内主文字色：统一走 AppTheme 语义色，避免散落硬编码。 */
   private itemColor(): string {
     return AppTheme.onSurface();
-  }
-
-  private themeModeAt(index: number): string {
-    if (index === 1) return AppTheme.MODE_LIGHT;
-    if (index === 2) return AppTheme.MODE_DARK;
-    return AppTheme.MODE_SYSTEM;
   }
 
   @Builder
@@ -358,6 +283,20 @@ export struct MineView {
 
         this.GroupDivider()
 
+        // 下载中心：游客可用（缓存到本地，导出走系统文件选择器）。
+        this.MenuRow($r('app.media.ic_download'), '下载中心', () => {
+          AppNavStack.pushPathByName(NAV_DOWNLOAD_CENTER, null);
+        })
+
+        this.GroupDivider()
+
+        // 网络与隐私：代理、本地不想看记录管理。
+        this.MenuRow($r('app.media.ic_privacy'), '网络与隐私', () => {
+          AppNavStack.pushPathByName(NAV_NETWORK_PRIVACY, null);
+        })
+
+        this.GroupDivider()
+
         this.MenuRow($r('app.media.ic_favorite'), '我的收藏', () => {
           if (UserStore.isLogin) AppNavStack.pushPathByName(NAV_FAVORITES, null);
           else AppNavStack.pushPathByName(NAV_LOGIN, null);
@@ -366,7 +305,7 @@ export struct MineView {
         this.GroupDivider()
 
         // 追番/追剧列表（需登录）
-        this.MenuRow($r('app.media.bilix_logo_tv'), '我的追番', () => {
+        this.MenuRow($r('app.media.ic_tv'), '我的追番', () => {
           if (UserStore.isLogin) AppNavStack.pushPathByName(NAV_BANGUMI_LIST, null);
           else AppNavStack.pushPathByName(NAV_LOGIN, null);
         })
@@ -374,14 +313,14 @@ export struct MineView {
         this.GroupDivider()
 
         // 番剧索引（无需登录的浏览聚合）
-        this.MenuRow($r('app.media.ic_favorite'), '番剧索引', () => {
+        this.MenuRow($r('app.media.ic_categories'), '番剧索引', () => {
           AppNavStack.pushPathByName(NAV_BANGUMI_INDEX, null);
         })
 
         this.GroupDivider()
 
         // 黑名单（需登录）
-        this.MenuRow($r('app.media.ic_dislike'), '黑名单', () => {
+        this.MenuRow($r('app.media.ic_user_block'), '黑名单', () => {
           if (UserStore.isLogin) AppNavStack.pushPathByName(NAV_BLACK_LIST, null);
           else AppNavStack.pushPathByName(NAV_LOGIN, null);
         })
@@ -390,7 +329,7 @@ export struct MineView {
 
         // 顶层平台切换：YouTube 与哔哩哔哩同级，切入后由 YouTube 自己的外壳接管
         // （自带玻璃头栏与底部 Dock），回程在 YouTube「我的」页。
-        this.MenuRow($r('app.media.ic_youtube'), 'YouTube', () => {
+        this.MenuRow($r('app.media.ic_youtube_outline'), 'YouTube', () => {
           PlatformStore.switchTo(PlatformStore.YOUTUBE);
         })
       }
@@ -399,125 +338,16 @@ export struct MineView {
       .backgroundColor(this.groupBg())
       .clip(true)
 
-      // ===== 组2：外观 =====
+      // 个性化与播放选项移到独立页面，保留统一入口。
       Column() {
-        // 跟随系统 / 强制浅色 / 强制深色
-        Row({ space: 14 }) {
-          Text('显示模式')
-            .fontSize(15)
-            .fontColor(this.itemColor())
-          Blank()
-          Row({ space: 6 }) {
-            ForEach(['跟随系统', '浅色', '深色'], (label: string, index: number) => {
-              Text(label)
-                .fontSize(12)
-                .fontColor(this.themeMode === this.themeModeAt(index) ? '#FFFFFF' :
-                  (this.isDark ? '#C8C8CC' : '#5A5F66'))
-                .backgroundColor(this.themeMode === this.themeModeAt(index) ? this.accent :
-                  (this.isDark ? '#3A3D44' : '#F0F1F3'))
-                .padding({ left: 10, right: 10, top: 8, bottom: 8 })
-                .borderRadius(16)
-                .stateStyles({ pressed: { opacity: 0.9 } })
-                .onClick(() => {
-                  AppTheme.setMode(this.themeModeAt(index));
-                })
-            }, (label: string) => label)
-          }
-        }
-        .width('100%')
-        .height(48)
-        .padding({ left: 14, right: 14 })
-        .alignItems(VerticalAlign.Center)
-
+        this.NavRow('外观与交互', { value: '主题 · 显示 · 操作手' }, () => {
+          AppNavStack.pushPathByName(NAV_APPEARANCE, null);
+        })
         this.GroupDivider()
-
-        // 定时深色：跟随系统模式下按时间段自动切换明暗（跨午夜支持）。
-        Row({ space: 14 }) {
-          Column({ space: 2 }) {
-            Text('定时深色')
-              .fontSize(15)
-              .fontColor(this.itemColor())
-            Text(this.autoDarkLabel())
-              .fontSize(10)
-              .fontColor('#9499A0')
-          }
-          .alignItems(HorizontalAlign.Start)
-          .layoutWeight(1)
-          .onClick(() => {
-            if (this.autoDark) this.toggleTimeEditor();
-          })
-          Toggle({ type: ToggleType.Switch, isOn: this.autoDark })
-            .selectedColor(this.accent)
-            .onChange((on: boolean) => {
-              AppTheme.setAutoDarkEnabled(on);
-              this.syncAutoDark();
-            })
-        }
-        .width('100%')
-        .height(48)
-        .padding({ left: 14, right: 14 })
-        .alignItems(VerticalAlign.Center)
-
-        this.GroupDivider()
-
-        // 沉浸光感（设计规范 §3.2：性能可降级）
-        Row({ space: 14 }) {
-          Text('沉浸光感')
-            .fontSize(15)
-            .fontColor(this.itemColor())
-          Blank()
-          Toggle({ type: ToggleType.Switch, isOn: this.glassOn })
-            .selectedColor(this.accent)
-            .onChange((on: boolean) => {
-              AppTheme.setGlassEnabled(on);
-            })
-        }
-        .width('100%')
-        .height(48)
-        .padding({ left: 14, right: 14 })
-        .alignItems(VerticalAlign.Center)
-
-        this.GroupDivider()
-
-        // 主题色（用户自选，色板右对齐紧凑排列）
-        Row({ space: 14 }) {
-          Text('主题色')
-            .fontSize(15)
-            .fontColor(this.itemColor())
-          Blank()
-          Row({ space: 4 }) {
-            ForEach(AppTheme.PRESET_COLORS, (c: string) => {
-              Stack({ alignContent: Alignment.Center }) {
-                Circle()
-                  .width(20)
-                  .height(20)
-                  .fill(c)
-                if (c === this.accent) {
-                  Circle()
-                    .width(26)
-                    .height(26)
-                    .fill('#00000000')
-                    .border({ width: 2, color: c, radius: 13 })
-                }
-              }
-              .width(32)
-              .height(36)
-              .accessibilityText('主题色 ' + c + (c === this.accent ? '，已选中' : ''))
-              .onClick(() => {
-                AppTheme.setAccent(c);
-              })
-            }, (c: string) => c)
-          }
-        }
-        .width('100%')
-        .height(48)
-        .padding({ left: 14, right: 14 })
-        .alignItems(VerticalAlign.Center)
-      }
-      .width('100%')
-      .borderRadius(12)
-      .backgroundColor(this.groupBg())
-      .clip(true)
+        this.NavRow('播放设置', { value: '后台 · 小窗 · 手势' }, () => {
+          AppNavStack.pushPathByName(NAV_PLAYBACK_SETTINGS, null);
+        })
+      }.width('100%').borderRadius(16).backgroundColor(this.groupBg()).clip(true)
 
       // ===== 组3：关于 / 清空缓存 / 退出登录 =====
       Column() {
@@ -708,87 +538,9 @@ export struct MineView {
       .width('100%')
       .height('100%')
 
-      // 定时深色时段编辑抽屉：两个 TimePicker + 确认，半透明遮罩点击关闭。
-      if (this.showTimeEditor) {
-        Column() {
-          Row({ space: 12 }) {
-            Column({ space: 6 }) {
-              Text('开始时间').fontSize(14).fontColor(this.itemColor())
-              TimePicker({ selected: this.makeStartDate() })
-                .width('100%').height(160).useMilitaryTime(true)
-                .selectedTextStyle({ color: this.accent, font: { size: 20 } })
-                .backgroundColor(Color.Transparent)
-                .onChange((value: TimePickerResult) => {
-                  this.startHour = value.hour;
-                  this.startMinute = value.minute;
-                })
-            }.layoutWeight(1)
-            Column({ space: 6 }) {
-              Text('结束时间').fontSize(14).fontColor(this.itemColor())
-              TimePicker({ selected: this.makeEndDate() })
-                .width('100%').height(160).useMilitaryTime(true)
-                .selectedTextStyle({ color: this.accent, font: { size: 20 } })
-                .backgroundColor(Color.Transparent)
-                .onChange((value: TimePickerResult) => {
-                  this.endHour = value.hour;
-                  this.endMinute = value.minute;
-                })
-            }.layoutWeight(1)
-          }
-          .width('100%')
-          .padding({ top: 20 })
-          Text('此时段内自动切换为深色（支持跨午夜）')
-            .fontSize(11)
-            .fontColor('#9499A0')
-            .margin({ top: 4 })
-          Row({ space: 12 }) {
-            Text('取消')
-              .fontSize(15)
-              .fontColor('#9499A0')
-              .padding({ left: 28, right: 28, top: 10, bottom: 10 })
-              .borderRadius(18)
-              .backgroundColor(this.isDark ? '#3A3D44' : '#F0F1F3')
-              .onClick(() => {
-                this.showTimeEditor = false;
-              })
-            Text('确定')
-              .fontSize(15)
-              .fontColor('#FFFFFF')
-              .padding({ left: 28, right: 28, top: 10, bottom: 10 })
-              .borderRadius(18)
-              .backgroundColor(this.accent)
-              .onClick(() => {
-                this.commitTimeEditor();
-              })
-          }
-          .margin({ top: 12 })
-        }
-        .width('100%')
-        .padding({ left: 14, right: 14 })
-        // 底部 Dock（Tabs）高约 56vp：抽屉按钮必须整体抬到 Dock 之上，防被遮挡。
-        .padding({ bottom: Immersive.bottomInset() + 74 })
-        .backgroundColor(this.isDark ? '#26272B' : '#FFFFFF')
-        .borderRadius({ topLeft: 16, topRight: 16 })
-        .shadow({ radius: 24, color: '#33000000', offsetY: -4 })
-        .transition(TransitionEffect.asymmetric(
-          TransitionEffect.translate({ y: 120 }).animation({ duration: 180, curve: Curve.EaseOut }),
-          TransitionEffect.translate({ y: 120 }).animation({ duration: 160, curve: Curve.EaseIn })))
-      }
     }
     .width('100%')
     .height('100%')
   }
 
-  /** 构建 TimePicker 初始 Date（避开 @State Date 可变性，仅作组件初始值）。 */
-  private makeStartDate(): Date {
-    const d: Date = new Date();
-    d.setHours(this.startHour, this.startMinute, 0, 0);
-    return d;
-  }
-
-  private makeEndDate(): Date {
-    const d: Date = new Date();
-    d.setHours(this.endHour, this.endMinute, 0, 0);
-    return d;
-  }
 }

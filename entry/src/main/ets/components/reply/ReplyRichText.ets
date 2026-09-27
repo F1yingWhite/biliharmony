@@ -197,10 +197,12 @@ export struct ReplyRichText {
     return null;
   }
 
-  /** ImageSpan 源：本地缓存路径优先，未就绪回退网络 URL。 */
+  /** ImageSpan 源：只读本地缓存，未就绪保持原有尺寸占位。 */
   private emoteSrc(image: string): string {
     const local: string | undefined = this.emoteLocal.get(image);
-    return local !== undefined && local.length > 0 ? local : image;
+    if (local !== undefined && local.length > 0) return local;
+    const cached: string = EmoteImageCache.localPathOf(image);
+    return cached !== image ? cached : '';
   }
 
   private plainColor(): string {

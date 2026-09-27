@@ -41,7 +41,7 @@ export struct LoadingSkeleton {
         this.Bar('44%', 10)
       }.width('100%').alignItems(HorizontalAlign.Start).padding({ left: 12, right: 12, bottom: 26 })
     }
-    .layoutWeight(1).borderRadius(16).clip(true)
+    .layoutWeight(1).borderRadius(LayoutTokens.cardRadius).clip(true)
     .backgroundColor(this.isDark ? '#24272E' : '#FFFFFF')
   }
 

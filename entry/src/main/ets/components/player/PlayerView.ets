@@ -1,3 +1,4 @@
+import { VideoReportDialog } from '../VideoReportDialog';
 import { PlayerQualityPreference } from '../../common/PlayerQualityPreference';
 import { AVVolumePanel } from '@kit.AudioKit';
 import { SystemMediaVolume } from './SystemMediaVolume';
@@ -8,6 +9,7 @@ import { chapterTitleAt } from './PlayerChapterSupport';
  */
 import { RequestEpoch } from '../../common/RequestEpoch';
 import { media } from '@kit.MediaKit';
+import { PiPWindow as pictureInPicture } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { avSession } from '@kit.AVSessionKit';
 import { PlayerAvSessionHelper } from './PlayerAvSessionHelper';
@@ -21,20 +23,23 @@ import { PlayerSideSettingsDrawer } from './PlayerSideSettingsDrawer';
 import { common } from '@kit.AbilityKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { picker } from '@kit.CoreFileKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { util } from '@kit.ArkTS';
 import { DEBUG } from 'BuildProfile';
-import { displaySync } from '@kit.ArkGraphics2D';
-import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, VideoChapter } from '../../api/BiliApi';
+import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, HotPoint, VideoChapter } from '../../api/BiliApi';
 import { SponsorBlockApi, SponsorBlockResult, SponsorBlockUserInfo } from '../../api/SponsorBlockApi';
 import { UserStore } from '../../services/auth/UserStore';
 import { AppTheme, DanmakuSettings } from '../../common/AppTheme';
 import { Haptic } from '../../common/Haptic';
 import { Immersive } from '../../common/Immersive';
 import { formatDuration, formatCount } from '../../common/Utils';
+import { PlayerSponsorController, SponsorNoticeUi } from './PlayerSponsorController';
+import { PlayerDanmakuClock } from './PlayerDanmakuClock';
 import { PlayUrlInfo, SubtitleCue, SubtitleTrack, VideoItem, VideoQualityOption } from '../../model/Models';
 import { Constants } from '../../common/Constants';
 import { BasicDataSource } from '../../common/BasicDataSource';
-import { PlayerGestureOverlay } from './PlayerGestureOverlay';
+import { PlayerGestureOverlay, PlayerScrubController } from './PlayerGestureOverlay';
 import { PlayerFullscreenHeader } from './PlayerFullscreenHeader';
 import { CONTROLS_GRADIENT_COLORS, DM_SEGMENT_SECONDS } from './PlayerDanmakuSupport';
 import { PlayerDanmakuEngine } from './PlayerDanmakuEngine';
@@ -47,10 +52,19 @@ import { PlayerCompactControls } from './PlayerCompactControls';
 import { DanmakuPinResult, PlayerDanmakuInteractionController } from './PlayerDanmakuInteractionController';
 import { PlayerDanmakuAction } from './PlayerDanmakuAction';
 import { SponsorBlockCategory, SponsorBlockMode, SponsorBlockSegment, SponsorBlockStore,
-  sponsorBlockActionLabel, sponsorBlockCategory, sponsorBlockSupportedActions } from '../../common/SponsorBlock';
+  sponsorBlockSupportedActions } from '../../common/SponsorBlock';
 import { SponsorBlockNotice } from './SponsorBlockNotice';
 import { HttpClient } from '../../services/network/HttpClient';
 import { VideoDownloadService } from '../../services/media/VideoDownloadService';
+import { DownloadCenter, DOWNLOAD_KIND_AUDIO, DOWNLOAD_KIND_VIDEO } from '../../services/media/DownloadCenter';
+import { PhotoLibrarySaver } from '../../services/media/PhotoLibrarySaver';
+import { ContinueWatchingStore } from '../../common/ContinueWatchingStore';
+
+/**
+ * 非首帧关键请求的延后窗口：空降片段 / 章节 / 拖动预览 / 在看人数都属于增强能力，
+ * 首帧前发出去只会和播放地址、封面抢带宽与解码。首帧事件先到就提前发。
+ */
+const DEFERRED_LOAD_DELAY_MS: number = 1200;
 
 /** showDialog 按钮的声明类型（promptAction 的 Button 命名空间类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -108,6 +122,8 @@ export struct PlayerView {
   onFirstFrameShown: () => void = () => {};
   onResumeRequest: () => void = () => {};
   onDanmakuChange: (enabled: boolean) => void = () => {};
+  /** 全视频空降标签（如「商业推广」）：交给页面显示在标题前，避免长期盖住画面。 */
+  onSponsorFullLabel: (label: string, color: string) => void = () => {};
   /** AVPlayer 解码后的真实视频尺寸，详情页据此重算高度，避免竖屏长视频被裁切。 */
   onVideoSizeChange: (width: number, height: number) => void = () => {};
   /** 横屏底栏弹幕输入：草稿与发送由业务页（VideoDetail）持有 */
@@ -182,6 +198,7 @@ export struct PlayerView {
   @State subtitleOn: boolean = false;
   @State subtitleIndex: number = -1;
   @State subtitleText: string = '';
+  @StorageProp('subtitleScale') @Watch('onSubtitleScaleChanged') subtitleScale: number = 1.0;
   @State subtitleLoading: boolean = false;
   @State dmFilterRulesCount: number = 0;
   @State dmFilterLoading: boolean = false;
@@ -189,6 +206,9 @@ export struct PlayerView {
   @State dmFilterType: number = 0;
   @State dmListCount: number = 0;
   @State chapters: Array<VideoChapter> = [];
+  @State hotPoints: Array<HotPoint> = [];
+  /** 每个源只做一次片头跳过判断（番剧）。 */
+  private pgcSkipTried: boolean = false;
   @State activeQuality: number = 0;
   @State qualityLoading: boolean = false;
   @State downloadBusy: boolean = false;
@@ -208,8 +228,16 @@ export struct PlayerView {
   @State blockTopDm: boolean = false;
   @State blockBottomDm: boolean = false;
   @State blockColorDm: boolean = false;
+  @State dmMerge: boolean = false;
+  @State dmMergeCount: boolean = true;
   @State holdSpeedActive: boolean = false;
-  @State gestureSeekPreview: number = -1;
+  // 横滑预览时间下沉到 PlayerGestureOverlay 自持（scrubCtl 注入写回），
+  // 父结构体不再随手势采样频率全量重渲染。这里只留非响应式镜像供手势结束时的 seekTo 读取落点。
+  private gestureScrubValue: number = -1;
+  private scrubCtl: PlayerScrubController = new PlayerScrubController();
+  // 底部进度条/章节条的「待落点」通道：横滑期间与结束后保持预览位置（条跟手），
+  // seek 完成后清零回落到真实播放进度。与 scrubCtl 分开：叠层预览卡要在手势结束时立即消失。
+  private seekTargetCtl: PlayerScrubController = new PlayerScrubController();
   @State systemVolumeLevel: number = 0;
   private systemVolume: SystemMediaVolume = new SystemMediaVolume();
   @State gestureAdjustKind: string = '';
@@ -221,6 +249,9 @@ export struct PlayerView {
   @StorageProp('videoFullscreenExitRequest') @Watch('onFullscreenExitRequested') fullscreenExitRequest: number = 0;
   @StorageProp('videoSeekRequestToken') @Watch('onExternalSeekRequested') seekRequestToken: number = 0;
   @StorageProp('videoPlaybackStopRequest') @Watch('onPlaybackStopRequested') stopRequest: number = 0;
+  @StorageProp('playerDoubleTapEnabled') doubleTapEnabled: boolean = true;
+  @StorageProp('playerPanEnabled') panEnabled: boolean = true;
+  @StorageProp('playerHoldEnabled') holdEnabled: boolean = true;
   @StorageProp('backgroundPlaybackEnabled') backgroundPlaybackEnabled: boolean = false;
   @StorageProp('appInBackground') @Watch('onAppBackgroundChanged') appInBackground: boolean = false;
   @StorageLink('sponsorSkipEnabled') sponsorSkipEnabled: boolean = true;
@@ -228,17 +259,29 @@ export struct PlayerView {
   @StorageLink('autoContinuePlay') autoContinuePlay: boolean = true;
   private player: media.AVPlayer | null = null;
   private audioPlayer: media.AVPlayer | null = null;
+  private pendingAudioPause: Promise<void> | null = null;
+  private pendingAudioPausePlayer: media.AVPlayer | null = null;
   private audioPrepared: boolean = false;
+  private videoReportDialog: CustomDialogController | null = null;
+  private pipController: pictureInPicture.PiPController | null = null;
+  private pipActive: boolean = false;
+  private pipStarting: boolean = false;
+  private pipRestoring: boolean = false;
+  private pipGeneration: number = 0;
   private xcController: XComponentController = new XComponentController();
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
   private dmEngine: PlayerDanmakuEngine = new PlayerDanmakuEngine(this.ctx);
   private dmInteraction: PlayerDanmakuInteractionController = new PlayerDanmakuInteractionController(this.dmEngine);
-  private dmLoopRunning: boolean = false;
-  private dmDisplaySync: displaySync.DisplaySync | null = null;
-  /** 上次实际绘制时间；按用户设置的目标帧率节流，位移始终使用真实 DisplaySync 时间差。 */
-  private dmLastFrameMs: number = 0;
-  /** 极少数 DisplaySync 初始化失败设备的兼容回退，不参与正常路径。 */
-  private dmFallbackTick: number = -1;
+  private dmClock: PlayerDanmakuClock = new PlayerDanmakuClock({
+    isPlaying: (): boolean => this.playing,
+    isDanmakuOn: (): boolean => this.danmakuOn,
+    getFrameRate: (): number => this.dmFrameRate,
+    getEngine: (): PlayerDanmakuEngine => this.dmEngine,
+    clearPinned: (): void => {
+      this.dmPinnedVisible = false;
+      this.dmPinnedText = '';
+    },
+  });
   private hideTimer: number = -1;
   private sourceIndex: number = 0;
   private retryingSource: boolean = false;
@@ -258,7 +301,6 @@ export struct PlayerView {
   @State sponsorNoticeManual: boolean = false;
   @State sponsorNoticeCanUndo: boolean = false;
   @State sponsorNoticeCanVote: boolean = false;
-  @State sponsorFullLabel: string = '';
   @State sponsorDraftStart: number = -1;
   @State sponsorDraftEnd: number = -1;
   @State sponsorDraftCategory: string = 'sponsor';
@@ -269,13 +311,39 @@ export struct PlayerView {
   @State sponsorUserStats: string = '';
   @State sponsorWarningReason: string = '';
   @StorageProp('sponsorBlockSettingsRevision') @Watch('onSponsorSettingsChanged') sponsorSettingsRevision: number = 0;
-  private sponsorNoticeSegment: SponsorBlockSegment | null = null;
-  private sponsorNoticeTimer: number = -1;
-  private sponsorUndoTime: number = -1;
-  private sponsorMuted: boolean = false;
-  private sponsorHandled: Set<string> = new Set<string>();
-  private sponsorDismissed: Set<string> = new Set<string>();
-  private sponsorViewed: Set<string> = new Set<string>();
+  /** 空降运行时域（片段命中/跳段/静音/提示卡/投票）抽到 PlayerSponsorController。 */
+  private sponsorCtl: PlayerSponsorController = new PlayerSponsorController({
+    isDestroyed: (): boolean => this.destroyed,
+    getSegments: (): Array<SponsorBlockSegment> => this.sponsorSegments,
+    setSegments: (segments: Array<SponsorBlockSegment>): void => {
+      this.sponsorSegments = segments;
+    },
+    getSponsorSkipEnabled: (): boolean => this.sponsorSkipEnabled,
+    getPlayhead: (): number => this.playheadSec,
+    applyNotice: (ui: SponsorNoticeUi | null): void => {
+      if (ui === null) {
+        this.sponsorNoticeVisible = false;
+        this.sponsorNoticeManual = false;
+        this.sponsorNoticeCanUndo = false;
+        return;
+      }
+      this.sponsorNoticeTitle = ui.title;
+      this.sponsorNoticeDetail = ui.detail;
+      this.sponsorNoticeColor = ui.color;
+      this.sponsorNoticeManual = ui.manual;
+      this.sponsorNoticeCanUndo = ui.canUndo;
+      this.sponsorNoticeCanVote = ui.canVote;
+      this.sponsorNoticeVisible = true;
+    },
+    onFullLabel: (label: string, color: string): void => this.onSponsorFullLabel(label, color),
+    seekTo: (seconds: number, precise: boolean): void => this.seekTo(seconds, precise),
+    muteImmediately: (): void => this.muteImmediately(),
+    restoreUserVolume: (): void => this.restoreUserVolume(),
+    isFirstFrameMuteArmed: (): boolean => this.firstFrameMuteArmed,
+    toast: (message: string): void => this.toast(message),
+    getBvid: (): string => this.bvid,
+    getCid: (): number => this.cid,
+  });
   private subtitleCtl: PlayerSubtitleController | null = null;
   private avSessionHelper: PlayerAvSessionHelper | null = null;
   private dmListSource: BasicDataSource<DanmakuItem> = new BasicDataSource<DanmakuItem>();
@@ -341,8 +409,15 @@ export struct PlayerView {
   private dmSegLoaded: Set<number> = new Set<number>();
   private dmSegLoading: Set<number> = new Set<number>();
   private dmSegFallback: boolean = false;
+  /** 首帧后才发的增强请求是否已发出（换源时重置，让新 cid 同样排到新首帧之后）。 */
+  private deferredLoadsDone: boolean = false;
+  private deferredLoadTimer: number = -1;
 
   aboutToAppear(): void {
+    PersistentStorage.persistProp<number>('subtitleScale', 1.0);
+    PersistentStorage.persistProp<number>('pgcSkipIntroSeconds', 0);
+    const persistedScale: number = AppStorage.get<number>('subtitleScale') ?? 1.0;
+    if (persistedScale > 0) this.subtitleScale = persistedScale;
     // 被其他 NavDestination 覆盖时 aboutToDisappear 已置位；返回同一实例时恢复。
     this.destroyed = false;
     try { this.systemVolumeLevel = this.systemVolume.level(); } catch (e) {}
@@ -374,7 +449,7 @@ export struct PlayerView {
         (): boolean => this.audioPrepared,
         (targetMs: number, resumePlaying: boolean): void => {
           this.preparePlayersForSeek(targetMs, resumePlaying);
-          this.stopDmLoop(false);
+          this.dmClock.stop(false);
         },
         (on: boolean): void => {
           this.buffering = on;
@@ -401,12 +476,14 @@ export struct PlayerView {
           }
           // seek 完成：解锁进度回写，让 timeUpdate 接管进度显示。
           this.seekLocked = false;
+          this.seekTargetCtl.show(-1);
           // 播放中的 seek 要等新位置首个 timeUpdate 再撤遮罩/缓冲；暂停态可直接显示定位帧。
           if (!resume) this.buffering = false;
         },
         (video: media.AVPlayer | null, targetMs: number): void => {
           if (video !== null) this.recoverPlayersAfterSeekStall(video, targetMs);
         },
+        (): Promise<void> | null => this.pendingAudioPausePlayer === this.audioPlayer ? this.pendingAudioPause : null,
       );
     }
 
@@ -424,16 +501,19 @@ export struct PlayerView {
     if (this.gestureCtl === null) {
       this.gestureCtl = new PlayerGestureController(
         (value: number): void => {
-          this.gestureSeekPreview = value;
+          this.gestureScrubValue = value;
+          this.scrubCtl.show(value);
+          this.seekTargetCtl.show(value);
           if (value >= 0) this.requestSeekPreview(value);
         },
         (value: number): void => {
-          if (this.gestureSeekPreview >= 0 && value === -1) {
-            const preview: number = this.gestureSeekPreview;
+          if (this.gestureScrubValue >= 0 && value === -1) {
+            const preview: number = this.gestureScrubValue;
             Haptic.seek();
             // 横滑快进/后退按预览值精确落点，不能退回约 5 秒一档的关键帧。
             this.seekTo(preview);
-            this.gestureSeekPreview = -1;
+            this.gestureScrubValue = -1;
+            this.scrubCtl.show(-1);
             this.closeSeekPreview();
           }
         },
@@ -471,10 +551,10 @@ if (this.runtimeSources.length === 0) {
       this.playheadSec = this.initialSeekSeconds;
     }
     this.loadDanmaku();
-    this.loadSponsorSegments();
-    this.loadVideoChapters();
-    this.seekPreviewCtl.preload(this.aid, this.bvid, this.cid);
-    this.loadOnlineTotal();
+    // 增强请求（空降/章节/拖动预览/在看人数）延到首帧后，别和首帧抢带宽；
+    // 重新出现时按旧行为重取一次，避免使用上一次会话的陈旧数据。
+    this.deferredLoadsDone = false;
+    this.armDeferredLoads();
     this.loadGestureLevels();
     // 被其他 NavDestination 覆盖后 AVPlayer 已释放；返回时在原进度重建并保持暂停。
     if (this.player === null && this.surfaceId.length > 0) {
@@ -490,7 +570,7 @@ if (this.runtimeSources.length === 0) {
 
   onSponsorSettingsChanged(): void {
     this.sponsorCategories = SponsorBlockStore.categories();
-    this.updateSponsorFullLabel();
+    this.sponsorCtl.refreshFullLabel();
   }
 
   private ensureAVSession(): void {
@@ -545,6 +625,7 @@ if (this.runtimeSources.length === 0) {
   }
 
   private updateAVSessionPlaybackState(): void {
+    this.syncPictureInPicture();
     const helper: PlayerAvSessionHelper | null = this.avSessionHelper;
     if (helper === null) return;
     helper.setPlaybackState(this.avSessionPlaybackState());
@@ -558,11 +639,126 @@ if (this.runtimeSources.length === 0) {
     }
   }
 
+  private reportCurrentVideo(): void {
+    if (!UserStore.isLogin) { this.toast('请先登录后再举报'); return; }
+    if (this.aid <= 0) { this.toast('当前视频不支持举报'); return; }
+    this.closeSettingPanels();
+    this.videoReportDialog?.close();
+    this.videoReportDialog = new CustomDialogController({
+      builder: VideoReportDialog({ aid: this.aid, title: this.videoTitle }),
+      autoCancel: false,
+      customStyle: true,
+    });
+    this.videoReportDialog.open();
+  }
+
+  private async startPictureInPicture(): Promise<void> {
+    if (this.pipStarting || this.pipActive || this.destroyed) return;
+    if (!this.prepared || this.player === null || this.surfaceId.length === 0) {
+      this.toast('请等待视频加载后再开启小窗');
+      return;
+    }
+    const generation: number = ++this.pipGeneration;
+    this.pipStarting = true;
+    try {
+      if (!pictureInPicture.isPiPEnabled()) {
+        this.toast('当前设备不支持小窗播放');
+        return;
+      }
+      this.closeSettingPanels();
+      let controller: pictureInPicture.PiPController | null = this.pipController;
+      if (controller === null) {
+        controller = await pictureInPicture.create({
+          context: this.getUIContext().getHostContext() as common.UIAbilityContext,
+          componentController: this.xcController,
+          navigationId: 'bili_main_navigation',
+          templateType: pictureInPicture.PiPTemplateType.VIDEO_PLAY,
+          contentWidth: this.realVideoWidth > 0 ? this.realVideoWidth : 16,
+          contentHeight: this.realVideoHeight > 0 ? this.realVideoHeight : 9,
+        });
+        if (generation !== this.pipGeneration || this.destroyed) return;
+        this.pipController = controller;
+        controller.setAutoStartEnabled(false);
+        controller.on('stateChange', (state: pictureInPicture.PiPState): void => {
+          if (this.pipController !== controller || this.destroyed) return;
+          if (state === pictureInPicture.PiPState.ABOUT_TO_START || state === pictureInPicture.PiPState.STARTED) {
+            this.pipActive = true;
+            this.pipRestoring = false;
+            this.syncPictureInPicture();
+          } else if (state === pictureInPicture.PiPState.ABOUT_TO_RESTORE) {
+            this.pipRestoring = true;
+          } else if (state === pictureInPicture.PiPState.STOPPED || state === pictureInPicture.PiPState.ERROR) {
+            this.pipActive = false;
+            this.pipStarting = false;
+            if (!this.appInBackground) this.pipRestoring = false;
+            if (!this.pipRestoring) this.onAppBackgroundChanged();
+          }
+        });
+        controller.on('controlEvent', (event: pictureInPicture.ControlEventParam): void => {
+          if (this.pipController !== controller || this.destroyed) return;
+          if (event.controlType === pictureInPicture.PiPControlType.VIDEO_PLAY_PAUSE && event.status !== undefined) {
+            const play: boolean = event.status === pictureInPicture.PiPControlStatus.PLAY;
+            if (play !== this.playing) this.togglePlay();
+            this.syncPictureInPicture();
+          }
+        });
+      }
+      await controller.startPiP();
+      if (generation !== this.pipGeneration || this.destroyed) {
+        // release 可能先于 startPiP 完成；完成后再次停止，避免孤立系统窗口。
+        await controller.stopPiP().catch(() => {});
+        return;
+      }
+      this.syncPictureInPicture();
+    } catch (e) {
+      if (generation === this.pipGeneration && !this.destroyed) {
+        this.pipActive = false;
+        this.toast('小窗启动失败，请检查系统画中画权限后重试');
+      }
+    } finally {
+      if (generation === this.pipGeneration) {
+        this.pipStarting = false;
+        if (!this.destroyed && this.appInBackground && !this.pipActive) this.onAppBackgroundChanged();
+      }
+    }
+  }
+
+  private syncPictureInPicture(): void {
+    if (this.pipController === null) return;
+    try {
+      this.pipController.updatePiPControlStatus(pictureInPicture.PiPControlType.VIDEO_PLAY_PAUSE,
+        this.playing ? pictureInPicture.PiPControlStatus.PLAY : pictureInPicture.PiPControlStatus.PAUSE);
+      if (this.realVideoWidth > 0 && this.realVideoHeight > 0) {
+        this.pipController.updateContentSize(this.realVideoWidth, this.realVideoHeight);
+      }
+    } catch (_) {}
+  }
+
+  private releasePictureInPicture(): void {
+    ++this.pipGeneration;
+    const controller: pictureInPicture.PiPController | null = this.pipController;
+    this.pipController = null;
+    this.pipActive = false;
+    this.pipStarting = false;
+    this.pipRestoring = false;
+    if (controller === null) return;
+    try {
+      controller.off('stateChange');
+      controller.off('controlEvent');
+      controller.setAutoStartEnabled(false);
+      controller.stopPiP().catch(() => {});
+    } catch (_) {}
+  }
+
   onAppBackgroundChanged(): void {
+    if (this.destroyed) return;
     if (this.appInBackground) {
+      // 画中画异步启动期间也可能先收到后台通知，必须保留双轨播放。
+      if (this.pipActive || this.pipStarting || this.pipRestoring) return;
       if (this.backgroundPlaybackEnabled) this.enterBackgroundAudioOnly();
       else if (this.playing) this.togglePlay();
     } else {
+      this.pipRestoring = false;
       this.leaveBackgroundAudioOnly();
     }
   }
@@ -584,7 +780,7 @@ if (this.runtimeSources.length === 0) {
     try {
       video.pause();
       audio.play();
-      this.pauseDmLoop();
+      this.dmClock.pause();
       Immersive.setKeepScreenOn(false);
       this.updateAVSessionPlaybackState();
       if (DEBUG) {
@@ -662,6 +858,10 @@ if (this.runtimeSources.length === 0) {
     const index: number = next ? (this.subtitleIndex >= 0 ? this.subtitleIndex : 0) : -1;
     if (ctl.loading && index === ctl.index) return;
     ctl.changeSubtitle(index);
+  }
+
+  private onSubtitleScaleChanged(): void {
+    // @StorageProp 自动更新渲染；持久化由 PersistentStorage 完成。
   }
 
   private syncSubtitleState(): void {
@@ -831,10 +1031,15 @@ if (this.runtimeSources.length === 0) {
     this.activeQuality = this.currentQuality;
     this.subtitleText = '';
     this.subtitleCtl?.reset();
-    this.stopDmLoop(true);
+    // 换源立即作废旧视频的空降片段与章节：若等新首帧后的异步加载返回才清，
+    // 窗口期内新视频命中旧片段时间区间会误自动跳段、进度条短暂显示旧章节。
+    this.sponsorCtl.invalidateForSourceChange();
+    this.chapters = [];
+    this.dmClock.stop(true);
     this.dmEngine.list = [];
     this.dmEngine.cursor = 0;
     this.seekLocked = false;
+    this.seekTargetCtl.show(-1);
     this.endScreenOpen = false;
     this.onPlayingChange(false);
     if (oldPlayer !== null) {
@@ -853,10 +1058,9 @@ if (this.runtimeSources.length === 0) {
     if (this.destroyed || !this.sourceRequests.isCurrent(request)) return;
     this.dmLoadedCid = -1;
     this.loadDanmaku();
-    this.loadSponsorSegments();
-    this.loadVideoChapters();
-    this.seekPreviewCtl.preload(this.aid, this.bvid, this.cid);
-    this.loadOnlineTotal();
+    // 换源后这些增强请求都属于新 cid，但同样要排在新首帧之后。
+    this.deferredLoadsDone = false;
+    this.armDeferredLoads();
     await this.initPlayer();
   }
 
@@ -880,12 +1084,15 @@ if (this.runtimeSources.length === 0) {
 
   aboutToDisappear(): void {
     this.destroyed = true;
+    this.videoReportDialog?.close();
+    this.videoReportDialog = null;
+    this.cancelDeferredLoadTimer();
     this.systemVolume.stop();
     this.sourceRequests.invalidate();
     this.invalidatePlayerCreation();
     AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
     this.endHoldSpeed();
-    this.clearSponsorNoticeTimer();
+    this.sponsorCtl.clearNoticeTimer();
     this.resumeAfterPrepare = this.playheadSec;
     this.shouldPlayAfterPrepare = false;
     if (this.seekCtl !== null) this.seekCtl.seekResumePlaying = false;
@@ -933,7 +1140,7 @@ if (this.runtimeSources.length === 0) {
     }
     this.playing = false;
     this.showControls = true;
-    this.pauseDmLoop();
+    this.dmClock.pause();
     this.onPlayingChange(false);
     // pause 完成后恢复音量；播放器仍保持暂停，返回点击继续时声音正常。
     if (this.volumeRestoreTimer >= 0) clearTimeout(this.volumeRestoreTimer);
@@ -941,7 +1148,7 @@ if (this.runtimeSources.length === 0) {
       this.volumeRestoreTimer = -1;
       if (this.destroyed) return;
       try {
-        const restoreVolume: number = this.sponsorMuted ? 0 : 1;
+        const restoreVolume: number = this.sponsorCtl.isMuted() ? 0 : 1;
         if (this.player === video && video !== null && this.prepared) video.setVolume(restoreVolume);
         if (this.audioPlayer === audio && audio !== null && this.audioPrepared) audio.setVolume(restoreVolume);
       } catch (e) {
@@ -960,7 +1167,7 @@ if (this.runtimeSources.length === 0) {
 
   private restoreUserVolume(): void {
     try {
-      const restoreVolume: number = this.sponsorMuted ? 0 : 1;
+      const restoreVolume: number = this.sponsorCtl.isMuted() ? 0 : 1;
       if (this.player !== null && this.prepared) this.player.setVolume(restoreVolume);
       if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.setVolume(restoreVolume);
     } catch (e) {
@@ -1024,176 +1231,14 @@ if (this.runtimeSources.length === 0) {
       this.seekRecoveryActive = false;
       this.seekRecoveryCoverVisible = false;
       this.buffering = false;
-      if (this.playing) this.startDmLoop();
+      if (this.playing) this.dmClock.start();
     }
-  }
-
-  async loadSponsorSegments(ignoreCache: boolean = false): Promise<void> {
-    const bvid: string = this.bvid;
-    const cid: number = this.cid;
-    this.sponsorSegments = [];
-    this.resetSponsorRuntime();
-    try {
-      const segments: Array<SponsorBlockSegment> = await SponsorBlockApi.getSegments(bvid, cid, ignoreCache);
-      if (this.destroyed || this.bvid !== bvid || this.cid !== cid) return;
-      this.sponsorSegments = segments;
-      this.updateSponsorFullLabel();
-    } catch (e) {
-      // 空降数据是增强能力，请求失败不能影响播放器主流程。
-    }
-  }
-
-  private sponsorKey(segment: SponsorBlockSegment): string {
-    return segment.uuid.length > 0 ? segment.uuid : segment.category + ':' +
-      segment.start.toFixed(3) + ':' + segment.end.toFixed(3);
-  }
-
-  private resetSponsorRuntime(): void {
-    this.sponsorHandled.clear();
-    this.sponsorDismissed.clear();
-    this.sponsorViewed.clear();
-    this.setSponsorMuted(false);
-    this.sponsorUndoTime = -1;
-    this.sponsorFullLabel = '';
-    this.hideSponsorNotice(false);
-  }
-
-  private clearSponsorNoticeTimer(): void {
-    if (this.sponsorNoticeTimer >= 0) {
-      clearTimeout(this.sponsorNoticeTimer);
-      this.sponsorNoticeTimer = -1;
-    }
-  }
-
-  private updateSponsorFullLabel(): void {
-    this.sponsorFullLabel = '';
-    for (let i: number = 0; i < this.sponsorSegments.length; i++) {
-      const segment: SponsorBlockSegment = this.sponsorSegments[i];
-      if (segment.actionType === 'full' && SponsorBlockStore.modeFor(segment.category) !== SponsorBlockMode.DISABLED) {
-        this.sponsorFullLabel = sponsorBlockCategory(segment.category).label;
-        return;
-      }
-    }
-  }
-
-  private showSponsorNotice(segment: SponsorBlockSegment, manual: boolean, canUndo: boolean): void {
-    const category: SponsorBlockCategory = sponsorBlockCategory(segment.category);
-    this.clearSponsorNoticeTimer();
-    this.sponsorNoticeSegment = segment;
-    this.sponsorNoticeTitle = (canUndo ? '已空降 ' : '') + category.label;
-    this.sponsorNoticeDetail = sponsorBlockActionLabel(segment.actionType) + ' · ' +
-      formatDuration(segment.start) + ' - ' + formatDuration(segment.end);
-    this.sponsorNoticeColor = category.color;
-    this.sponsorNoticeManual = manual;
-    this.sponsorNoticeCanUndo = canUndo;
-    this.sponsorNoticeCanVote = segment.uuid.length > 0;
-    this.sponsorNoticeVisible = true;
-    const autoCloseDelay: number = manual ? 6000 : (canUndo ? 5000 : 3500);
-    this.sponsorNoticeTimer = setTimeout(() => {
-      this.sponsorNoticeTimer = -1;
-      // 手动提示超时等同于用户关闭，防止仍处于片段内时下一次进度回调立即重弹。
-      this.hideSponsorNotice(manual);
-    }, autoCloseDelay);
-  }
-
-  private hideSponsorNotice(dismiss: boolean = true): void {
-    this.clearSponsorNoticeTimer();
-    if (dismiss && this.sponsorNoticeSegment !== null) {
-      this.sponsorDismissed.add(this.sponsorKey(this.sponsorNoticeSegment));
-    }
-    this.sponsorNoticeVisible = false;
-    this.sponsorNoticeManual = false;
-    this.sponsorNoticeCanUndo = false;
-    this.sponsorNoticeSegment = null;
-  }
-
-  private setSponsorMuted(muted: boolean): void {
-    if (this.sponsorMuted === muted) return;
-    this.sponsorMuted = muted;
-    if (muted) this.muteImmediately();
-    else if (!this.firstFrameMuteArmed) this.restoreUserVolume();
-  }
-
-  private recordSponsorView(segment: SponsorBlockSegment, seconds: number): void {
-    const key: string = this.sponsorKey(segment);
-    if (this.sponsorViewed.has(key)) return;
-    this.sponsorViewed.add(key);
-    if (seconds > 0) SponsorBlockStore.recordSkip(seconds);
-    SponsorBlockApi.reportViewed(segment.uuid).catch(() => {});
-  }
-
-  private executeSponsorSegment(segment: SponsorBlockSegment, now: number): void {
-    const key: string = this.sponsorKey(segment);
-    this.sponsorHandled.add(key);
-    this.sponsorDismissed.delete(key);
-    if (segment.actionType === 'mute') {
-      this.sponsorUndoTime = now;
-      this.setSponsorMuted(true);
-      this.showSponsorNotice(segment, false, true);
-      return;
-    }
-    if (segment.actionType === 'poi') {
-      this.sponsorUndoTime = now;
-      this.seekTo(segment.start, true);
-      this.showSponsorNotice(segment, false, true);
-      return;
-    }
-    if (segment.actionType === 'full') {
-      this.showSponsorNotice(segment, false, false);
-      return;
-    }
-    this.sponsorUndoTime = now;
-    this.seekTo(segment.end + 0.01, true);
-    this.recordSponsorView(segment, Math.max(0, segment.end - now));
-    this.showSponsorNotice(segment, false, true);
-  }
-
-  private undoSponsorSkip(): void {
-    const segment: SponsorBlockSegment | null = this.sponsorNoticeSegment;
-    if (segment === null) return;
-    if (segment.actionType === 'mute') {
-      this.setSponsorMuted(false);
-    } else if (this.sponsorUndoTime >= 0) {
-      this.seekTo(this.sponsorUndoTime, true);
-    }
-    this.sponsorHandled.add(this.sponsorKey(segment));
-    this.hideSponsorNotice(false);
-  }
-
-  private sponsorNoticePrimary(): void {
-    const segment: SponsorBlockSegment | null = this.sponsorNoticeSegment;
-    if (segment === null) return;
-    if (this.sponsorNoticeCanUndo) this.undoSponsorSkip();
-    else this.executeSponsorSegment(segment, this.playheadSec);
-  }
-
-  private voteSponsor(type: number): void {
-    const segment: SponsorBlockSegment | null = this.sponsorNoticeSegment;
-    if (segment === null) return;
-    this.voteSponsorSegment(segment, type);
-  }
-
-  private voteSponsorSegment(segment: SponsorBlockSegment, type: number): void {
-    SponsorBlockApi.vote(segment.uuid, type).then((result: SponsorBlockResult) => {
-      this.toast(result.message);
-      if (!result.ok) return;
-      segment.votes += type === 1 ? 1 : -1;
-      if (type === 0) {
-        const key: string = this.sponsorKey(segment);
-        this.sponsorSegments = this.sponsorSegments.filter((item: SponsorBlockSegment) =>
-          this.sponsorKey(item) !== key);
-        this.setSponsorMuted(false);
-        this.hideSponsorNotice(false);
-      } else {
-        this.sponsorSegments = this.sponsorSegments.slice();
-      }
-    }).catch(() => this.toast('投票失败，请稍后重试'));
   }
 
   private changeSponsorMode(category: string, mode: number): void {
     SponsorBlockStore.setMode(category, mode);
     this.sponsorCategories = SponsorBlockStore.categories();
-    this.updateSponsorFullLabel();
+    this.sponsorCtl.refreshFullLabel();
   }
 
   private markSponsorStart(): void {
@@ -1240,7 +1285,7 @@ if (this.runtimeSources.length === 0) {
   }
 
   private seekSponsorSegment(segment: SponsorBlockSegment): void {
-    this.sponsorHandled.add(this.sponsorKey(segment));
+    this.sponsorCtl.markHandled(segment);
     this.seekTo(segment.start, true);
     this.closeSettingPanels();
   }
@@ -1284,7 +1329,7 @@ if (this.runtimeSources.length === 0) {
       if (result.uuids.length > 0) segment.uuid = result.uuids[0];
       this.sponsorSegments = this.sponsorSegments.concat([segment]);
       this.sponsorSegments.sort((a: SponsorBlockSegment, b: SponsorBlockSegment) => a.start - b.start);
-      this.updateSponsorFullLabel();
+      this.sponsorCtl.refreshFullLabel();
       this.clearSponsorDraft();
       this.toast(result.message);
       this.loadSponsorUserInfo(true).catch(() => {});
@@ -1331,8 +1376,7 @@ if (this.runtimeSources.length === 0) {
     this.sponsorSkipEnabled = next;
     AppTheme.persistSponsorSkip(next);
     if (!next) {
-      this.setSponsorMuted(false);
-      this.hideSponsorNotice(false);
+      this.sponsorCtl.deactivate();
     }
     this.toast(next ? '空降助手已开启' : '空降助手已关闭');
   }
@@ -1345,6 +1389,43 @@ if (this.runtimeSources.length === 0) {
       }
     }
     return result;
+  }
+
+  /** 服务卡片「继续观看」数据上报（内部 15 秒节流；失败静默）。 */
+  private reportContinueWatching(positionSec: number): void {
+    if (this.videoTitle.length === 0) return;
+    const context: common.Context | undefined = this.getUIContext().getHostContext();
+    if (context === undefined) return;
+    ContinueWatchingStore.report(context, this.bvid, this.aid, this.videoTitle, this.videoCover,
+      positionSec, this.duration).catch(() => {
+    });
+  }
+
+  /**
+   * 番剧跳过片头：仅 PGC（epId>0）生效；每次起播尝试一次，且仅在自然接近片头位置时跳。
+   * 用户手动拖动/续播到中段时不会回跳。
+   */
+  private applyPgcSkipIntroOnce(): void {
+    if (this.epId <= 0 || this.pgcSkipTried) return;
+    this.pgcSkipTried = true;
+    const seconds: number = AppStorage.get<number>('pgcSkipIntroSeconds') ?? 0;
+    if (seconds <= 0) return;
+    if (this.playheadSec > 30 || this.playheadSec >= seconds) return;
+    this.seekTo(seconds, true);
+    this.toast('已跳过片头');
+  }
+
+  async loadVideoHeatPoints(): Promise<void> {
+    const aid: number = this.aid;
+    const bvid: string = this.bvid;
+    const cid: number = this.cid;
+    try {
+      const points: Array<HotPoint> = await BiliApi.getVideoHeatPoints(aid, bvid, cid);
+      if (this.destroyed || this.aid !== aid || this.bvid !== bvid || this.cid !== cid) return;
+      this.hotPoints = points;
+    } catch (e) {
+      // 高能数据失败不影响播放与进度条。
+    }
   }
 
   async loadVideoChapters(): Promise<void> {
@@ -1360,42 +1441,6 @@ if (this.runtimeSources.length === 0) {
     }
   }
 
-  maybeSkipSponsor(now: number): boolean {
-    if (!this.sponsorSkipEnabled || this.sponsorSegments.length === 0) {
-      this.setSponsorMuted(false);
-      return false;
-    }
-    let keepMuted: boolean = false;
-    let activeManual: boolean = false;
-    for (let i: number = 0; i < this.sponsorSegments.length; i++) {
-      const segment: SponsorBlockSegment = this.sponsorSegments[i];
-      const mode: number = SponsorBlockStore.modeFor(segment.category);
-      if (mode === SponsorBlockMode.DISABLED || segment.actionType === 'full' || segment.actionType === 'poi') continue;
-      const inside: boolean = now >= segment.start && now < segment.end - 0.04;
-      if (!inside) continue;
-      const key: string = this.sponsorKey(segment);
-      if (segment.actionType === 'mute' && (mode === SponsorBlockMode.AUTO || this.sponsorHandled.has(key))) {
-        keepMuted = true;
-      }
-      if (this.sponsorHandled.has(key) || this.sponsorDismissed.has(key)) continue;
-      if (mode === SponsorBlockMode.AUTO) {
-        this.executeSponsorSegment(segment, now);
-        this.setSponsorMuted(segment.actionType === 'mute');
-        return segment.actionType === 'skip';
-      }
-      if (mode === SponsorBlockMode.MANUAL) {
-        activeManual = true;
-        if (!this.sponsorNoticeVisible || this.sponsorNoticeSegment === null ||
-          this.sponsorKey(this.sponsorNoticeSegment) !== key) {
-          this.showSponsorNotice(segment, true, false);
-        }
-      }
-    }
-    this.setSponsorMuted(keepMuted);
-    if (!activeManual && this.sponsorNoticeManual) this.hideSponsorNotice(false);
-    return false;
-  }
-
   async loadDanmaku(): Promise<void> {
     // 同一 cid 不重复加载；先占位再 await 的写法同时挡住 aboutToAppear 与换源触发的并发加载。
     const cid: number = this.cid;
@@ -1404,6 +1449,7 @@ if (this.runtimeSources.length === 0) {
     this.dmSegLoaded.clear();
     this.dmSegLoading.clear();
     this.dmSegFallback = false;
+    this.pgcSkipTried = false;
     this.dmSegLoading.add(0);
     try {
       // 优先 protobuf 分段接口（每 6 分钟一段）；首段失败才回退 XML 整段。
@@ -1490,7 +1536,38 @@ if (this.runtimeSources.length === 0) {
     if (!this.firstFrameShown && this.playing && this.firstRenderReady) {
       this.firstFrameShown = true;
       this.onFirstFrameShown();
+      // 首帧已经出画，增强请求现在才允许占用带宽。
+      this.scheduleDeferredLoads();
     }
+  }
+
+  /** 排定增强请求：首帧事件或 DEFERRED_LOAD_DELAY_MS 兜底，谁先到谁触发。 */
+  private armDeferredLoads(): void {
+    if (this.deferredLoadsDone || this.deferredLoadTimer >= 0) return;
+    this.deferredLoadTimer = setTimeout(() => {
+      this.deferredLoadTimer = -1;
+      if (this.destroyed) return;
+      this.scheduleDeferredLoads();
+    }, DEFERRED_LOAD_DELAY_MS);
+  }
+
+  private cancelDeferredLoadTimer(): void {
+    if (this.deferredLoadTimer >= 0) {
+      clearTimeout(this.deferredLoadTimer);
+      this.deferredLoadTimer = -1;
+    }
+  }
+
+  /** 一次发出全部增强请求；重复调用无副作用。 */
+  private scheduleDeferredLoads(): void {
+    if (this.deferredLoadsDone || this.destroyed) return;
+    this.deferredLoadsDone = true;
+    this.cancelDeferredLoadTimer();
+    this.sponsorCtl.loadSponsorSegments();
+    this.loadVideoChapters();
+    this.loadVideoHeatPoints();
+    this.seekPreviewCtl.preload(this.aid, this.bvid, this.cid);
+    this.loadOnlineTotal();
   }
 
   async initPlayer(): Promise<void> {
@@ -1523,7 +1600,7 @@ if (this.runtimeSources.length === 0) {
           this.reportVideoSize(p);
           try {
             p.setPlaybackRate(this.playbackRate);
-            p.setVolume(this.sponsorMuted ? 0 : 1);
+            p.setVolume(this.sponsorCtl.isMuted() ? 0 : 1);
           } catch (e) {
             // 某些视频解码器不支持非常用倍速，保持 1x 即可。
           }
@@ -1532,21 +1609,22 @@ if (this.runtimeSources.length === 0) {
           this.backgroundVideoResumePending = false;
           this.resumeTransitionActive = false;
           this.playing = true;
+          this.applyPgcSkipIntroOnce();
           this.revealFirstFrameIfReady();
           this.onPlayingChange(true);
           this.scheduleControlsHide();
-          this.startDmLoop();
+          this.dmClock.start();
           this.buffering = false;
           this.ensureAVSession();
           this.updateAVSessionPlaybackState();
           Immersive.setKeepScreenOn(true);
         } else if (state === 'paused' && (this.backgroundAudioOnly || this.backgroundVideoResumePending)) {
           // 后台音乐模式只暂停视频轨；逻辑播放态和 AVSession 仍由音频轨维持。
-          this.pauseDmLoop();
+          this.dmClock.pause();
           Immersive.setKeepScreenOn(false);
         } else if (state === 'paused' && ((this.seekCtl?.seekInFlight ?? false) || this.seekRecoveryActive)) {
           // seek 内部暂停只是解码状态切换，不能把逻辑播放态、系统媒体会话和控制栏改成“用户暂停”。
-          this.pauseDmLoop();
+          this.dmClock.pause();
         } else if (state === 'paused' || state === 'completed') {
           this.resumeTransitionActive = false;
           this.playing = false;
@@ -1556,7 +1634,7 @@ if (this.runtimeSources.length === 0) {
             this.hideTimer = -1;
           }
           this.onPlayingChange(false);
-          this.pauseDmLoop();
+          this.dmClock.pause();
           this.updateAVSessionPlaybackState();
           Immersive.setKeepScreenOn(false);
             if (state === 'completed') {
@@ -1578,6 +1656,19 @@ if (this.runtimeSources.length === 0) {
         this.firstRenderReady = true;
         this.revealFirstFrameIfReady();
         this.tryStartGatedAudio();
+      });
+      p.on('playbackRateDone', (rate: number) => {
+        if (this.player !== p || !DEBUG) return;
+        hilog.info(0x0000, 'BiliPlayback', 'video.rate.done rate=%{public}s position=%{public}d',
+          String(rate), p.currentTime);
+      });
+      p.onMetricsEvent((events: Array<media.AVMetricsEvent>) => {
+        if (this.player !== p || !DEBUG) return;
+        for (let i: number = 0; i < events.length; i++) {
+          // 仅记事件类型和播放位置，不输出地址、鉴权参数或完整事件载荷。
+          hilog.info(0x0000, 'BiliPlayback', 'video.metric type=%{public}d position=%{public}d',
+            events[i].event, events[i].playbackPosition);
+        }
       });
       p.on('error', (err: BusinessError) => {
         this.handlePlayerError(p, err.message);
@@ -1606,6 +1697,7 @@ if (this.runtimeSources.length === 0) {
         if (systemPlaybackBucket !== this.lastSystemPlaybackBucket) {
           this.lastSystemPlaybackBucket = systemPlaybackBucket;
           this.updateAVSessionPlaybackState();
+          this.reportContinueWatching(nextTime);
         }
         if (this.timerFireAt > 0 && Date.now() >= this.timerFireAt) {
           this.timerFireAt = 0;
@@ -1617,7 +1709,7 @@ if (this.runtimeSources.length === 0) {
         this.spawnDanmaku(nextTime);
         // 弹幕分段预取：进入新段或逼近段尾时拉取下一段（XML 兜底模式下为空操作）。
         this.prefetchDanmakuSegments(nextTime);
-        if (this.maybeSkipSponsor(nextTime)) return;
+        if (this.sponsorCtl.maybeSkipSponsor(nextTime)) return;
         this.checkAudioSync(t);
       });
       p.on('durationUpdate', (d: number) => {
@@ -1625,36 +1717,79 @@ if (this.runtimeSources.length === 0) {
         this.updateAVSessionMetadata();
       });
       let bufferingAudioPause: Promise<void> | null = null;
+      let bufferingAudioGeneration: number = -1;
+      let bufferGeneration: number = 0;
+      let speedBufferTimer: number = -1;
+      const pauseForBuffer = (): void => {
+        // 用户定位已经接管双轨，不能再排入一个会迟到的缓冲暂停。
+        if (this.seekLocked || (this.seekCtl?.seekInFlight ?? true)) return;
+        // seek 的短暂缓冲由延迟提示管理，快速定位不闪 loading。
+        if ((this.seekCtl?.seekInFlight ?? true) === false) this.buffering = true;
+        this.dmClock.pause();
+        const audio: media.AVPlayer | null = this.audioPlayer;
+        if (audio !== null && this.audioPrepared && this.playing &&
+          !(this.seekCtl?.seekInFlight ?? true) && bufferingAudioPause === null) {
+          this.cancelAudioGate();
+          bufferingAudioGeneration = this.audioGateGeneration;
+          const pauseGeneration: number = bufferingAudioGeneration;
+          audio.setVolume(0);
+          bufferingAudioPause = this.pauseAudioForSync(audio).catch(() => {
+            if (this.player === p && this.audioPlayer === audio &&
+              pauseGeneration === this.audioGateGeneration) {
+              this.handleAudioPlayerError(audio, '缓冲暂停失败');
+            }
+          });
+        }
+      };
       p.on('bufferingUpdate', (infoType: media.BufferingInfoType, value: number) => {
         if (this.player !== p || this.backgroundAudioOnly) return;
         if (infoType === media.BufferingInfoType.BUFFERING_START) {
-          // seek 的短暂缓冲由延迟提示管理，快速定位不闪 loading。
-          if ((this.seekCtl?.seekInFlight ?? true) === false) this.buffering = true;
-          this.pauseDmLoop();
-          const audio: media.AVPlayer | null = this.audioPlayer;
-          if (audio !== null && this.audioPrepared && audio.state === 'playing' &&
-            !(this.seekCtl?.seekInFlight ?? true) && bufferingAudioPause === null) {
-            audio.setVolume(0);
-            bufferingAudioPause = audio.pause().catch(() => {});
+          bufferGeneration++;
+          if (DEBUG) hilog.info(0x0000, 'BiliPlayback',
+            'buffer.start hold=%{public}s seek=%{public}s position=%{public}d',
+            String(this.holdSpeedActive), String(this.seekLocked), p.currentTime);
+          // 切速时短暂重新排帧不立即暂停音轨；真正持续的缓冲最多延迟 180ms 处理。
+          if (Date.now() < this.speedTransitionUntilMs) {
+            if (speedBufferTimer < 0) {
+              speedBufferTimer = setTimeout(() => {
+                speedBufferTimer = -1;
+                if (this.player === p && !this.backgroundAudioOnly) pauseForBuffer();
+              }, 180);
+            }
+          } else {
+            pauseForBuffer();
           }
         } else if (infoType === media.BufferingInfoType.BUFFERING_END) {
+          if (speedBufferTimer >= 0) {
+            clearTimeout(speedBufferTimer);
+            speedBufferTimer = -1;
+          }
+          const completedBuffer: number = bufferGeneration;
+          const completedAudioGeneration: number = bufferingAudioGeneration;
           const paused: Promise<void> | null = bufferingAudioPause;
           bufferingAudioPause = null;
           if (paused !== null) {
             paused.then(() => {
-              if (this.player !== p || !this.playing || this.backgroundAudioOnly || this.seekLocked) return;
-              this.seekTo(Math.max(0, p.currentTime) / 1000, true);
+              if (this.player !== p || completedBuffer !== bufferGeneration || !this.playing ||
+                completedAudioGeneration !== this.audioGateGeneration ||
+                this.backgroundAudioOnly || this.seekLocked) return;
+              // 首帧恢复期间仍可能 buffering；保留待启动标记，后续 timeUpdate 再尝试。
+              this.gateAudioStart();
+              this.tryStartGatedAudio();
             });
           }
           // seek 尚未完成音轨对齐时不能提前隐藏 loading 或恢复弹幕时钟。
           if ((this.seekCtl?.seekInFlight ?? true) === false && !this.seekRecoveryActive) {
             this.buffering = false;
-            this.startDmLoop();
+            this.dmClock.start();
           }
         }
       });
       p.on('videoSizeChange', (width: number, height: number) => {
         if (this.player !== p || height <= 0 || width <= 0) return;
+        this.realVideoWidth = width;
+        this.realVideoHeight = height;
+        this.syncPictureInPicture();
         this.onVideoSizeChange(width, height);
       });
       const sourceUrl: string = this.currentSourceUrl();
@@ -1669,6 +1804,14 @@ if (this.runtimeSources.length === 0) {
       // tryStartPreparedPlayers 会等到两条轨都 prepared 才开播，并行不会引入竞态。
       if (this.runtimeAudioSources.length > 0) {
         this.initAudioPlayer(generation).catch(() => {
+          // initAudioPlayer 内部已把 setMediaSource 失败收敛到 handleAudioPlayerError；
+          // 这里只兜底清理残留引用，防止 tryStartPreparedPlayers 因音轨未就绪而永久等待。
+          // generation 已变说明有新一轮重建在途，动它的引用反而会破坏新初始化。
+          if (this.destroyed || generation !== this.playerCreateGeneration || this.retryingSource) return;
+          if (this.audioPlayer !== null && !this.audioPrepared && this.errorText.length === 0) {
+            this.audioPlayer = null;
+            this.tryStartPreparedPlayers();
+          }
         });
       }
       if (this.destroyed || generation !== this.playerCreateGeneration || this.player !== p) return;
@@ -1732,7 +1875,7 @@ if (this.runtimeSources.length === 0) {
         this.audioPrepared = true;
         try {
           audio.setPlaybackRate(this.playbackRate);
-          audio.setVolume(this.sponsorMuted ? 0 : 1);
+          audio.setVolume(this.sponsorCtl.isMuted() ? 0 : 1);
         } catch (e) {
           // 倍速不被音频解码器支持时，设置入口会统一回退到 1x。
         }
@@ -1746,6 +1889,11 @@ if (this.runtimeSources.length === 0) {
         this.endScreenOpen = true;
         this.onEnded();
       }
+    });
+    audio.on('playbackRateDone', (rate: number) => {
+      if (this.audioPlayer !== audio || !DEBUG) return;
+      hilog.info(0x0000, 'BiliPlayback', 'audio.rate.done rate=%{public}s position=%{public}d',
+        String(rate), audio.currentTime);
     });
     audio.on('error', (err: BusinessError) => {
       this.handleAudioPlayerError(audio, err.message);
@@ -1781,18 +1929,62 @@ if (this.runtimeSources.length === 0) {
         this.timerMinutes = 0;
         this.pauseForTimer();
       }
+      // 后台听视频时视频轨已暂停，SponsorBlock 的跳段/静音只能由音频轨进度回调驱动；
+      // skip 触发的 seekTo 走双轨定位，与前台行为一致。
+      this.sponsorCtl.maybeSkipSponsor(nextTime);
     });
-    const source: media.MediaSource = media.createMediaSourceWithUrl(sourceUrl, this.playbackHeaders());
-    await audio.setMediaSource(source, this.audioPlaybackStrategy());
+    try {
+      const source: media.MediaSource = media.createMediaSourceWithUrl(sourceUrl, this.playbackHeaders());
+      await audio.setMediaSource(source, this.audioPlaybackStrategy());
+    } catch (e) {
+      // setMediaSource 失败可能只走 rejection 不发 error 事件；必须收敛到统一兜底，
+      // 否则 audioPlayer 残留且 audioPrepared 恒为 false，tryStartPreparedPlayers 永久等待。
+      await this.handleAudioPlayerError(audio, '音轨资源加载失败');
+    }
+  }
+
+  private speedTransitionUntilMs: number = 0;
+  private audioSyncRate: number = -1;
+  private audioSyncPlayer: media.AVPlayer | null = null;
+
+  private resetAudioSyncRate(): void {
+    const audio: media.AVPlayer | null = this.audioPlayer;
+    if (audio !== null && audio === this.audioSyncPlayer && this.audioSyncRate >= 0 && this.audioPrepared) {
+      try { audio.setPlaybackRate(this.playbackRate); } catch (e) {}
+    }
+    this.audioSyncRate = -1;
+    this.audioSyncPlayer = null;
   }
 
   private checkAudioSync(videoTimeMs: number): void {
+    // 两轨倍速切换异步生效；稳定期间不依据瞬时钟差再次切速。
+    if (Date.now() < this.speedTransitionUntilMs) {
+      this.audioDriftSamples = 0;
+      return;
+    }
     const audio: media.AVPlayer | null = this.audioPlayer;
-    // 连续三个采样失步才校准，过滤回调调度抖动；使用墙钟限频，反复跳回同一时间段仍能恢复。
+    if (this.holdSpeedActive) {
+      // 临时倍速由手势控制器接管，不能在 timeUpdate 中改回设置页倍速。
+      this.audioSyncRate = -1;
+      this.audioSyncPlayer = null;
+      this.audioDriftSamples = 0;
+      return;
+    }
     if (!this.playing || this.backgroundAudioOnly || this.buffering || this.firstFrameMuteArmed ||
       this.audioStartPending || this.audioGateSeekPending || this.seekLocked ||
-      (this.seekCtl?.seekInFlight ?? true) || audio === null || !this.audioPrepared || audio.state !== 'playing' ||
-      Math.abs(audio.currentTime - videoTimeMs) <= 350) {
+      (this.seekCtl?.seekInFlight ?? true) || audio === null || !this.audioPrepared || audio.state !== 'playing') {
+      this.audioDriftSamples = 0;
+      this.resetAudioSyncRate();
+      return;
+    }
+    const driftMs: number = audio.currentTime - (this.player?.currentTime ?? videoTimeMs);
+    if (Math.abs(driftMs) <= 100) {
+      this.audioDriftSamples = 0;
+      this.resetAudioSyncRate();
+      return;
+    }
+    // 350ms 才开始调整，回到 100ms 内停止，避免时钟回调抖动导致来回切速。
+    if (Math.abs(driftMs) <= 350 && this.audioSyncRate < 0) {
       this.audioDriftSamples = 0;
       return;
     }
@@ -1800,9 +1992,18 @@ if (this.runtimeSources.length === 0) {
     const nowMs: number = Date.now();
     if (this.audioDriftSamples < 3 || nowMs - this.lastAudioSyncAtMs < 3000) return;
     this.audioDriftSamples = 0;
-    // 校时走双轨暂停定位，禁止边播边单独 seek 音轨。
-    this.seekTo(videoTimeMs / 1000, true);
+    // 连续播放期间不再静音、pause 或 seek；以最多 3% 的速度差逐步收敛。
+    const rate: number = Math.max(0.125, Math.min(8, this.playbackRate * (driftMs > 0 ? 0.97 : 1.03)));
     this.lastAudioSyncAtMs = nowMs;
+    if (this.audioSyncPlayer === audio && Math.abs(this.audioSyncRate - rate) < 0.001) return;
+    try {
+      audio.setPlaybackRate(rate);
+      this.audioSyncPlayer = audio;
+      this.audioSyncRate = rate;
+    } catch (e) {
+      // 设备不支持微调时保留连续播放，不能退回循环暂停/定位。
+      this.resetAudioSyncRate();
+    }
   }
 
   private invalidatePlayerCreation(): void {
@@ -1850,17 +2051,47 @@ if (this.runtimeSources.length === 0) {
   /** 视频已开始推进：先把尚未播放的 DASH 音轨定位到当前视频时间，再在 seekDone 后启动。 */
   private tryStartGatedAudio(): void {
     if (!this.audioStartPending || this.audioGateSeekPending || !this.playing) return;
+    if (this.buffering || this.seekLocked || this.backgroundAudioOnly ||
+      (this.seekCtl?.seekInFlight ?? false)) return;
     const video: media.AVPlayer | null = this.player;
     const audio: media.AVPlayer | null = this.audioPlayer;
     if (video === null || !this.prepared || audio === null || !this.audioPrepared) return;
     const targetMs: number = Math.max(0, video.currentTime);
     if (Math.abs(audio.currentTime - targetMs) > 80) {
-      // 首帧等待期间两轨可能已错开；用统一状态机冻结视频再校准，避免追逐持续移动的播放头。
-      this.cancelAudioGate();
-      this.seekTo(targetMs / 1000, true);
+      this.alignGatedAudio(video, audio);
       return;
     }
     this.finishGatedAudioStart(audio);
+  }
+
+  private audioGateGeneration: number = 0;
+
+  /** 自动恢复只暂停、定位音轨；用户拖动仍由双轨 seek 状态机处理。 */
+  private async alignGatedAudio(video: media.AVPlayer, audio: media.AVPlayer): Promise<void> {
+    const generation: number = this.audioGateGeneration;
+    this.audioGateSeekPending = true;
+    try {
+      audio.setVolume(0);
+      await this.pauseAudioForSync(audio);
+      if (generation !== this.audioGateGeneration || this.player !== video || this.audioPlayer !== audio ||
+        !this.playing || this.seekLocked || this.backgroundAudioOnly) return;
+      this.audioGateSeekTargetMs = Math.max(0, video.currentTime);
+      audio.seek(this.audioGateSeekTargetMs);
+      this.audioGateTimer = setTimeout(() => {
+        this.audioGateTimer = -1;
+        if (generation !== this.audioGateGeneration || this.audioPlayer !== audio || !this.audioGateSeekPending) return;
+        if (Math.abs(audio.currentTime - this.audioGateSeekTargetMs) <= 500) {
+          this.finishGatedAudioStart(audio);
+        } else {
+          this.cancelAudioGate();
+          this.handleAudioPlayerError(audio, '音轨定位超时');
+        }
+      }, 1500);
+    } catch (e) {
+      if (generation !== this.audioGateGeneration || this.audioPlayer !== audio) return;
+      this.cancelAudioGate();
+      this.handleAudioPlayerError(audio, '音轨同步失败');
+    }
   }
 
   private finishGatedAudioStart(audio: media.AVPlayer): void {
@@ -1873,12 +2104,31 @@ if (this.runtimeSources.length === 0) {
     this.audioStartPending = false;
     if (this.audioPlayer !== audio || !this.audioPrepared || !this.playing) return;
     try {
+      this.restoreUserVolume();
       audio.play();
     } catch (e) {
     }
   }
 
+  /** 所有自动音轨暂停共用屏障，用户 seek 必须等旧暂停真正完成。 */
+  private pauseAudioForSync(audio: media.AVPlayer): Promise<void> {
+    if (this.pendingAudioPausePlayer === audio && this.pendingAudioPause !== null) return this.pendingAudioPause;
+    const pending: Promise<void> = audio.state === 'playing' ? audio.pause() : Promise.resolve();
+    this.pendingAudioPause = pending;
+    this.pendingAudioPausePlayer = audio;
+    const clearPending = (): void => {
+      if (this.pendingAudioPause === pending) {
+        this.pendingAudioPause = null;
+        this.pendingAudioPausePlayer = null;
+      }
+    };
+    pending.then(clearPending, clearPending);
+    return pending;
+  }
+
   private cancelAudioGate(): void {
+    this.resetAudioSyncRate();
+    this.audioGateGeneration++;
     if (this.audioGateTimer >= 0) {
       clearTimeout(this.audioGateTimer);
       this.audioGateTimer = -1;
@@ -1936,7 +2186,7 @@ if (this.runtimeSources.length === 0) {
       this.firstRenderReady = false;
       this.buffering = true;
       this.closeSettingPanels();
-      this.stopDmLoop(false);
+      this.dmClock.stop(false);
       if (oldPlayer !== null) {
         try {
           await oldPlayer.release();
@@ -1964,6 +2214,11 @@ if (this.runtimeSources.length === 0) {
   }
 
   setPlaybackSpeed(rate: number): void {
+    this.audioSyncRate = -1;
+    this.audioSyncPlayer = null;
+    this.audioDriftSamples = 0;
+    this.lastAudioSyncAtMs = Date.now();
+    this.speedTransitionUntilMs = this.lastAudioSyncAtMs + 1500;
     this.playbackRate = rate;
     this.dmEngine.setPlaybackRate(rate);
     this.closeSettingPanels();
@@ -1982,6 +2237,12 @@ if (this.runtimeSources.length === 0) {
   }
 
   private applyTemporarySpeed(rate: number): void {
+    // 直接覆盖微调速率，不能先恢复旧倍速再设置目标倍速，造成一次手势两次重配。
+    this.audioSyncRate = -1;
+    this.audioSyncPlayer = null;
+    this.audioDriftSamples = 0;
+    this.lastAudioSyncAtMs = Date.now();
+    this.speedTransitionUntilMs = this.lastAudioSyncAtMs + 1500;
     let videoApplied: boolean = false;
     let audioApplied: boolean = false;
     try {
@@ -2016,6 +2277,7 @@ if (this.runtimeSources.length === 0) {
   }
 
   private beginHoldSpeed(): void {
+    if (this.holdEnabled === false) return;
     this.dmInteraction.cancelPending();
     if (!this.playing || !this.prepared || this.holdSpeedActive) return;
     Haptic.seek();
@@ -2055,6 +2317,7 @@ if (this.runtimeSources.length === 0) {
   }
 
   private beginPlayerPan(event: GestureEvent): void {
+    if (this.panEnabled === false) return;
     if (this.endScreenOpen) return;
     // 滑动手势判定后不再视为点弹幕。
     this.dmInteraction.cancelPending();
@@ -2065,6 +2328,7 @@ if (this.runtimeSources.length === 0) {
   }
 
   private updatePlayerPan(event: GestureEvent): void {
+    if (this.panEnabled === false) return;
     this.gestureCtl?.updatePan(event.offsetX, event.offsetY, this.dmEngine.width, this.duration);
     if (this.gestureCtl?.panMode === 'seek') {
       this.showControls = true;
@@ -2088,7 +2352,6 @@ if (this.runtimeSources.length === 0) {
 
   private progressDisplayTime(): number {
     if (this.sliderDragging) return this.sliderDragValue;
-    if (this.gestureSeekPreview >= 0) return this.gestureSeekPreview;
     return this.duration > 0 ? this.curTime : 0;
   }
 
@@ -2126,19 +2389,24 @@ if (this.runtimeSources.length === 0) {
 
   private clearSeekPreviewInteraction(): void {
     this.sliderDragging = false;
-    this.gestureSeekPreview = -1;
+    this.gestureScrubValue = -1;
+    this.scrubCtl.show(-1);
+    this.seekTargetCtl.show(-1);
     this.closeSeekPreview();
   }
 
   private releaseSeekPreview(): void {
     this.sliderDragging = false;
-    this.gestureSeekPreview = -1;
+    this.gestureScrubValue = -1;
+    this.scrubCtl.show(-1);
+    this.seekTargetCtl.show(-1);
     this.seekPreviewSeconds = -1;
     this.seekPreviewCtl.release();
   }
 
 
   private handleDoubleTap(): void {
+    if (this.doubleTapEnabled === false) return;
     this.dmInteraction.cancelPending();
     if (!this.prepared || this.player === null || this.endScreenOpen) return;
     // 双击只切换播放/暂停，不再在屏幕中央弹图标；播放键状态由左下角按钮直接反映。
@@ -2290,8 +2558,9 @@ if (this.runtimeSources.length === 0) {
         // 底层状态不允许暂停时保持原 UI，等待 stateChange 校准。
       }
     } else {
-      if (this.appInBackground && !this.backgroundPlaybackEnabled) return;
-      if (this.appInBackground && this.audioPlayer !== null && this.audioPrepared) {
+      if (this.appInBackground && !this.backgroundPlaybackEnabled && !this.pipActive && !this.pipStarting) return;
+      if (this.appInBackground && !this.pipActive && !this.pipStarting &&
+        this.audioPlayer !== null && this.audioPrepared) {
         try {
           this.backgroundAudioOnly = true;
           this.audioPlayer.play();
@@ -2330,10 +2599,7 @@ if (this.runtimeSources.length === 0) {
     this.resumeTransitionActive = this.compactMode && !this.fullscreen;
     this.onResumeRequest();
     try {
-      this.sponsorHandled.clear();
-      this.sponsorDismissed.clear();
-      this.setSponsorMuted(false);
-      this.hideSponsorNotice(false);
+      this.sponsorCtl.resetForReplay();
       this.resetDanmakuAt(0);
       this.playheadSec = 0;
       this.curTime = 0;
@@ -2398,6 +2664,7 @@ if (this.runtimeSources.length === 0) {
       this.seekRecoveryActive = false;
       this.seekRecoveryCoverVisible = false;
       this.seekLocked = false;
+      this.seekTargetCtl.show(-1);
       this.buffering = false;
       try {
         if (resume && this.prepared) {
@@ -2418,6 +2685,7 @@ if (this.runtimeSources.length === 0) {
     this.seekRecoveryActive = false;
     this.seekRecoveryCoverVisible = false;
     this.seekLocked = false;
+    this.seekTargetCtl.show(-1);
     this.invalidatePlayerCreation();
     const stalledAudio: media.AVPlayer | null = this.audioPlayer;
     this.player = null;
@@ -2723,26 +2991,232 @@ if (this.runtimeSources.length === 0) {
   }
 
   private promptDownloadType(): void {
-    if (this.downloadBusy || VideoDownloadService.isActive()) {
-      this.toast('已有下载任务正在进行');
-      return;
-    }
+    const dark: boolean = this.isDark;
+    const option: string = dark ? '#E6E6E6' : '#18191C';
     try {
       this.getUIContext().getPromptAction().showActionMenu({
-        title: '选择下载格式',
+        title: '选择下载内容',
         buttons: [
-          { text: '下载视频（MP4）', color: this.isDark ? '#E6E6E6' : '#18191C' },
-          { text: '只下载音频（M4A）', color: this.isDark ? '#E6E6E6' : '#18191C' },
+          { text: '缓存到下载中心 · 视频', color: option },
+          { text: '缓存到下载中心 · 音频', color: option },
+          { text: '导出视频（MP4）', color: option },
+          { text: '导出音频（M4A）', color: option },
+          { text: '弹幕 / 字幕 / 封面…', color: option },
         ],
       }).then((result) => {
         const index: number = Number(result.index);
-        if (index === 0 || index === 1) {
-          this.startMediaDownload(index === 1).catch(() => {
+        if (index === 0) {
+          this.enqueueCenterDownload(false).catch(() => {
           });
+        } else if (index === 1) {
+          this.enqueueCenterDownload(true).catch(() => {
+          });
+        } else if (index === 2) {
+          this.startMediaDownload(false).catch(() => {
+          });
+        } else if (index === 3) {
+          this.startMediaDownload(true).catch(() => {
+          });
+        } else if (index === 4) {
+          this.promptMediaExportMenu();
         }
       });
     } catch (e) {
       this.toast('无法打开下载格式选择');
+    }
+  }
+
+  /** 二级菜单：弹幕/字幕/封面（showActionMenu 最多 6 个按钮）。 */
+  private promptMediaExportMenu(): void {
+    const dark: boolean = this.isDark;
+    const option: string = dark ? '#E6E6E6' : '#18191C';
+    try {
+      this.getUIContext().getPromptAction().showActionMenu({
+        title: '导出内容',
+        buttons: [
+          { text: '下载弹幕（XML）', color: option },
+          { text: '下载字幕（SRT）', color: option },
+          { text: '下载封面（图片）', color: option },
+        ],
+      }).then((result) => {
+        const index: number = Number(result.index);
+        if (index === 0) {
+          this.exportDanmaku().catch(() => {
+          });
+        } else if (index === 1) {
+          this.exportSubtitle().catch(() => {
+          });
+        } else if (index === 2) {
+          this.exportCover().catch(() => {
+          });
+        }
+      });
+    } catch (e) {
+      this.toast('无法打开导出菜单');
+    }
+  }
+
+  /** 播放器截图：取进度预览雪碧图最近帧 → 存相册（系统安全组件确认）。 */
+  private async captureScreenshot(): Promise<void> {
+    const frame: image.PixelMap | null = await this.seekPreviewCtl.captureAt(this.playheadSec);
+    if (frame === null) {
+      this.toast('该视频暂不支持截图');
+      return;
+    }
+    try {
+      const packer: image.ImagePacker = image.createImagePacker();
+      const data: ArrayBuffer = await packer.packToData(frame, { format: 'image/jpeg', quality: 92 });
+      const context: common.UIAbilityContext | undefined =
+        this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+      if (context === undefined) return;
+      const saved: boolean = await PhotoLibrarySaver.saveImage(context, data, 'jpeg',
+        'BiliHaromny_' + String(Math.floor(this.playheadSec)) + 's');
+      this.toast(saved ? '截图已保存到相册' : '截图未保存');
+    } catch (e) {
+      this.toast('截图保存失败，请重试');
+    }
+  }
+
+  /** 缓存到下载中心：任务持久化、可排队/重试，不再依赖当前页面存活。 */
+  private async enqueueCenterDownload(audioOnly: boolean): Promise<void> {
+    if (this.epId > 0) {
+      this.toast('番剧下载暂未开放');
+      return;
+    }
+    if (this.cid <= 0 || (this.aid <= 0 && this.bvid.length === 0)) {
+      this.toast('当前视频信息不完整，无法下载');
+      return;
+    }
+    const context: common.UIAbilityContext | undefined =
+      this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+    if (context === undefined) return;
+    try {
+      await DownloadCenter.init(context);
+      let baseName: string = this.videoTitle;
+      if (this.videoPartTitle.trim().length > 0 && this.videoPartTitle.trim() !== this.videoTitle.trim()) {
+        baseName += ' - ' + this.videoPartTitle.trim();
+      }
+      const requestedQuality: number = this.downloadQualityValue();
+      const qualityLabel: string = audioOnly ? '音频' : this.downloadQualityText();
+      const title: string = this.safeDownloadName(baseName + ' [' + qualityLabel + ']');
+      await DownloadCenter.enqueue(audioOnly ? DOWNLOAD_KIND_AUDIO : DOWNLOAD_KIND_VIDEO,
+        this.aid, this.bvid, this.cid, 0, audioOnly ? 0 : requestedQuality, title, qualityLabel);
+      this.toast('已加入下载中心' + (DownloadCenter.hasActive() ? '，正在下载' : '，排队中'));
+    } catch (e) {
+      const message: string = e instanceof Error ? e.message : '';
+      this.toast(message.length > 0 ? message : '加入下载中心失败，请重试');
+    }
+  }
+
+  /** 弹幕导出：全部分段 protobuf → 标准 XML（官方弹幕XML格式 p 属性）。 */
+  private async exportDanmaku(): Promise<void> {
+    if (this.cid <= 0) {
+      this.toast('当前视频没有弹幕');
+      return;
+    }
+    this.toast('正在整理弹幕…');
+    let xml: string = '<?xml version="1.0" encoding="UTF-8"?><i><chatserver>chat.bilibili.com' +
+      '</chatserver><chatid>' + String(this.cid) + '</chatid><maxlimit>1500</maxlimit><source>k-v</source>';
+    let total: number = 0;
+    for (let seg: number = 1; seg <= 12; seg++) {
+      const items: Array<DanmakuItem> | null = await BiliApi.getDanmakuSeg(this.cid, this.aid, seg);
+      if (items === null || items.length === 0) break;
+      for (let i: number = 0; i < items.length; i++) {
+        const dm: DanmakuItem = items[i];
+        const text: string = dm.text.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        const p: string = dm.time.toFixed(2) + ',' + String(dm.mode) + ',' + String(dm.fontsize) + ',' +
+          String(dm.color) + ',0,0,0,' + (dm.idStr.length > 0 ? dm.idStr : String(dm.id));
+        xml += '<d p="' + p + '">' + text + '</d>';
+        total++;
+      }
+    }
+    xml += '</i>';
+    if (total === 0) {
+      this.toast('当前视频没有弹幕');
+      return;
+    }
+    const identity: string = this.bvid.length > 0 ? this.bvid : 'av' + String(this.aid);
+    await this.saveTextFile(this.safeDownloadName(this.videoTitle + ' [' + identity + ']') + '.xml',
+      '弹幕文件|.xml', xml);
+    this.toast('弹幕已保存（' + String(total) + ' 条）');
+  }
+
+  /** 字幕导出：当前轨道 CC JSON → SRT。 */
+  private async exportSubtitle(): Promise<void> {
+    const tracks: Array<SubtitleTrack> = this.subtitles;
+    if (tracks.length === 0) {
+      this.toast('该视频没有 CC 字幕');
+      return;
+    }
+    const track: SubtitleTrack = tracks[0];
+    const cues: Array<SubtitleCue> = await BiliApi.getSubtitleCues(track.url);
+    if (cues.length === 0) {
+      this.toast('字幕内容获取失败');
+      return;
+    }
+    let srt: string = '';
+    for (let i: number = 0; i < cues.length; i++) {
+      const cue: SubtitleCue = cues[i];
+      srt += String(i + 1) + '\n' + PlayerView.srtTime(cue.from) + ' --> ' + PlayerView.srtTime(cue.to) +
+        '\n' + cue.content + '\n\n';
+    }
+    const trackName: string = track.lanDoc.length > 0 ? track.lanDoc : (track.lan.length > 0 ? track.lan : '字幕');
+    await this.saveTextFile(this.safeDownloadName(this.videoTitle + ' [' + trackName + ']') + '.srt',
+      '字幕文件|.srt', srt);
+    this.toast('字幕已保存（' + String(cues.length) + ' 条）');
+  }
+
+  private static srtTime(seconds: number): string {
+    const total: number = Math.max(0, Math.round(seconds * 1000));
+    const ms: number = total % 1000;
+    const whole: number = Math.floor(total / 1000);
+    const h: number = Math.floor(whole / 3600);
+    const m: number = Math.floor((whole % 3600) / 60);
+    const sec: number = whole % 60;
+    const pad = (v: number, n: number): string => String(v).padStart(n, '0');
+    return pad(h, 2) + ':' + pad(m, 2) + ':' + pad(sec, 2) + ',' + pad(ms, 3);
+  }
+
+  /** 封面导出：原图字节经文件选择器落盘（JPG/PNG 按地址扩展名）。 */
+  private async exportCover(): Promise<void> {
+    if (this.videoCover.length === 0) {
+      this.toast('当前视频没有封面');
+      return;
+    }
+    try {
+      const bytes: ArrayBuffer = await HttpClient.getBytes(this.videoCover);
+      const lower: string = this.videoCover.split('?')[0].toLowerCase();
+      const extension: string = lower.endsWith('.png') ? '.png' : (lower.endsWith('.webp') ? '.webp' : '.jpg');
+      const identity: string = this.bvid.length > 0 ? this.bvid : 'av' + String(this.aid);
+      await this.saveBinaryFile(this.safeDownloadName(this.videoTitle + ' [封面] [' + identity + ']') + extension,
+        '图片文件|' + extension, bytes);
+      this.toast('封面已保存');
+    } catch (e) {
+      this.toast('封面下载失败，请重试');
+    }
+  }
+
+  private async saveTextFile(fileName: string, suffix: string, content: string): Promise<void> {
+    const encoder: util.TextEncoder = new util.TextEncoder();
+    await this.saveBinaryFile(fileName, suffix, encoder.encodeInto(content).buffer as ArrayBuffer);
+  }
+
+  private async saveBinaryFile(fileName: string, suffix: string, bytes: ArrayBuffer): Promise<void> {
+    const context: common.UIAbilityContext | undefined =
+      this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+    if (context === undefined) return;
+    const documentPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
+    const options: picker.DocumentSaveOptions = new picker.DocumentSaveOptions();
+    options.newFileNames = [fileName];
+    options.fileSuffixChoices = [suffix];
+    const targets: Array<string> = await documentPicker.save(options);
+    if (targets.length === 0) return;
+    const file: fs.File = fs.openSync(targets[0], fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(file.fd, bytes);
+    } finally {
+      fs.closeSync(file);
     }
   }
 
@@ -2836,6 +3310,7 @@ if (this.runtimeSources.length === 0) {
   }
 
   release(): void {
+    this.releasePictureInPicture();
     this.invalidatePlayerCreation();
     if (this.hideTimer >= 0) {
       clearTimeout(this.hideTimer);
@@ -2861,8 +3336,8 @@ if (this.runtimeSources.length === 0) {
     this.seekRecoveryActive = false;
     this.seekRecoveryCoverVisible = false;
     this.audioStartPending = false;
-    this.stopDmLoop(true);
-    this.releaseDmClock();
+    this.dmClock.stop(true);
+    this.dmClock.release();
     this.dmEngine.clearCaches();
     Immersive.setKeepScreenOn(false);
     this.deactivateAVSession();
@@ -2891,112 +3366,7 @@ if (this.runtimeSources.length === 0) {
 
   spawnDanmaku(now: number): void {
     this.dmEngine.spawn(now);
-    if (this.dmEngine.active.length > 0) this.startDmLoop();
-  }
-
-  /** 统一绘制入口：画布上已经没有活动弹幕时顺带停掉定时器。 */
-  private renderDanmakuFrame(advance: boolean = true, frameTimeMs: number = Date.now()): void {
-    this.dmEngine.drawFrame(advance, frameTimeMs);
-    if (this.dmEngine.active.length === 0) this.stopDmLoop(false);
-  }
-
-  startDmLoop(): void {
-    if (this.dmLoopRunning || !this.danmakuOn || this.dmEngine.active.length === 0) {
-      return;
-    }
-    this.dmEngine.lastDrawMs = 0;
-    this.dmLastFrameMs = 0;
-    this.dmLoopRunning = true;
-    try {
-      if (this.dmDisplaySync === null) {
-        const sync: displaySync.DisplaySync = displaySync.create();
-        sync.setExpectedFrameRateRange(this.dmExpectedFrameRateRange());
-        sync.on('frame', (info: displaySync.IntervalInfo): void => {
-          if (this.dmLoopRunning && this.playing && this.danmakuOn && this.dmEngine.active.length > 0) {
-            const frameTimeMs: number = info.timestamp / 1_000_000;
-            if (this.shouldRenderDmFrame(frameTimeMs)) this.renderDanmakuFrame(true, frameTimeMs);
-          }
-        });
-        this.dmDisplaySync = sync;
-      }
-      this.dmDisplaySync.start();
-    } catch (e) {
-      // API 26 正常走 DisplaySync；仅为异常 ROM 保留可播放兜底。
-      this.dmFallbackTick = setInterval(() => {
-        if (this.dmLoopRunning && this.playing && this.danmakuOn && this.dmEngine.active.length > 0) {
-          const frameTimeMs: number = Date.now();
-          if (this.shouldRenderDmFrame(frameTimeMs)) this.renderDanmakuFrame(true, frameTimeMs);
-        }
-      }, 16);
-    }
-  }
-
-  /** 暂停/缓冲时只停时钟，保留已上屏弹幕；恢复播放后从当前帧继续推进。 */
-  private pauseDmLoop(): void {
-    this.stopDmClock();
-    this.dmEngine.lastDrawMs = 0;
-  }
-
-  stopDmLoop(clearActive: boolean): void {
-    this.stopDmClock();
-    this.dmEngine.lastDrawMs = 0;
-    if (clearActive) {
-      this.dmEngine.clearActive();
-      this.dmPinnedVisible = false;
-      this.dmPinnedText = '';
-    } else {
-      this.dmEngine.clearCanvas();
-    }
-  }
-
-  private stopDmClock(): void {
-    this.dmLoopRunning = false;
-    this.dmLastFrameMs = 0;
-    if (this.dmDisplaySync !== null) {
-      try {
-        this.dmDisplaySync.stop();
-      } catch (e) {
-      }
-    }
-    if (this.dmFallbackTick >= 0) {
-      clearInterval(this.dmFallbackTick);
-      this.dmFallbackTick = -1;
-    }
-  }
-
-  private shouldRenderDmFrame(frameTimeMs: number): boolean {
-    // 不再因弹幕密度或长按倍速暗中降到 30/20fps；用户选择的帧率是唯一上限。
-    // 实际位移仍按两次绘制的真实时间差推进，设备刷新率不足时不会慢放或失去音画同步。
-    const minIntervalMs: number = 1000 / Math.max(24, this.dmFrameRate);
-    if (this.dmLastFrameMs <= 0) {
-      this.dmLastFrameMs = frameTimeMs;
-      return true;
-    }
-    const nextFrameMs: number = this.dmLastFrameMs + minIntervalMs;
-    if (frameTimeMs + 0.5 < nextFrameMs) {
-      return false;
-    }
-    // 按目标时间线累积而不是重置为实际回调时间：120Hz 上选择 90fps 时会以 2/1/1 帧
-    // 的节奏逼近 90，而不是每次都从当前帧重算后退化成固定 60fps。
-    const overdueMs: number = Math.max(0, frameTimeMs - nextFrameMs);
-    this.dmLastFrameMs = nextFrameMs + Math.floor(overdueMs / minIntervalMs) * minIntervalMs;
-    return true;
-  }
-
-  private dmExpectedFrameRateRange(): ExpectedFrameRateRange {
-    const target: number = Math.max(24, Math.min(120, Math.round(this.dmFrameRate)));
-    return { min: Math.min(30, target), max: target, expected: target };
-  }
-
-  private releaseDmClock(): void {
-    this.stopDmClock();
-    if (this.dmDisplaySync !== null) {
-      try {
-        this.dmDisplaySync.off('frame');
-      } catch (e) {
-      }
-      this.dmDisplaySync = null;
-    }
+    if (this.dmEngine.active.length > 0) this.dmClock.start();
   }
 
   toggleDanmaku(): void {
@@ -3008,7 +3378,7 @@ if (this.runtimeSources.length === 0) {
     this.danmakuOn = enabled;
     this.dmEngine.enabled = enabled;
     if (!enabled) {
-      this.stopDmLoop(true);
+      this.dmClock.stop(true);
     } else {
       // 重新开启时从当前播放位置继续，不补画已经错过的一大批弹幕。
       this.dmEngine.syncCursor(this.playheadSec - 0.08);
@@ -3019,16 +3389,16 @@ if (this.runtimeSources.length === 0) {
   }
 
   restartDmLoopForViewport(): void {
-    const shouldRestart: boolean = this.dmLoopRunning;
-    this.stopDmLoop(false);
+    const shouldRestart: boolean = this.dmClock.isRunning();
+    this.dmClock.stop(false);
     this.dmEngine.clearCaches();
     // 横竖屏字号和轨道数不同，切换时立即重排，避免旋转后沿用旧坐标产生抽搐。
     this.setDmFontScale(this.dmFontScale);
-    if (shouldRestart || (this.playing && this.dmEngine.active.length > 0)) this.startDmLoop();
+    if (shouldRestart || (this.playing && this.dmEngine.active.length > 0)) this.dmClock.start();
   }
 
   resetDanmakuAt(time: number): void {
-    this.stopDmLoop(true);
+    this.dmClock.stop(true);
     this.dmEngine.resetAt(time);
   }
 
@@ -3047,6 +3417,8 @@ if (this.runtimeSources.length === 0) {
     this.blockTopDm = s.blockTop;
     this.blockBottomDm = s.blockBottom;
     this.blockColorDm = s.blockColor;
+    this.dmMerge = s.mergeDuplicates;
+    this.dmMergeCount = s.mergeShowCount;
     this.dmEngine.opacity = s.opacity;
     this.dmEngine.speed = s.speed;
     this.dmEngine.fontScale = s.fontScale;
@@ -3057,6 +3429,8 @@ if (this.runtimeSources.length === 0) {
     this.dmEngine.blockTopDm = s.blockTop;
     this.dmEngine.blockBottomDm = s.blockBottom;
     this.dmEngine.blockColorDm = s.blockColor;
+    this.dmEngine.mergeDuplicates = s.mergeDuplicates;
+    this.dmEngine.showMergeCount = s.mergeShowCount;
   }
 
   /** 当前弹幕设置全量快照落盘（存储层内部 flush 防抖，滑条高频触发安全）。 */
@@ -3074,7 +3448,24 @@ if (this.runtimeSources.length === 0) {
     s.blockTop = this.blockTopDm;
     s.blockBottom = this.blockBottomDm;
     s.blockColor = this.blockColorDm;
+    s.mergeDuplicates = this.dmMerge;
+    s.mergeShowCount = this.dmMergeCount;
     AppTheme.persistDanmakuSettings(s);
+  }
+
+  /** 重复弹幕合并开关：切换后重载弹幕以重新聚类（列表已被合并/展开过，无法原地逆变换）。 */
+  setDmMerge(on: boolean): void {
+    this.dmMerge = on;
+    this.dmEngine.mergeDuplicates = on;
+    this.persistDanmaku();
+    this.loadDanmaku();
+  }
+
+  setDmMergeCount(on: boolean): void {
+    this.dmMergeCount = on;
+    this.dmEngine.showMergeCount = on;
+    this.persistDanmaku();
+    if (on) this.loadDanmaku();
   }
 
   setDmOpacity(value: number): void {
@@ -3085,14 +3476,7 @@ if (this.runtimeSources.length === 0) {
 
   setDmFrameRate(value: number): void {
     this.dmFrameRate = Math.max(24, Math.min(120, Math.round(value)));
-    this.dmLastFrameMs = 0;
-    if (this.dmDisplaySync !== null) {
-      try {
-        this.dmDisplaySync.setExpectedFrameRateRange(this.dmExpectedFrameRateRange());
-      } catch (e) {
-        // 系统不接受高于屏幕刷新率的目标值时，DisplaySync 会继续使用设备可用帧率。
-      }
-    }
+    this.dmClock.frameRateChanged();
     this.persistDanmaku();
   }
 
@@ -3134,7 +3518,7 @@ if (this.runtimeSources.length === 0) {
     this.dmEngine.blockColorDm = this.blockColorDm;
     this.dmEngine.minWeight = this.dmBlockLevel;
     this.dmEngine.applyFilters();
-    if (this.dmEngine.active.length === 0) this.stopDmLoop(false);
+    if (this.dmEngine.active.length === 0) this.dmClock.stop(false);
     this.persistDanmaku();
   }
 
@@ -3151,6 +3535,8 @@ if (this.runtimeSources.length === 0) {
     this.blockTopDm = defaults.blockTop;
     this.blockBottomDm = defaults.blockBottom;
     this.blockColorDm = defaults.blockColor;
+    this.dmMerge = defaults.mergeDuplicates;
+    this.dmMergeCount = defaults.mergeShowCount;
     this.applyDmFilters();
   }
 
@@ -3256,7 +3642,7 @@ if (this.runtimeSources.length === 0) {
       // CC 字幕层：底部黑底白字，开关与轨道选择见设置面板/更多菜单。
       if (this.subtitleOn && this.subtitleText.length > 0) {
         Text(this.subtitleText)
-          .fontSize(15)
+          .fontSize(Math.max(12, Math.min(30, Math.round(15 * this.subtitleScale))))
           .fontColor(this.sheetTitleColor())
           .backgroundColor('#66000000')
           .padding({ left: 10, right: 10, top: 4, bottom: 4 })
@@ -3309,7 +3695,8 @@ if (this.runtimeSources.length === 0) {
         showControls: this.showControls,
         fullscreen: this.fullscreen,
         holdSpeedActive: this.holdSpeedActive,
-        gestureSeekPreview: this.gestureSeekPreview,
+        chapters: this.chapters,
+        scrubCtl: this.scrubCtl,
         sliderSeekPreview: this.sliderDragging ? this.sliderDragValue : -1,
         seekPreviewFrame: this.seekPreviewFrame,
         seekPreviewCover: this.videoCover,
@@ -3322,33 +3709,29 @@ if (this.runtimeSources.length === 0) {
         panStartTime: this.gestureCtl?.panStartTime ?? 0,
         duration: this.duration,
       })
-      if (this.sponsorFullLabel.length > 0 && this.sponsorSkipEnabled) {
-        Text(this.sponsorFullLabel)
-          .fontSize(11)
-          .fontColor('#FFFFFF')
-          .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-          .borderRadius(4)
-          .backgroundColor('#B3008A5C')
-          .align(Alignment.TopEnd)
-          .margin({ top: this.fullscreen ? 52 : 10, right: 10 })
-          .hitTestBehavior(HitTestMode.None)
-          .zIndex(72)
-      }
+      // 空降提示固定在右下角（旧实现无显式定位，被根 Stack 的 Center 对齐顶到画面中间遮挡内容）。
       if (this.sponsorNoticeVisible && !this.endScreenOpen) {
-        SponsorBlockNotice({
-          title: this.sponsorNoticeTitle,
-          detail: this.sponsorNoticeDetail,
-          color: this.sponsorNoticeColor,
-          manual: this.sponsorNoticeManual,
-          canUndo: this.sponsorNoticeCanUndo,
-          canVote: this.sponsorNoticeCanVote,
-          onPrimary: () => this.sponsorNoticePrimary(),
-          onVote: (type: number) => this.voteSponsor(type),
-          onClose: () => this.hideSponsorNotice(true),
-        })
-          .align(Alignment.BottomEnd)
-          .margin({ bottom: this.fullscreen ? 88 : 48, right: 10 })
-          .zIndex(95)
+        Column() {
+          SponsorBlockNotice({
+            title: this.sponsorNoticeTitle,
+            detail: this.sponsorNoticeDetail,
+            color: this.sponsorNoticeColor,
+            manual: this.sponsorNoticeManual,
+            canUndo: this.sponsorNoticeCanUndo,
+            canVote: this.sponsorNoticeCanVote,
+            onPrimary: () => this.sponsorCtl.noticePrimary(),
+            onVote: (type: number) => this.sponsorCtl.voteNotice(type),
+            onClose: () => this.sponsorCtl.hideNotice(true),
+          })
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.End)
+        .alignItems(HorizontalAlign.End)
+        .padding({ right: 10, bottom: this.fullscreen ? 88 : 48 })
+        // 容器自身不参与命中测试，只有提示卡里的按钮可点（与 HeaderBackdrop 同款覆盖层语义）。
+        .hitTestBehavior(HitTestMode.None)
+        .zIndex(95)
       }
       // 竖屏收起控件后仍保留 1.5vp 的播放进度提示，紧贴画面底边且不响应触摸。
       if (!this.fullscreen && !this.showControls && this.duration > 0 &&
@@ -3373,6 +3756,7 @@ if (this.runtimeSources.length === 0) {
         Row() {
           PlayerChapterBar({
             chapters: this.chapters, progress: this.progressDisplayTime(), duration: this.duration,
+            scrubCtl: this.seekTargetCtl,
             controlsVisible: this.showControls, fullscreen: this.fullscreen,
             onSelect: (seconds: number) => {
               this.seekTo(seconds, true);
@@ -3392,9 +3776,11 @@ if (this.runtimeSources.length === 0) {
           if (this.compactMode && !this.fullscreen) {
             PlayerCompactControls({
               playing: this.playing,
+              hotPoints: this.hotPoints,
               progress: this.progressDisplayTime(),
               duration: this.duration,
               chapters: this.chapters,
+              scrubCtl: this.seekTargetCtl,
               sponsorSegments: this.visibleSponsorSegments(),
               titleColor: this.sheetTitleColor(),
               onBack: () => this.handlePlayerBack(),
@@ -3451,6 +3837,7 @@ if (this.runtimeSources.length === 0) {
             .layoutWeight(1)
             PlayerBottomControls({
               fullscreen: this.fullscreen,
+              hotPoints: this.hotPoints,
               playing: this.playing,
               danmakuOn: this.danmakuOn,
               sponsorEnabled: this.sponsorSkipEnabled,
@@ -3458,6 +3845,7 @@ if (this.runtimeSources.length === 0) {
               sponsorSegments: this.visibleSponsorSegments(),
               progress: this.progressDisplayTime(),
               duration: this.duration,
+              scrubCtl: this.seekTargetCtl,
               qualityLoading: this.qualityLoading,
               qualityLabel: this.qualityLabel(),
               playbackRate: this.playbackRate,
@@ -3697,6 +4085,7 @@ if (this.runtimeSources.length === 0) {
       sponsorUserStats: $sponsorUserStats,
       sponsorWarningReason: $sponsorWarningReason,
       subtitleOn: this.subtitleOn,
+      subtitleScale: this.subtitleScale,
       backgroundPlaybackEnabled: this.backgroundPlaybackEnabled,
       subtitleIndex: this.subtitleIndex,
       subtitles: this.subtitles,
@@ -3716,6 +4105,8 @@ if (this.runtimeSources.length === 0) {
       blockTopDm: this.blockTopDm,
       blockBottomDm: this.blockBottomDm,
       blockColorDm: this.blockColorDm,
+      dmMerge: this.dmMerge,
+      dmMergeCount: this.dmMergeCount,
       dmListCount: this.dmListCount,
       dmFilterLoading: this.dmFilterLoading,
       dmFilterType: this.dmFilterType,
@@ -3749,6 +4140,8 @@ if (this.runtimeSources.length === 0) {
       onDmDensityChange: (value: number) => this.setDmDensity(value),
       onDmBlockLevelChange: (value: number) => this.setDmBlockLevel(value),
       onToggleDmBlock: (kind: string) => this.toggleDmBlock(kind),
+      onDmMergeChange: (next: boolean) => this.setDmMerge(next),
+      onDmMergeCountChange: (next: boolean) => this.setDmMergeCount(next),
       onQualityChange: (qn: number) => this.changeQuality(qn),
       onChapterChange: (seconds: number) => {
         this.seekTo(seconds, true);
@@ -3759,13 +4152,18 @@ if (this.runtimeSources.length === 0) {
       onTimerChange: (minutes: number) => this.onTimerChanged(minutes),
       onMirrorChange: (next: boolean) => this.mirrorOn = next,
       onSubtitleToggle: (next: boolean) => this.toggleSubtitle(next),
+      onSubtitleScaleChange: (scale: number) => {
+        AppStorage.setOrCreate<number>('subtitleScale', scale);
+      },
       onBackgroundPlaybackChange: (next: boolean) => this.setBackgroundPlayback(next),
+      onPictureInPicture: () => { this.startPictureInPicture(); },
+      onReportVideo: () => this.reportCurrentVideo(),
       onSponsorToggle: (next: boolean) => {
         this.setSponsorEnabled(next);
       },
       onSponsorModeChange: (category: string, mode: number) => this.changeSponsorMode(category, mode),
       onSponsorRefresh: () => {
-        this.loadSponsorSegments(true);
+        this.sponsorCtl.loadSponsorSegments(true);
         this.loadSponsorUserInfo(true).catch(() => {});
       },
       onSponsorMarkStart: () => this.markSponsorStart(),
@@ -3778,7 +4176,7 @@ if (this.runtimeSources.length === 0) {
       onSponsorClear: () => this.clearSponsorDraft(),
       onSponsorSubmit: () => this.submitSponsorDraft().catch(() => {}),
       onSponsorSegmentSeek: (segment: SponsorBlockSegment) => this.seekSponsorSegment(segment),
-      onSponsorSegmentVote: (segment: SponsorBlockSegment, type: number) => this.voteSponsorSegment(segment, type),
+      onSponsorSegmentVote: (segment: SponsorBlockSegment, type: number) => this.sponsorCtl.voteSegment(segment, type),
       onSponsorUserNameChange: (value: string) => this.sponsorUserName = value,
       onSponsorSaveUserName: () => this.saveSponsorUsername().catch(() => this.toast('昵称更新失败')),
       onSponsorAcknowledgeWarning: () => this.acknowledgeSponsorWarning().catch(() => this.toast('操作失败')),

@@ -5,7 +5,9 @@
 import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
 import { AppNavStack } from '../common/AppRouter';
-import { AuthApi, CookiePair, LoginResult, SmsSendResult, TVCodeResult } from '../api/AuthApi';
+import { AuthApi, CookiePair, GaiaRegisterResult, GeetestAnswer, LoginResult, SmsSendResult,
+  WebQrCode } from '../api/AuthApi';
+import { GeetestPanel } from '../components/login/GeetestPanel';
 import { UserStore } from '../services/auth/UserStore';
 import { BackButton } from '../components/BackButton';
 import { safeToast } from '../common/Toast';
@@ -51,6 +53,67 @@ export struct LoginPage {
   private popTimer: number = -1;
   private pollInflight: boolean = false;
   private qrGeneration: number = 0;
+  // gaia-vgate 风控验证：v_voucher 换极验参数，滑块通过后 grisk_id 作为 recaptcha_token 重试。
+  @State gaiaGt: string = '';
+  @State gaiaChallenge: string = '';
+  private gaiaVoucher: string = '';
+  private gaiaToken: string = '';
+  private geetestDialog: CustomDialogController = new CustomDialogController({
+    builder: GeetestPanel({
+      gt: this.gaiaGt,
+      challenge: this.gaiaChallenge,
+      onAnswer: (challenge: string, validate: string, seccode: string): void =>
+        this.onGeetestAnswer(challenge, validate, seccode),
+    }),
+    autoCancel: true,
+    alignment: DialogAlignment.Bottom,
+    customStyle: false,
+  });
+
+  /** 风控入口：register 拿极验参数 → 弹滑块 → validate 换 grisk_id → 由调用方重试。 */
+  private async runGaiaFlow(vVoucher: string, onPass: (griskId: string) => void): Promise<void> {
+    let registered: GaiaRegisterResult | null = null;
+    try {
+      registered = await AuthApi.gaiaVgateRegister(vVoucher);
+    } catch (e) {
+      // 与 null 走同一失败态。
+    }
+    if (this.destroyed) return;
+    if (registered === null) {
+      this.toast('安全验证初始化失败，请改用扫码登录');
+      return;
+    }
+    this.gaiaVoucher = vVoucher;
+    this.gaiaToken = '';
+    this.gaiaRegisterToken = registered.token;
+    this.gaiaGt = registered.gt;
+    this.gaiaChallenge = registered.challenge;
+    this.gaiaOnPass = onPass;
+    this.geetestDialog.open();
+  }
+
+  private gaiaOnPass: (griskId: string) => void = () => {
+  };
+  /** gaia register 返回的验证 token，与 v_voucher 对应，validate 时回传。 */
+  private gaiaRegisterToken: string = '';
+
+  private onGeetestAnswer(challenge: string, validate: string, seccode: string): void {
+    const answer: GeetestAnswer = new GeetestAnswer();
+    answer.challenge = challenge;
+    answer.validate = validate;
+    answer.seccode = seccode;
+    AuthApi.gaiaVgateValidate(this.gaiaRegisterToken, answer).then((res) => {
+      if (this.destroyed) return;
+      if (!res.ok || res.griskId.length === 0) {
+        this.toast('安全验证未通过，请重试');
+        return;
+      }
+      this.gaiaToken = res.griskId;
+      this.gaiaOnPass(res.griskId);
+    }).catch(() => {
+      if (!this.destroyed) this.toast('安全验证请求失败，请重试');
+    });
+  }
   private loggedIn: boolean = false;
   private destroyed: boolean = false;
 
@@ -86,9 +149,10 @@ export struct LoginPage {
     this.qrUrl = '';
     this.statusText = '获取登录二维码...';
     this.statusColor = '#9499A0';
-    let result: TVCodeResult | null = null;
+    let result: WebQrCode | null = null;
     try {
-      result = await AuthApi.getTVCode();
+      // Web 扫码：确认后下发完整 Web Cookie + refresh_token，是自动续期的基础。
+      result = await AuthApi.getWebQRCode();
     } catch (e) {
       // 与 null 走同一失败态。
     }
@@ -99,7 +163,7 @@ export struct LoginPage {
       this.statusColor = AppTheme.DANGER;
       return;
     }
-    this.authCode = result.authCode;
+    this.authCode = result.qrcodeKey;
     this.qrUrl = result.url;
     this.statusText = '请使用哔哩哔哩 App 扫码登录';
     this.statusColor = this.isDark ? '#D0D0D0' : '#61666D';
@@ -145,19 +209,19 @@ export struct LoginPage {
     const generation: number = this.qrGeneration;
     const authCode: string = this.authCode;
     try {
-      const result = await AuthApi.pollTVCode(authCode);
+      const result = await AuthApi.pollWebQRCode(authCode);
       if (this.destroyed || this.loggedIn || generation !== this.qrGeneration || authCode !== this.authCode) return;
       if (result.code === 0) {
-        // 登录成功
+        // 登录成功：Cookie 已由 Set-Cookie 入罐，这里补 refresh_token 的持久化与状态广播。
         this.stopPoll();
         this.loggedIn = true;
         this.statusText = '登录成功！';
         this.statusColor = '#2FB96A';
-        await UserStore.applyLoginCookies(result.cookies, result.accessToken);
+        await UserStore.applyLoginCookies([], '', result.refreshToken);
         if (this.destroyed) return;
         this.toast('登录成功，欢迎回来');
         this.schedulePop();
-      } else if (result.code === 86039) {
+      } else if (result.code === 86101) {
         this.statusText = '二维码尚未扫描，请使用 App 扫码';
       } else if (result.code === 86090) {
         this.statusText = '已扫码，请在手机上确认登录';
@@ -221,14 +285,22 @@ export struct LoginPage {
     }
     this.smsSending = true;
     try {
-      const result: SmsSendResult = await AuthApi.sendSmsCode(tel);
+      const result: SmsSendResult = await AuthApi.sendSmsCode(tel, this.gaiaToken);
       if (this.destroyed) return;
       if (result.code === 0 && result.captchaKey.length > 0) {
         this.captchaKey = result.captchaKey;
+        this.gaiaToken = '';
         this.toast('验证码已发送，请查收');
         this.startSmsCountdown();
+      } else if (result.vVoucher.length > 0) {
+        // -352 类风控：内嵌 gaia-vgate + 极验滑块，通过后携 grisk_id 自动重发。
+        this.toast('检测到异常环境，请先完成安全验证');
+        this.runGaiaFlow(result.vVoucher, () => {
+          this.doSendSms().catch(() => {
+          });
+        }).catch(() => {
+        });
       } else if (result.needCaptcha) {
-        // 触发极验滑块验证码，v1 不支持内嵌验证
         this.toast('需要先完成滑块验证，请改用扫码登录');
       } else {
         this.toast(result.message.length > 0 ? result.message : '发送失败，请稍后重试');

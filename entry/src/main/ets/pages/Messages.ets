@@ -4,9 +4,9 @@ import { AppTheme } from '../common/AppTheme';
 import { display } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { Immersive } from '../common/Immersive';
-import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
+import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   ImageViewerParam, ImageViewerSrcRect, NAV_IMAGE_VIEWER, NAV_LOGIN, NAV_VIDEO_DETAIL,
-  VideoDetailParam } from '../common/AppRouter';
+  VideoDetailParam, setHeroBgSnapshot } from '../common/AppRouter';
 import { BiliApi, ActionResult } from '../api/BiliApi';
 import { MessageSessionItem, MessageSessionPageData, PrivateMessageItem, PrivateMessagePageData } from '../model/Models';
 import { UserStore } from '../services/auth/UserStore';
@@ -23,7 +23,8 @@ import { biliImageOriginal, biliImageThumbnail } from '../common/ImageUrl';
 @Component
 export struct MessagesPage {
   @State current: MessageSessionItem = new MessageSessionItem();
-  @State messages: Array<PrivateMessageItem> = [];
+  /** 聊天记录数据源：老消息 prepend、新消息 append 均增量通知 LazyForEach，不整表重建。 */
+  private messagesSource: BasicDataSource<PrivateMessageItem> = new BasicDataSource<PrivateMessageItem>();
   @State sessionLoading: boolean = false;
   @State messageLoading: boolean = false;
   @State sessionError: string = '';
@@ -112,7 +113,7 @@ export struct MessagesPage {
     this.draft = '';
     this.pendingScrollIndex = null;
     AppStorage.setOrCreate<boolean>('messageThreadOpen', true);
-    this.messages = [];
+    this.messagesSource.clear();
     this.messageError = '';
     this.minSeqno = 0;
     this.hasMore = true;
@@ -132,16 +133,22 @@ export struct MessagesPage {
         return;
       }
       this.messageError = '';
-      const previousCount: number = this.messages.length;
+      const previousCount: number = this.messagesSource.totalCount();
       const firstVisible: number = this.firstVisibleMessage;
-      this.messages = reset ? data.messages : this.mergeMessages(data.messages, this.messages);
+      if (reset) {
+        this.messagesSource.reset(data.messages);
+      } else {
+        // 向前翻页：增量插到头部，不整表 reset，避免已渲染消息重建导致滚动位置丢失。
+        this.messagesSource.prepend(this.freshOlderMessages(data.messages));
+      }
       // 首次进入看最新消息；向前翻页保留原来的阅读位置。
-      this.pendingScrollIndex = reset ? -1 : firstVisible + this.messages.length - previousCount;
+      this.pendingScrollIndex = reset ? -1 : firstVisible + this.messagesSource.totalCount() - previousCount;
       this.scheduleMessageScroll();
       this.minSeqno = data.minSeqno > 0 ? data.minSeqno : this.minSeqno;
       this.hasMore = data.hasMore;
-      if (reset && this.messages.length > 0) {
-        const ackSeqno: number = this.messages[this.messages.length - 1].seqno;
+      if (reset && this.messagesSource.totalCount() > 0) {
+        const all: Array<PrivateMessageItem> = this.messagesSource.getAll();
+        const ackSeqno: number = all[all.length - 1].seqno;
         // 服务端确认成功后再清本地红点，避免请求失败时退出会话又恢复成未读。
         MessageApi.markPrivateMessagesRead(talkerId, ackSeqno).then((result: ActionResult) => {
           if (result.ok) this.clearSessionUnread(talkerId);
@@ -155,22 +162,21 @@ export struct MessagesPage {
     }
   }
 
-  private mergeMessages(older: Array<PrivateMessageItem>, newer: Array<PrivateMessageItem>): Array<PrivateMessageItem> {
+  /** 向前翻页去重：跳过本地已有 seqno（分页边界可能重复返回），只把新消息增量 prepend。 */
+  private freshOlderMessages(older: Array<PrivateMessageItem>): Array<PrivateMessageItem> {
     const seen: Set<number> = new Set<number>();
-    const all: Array<PrivateMessageItem> = [];
+    const all: Array<PrivateMessageItem> = this.messagesSource.getAll();
+    for (let i: number = 0; i < all.length; i++) {
+      seen.add(all[i].seqno);
+    }
+    const out: Array<PrivateMessageItem> = [];
     for (let i: number = 0; i < older.length; i++) {
       if (!seen.has(older[i].seqno)) {
         seen.add(older[i].seqno);
-        all.push(older[i]);
+        out.push(older[i]);
       }
     }
-    for (let i: number = 0; i < newer.length; i++) {
-      if (!seen.has(newer[i].seqno)) {
-        seen.add(newer[i].seqno);
-        all.push(newer[i]);
-      }
-    }
-    return all;
+    return out;
   }
 
   async send(): Promise<void> {
@@ -193,7 +199,8 @@ export struct MessagesPage {
       local.text = content;
       local.timestamp = Math.floor(Date.now() / 1000);
       local.seqno = Date.now();
-      this.messages = this.messages.concat([local]);
+      // 服务端确认成功后追加到尾部（现状即非乐观发送），数据源增量通知尾部插入。
+      this.messagesSource.append([local]);
       this.pendingScrollIndex = -1;
       this.scheduleMessageScroll();
       if (this.draft.trim() === content) this.draft = '';
@@ -233,7 +240,7 @@ export struct MessagesPage {
     this.scrollTimer = setTimeout(() => {
       this.scrollTimer = -1;
       if (!this.threadOpen || generation !== this.messageGeneration) return;
-      if (index < 0) this.messageScroller.scrollToIndex(this.messages.length, false, ScrollAlign.END);
+      if (index < 0) this.messageScroller.scrollToIndex(this.messagesSource.totalCount(), false, ScrollAlign.END);
       else this.messageScroller.scrollToIndex(index, false, ScrollAlign.START);
     }, 120);
   }
@@ -292,11 +299,56 @@ export struct MessagesPage {
     .width('100%')
     .padding({ top: 11, bottom: 11 })
     .onClick(() => this.openSession(item))
-    // 长按删除会话（对齐 PiliPlus 私信会话删除）
+    // 长按会话：置顶/取消置顶、删除（对齐官方会话管理）
     .gesture(
       LongPressGesture({ repeat: false })
-        .onAction(() => this.confirmRemoveSession(item))
+        .onAction(() => this.promptSessionActions(item))
     )
+  }
+
+  /** 长按会话弹出操作菜单：置顶切换 + 删除。 */
+  private promptSessionActions(item: MessageSessionItem): void {
+    const isDark: boolean = this.isDark;
+    try {
+      this.getUIContext().getPromptAction().showActionMenu({
+        title: item.name.length > 0 ? item.name : '会话操作',
+        buttons: [
+          { text: item.pinned ? '取消置顶' : '置顶', color: isDark ? '#E6E6E6' : '#18191C' },
+          { text: '删除会话', color: AppTheme.DANGER },
+        ],
+      }).then((result) => {
+        const index: number = Number(result.index);
+        if (index === 0) this.togglePinSession(item);
+        else if (index === 1) this.confirmRemoveSession(item);
+      });
+    } catch (e) {
+      // 弹窗失败忽略。
+    }
+  }
+
+  /** 置顶/取消置顶会话：成功后更新本地 pinned 标记并重排（置顶在前）。 */
+  private togglePinSession(item: MessageSessionItem): void {
+    if (item.talkerId <= 0) {
+      this.getUIContext().getPromptAction().showToast({ message: '该会话不支持置顶' });
+      return;
+    }
+    MessageApi.pinSession(item.talkerId, !item.pinned)
+      .then((r: ActionResult) => {
+        this.getUIContext().getPromptAction().showToast({ message: r.message });
+        if (!r.ok) return;
+        const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
+        for (let i: number = 0; i < all.length; i++) {
+          all[i].pinned = all[i].talkerId === item.talkerId ? !item.pinned : false;
+        }
+        all.sort((a: MessageSessionItem, b: MessageSessionItem): number => {
+          if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+          return b.sessionTs - a.sessionTs;
+        });
+        this.sessionsSource.reset(all);
+      })
+      .catch(() => {
+        this.getUIContext().getPromptAction().showToast({ message: '网络异常，操作失败' });
+      });
   }
 
   /** 长按删除私信会话：确认后调服务端删除，成功后本地移除该会话行。 */
@@ -440,7 +492,7 @@ export struct MessagesPage {
           waitUntilRenderFinished: true,
         });
         param.cardRect = cardRect;
-        AppStorage.setOrCreate<image.PixelMap>(HERO_BG_SNAPSHOT_KEY, snapshot);
+        setHeroBgSnapshot(snapshot);
         AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
         AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
         AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
@@ -658,19 +710,19 @@ export struct MessagesPage {
         .height('100%')
         .visibility(this.activeTab === 0 ? Visibility.Visible : Visibility.Hidden)
         if (this.tabMounted[1]) {
-          MsgNotifyList({ tab: 'reply' })
+          MsgNotifyList({ tab: 'reply', active: this.activeTab === 1 })
             .visibility(this.activeTab === 1 ? Visibility.Visible : Visibility.Hidden)
         }
         if (this.tabMounted[2]) {
-          MsgNotifyList({ tab: 'at' })
+          MsgNotifyList({ tab: 'at', active: this.activeTab === 2 })
             .visibility(this.activeTab === 2 ? Visibility.Visible : Visibility.Hidden)
         }
         if (this.tabMounted[3]) {
-          MsgNotifyList({ tab: 'like' })
+          MsgNotifyList({ tab: 'like', active: this.activeTab === 3 })
             .visibility(this.activeTab === 3 ? Visibility.Visible : Visibility.Hidden)
         }
         if (this.tabMounted[4]) {
-          MsgNotifyList({ tab: 'sys' })
+          MsgNotifyList({ tab: 'sys', active: this.activeTab === 4 })
             .visibility(this.activeTab === 4 ? Visibility.Visible : Visibility.Hidden)
         }
       }
@@ -764,12 +816,12 @@ export struct MessagesPage {
             .width('100%').textAlign(TextAlign.Center).padding(12)
             .onClick(() => {
               if (!this.messageLoading && (this.messageError.length > 0 || this.hasMore)) {
-                this.loadMessages(this.messages.length === 0).catch(() => {
+                this.loadMessages(this.messagesSource.totalCount() === 0).catch(() => {
                 });
               }
             })
         }
-        ForEach(this.messages, (item: PrivateMessageItem) => {
+        LazyForEach(this.messagesSource, (item: PrivateMessageItem) => {
           ListItem() { this.MessageBubble(item) }
         }, (item: PrivateMessageItem) => String(item.seqno))
       }
