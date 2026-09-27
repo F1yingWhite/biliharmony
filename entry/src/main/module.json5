@@ -42,23 +42,6 @@
         ]
       }
     ],
-    "extensionAbilities": [
-      {
-        "name": "EntryFormAbility",
-        "srcEntry": "./ets/entryformability/EntryFormAbility.ets",
-        "description": "$string:card_continue_desc",
-        "icon": "$media:app_layered_icon_20260814",
-        "label": "$string:card_continue_display",
-        "type": "form",
-        "exported": true,
-        "metadata": [
-          {
-            "name": "ohos.extension.form",
-            "resource": "$profile:form_config"
-          }
-        ]
-      }
-    ],
     "requestPermissions": [
       {
         "name": "ohos.permission.INTERNET"
