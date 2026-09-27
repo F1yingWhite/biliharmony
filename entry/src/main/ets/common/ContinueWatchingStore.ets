@@ -41,7 +41,19 @@ export class ContinueWatchingStore {
   /** 最小写入间隔（毫秒）：进度回调高频，卡片数据不需要秒级新鲜。 */
   private static readonly WRITE_INTERVAL: number = 15000;
 
+  /** onAddForm 必须同步返回；在卡片扩展冷启动时先打开同一份持久化记录。 */
+  static ensureSync(context: common.Context): void {
+    if (ContinueWatchingStore.store !== null) return;
+    try {
+      ContinueWatchingStore.store = preferences.getPreferencesSync(context,
+        { name: ContinueWatchingStore.PREFS_NAME });
+    } catch (e) {
+      // 存储暂不可用时展示空态；下一次卡片回调会重试。
+    }
+  }
+
   static ensure(context: common.Context): Promise<void> {
+    if (ContinueWatchingStore.store !== null) return Promise.resolve();
     if (ContinueWatchingStore.ready !== null) return ContinueWatchingStore.ready;
     ContinueWatchingStore.ready = preferences.getPreferences(context, { name: ContinueWatchingStore.PREFS_NAME })
       .then((store: preferences.Preferences) => {

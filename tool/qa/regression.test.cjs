@@ -14,6 +14,53 @@ function deferred() {
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+test('service card restores persisted aid-only records on cold add and update', () => {
+  let record = { bvid: '', aid: 123, title: 'Saved video', progressText: '看到 0:42', position: 42 };
+  const updates = [];
+  let opens = 0;
+  const env = environment({
+    '@kit.FormKit': {
+      FormExtensionAbility: class { context = {}; },
+      formBindingData: { createFormBindingData: value => value },
+      formProvider: { updateForm: async (id, data) => { updates.push({ id, data }); } }
+    },
+    '@kit.ArkData': { preferences: { getPreferencesSync: () => {
+      opens++;
+      return { getSync: () => JSON.stringify(record) };
+    } } }
+  });
+  const Form = env.load('entryformability/EntryFormAbility').default;
+  const form = new Form();
+  const first = form.onAddForm({});
+  assert.equal(first.hasRecord, true);
+  assert.equal(first.aid, 123);
+  assert.equal(first.progressText, '看到 0:42');
+  record = { bvid: 'BVnext', aid: 456, title: 'Next video' };
+  form.onUpdateForm('card-1');
+  assert.equal(updates[0].id, 'card-1');
+  assert.equal(updates[0].data.bvid, 'BVnext');
+  assert.equal(opens, 1);
+});
+
+test('service card retries failed synchronous storage initialization', () => {
+  let opens = 0;
+  const env = environment({
+    '@kit.FormKit': {
+      FormExtensionAbility: class { context = {}; },
+      formBindingData: { createFormBindingData: value => value }
+    },
+    '@kit.ArkData': { preferences: { getPreferencesSync: () => {
+      if (++opens === 1) throw new Error('storage unavailable');
+      return { getSync: () => JSON.stringify({ bvid: 'BVrestored', aid: 123 }) };
+    } } }
+  });
+  const Form = env.load('entryformability/EntryFormAbility').default;
+  const form = new Form();
+  assert.equal(form.onAddForm({}).hasRecord, false);
+  assert.equal(form.onAddForm({}).bvid, 'BVrestored');
+  assert.equal(opens, 2);
+});
+
 test('continue watching restores cold storage and rejects unrelated aid-only videos', async () => {
   const record = { bvid: '', aid: 123, position: 42 };
   const store = environment({ '@kit.ArkData': { preferences: {

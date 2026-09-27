@@ -35,8 +35,10 @@ export default class EntryFormAbility extends FormExtensionAbility {
   }
 
   private buildCardData(): formBindingData.FormBindingData {
+    ContinueWatchingStore.ensureSync(this.context);
     const record: ContinueWatchRecord | null = ContinueWatchingStore.latest();
-    const empty: boolean = record === null || (record as ContinueWatchRecord).bvid.length === 0;
+    const empty: boolean = record === null ||
+      ((record as ContinueWatchRecord).bvid.length === 0 && (record as ContinueWatchRecord).aid <= 0);
     const params: Record<string, Object> = {
       'title': empty ? 'BiliHaromny' : (record as ContinueWatchRecord).title,
       'cover': empty ? '' : (record as ContinueWatchRecord).cover,
