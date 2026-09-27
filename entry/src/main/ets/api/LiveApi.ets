@@ -11,6 +11,12 @@ import { LiveChatMessage, LiveDanmakuInfo, LiveDanmakuServer, LiveEmoteItem, Liv
 import { ActionResult, actionWithCsrf, failureText, getData, webGet, webGetSigned,
   webPost } from './internal/ApiCommon';
 
+class LiveStreamCandidate {
+  score: number = 0;
+  quality: number = 0;
+  urls: Array<string> = [];
+}
+
 export class LiveApi {
   static async getFollowedLiveRooms(page: number): Promise<FollowedLivePage> {
     const resp: HttpResponse = await webGet(Api.liveFollowing, {
@@ -148,8 +154,7 @@ export class LiveApi {
       labels.set(asNumber(d['qn'], 0), str(d, 'desc', String(asNumber(d['qn'], 0))));
     }
     const streams: Array<Object> = asArray(playurl['stream']);
-    let bestScore: number = -1;
-    let selectedCodec: Record<string, Object> = {};
+    const candidates: Array<LiveStreamCandidate> = [];
     const availableQn: Map<number, boolean> = new Map<number, boolean>();
     for (let i: number = 0; i < streams.length; i++) {
       const stream: Record<string, Object> = asObject(streams[i]);
@@ -171,15 +176,25 @@ export class LiveApi {
           if (protocol === 'http_hls' && formatName === 'fmp4') score = 30;
           else if (protocol === 'http_hls' && formatName === 'ts') score = 20;
           else if (protocol === 'http_stream' && formatName === 'flv') score = 10;
-          if (score > bestScore) {
-            bestScore = score;
-            selectedCodec = codec;
+          if (score === 0) continue;
+          const candidate: LiveStreamCandidate = new LiveStreamCandidate();
+          candidate.score = score;
+          candidate.quality = asNumber(codec['current_qn'], qn);
+          const baseUrl: string = str(codec, 'base_url', '');
+          const urlInfo: Array<Object> = asArray(codec['url_info']);
+          for (let u: number = 0; u < urlInfo.length; u++) {
+            const part: Record<string, Object> = asObject(urlInfo[u]);
+            const host: string = str(part, 'host', '');
+            const extra: string = str(part, 'extra', '');
+            if (host.length > 0 && baseUrl.length > 0) candidate.urls.push(toHttps(host + baseUrl + extra));
           }
+          if (candidate.urls.length > 0) candidates.push(candidate);
         }
       }
     }
-    if (bestScore < 0) return null;
-    info.currentQn = asNumber(selectedCodec['current_qn'], qn);
+    candidates.sort((a: LiveStreamCandidate, b: LiveStreamCandidate) => b.score - a.score);
+    if (candidates.length === 0) return null;
+    info.currentQn = candidates[0].quality;
     const qualityNumbers: Array<number> = Array.from(availableQn.keys());
     qualityNumbers.sort((a: number, b: number) => b - a);
     for (let i: number = 0; i < qualityNumbers.length; i++) {
@@ -189,13 +204,17 @@ export class LiveApi {
     if (info.qualities.length === 0 && info.currentQn > 0) {
       info.qualities.push(new LiveQualityOption(info.currentQn, labels.get(info.currentQn) ?? '当前画质'));
     }
-    const baseUrl: string = str(selectedCodec, 'base_url', '');
-    const urlInfo: Array<Object> = asArray(selectedCodec['url_info']);
-    for (let i: number = 0; i < urlInfo.length; i++) {
-      const part: Record<string, Object> = asObject(urlInfo[i]);
-      const host: string = str(part, 'host', '');
-      const extra: string = str(part, 'extra', '');
-      if (host.length > 0 && baseUrl.length > 0) info.urls.push(toHttps(host + baseUrl + extra));
+    // 先试每种格式的首条线路，再试其余 CDN，避免同一格式超时反复阻塞回退。
+    // 只拼接实际画质相同的候选，保证播放器的当前画质标签始终准确。
+    let maxUrls: number = 0;
+    for (let i: number = 0; i < candidates.length; i++) maxUrls = Math.max(maxUrls, candidates[i].urls.length);
+    for (let u: number = 0; u < maxUrls; u++) {
+      for (let i: number = 0; i < candidates.length; i++) {
+        const candidate: LiveStreamCandidate = candidates[i];
+        if (candidate.quality !== info.currentQn || u >= candidate.urls.length) continue;
+        const url: string = candidate.urls[u];
+        if (info.urls.indexOf(url) < 0) info.urls.push(url);
+      }
     }
     info.url = info.urls.length > 0 ? info.urls[0] : '';
     return info.url.length > 0 ? info : null;

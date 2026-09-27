@@ -255,7 +255,8 @@ test('stopping QR polling ignores a late login success', async () => {
 });
 
 function liveHarness(create) {
-  const env=environment({'@kit.MediaKit':{media:{createAVPlayer:create,createMediaSourceWithUrl:()=>({})}}});
+  const env=environment({'@kit.MediaKit':{media:{createAVPlayer:create,createMediaSourceWithUrl:()=>({}),
+    VideoScaleType: {VIDEO_SCALE_TYPE_SCALED_ASPECT: 0}}}});
   const Harness=env.methodHarness('components/live/LivePlayerView','  async restartForSource():','  togglePlay():',
     "import { media } from '@kit.MediaKit'; const Constants={browserUa:'test'};");
   const p=new Harness(); Object.assign(p,{destroyed:false,player:null,playerCreating:false,
@@ -292,6 +293,23 @@ test('live source switch during creation starts the newest source without pollin
   p.playInfo={urls:['new']}; await p.restartForSource();
   pending.resolve(first); await creating;
   assert.equal(p.player,next); assert.equal(creations,2); assert.equal(releases,1);
+});
+
+test('live backup clears the failure overlay once prepared and playing', async () => {
+  let starts = 0;
+  const backup = Object.assign(fakePlayer(), { play: () => { starts++; } });
+  const p = liveHarness(async () => backup);
+  p.scheduleHide = () => {};
+  await p.initPlayer();
+  p.errorText = '正在切换备用线路…';
+  p.buffering = true;
+  backup.handlers.stateChange('prepared');
+  assert.equal(p.errorText, '');
+  assert.equal(p.buffering, false);
+  assert.equal(starts, 1);
+  backup.handlers.stateChange('playing');
+  assert.equal(p.playing, true);
+  assert.equal(p.errorText, '');
 });
 
 test('live error cannot advance a new source while old release is pending', async () => {

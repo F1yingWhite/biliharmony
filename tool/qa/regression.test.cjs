@@ -155,6 +155,48 @@ function httpMock(handler) {
 }
 const response = (body, header = {}, responseCode = 200) => ({ result: JSON.stringify(body), header, responseCode });
 
+function liveFormat(name, quality, hosts, codec = 'avc') {
+  return { format_name: name, codec: [{ codec_name: codec, current_qn: quality,
+    accept_qn: [quality], base_url: '/live.' + name,
+    url_info: hosts.map(host => ({ host, extra: '?test=1' })) }] };
+}
+
+function liveApiFor(streams) {
+  const data = { live_status: 1, playurl_info: { playurl: { stream: streams } } };
+  return environment({ '@kit.NetworkKit': httpMock(() => response({})), 'api/internal/ApiCommon': {
+    webGet: async () => ({ ok: true }), getData: () => data,
+  } }).load('api/LiveApi').LiveApi;
+}
+
+test('live sources retain alternate formats and try another format before repeating CDN failures', async () => {
+  const api = liveApiFor([
+    { protocol_name: 'http_stream', format: [liveFormat('flv', 10000, ['https://flv.test'])] },
+    { protocol_name: 'http_hls', format: [
+      liveFormat('fmp4', 10000, ['https://a.test', 'https://b.test', 'https://a.test']),
+      liveFormat('ts', 10000, ['https://ts.test']),
+      liveFormat('ts', 400, ['https://lower-quality.test']),
+      liveFormat('fmp4', 10000, ['https://hevc.test'], 'hevc'),
+    ] },
+  ]);
+  const info = await api.getLivePlayInfo(123);
+  assert.equal(info.currentQn, 10000);
+  assert.deepEqual(info.urls, ['https://a.test/live.fmp4?test=1', 'https://ts.test/live.ts?test=1',
+    'https://flv.test/live.flv?test=1', 'https://b.test/live.fmp4?test=1']);
+  assert.equal(info.url, info.urls[0]);
+});
+
+test('live sources skip unusable preferred codecs and unsupported formats', async () => {
+  const info = await liveApiFor([{ protocol_name: 'http_hls', format: [
+    liveFormat('fmp4', 10000, []), liveFormat('ts', 400, ['https://ts.test']),
+  ] }]).getLivePlayInfo(123);
+  assert.equal(info.currentQn, 400);
+  assert.equal(info.url, 'https://ts.test/live.ts?test=1');
+  const unsupported = await liveApiFor([{ protocol_name: 'unknown', format: [
+    liveFormat('unknown', 10000, ['https://unknown.test']),
+  ] }]).getLivePlayInfo(123);
+  assert.equal(unsupported, null);
+});
+
 test('PGC: episode metadata uses the selected episode identity rather than the first episode', async () => {
   const seasonResponse = {ok:true,json:()=>({code:0,result:{title:'Series',episodes:[
     {id:10,aid:1,bvid:'first',cid:100,title:'1',duration:1000},

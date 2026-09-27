@@ -226,11 +226,13 @@ export struct LivePlayerView {
         } else if (state === 'prepared') {
           this.prepared = true;
           this.buffering = false;
+          this.errorText = '';
           createdPlayer.videoScaleType = media.VideoScaleType.VIDEO_SCALE_TYPE_SCALED_ASPECT;
           createdPlayer.play();
         } else if (state === 'playing') {
           this.playing = true;
           this.buffering = false;
+          this.errorText = '';
           this.dmRenderer.setPlayback(true, this.fullscreen);
           this.scheduleHide();
         } else if (state === 'paused') {
