@@ -115,6 +115,7 @@ export struct LoginPage {
     });
   }
   private loggedIn: boolean = false;
+  @State authCompleting: boolean = false;
   private destroyed: boolean = false;
 
   private toast(message: string): void {
@@ -140,7 +141,7 @@ export struct LoginPage {
 
   // ===== 扫码登录 =====
   async requestCode(): Promise<void> {
-    if (this.destroyed || this.loggedIn) return;
+    if (this.destroyed || this.loggedIn || this.authCompleting) return;
     this.stopPoll();
     const generation: number = this.qrGeneration;
     this.authCode = '';
@@ -202,7 +203,8 @@ export struct LoginPage {
 
   async poll(): Promise<void> {
     // 慢网络下上一轮 poll 未返回时跳过，避免轮询重叠
-    if (this.destroyed || this.tab !== 0 || this.loggedIn || this.authCode.length === 0 || this.pollInflight) {
+    if (this.destroyed || this.tab !== 0 || this.loggedIn || this.authCompleting ||
+      this.authCode.length === 0 || this.pollInflight) {
       return;
     }
     this.pollInflight = true;
@@ -212,15 +214,21 @@ export struct LoginPage {
       const result = await AuthApi.pollWebQRCode(authCode);
       if (this.destroyed || this.loggedIn || generation !== this.qrGeneration || authCode !== this.authCode) return;
       if (result.code === 0) {
-        // 登录成功：Cookie 已由 Set-Cookie 入罐，这里补 refresh_token 的持久化与状态广播。
-        this.stopPoll();
-        this.loggedIn = true;
-        this.statusText = '登录成功！';
-        this.statusColor = '#2FB96A';
-        await UserStore.applyLoginCookies([], '', result.refreshToken);
-        if (this.destroyed) return;
-        this.toast('登录成功，欢迎回来');
-        this.schedulePop();
+        this.statusText = '已确认，正在验证登录状态...';
+        try {
+          await this.finishLogin([], '', result.refreshToken);
+          if (this.destroyed) return;
+          if (this.loggedIn) {
+            this.statusText = '登录成功！';
+            this.statusColor = '#2FB96A';
+          }
+        } catch (e) {
+          if (this.destroyed) return;
+          this.qrError = true;
+          this.qrUrl = '';
+          this.statusText = '登录状态验证失败，请重新扫码或使用短信登录';
+          this.statusColor = AppTheme.DANGER;
+        }
       } else if (result.code === 86101) {
         this.statusText = '二维码尚未扫描，请使用 App 扫码';
       } else if (result.code === 86090) {
@@ -366,14 +374,23 @@ export struct LoginPage {
   }
 
   // ===== 登录成功统一收尾：写回 cookie 并返回 =====
-  async finishLogin(cookies: Array<CookiePair>, accessToken: string): Promise<void> {
-    if (this.destroyed || this.loggedIn) return;
+  async finishLogin(cookies: Array<CookiePair>, accessToken: string, refreshToken: string = ''): Promise<void> {
+    if (this.destroyed || this.loggedIn || this.authCompleting) return;
     this.stopPoll();
-    this.loggedIn = true;
-    await UserStore.applyLoginCookies(cookies, accessToken);
-    if (this.destroyed) return;
-    this.toast('登录成功，欢迎回来');
-    this.schedulePop();
+    this.authCompleting = true;
+    try {
+      await UserStore.applyLoginCookies(cookies, accessToken, refreshToken);
+      if (this.destroyed) return;
+      // Cookie 存在不等于服务端接受登录；必须以刷新后的账户信息为准。
+      if (UserStore.current === null || !UserStore.current.isLogin) {
+        throw new Error('登录状态验证失败，请重试');
+      }
+      this.loggedIn = true;
+      this.toast('登录成功，欢迎回来');
+      this.schedulePop();
+    } finally {
+      this.authCompleting = false;
+    }
   }
 
   // ===== 登录方式切换 chip =====
@@ -387,7 +404,7 @@ export struct LoginPage {
       .backgroundColor(this.tab === index ? this.accent : (this.isDark ? '#2F3136' : '#FFFFFF'))
       .animation({ duration: 180, curve: Curve.EaseOut })
       .onClick(() => {
-        if (this.loggedIn || this.pwdLoading || this.smsLoading || this.tab === index) return;
+        if (this.loggedIn || this.authCompleting || this.pwdLoading || this.smsLoading || this.tab === index) return;
         this.tab = index;
         // 扫码轮询只在扫码 tab 运行；切回时若二维码仍有效则恢复
         if (index === 0) {

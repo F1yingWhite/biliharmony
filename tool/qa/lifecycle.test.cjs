@@ -293,15 +293,48 @@ test('recommendation reset supersedes old pagination and preserves new loading s
   assert.deepEqual(p.recSource.getAll(), [{aid:2}]); assert.equal(p.recFetching,false);
 });
 
-function qrHarness(api) {
-  const env = environment({'api/AuthApi':{AuthApi:api}});
+function qrHarness(api, userStore = {}) {
+  const env = environment({'api/AuthApi':{AuthApi:api}, 'services/auth/UserStore': {UserStore:userStore}});
   const Harness = env.methodHarness('pages/Login','  async requestCode():','  // ===== 密码登录',
     "import { AuthApi } from '../api/AuthApi'; const AppTheme={DANGER:'#f00'};");
   const p = new Harness();
+  const Finish = env.methodHarness('pages/Login','  async finishLogin(', '  // ===== 登录方式切换',
+    "import { UserStore } from '../services/auth/UserStore';");
+  p.finishLogin = Finish.prototype.finishLogin;
   Object.assign(p,{destroyed:false,loggedIn:false,tab:0,authCode:'OLD',qrGeneration:0,
     pollInflight:false,pollTimer:-1,expired:false,isDark:false});
   return p;
 }
+
+test('QR confirmation waits for account verification before success and navigation', async () => {
+  const ready = deferred(); const user = {current:null, applyLoginCookies:()=>ready.promise};
+  const p=qrHarness({pollWebQRCode:async()=>({code:0,refreshToken:'test-token'})},user);
+  let popped=0, toasted=0;p.schedulePop=()=>popped++;p.toast=()=>toasted++;
+  const run=p.poll();await tick();
+  assert.equal(p.authCompleting,true);assert.equal(p.loggedIn,false);assert.equal(popped,0);
+  user.current={isLogin:true};ready.resolve();await run;
+  assert.equal(p.authCompleting,false);assert.equal(p.loggedIn,true);assert.equal(popped,1);assert.equal(toasted,1);
+});
+
+test('QR guest verification or network failure restores the retry entry without false success', async () => {
+  for(const fail of [false,true]) {
+    const user={current:{isLogin:false},applyLoginCookies:async()=>{if(fail)throw Error('offline');}};
+    const p=qrHarness({pollWebQRCode:async()=>({code:0,refreshToken:'test-token'}),
+      getWebQRCode:async()=>({qrcodeKey:'RETRY',url:'retry-url'})},user);
+    let popped=0;p.schedulePop=()=>popped++;p.toast=()=>{throw Error('unexpected success');};
+    await p.poll();
+    assert.equal(p.loggedIn,false);assert.equal(p.authCompleting,false);assert.equal(p.qrError,true);assert.equal(popped,0);
+    try {await p.requestCode();assert.equal(p.authCode,'RETRY');assert.equal(p.qrError,false);} finally {p.stopPoll();}
+  }
+});
+
+test('closing login while account verification is pending does not navigate', async () => {
+  const ready=deferred();const p=qrHarness({pollWebQRCode:async()=>({code:0})},
+    {current:{isLogin:true},applyLoginCookies:()=>ready.promise});
+  let popped=0;p.schedulePop=()=>popped++;p.toast=()=>{};
+  const run=p.poll();await tick();p.destroyed=true;p.stopPoll();ready.resolve();await run;
+  assert.equal(popped,0);assert.equal(p.loggedIn,false);assert.equal(p.authCompleting,false);
+});
 
 test('old QR expiry cannot stop a refreshed QR or clear its inflight guard', async () => {
   const old = deferred(), latest = deferred(); let calls = 0;
