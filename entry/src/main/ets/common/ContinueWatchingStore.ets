@@ -9,6 +9,8 @@ import { preferences } from '@kit.ArkData';
 export class ContinueWatchRecord {
   bvid: string = '';
   aid: number = 0;
+  cid: number = 0;
+  epId: number = 0;
   title: string = '';
   cover: string = '';
   /** 展示文案（"看到 12:34 / 25:00"）。 */
@@ -22,6 +24,8 @@ export class ContinueWatchRecord {
     const r: ContinueWatchRecord = new ContinueWatchRecord();
     r.bvid = typeof j['bvid'] === 'string' ? j['bvid'] as string : '';
     r.aid = typeof j['aid'] === 'number' ? j['aid'] as number : 0;
+    r.cid = typeof j['cid'] === 'number' ? j['cid'] as number : 0;
+    r.epId = typeof j['epId'] === 'number' ? j['epId'] as number : 0;
     r.title = typeof j['title'] === 'string' ? j['title'] as string : '';
     r.cover = typeof j['cover'] === 'string' ? j['cover'] as string : '';
     r.progressText = typeof j['progressText'] === 'string' ? j['progressText'] as string : '';
@@ -66,12 +70,12 @@ export class ContinueWatchingStore {
 
   /** 播放器周期调用：记录当前视频与进度（节流；标题变化立即写入）。 */
   static async report(context: common.Context, bvid: string, aid: number, title: string, cover: string,
-    positionSec: number, durationSec: number): Promise<void> {
+    positionSec: number, durationSec: number, cid: number = 0, epId: number = 0): Promise<void> {
     if (bvid.length === 0 && aid <= 0) return;
     const now: number = Date.now();
     const current: ContinueWatchRecord | null = ContinueWatchingStore.latest();
     const sameVideo: boolean = current !== null && (current as ContinueWatchRecord).bvid === bvid &&
-      (current as ContinueWatchRecord).aid === aid;
+      (current as ContinueWatchRecord).aid === aid && (current as ContinueWatchRecord).cid === cid;
     if (sameVideo && now - ContinueWatchingStore.lastWriteAt < ContinueWatchingStore.WRITE_INTERVAL) return;
     ContinueWatchingStore.lastWriteAt = now;
     await ContinueWatchingStore.ensure(context);
@@ -79,6 +83,8 @@ export class ContinueWatchingStore {
     const record: ContinueWatchRecord = new ContinueWatchRecord();
     record.bvid = bvid;
     record.aid = aid;
+    record.cid = cid;
+    record.epId = epId;
     record.title = title;
     record.cover = cover;
     record.position = positionSec;

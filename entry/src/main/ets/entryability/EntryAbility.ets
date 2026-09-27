@@ -18,6 +18,7 @@ import { HttpClient } from '../services/network/HttpClient';
 import { CookieRefresher } from '../services/auth/CookieRefresher';
 import { NetworkSettingsStore } from '../pages/NetworkPrivacyPage';
 import { WebProxy } from '../services/network/WebProxy';
+import { ContinueWatchingStore } from '../common/ContinueWatchingStore';
 
 const DOMAIN: number = 0x0000;
 const TAG: string = 'BiliHarmony';
@@ -140,6 +141,16 @@ export default class EntryAbility extends UIAbility {
     if (bvid.length === 0 && aid === '0') return;
     AppStorage.setOrCreate<string>('pendingCardBvid', bvid);
     AppStorage.setOrCreate<number>('pendingCardAid', Number(aid) || 0);
+    ContinueWatchingStore.ensureSync(this.context);
+    const record = ContinueWatchingStore.latest();
+    const matches: boolean = record !== null && (bvid.length > 0 ? record.bvid === bvid :
+      Number(aid) > 0 && record.aid === Number(aid));
+    AppStorage.setOrCreate<number>('pendingCardCid', matches && record !== null ? record.cid : 0);
+    AppStorage.setOrCreate<number>('pendingCardEpId', matches && record !== null ? record.epId : 0);
+    AppStorage.setOrCreate<number>('pendingCardPosition', matches && record !== null &&
+      Number.isFinite(record.position) ? Math.max(0, record.position) : 0);
+    AppStorage.setOrCreate<number>('pendingCardRevision',
+      (AppStorage.get<number>('pendingCardRevision') ?? 0) + 1);
   }
 
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {

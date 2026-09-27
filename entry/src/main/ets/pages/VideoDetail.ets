@@ -1165,17 +1165,18 @@ export struct VideoDetailPage {
     this.currentPageIndex = 0;
     const initialQuality: number = PlayerQualityPreference.requested();
     try {
-      const selection: PlaybackSelection | null = await this.playbackSources.initial(detail, initialQuality, request);
+      const selection: PlaybackSelection | null = await this.playbackSources.initial(detail, initialQuality, request,
+        this.param.resumePosition !== undefined ? (this.param.cid ?? 0) : 0, this.param.resumePosition ?? 0);
       if (this.destroyed || !this.playbackSources.isCurrent(request)) return;
       if (selection === null) {
         this.playbackAddressFailed = true;
         return;
       }
       this.applyPlaybackSource(selection.info, selection.cid, selection.pageIndex,
-        Math.max(0, Math.floor(selection.info.lastPlayTime / 1000)));
+        selection.resumeSeconds);
       CommentLog.info('resume', 'lastPlayTime=' + String(selection.info.lastPlayTime) +
         ' lastPlayCid=' + String(selection.info.lastPlayCid) + ' pickedCid=' + String(selection.cid) +
-        ' seek=' + String(Math.floor(selection.info.lastPlayTime / 1000)));
+        ' seek=' + String(selection.resumeSeconds));
     } catch (e) {
       if (!this.destroyed && this.playbackSources.isCurrent(request)) {
         this.playbackAddressFailed = true;

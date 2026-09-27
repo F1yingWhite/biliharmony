@@ -444,6 +444,73 @@ test('Unread: logout resets immediately; old account and pre-clear responses can
   assert.equal(env.storage.get('msgUnreadTotal'), 0);
 });
 
+test('continue watching saves part changes immediately and preserves episode identity', async () => {
+  let saved = '';
+  const store = environment({ '@kit.ArkData': { preferences: {
+    getPreferences: async () => ({ getSync: () => saved,
+      putSync: (_key, value) => { saved = value; }, flush: async () => {} })
+  } } }).load('common/ContinueWatchingStore').ContinueWatchingStore;
+  await store.report({}, 'BVparts', 123, 'Parts', '', 42, 200, 10, 99);
+  await store.report({}, 'BVparts', 123, 'Parts', '', 3, 200, 20, 99);
+  assert.equal(store.latest().cid, 20);
+  assert.equal(store.latest().position, 3);
+  assert.equal(store.latest().epId, 99);
+});
+
+test('card intents publish complete resume data and root consumes each intent once', () => {
+  const pushed = [];
+  const env = environment({
+    'common/ContinueWatchingStore': { ContinueWatchingStore: {
+      ensureSync() {}, latest: () => ({ bvid: 'BVsaved', aid: 123, cid: 20, epId: 99, position: 42 })
+    } },
+    'common/AppRouter': { AppNavStack: { pushPathByName: (_name, param) => pushed.push(param) },
+      NAV_VIDEO_DETAIL: 'VideoDetail' }
+  });
+  const Ability = env.methodHarness('entryability/EntryAbility',
+    '  private handleCardDeepLink(', '  onNewWant(',
+    "import { ContinueWatchingStore } from '../common/ContinueWatchingStore';");
+  const Root = env.methodHarness('pages/Index',
+    '  private consumeCardDeepLink(', '  onThemeChanged(',
+    "import { AppNavStack, NAV_VIDEO_DETAIL } from '../common/AppRouter';");
+  const ability = new Ability();
+  const rootPage = new Root();
+  ability.handleCardDeepLink({ parameters: { bvid: 'BVsaved' } });
+  assert.equal(env.storage.get('pendingCardRevision'), 1);
+  rootPage.consumeCardDeepLink();
+  assert.equal(pushed.length, 0, 'cold intent waits for navigation readiness');
+  rootPage.cardNavigationReady = true;
+  rootPage.consumeCardDeepLink();
+  assert.deepEqual(pushed[0], { bvid: 'BVsaved', aid: 0, title: '', cid: 20, epId: 99, resumePosition: 42 });
+  rootPage.consumeCardDeepLink();
+  assert.equal(pushed.length, 1);
+  ability.handleCardDeepLink({ parameters: { bvid: 'BVother' } });
+  assert.equal(env.storage.get('pendingCardRevision'), 2);
+  rootPage.consumeCardDeepLink();
+  assert.equal(pushed[1].cid, 0, 'unrelated card must not inherit the latest part');
+  assert.equal(pushed[1].resumePosition, 0);
+});
+
+test('Playback: local card resume selects the saved part and ignores unrelated server progress', async () => {
+  const requested = [];
+  const env = environment({ 'api/BiliApi': { BiliApi: { getPlayUrl: async (_aid, _bv, cid) => {
+    requested.push(cid);
+    return { urls: ['stream'], lastPlayCid: 10, lastPlayTime: 90000 };
+  } } } });
+  const { PlaybackSourceCoordinator } = env.load('services/media/PlaybackSourceCoordinator');
+  const ctl = new PlaybackSourceCoordinator();
+  const detail = { aid: 1, bvid: 'test', cid: 10, pages: [{ cid: 10 }, { cid: 20 }] };
+  const result = await ctl.initial(detail, 80, ctl.next(), 20, 42.8);
+  assert.deepEqual(requested, [20]);
+  assert.equal(result.cid, 20);
+  assert.equal(result.pageIndex, 1);
+  assert.equal(result.resumeSeconds, 42);
+  const invalid = await ctl.initial(detail, 80, ctl.next(), 999, 42);
+  assert.equal(invalid.cid, 10);
+  assert.equal(invalid.resumeSeconds, 90);
+  const malformed = await ctl.initial(detail, 80, ctl.next(), 20, Infinity);
+  assert.equal(malformed.resumeSeconds, 0);
+});
+
 test('Playback: manual selection invalidates initial and resume-part requests', async () => {
   const requests = [];
   const env = environment({ 'api/BiliApi': { BiliApi: { getPlayUrl() { const d = deferred(); requests.push(d); return d.promise; } } } });

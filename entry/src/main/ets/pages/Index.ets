@@ -99,6 +99,8 @@ struct Index {
   @StorageProp('appInBackground') @Watch('onAppBackgroundChanged') appInBackground: boolean = false;
   /** 底部一行实测宽度（vp）：Dock 宽度随它收敛，窗口变化时由 onAreaChange 校准。 */
   @State dockRowWidth: number = 0;
+  @StorageProp('pendingCardRevision') @Watch('consumeCardDeepLink') pendingCardRevision: number = 0;
+  private cardNavigationReady: boolean = false;
 
   aboutToAppear(): void {
     this.reapplyBarColors();
@@ -119,6 +121,7 @@ struct Index {
   }
 
   onPageShow(): void {
+    this.cardNavigationReady = true;
     this.consumeCardDeepLink();
     // 应用从后台回到前台也会触发根页 onPageShow，必须按导航栈顶重算而不是无条件套根页配色，
     // 否则播放页（黑底）上状态栏图标被刷成深色，看不清时间电量。
@@ -127,12 +130,16 @@ struct Index {
 
   /** 服务卡片「继续观看」深链：导航栈就绪后打开目标视频详情。 */
   private consumeCardDeepLink(): void {
+    if (!this.cardNavigationReady) return;
     const bvid: string = AppStorage.get<string>('pendingCardBvid') ?? '';
     const aid: number = AppStorage.get<number>('pendingCardAid') ?? 0;
     if (bvid.length === 0 && aid <= 0) return;
     AppStorage.setOrCreate<string>('pendingCardBvid', '');
     AppStorage.setOrCreate<number>('pendingCardAid', 0);
-    const param: VideoDetailParam = { bvid: bvid, aid: aid, title: '' };
+    const param: VideoDetailParam = { bvid: bvid, aid: aid, title: '',
+      cid: AppStorage.get<number>('pendingCardCid') ?? 0,
+      epId: AppStorage.get<number>('pendingCardEpId') ?? 0,
+      resumePosition: AppStorage.get<number>('pendingCardPosition') ?? 0 };
     AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
   }
 

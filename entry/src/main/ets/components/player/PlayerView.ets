@@ -1397,7 +1397,7 @@ if (this.runtimeSources.length === 0) {
     const context: common.Context | undefined = this.getUIContext().getHostContext();
     if (context === undefined) return;
     ContinueWatchingStore.report(context, this.bvid, this.aid, this.videoTitle, this.videoCover,
-      positionSec, this.duration).catch(() => {
+      positionSec, this.duration, this.cid, this.epId).catch(() => {
     });
   }
 
@@ -1694,7 +1694,8 @@ if (this.runtimeSources.length === 0) {
         // seek 锁定时 AVPlayer 仍会上报 seek 前的位置，忽略这些旧回写，让进度条钉在目标值。
         if (!this.seekLocked && Math.floor(nextTime) !== Math.floor(this.curTime)) this.curTime = nextTime;
         const systemPlaybackBucket: number = Math.floor(nextTime / 15);
-        if (systemPlaybackBucket !== this.lastSystemPlaybackBucket) {
+        if (systemPlaybackBucket !== this.lastSystemPlaybackBucket &&
+          this.resumeAfterPrepare <= 0 && nextTime > 0.05) {
           this.lastSystemPlaybackBucket = systemPlaybackBucket;
           this.updateAVSessionPlaybackState();
           this.reportContinueWatching(nextTime);
