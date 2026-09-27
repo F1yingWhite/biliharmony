@@ -61,6 +61,86 @@ function deferred() {
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+function homeChannels(hot, live) {
+  const env = environment({
+    'api/FeedApi': { FeedApi: { getHot: hot } },
+    'api/LiveApi': { LiveApi: { getLiveRooms: live } },
+  });
+  const Harness = env.methodHarness('views/HomeView', '  async loadHot(', '  @Builder\n  SubTabItem(',
+    "import {FeedApi} from '../api/FeedApi'; import {LiveApi} from '../api/LiveApi';");
+  const p = new Harness();
+  Object.assign(p, { hotFetching:false, liveFetching:false, hotEpoch:epoch(env), liveEpoch:epoch(env),
+    hotPage:3, livePage:4, hotHasMore:true, liveHasMore:true, hotError:'', liveError:'', recError:'',
+    hotSource:source(env, [{aid:1}]), liveSource:source(env, [{roomId:1}]), followedLiveRefresh:0,
+    hotCount:1, liveCount:1, refreshingChannels:[false,false,false], loadingChannels:[false,false,false],
+    channelOperations:[0,0,0], retryResetChannels:[false,false,false],
+    dedupVideos:(source, rows)=>rows, dedupLive:(source, rows)=>rows,
+  });
+  return p;
+}
+
+for (const channel of [1,2]) {
+  test(`home channel ${channel}: refresh supersedes pagination and ignores its late response`, async () => {
+    const old=deferred(), fresh=deferred(); const pages=[];
+    const fetch=(page)=>{pages.push(page);return pages.length===1?old.promise:fresh.promise;};
+    const p=homeChannels(fetch,fetch);
+    p.onReachEnd(channel);
+    p.onRefresh(channel);
+    assert.deepEqual(pages,[channel===1?3:4,1]);
+    assert.equal(p.loadingChannels[channel],false);
+    old.resolve([{aid:99,roomId:99}]); await tick();
+    assert.equal(p.refreshingChannels[channel],true);
+    const source=channel===1?p.hotSource:p.liveSource;
+    assert.equal(source.getData(0)[channel===1?'aid':'roomId'],1);
+    fresh.resolve([{aid:2,roomId:2}]); await tick();
+    assert.equal(source.getData(0)[channel===1?'aid':'roomId'],2);
+    assert.equal(p.refreshingChannels[channel],false);
+  });
+
+  test(`home channel ${channel}: failure preserves cursor and retry mode`, async () => {
+    const pages=[]; let fail=true;
+    const fetch=async(page)=>{pages.push(page);if(fail)throw new Error('offline');return [{aid:2,roomId:2}];};
+    const p=homeChannels(fetch,fetch);
+    p.onReachEnd(channel);await tick();
+    assert.equal(channel===1?p.hotPage:p.livePage,channel===1?3:4);
+    assert.equal(p.channelHasMore(channel),true);
+    assert.ok(p.channelError(channel));
+    p.onReachEnd(channel);await tick();assert.equal(pages.length,1);
+    fail=false;p.retryMore(channel);await tick();
+    assert.deepEqual(pages,[channel===1?3:4,channel===1?3:4]);
+    assert.equal(p.channelError(channel),'');
+    fail=true;p.onRefresh(channel);await tick();
+    fail=false;p.retryMore(channel);await tick();
+    assert.deepEqual(pages.slice(-2),[1,1]);
+  });
+}
+
+test('home refresh and paging indicators belong to their own channel and newest operation', async () => {
+  const first=deferred(), second=deferred(), other=deferred();let calls=0;
+  const p=homeChannels(()=>++calls===1?first.promise:second.promise,()=>other.promise);
+  p.onRefresh(1);p.onRefresh(1);p.onReachEnd(2);
+  assert.deepEqual(p.refreshingChannels,[false,true,false]);
+  assert.deepEqual(p.loadingChannels,[false,false,true]);
+  first.resolve([]);await tick();assert.equal(p.refreshingChannels[1],true);
+  other.resolve([{roomId:5}]);await tick();assert.equal(p.loadingChannels[2],false);
+  assert.equal(p.refreshingChannels[1],true);
+  second.resolve([{aid:5}]);await tick();assert.equal(p.refreshingChannels[1],false);
+});
+
+test('home disappearing invalidates outstanding pages and clears activity indicators', async () => {
+  const pending=deferred();const p=homeChannels(()=>pending.promise,()=>pending.promise);
+  const env=environment();
+  const Lifecycle=env.methodHarness('views/HomeView','  aboutToDisappear(): void {\n    this.recEpoch.invalidate();','  async onLoginChanged():');
+  p.recEpoch=epoch(env);p.recFetching=true;
+  p.onRefresh(1);p.onReachEnd(2);
+  Lifecycle.prototype.aboutToDisappear.call(p);
+  pending.resolve([{aid:99,roomId:99}]);await tick();
+  assert.equal(p.hotSource.getData(0).aid,1);
+  assert.equal(p.liveSource.getData(0).roomId,1);
+  assert.deepEqual(p.refreshingChannels,[false,false,false]);
+  assert.deepEqual(p.loadingChannels,[false,false,false]);
+});
+
 function environment(mocks = {}) {
   const cache = new Map();
   const storage = new Map();

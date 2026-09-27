@@ -161,6 +161,23 @@ function liveFormat(name, quality, hosts, codec = 'avc') {
     url_info: hosts.map(host => ({ host, extra: '?test=1' })) }] };
 }
 
+test('home APIs distinguish failed or malformed pages from successful empty pages', async () => {
+  let data = null;
+  const env = environment({ '@kit.NetworkKit': httpMock(() => response({})), 'api/internal/ApiCommon': {
+    webGet: async () => ({ok:true}), getData: () => data,
+  } });
+  const live = env.load('api/LiveApi').LiveApi;
+  const hot = env.load('api/FeedApi').FeedApi;
+  for (const invalid of [null, {}, {list:null, recommend_room_list:'invalid'}]) {
+    data = invalid;
+    await assert.rejects(() => live.getLiveRooms(2), /加载失败/);
+    await assert.rejects(() => hot.getHot(2,20), /加载失败/);
+  }
+  data = {list:[], recommend_room_list:[]};
+  assert.deepEqual(await live.getLiveRooms(2), []);
+  assert.deepEqual(await hot.getHot(2,20), []);
+});
+
 function liveApiFor(streams) {
   const data = { live_status: 1, playurl_info: { playurl: { stream: streams } } };
   return environment({ '@kit.NetworkKit': httpMock(() => response({})), 'api/internal/ApiCommon': {

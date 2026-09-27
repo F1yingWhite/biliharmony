@@ -34,7 +34,7 @@ export class LiveApi {
     };
     const resp: HttpResponse = await webGet(Api.liveRoomList, params, 'https://live.bilibili.com/');
     const data: Record<string, Object> | null = getData(resp);
-    if (data === null) return [];
+    if (data === null || !Array.isArray(data['recommend_room_list'])) throw new Error('直播列表加载失败，请检查网络后重试');
     const source: Array<Object> = asArray(data['recommend_room_list']);
     const result: Array<LiveRoomItem> = [];
     for (let i: number = 0; i < source.length; i++) {

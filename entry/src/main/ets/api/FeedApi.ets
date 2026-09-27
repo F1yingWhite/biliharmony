@@ -175,8 +175,8 @@ export class FeedApi {
     const params: Record<string, string> = { 'pn': String(pn), 'ps': String(ps) };
     const resp: HttpResponse = await webGet(Api.hotList, params);
     const data: Record<string, Object> | null = getData(resp);
-    if (data === null) {
-      return [];
+    if (data === null || !Array.isArray(data['list'])) {
+      throw new Error('热门加载失败，请检查网络后重试');
     }
     const list: Array<Object> = asArray(data['list']);
     const result: Array<VideoItem> = [];

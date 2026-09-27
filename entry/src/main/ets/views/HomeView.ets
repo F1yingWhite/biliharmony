@@ -68,10 +68,11 @@ export struct HomeView {
   @StorageProp('windowStatusBarHeight') statusBarInset: number = 0;
   @State tab: number = 0; // 0 推荐 / 1 热门 / 2 直播
   @State visualTab: number = 0;
-  @State refreshing: boolean = false;
-  @State refreshStatus: RefreshStatus = RefreshStatus.Inactive;
+  @State refreshingChannels: Array<boolean> = [false, false, false];
   @State viewportWidth: number = 360;
-  @State loadingMore: boolean = false;
+  @State loadingChannels: Array<boolean> = [false, false, false];
+  private channelOperations: Array<number> = [0, 0, 0];
+  private retryResetChannels: Array<boolean> = [false, false, false];
   // 每频道独立的分页游标 / 错误文案 / 到底标记，互不串台
   @State hotPage: number = 1;
   @State livePage: number = 1;
@@ -99,11 +100,13 @@ export struct HomeView {
   private recSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
   private hotSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
   private liveSource: BasicDataSource<LiveRoomItem> = new BasicDataSource<LiveRoomItem>();
-  // 防重入：刷新 / 触底 / 切频道并发触发的重复请求直接丢弃
+  // 同频道防止重复翻页；刷新优先，并通过 epoch 丢弃被覆盖的请求。
   private recFetching: boolean = false;
   private recEpoch: RequestEpoch = new RequestEpoch();
   private hotFetching: boolean = false;
+  private hotEpoch: RequestEpoch = new RequestEpoch();
   private liveFetching: boolean = false;
+  private liveEpoch: RequestEpoch = new RequestEpoch();
   private readonly refreshTriggerOffset: number = 56;
   // 竖向行距与双列横向槽距共用（用户反馈 12 偏松，收紧到 8）。
   private readonly homeGap: number = 8;
@@ -118,6 +121,18 @@ export struct HomeView {
     } catch (e) {
       if (this.recSource.isEmpty()) this.recError = '推荐加载失败，请检查网络后重试';
     }
+  }
+
+  aboutToDisappear(): void {
+    this.recEpoch.invalidate();
+    this.hotEpoch.invalidate();
+    this.liveEpoch.invalidate();
+    this.recFetching = false;
+    this.hotFetching = false;
+    this.liveFetching = false;
+    for (let i: number = 0; i < this.channelOperations.length; i++) this.channelOperations[i]++;
+    this.refreshingChannels = [false, false, false];
+    this.loadingChannels = [false, false, false];
   }
 
   async onLoginChanged(): Promise<void> {
@@ -287,73 +302,85 @@ export struct HomeView {
   }
 
   async loadHot(reset: boolean): Promise<void> {
-    if (this.hotFetching || (!reset && !this.hotHasMore)) {
+    if (!reset && (this.hotFetching || !this.hotHasMore)) {
       return;
     }
     this.hotFetching = true;
+    const epoch: number = this.hotEpoch.next();
     try {
-      if (reset) {
-        this.hotPage = 1;
-        this.hotHasMore = true;
-      }
       this.hotError = '';
-      const pn: number = this.hotPage;
+      const pn: number = reset ? 1 : this.hotPage;
       const list: Array<VideoItem> = await FeedApi.getHot(pn, 20);
+      if (!this.hotEpoch.isCurrent(epoch)) return;
       if (list.length === 0) {
         this.hotHasMore = false;
+        if (reset) {
+          this.hotSource.clear();
+          this.hotCount = 0;
+        }
         if (this.hotSource.isEmpty()) {
-          this.hotError = '热门接口请求失败，请检查网络后重试';
+          this.hotError = '暂时没有热门内容，请稍后重试';
+          this.retryResetChannels[1] = true;
         }
         return;
       }
       this.hotPage = pn + 1;
-      if (list.length < 20) {
-        this.hotHasMore = false;
-      }
+      this.hotHasMore = list.length >= 20;
       if (reset) {
         this.hotSource.reset(this.dedupVideos(this.hotSource, list, true));
       } else {
         this.hotSource.append(this.dedupVideos(this.hotSource, list));
       }
       this.hotCount = this.hotSource.totalCount();
+    } catch (e) {
+      if (this.hotEpoch.isCurrent(epoch)) {
+        this.hotError = '热门加载失败，点击重试';
+        this.retryResetChannels[1] = reset;
+      }
     } finally {
-      this.hotFetching = false;
+      if (this.hotEpoch.isCurrent(epoch)) this.hotFetching = false;
     }
   }
 
   async loadLive(reset: boolean): Promise<void> {
     if (reset) this.followedLiveRefresh++;
-    if (this.liveFetching || (!reset && !this.liveHasMore)) {
+    if (!reset && (this.liveFetching || !this.liveHasMore)) {
       return;
     }
     this.liveFetching = true;
+    const epoch: number = this.liveEpoch.next();
     try {
-      if (reset) {
-        this.livePage = 1;
-        this.liveHasMore = true;
-      }
       this.liveError = '';
-      const page: number = this.livePage;
+      const page: number = reset ? 1 : this.livePage;
       const list: Array<LiveRoomItem> = await LiveApi.getLiveRooms(page, 20);
+      if (!this.liveEpoch.isCurrent(epoch)) return;
       if (list.length === 0) {
         this.liveHasMore = false;
+        if (reset) {
+          this.liveSource.clear();
+          this.liveCount = 0;
+        }
         if (this.liveSource.isEmpty()) {
-          this.liveError = '直播列表请求失败，请检查网络后重试';
+          this.liveError = '暂时没有直播内容，请稍后重试';
+          this.retryResetChannels[2] = true;
         }
         return;
       }
       this.livePage = page + 1;
-      if (list.length < 20) {
-        this.liveHasMore = false;
-      }
+      this.liveHasMore = list.length >= 20;
       if (reset) {
         this.liveSource.reset(list);
       } else {
         this.liveSource.append(this.dedupLive(this.liveSource, list));
       }
       this.liveCount = this.liveSource.totalCount();
+    } catch (e) {
+      if (this.liveEpoch.isCurrent(epoch)) {
+        this.liveError = '直播列表加载失败，点击重试';
+        this.retryResetChannels[2] = reset;
+      }
     } finally {
-      this.liveFetching = false;
+      if (this.liveEpoch.isCurrent(epoch)) this.liveFetching = false;
     }
   }
 
@@ -381,26 +408,38 @@ export struct HomeView {
   }
 
   onRefresh(feedTab: number): void {
-    this.refreshing = true;
+    const operation: number = ++this.channelOperations[feedTab];
+    this.refreshingChannels[feedTab] = true;
+    this.loadingChannels[feedTab] = false;
     this.loadChannel(feedTab, true)
       .catch(() => {
       })
       .finally(() => {
-        this.refreshing = false;
+        if (this.channelOperations[feedTab] === operation) this.refreshingChannels[feedTab] = false;
       });
   }
 
   onReachEnd(feedTab: number): void {
-    if (this.loadingMore || (feedTab === 0 && this.recError.length > 0)) {
+    if (this.loadingChannels[feedTab] || this.refreshingChannels[feedTab] ||
+      this.channelError(feedTab).length > 0) {
       return;
     }
-    this.loadingMore = true;
+    const operation: number = ++this.channelOperations[feedTab];
+    this.loadingChannels[feedTab] = true;
     this.loadChannel(feedTab, false)
       .catch(() => {
       })
       .finally(() => {
-        this.loadingMore = false;
+        if (this.channelOperations[feedTab] === operation) this.loadingChannels[feedTab] = false;
       });
+  }
+
+  private retryMore(feedTab: number): void {
+    if (feedTab === 0) this.recError = '';
+    else if (feedTab === 1) this.hotError = '';
+    else this.liveError = '';
+    if (this.retryResetChannels[feedTab]) this.onRefresh(feedTab);
+    else this.onReachEnd(feedTab);
   }
 
   @Builder
@@ -483,7 +522,7 @@ export struct HomeView {
   @Builder
   RefreshIndicator() {
     Row({ space: 8 }) {
-      if (this.refreshStatus === RefreshStatus.Refresh || this.refreshing) {
+      if (this.refreshingChannels[this.tab]) {
         LoadingProgress()
           .width(22)
           .height(22)
@@ -500,7 +539,7 @@ export struct HomeView {
     // 搜索栏和推荐/热门频道栏下方显示，但不参与 Refresh 的下拉距离计算。
     .margin({ top: this.statusBarInset + 88 })
     // Done 等结束态不再显示；即使系统状态回调稍晚，请求完成后也立即消失。
-    .opacity(this.refreshStatus === RefreshStatus.Refresh || this.refreshing ? 1 : 0)
+    .opacity(this.refreshingChannels[this.tab] ? 1 : 0)
     .animation({ duration: 120, curve: Curve.EaseOut })
     .hitTestBehavior(HitTestMode.None)
   }
@@ -508,16 +547,13 @@ export struct HomeView {
   @Builder
   VideoFeedFooter(feedTab: number) {
     LoadMoreFooter({
-      loading: this.loadingMore,
-      hasMore: this.channelHasMore(feedTab),
-      moreText: feedTab === 0 ? this.recError : '',
+      loading: this.loadingChannels[feedTab],
+      hasMore: this.channelHasMore(feedTab) || this.channelError(feedTab).length > 0,
+      moreText: this.channelError(feedTab),
       endText: feedTab === 0 ? '' : '—— 到底啦 ——',
       loadingText: '加载中…',
       fixedHeight: 48,
-      onLoadMore: () => {
-        this.recError = '';
-        this.onReachEnd(feedTab);
-      },
+      onLoadMore: () => this.retryMore(feedTab),
     })
   }
 
@@ -534,12 +570,13 @@ export struct HomeView {
   @Builder
   LiveFooter() {
     LoadMoreFooter({
-      loading: this.loadingMore,
+      loading: this.loadingChannels[2],
       hasMore: this.liveHasMore,
-      moreText: '',
+      moreText: this.liveError,
       endText: '—— 到底啦 ——',
       loadingText: '加载中…',
       fixedHeight: 48,
+      onLoadMore: () => this.retryMore(2),
     })
   }
 
@@ -665,12 +702,13 @@ export struct HomeView {
         }
         ListItem() {
           LoadMoreFooter({
-            loading: this.loadingMore,
-            hasMore: this.liveHasMore,
-            moreText: '',
+            loading: this.loadingChannels[2],
+            hasMore: this.liveHasMore || this.liveError.length > 0,
+            moreText: this.liveError,
             endText: '—— 到底啦 ——',
             loadingText: '加载中…',
-            fixedHeight: this.loadingMore || !this.liveHasMore ? 48 : 1,
+            fixedHeight: this.loadingChannels[2] || !this.liveHasMore || this.liveError.length > 0 ? 48 : 1,
+            onLoadMore: () => this.retryMore(2),
           })
         }
       }
@@ -696,13 +734,10 @@ export struct HomeView {
         .height('100%')
         .padding({ top: this.statusBarInset + 98 })
     } else if (feedTab === 2) {
-      Refresh({ refreshing: $$this.refreshing, builder: this.RefreshHeader() }) {
+      Refresh({ refreshing: this.refreshingChannels[2], builder: this.RefreshHeader() }) {
         this.LiveFeedList()
       }
       .refreshOffset(this.refreshTriggerOffset)
-      .onStateChange((status: RefreshStatus) => {
-        if (this.tab === 2) this.refreshStatus = status;
-      })
       .onRefreshing(() => this.onRefresh(2))
     } else if (this.channelError(feedTab).length > 0 && this.channelEmpty(feedTab)) {
       LoadingView({ skeleton: 'grid',
@@ -720,17 +755,12 @@ export struct HomeView {
         .height('100%')
         .padding({ top: this.statusBarInset + 98 })
     } else {
-      Refresh({ refreshing: $$this.refreshing, builder: this.RefreshHeader() }) {
+      Refresh({ refreshing: this.refreshingChannels[feedTab], builder: this.RefreshHeader() }) {
         if (feedTab === 2) this.LiveFeedList()
         else this.VideoFeedList(feedTab)
       }
       .refreshOffset(this.refreshTriggerOffset)
       .pullDownRatio(undefined)
-      .onStateChange((status: RefreshStatus) => {
-        if (this.tab === feedTab) {
-          this.refreshStatus = status;
-        }
-      })
       .onRefreshing(() => this.onRefresh(feedTab))
     }
   }
