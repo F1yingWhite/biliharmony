@@ -254,20 +254,35 @@ test('stopping QR polling ignores a late login success', async () => {
   assert.equal(p.loggedIn,false);
 });
 
-function liveHarness(create) {
+function liveClock() {
+  const pending = new Map(); let nextId = 1;
+  return {
+    pending,
+    setTimeout(callback, delay) { const id = nextId++; pending.set(id, { callback, delay }); return id; },
+    clearTimeout(id) { pending.delete(id); },
+    fire(delay) {
+      const entry = [...pending].find(([, timer]) => timer.delay === delay);
+      assert.ok(entry, 'expected pending timer at ' + delay);
+      pending.delete(entry[0]); entry[1].callback();
+    },
+  };
+}
+
+function liveHarness(create, clock = liveClock()) {
   const env=environment({'@kit.MediaKit':{media:{createAVPlayer:create,createMediaSourceWithUrl:()=>({}),
-    VideoScaleType: {VIDEO_SCALE_TYPE_SCALED_ASPECT: 0}}}});
+    VideoScaleType: {VIDEO_SCALE_TYPE_SCALED_ASPECT: 0}}}, 'test:liveClock': clock});
   const Harness=env.methodHarness('components/live/LivePlayerView','  async restartForSource():','  togglePlay():',
-    "import { media } from '@kit.MediaKit'; const Constants={browserUa:'test'};");
+    "import { media } from '@kit.MediaKit'; import {setTimeout, clearTimeout} from 'test:liveClock'; const Constants={browserUa:'test'};");
   const p=new Harness(); Object.assign(p,{destroyed:false,player:null,playerCreating:false,
     playerRestartPending:false,surfaceId:'test',playInfo:{urls:['first','backup']},playerGeneration:0,sourceIndex:0,
-    dmRenderer:{setPlayback(){},release(){}},hideTimer:-1,fullscreenTimer:-1});
+    dmRenderer:{setPlayback(){},release(){}},hideTimer:-1,fullscreenTimer:-1,
+    startupHintTimer:-1,startupTimer:-1,slowLoading:false,testClock:clock});
   return p;
 }
 function fakePlayer(setSource=async()=>{},release=async()=>{}) {
   const handlers={};
   return {handlers,on:(name,fn)=>handlers[name]=fn,release,setVolume(){},
-    setMediaSource:()=>setSource(handlers)};
+    prepare:async()=>{},play:async()=>{},setMediaSource:()=>setSource(handlers)};
 }
 
 for (const failure of ['event','rejection']) {
@@ -297,20 +312,105 @@ test('live source switch during creation starts the newest source without pollin
 
 test('live backup clears the failure overlay once prepared and playing', async () => {
   let starts = 0;
-  const backup = Object.assign(fakePlayer(), { play: () => { starts++; } });
+  const backup = Object.assign(fakePlayer(), { play: async () => { starts++; } });
   const p = liveHarness(async () => backup);
   p.scheduleHide = () => {};
   await p.initPlayer();
   p.errorText = '正在切换备用线路…';
   p.buffering = true;
+  const queued = [...p.testClock.pending.values()].map(t => t.callback);
   backup.handlers.stateChange('prepared');
   assert.equal(p.errorText, '');
-  assert.equal(p.buffering, false);
+  assert.equal(p.buffering, true);
   assert.equal(starts, 1);
   backup.handlers.stateChange('playing');
   assert.equal(p.playing, true);
+  assert.equal(p.buffering, false);
   assert.equal(p.errorText, '');
+  assert.equal(p.testClock.pending.size, 0);
+  queued.forEach(callback => callback());
+  await tick();
+  assert.equal(p.player, backup);
+  assert.equal(p.slowLoading, false);
 });
+
+test('live startup timeout can recover while setMediaSource is still pending', async () => {
+  const source = deferred(); let creations = 0;
+  const first = fakePlayer(() => source.promise, async () => source.reject(new Error('released')));
+  const backup = fakePlayer();
+  const p = liveHarness(async () => ++creations === 1 ? first : backup);
+  const creating = p.initPlayer();
+  await tick();
+  assert.equal(p.playerCreating, true);
+  p.testClock.fire(15000);
+  await creating;
+  await tick();
+  assert.equal(p.player, backup);
+  assert.equal(creations, 2);
+  assert.equal(p.playerCreating, false);
+  p.release();
+});
+
+test('live startup warns then advances once to a backup when no playback event arrives', async () => {
+  let creations = 0, releases = 0;
+  const first = fakePlayer(async () => {}, async () => { releases++; });
+  const backup = fakePlayer();
+  const p = liveHarness(async () => ++creations === 1 ? first : backup);
+  await p.initPlayer();
+  p.testClock.fire(5000);
+  assert.equal(p.slowLoading, true);
+  p.testClock.fire(15000);
+  await tick();
+  assert.equal(releases, 1);
+  assert.equal(creations, 2);
+  assert.equal(p.player, backup);
+  assert.equal(p.sourceIndex, 1);
+  assert.equal(p.slowLoading, false);
+  assert.equal(p.buffering, true);
+  await first.handlers.error({ message: 'late native error' });
+  assert.equal(creations, 2);
+  p.testClock.fire(15000);
+  await tick();
+  assert.equal(p.player, null);
+  assert.equal(p.buffering, false);
+  assert.match(p.errorText, /超时/);
+  assert.equal(p.testClock.pending.size, 0);
+});
+
+test('live startup timers cannot affect a new source or an unmounted player', async () => {
+  const players = [fakePlayer(), fakePlayer()]; let creations = 0;
+  const p = liveHarness(async () => players[creations++]);
+  await p.initPlayer();
+  const stale = [...p.testClock.pending.values()].map(t => t.callback);
+  p.playInfo = { urls: ['new'] };
+  await p.restartForSource();
+  stale.forEach(callback => callback());
+  await tick();
+  assert.equal(p.player, players[1]);
+  assert.equal(p.sourceIndex, 0);
+  assert.equal(p.slowLoading, false);
+  const leaving = [...p.testClock.pending.values()].map(t => t.callback);
+  p.destroyed = true; p.release();
+  leaving.forEach(callback => callback());
+  await tick();
+  assert.equal(creations, 2);
+  assert.equal(p.testClock.pending.size, 0);
+});
+
+for (const failedMethod of ['prepare', 'play']) {
+  test(`live ${failedMethod} rejection advances instead of leaving an unhandled promise`, async () => {
+    let creations = 0;
+    const first = fakePlayer(), backup = fakePlayer();
+    first[failedMethod] = async () => { throw new Error('native failure'); };
+    const p = liveHarness(async () => ++creations === 1 ? first : backup);
+    await p.initPlayer();
+    first.handlers.stateChange(failedMethod === 'prepare' ? 'initialized' : 'prepared');
+    await tick();
+    assert.equal(p.player, backup);
+    assert.equal(p.sourceIndex, 1);
+    p.release();
+  });
+}
 
 test('live error cannot advance a new source while old release is pending', async () => {
   const release=deferred(); let creations=0;

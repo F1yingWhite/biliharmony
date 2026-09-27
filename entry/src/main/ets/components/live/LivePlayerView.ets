@@ -97,6 +97,7 @@ export struct LivePlayerView {
   @State dmDensity: number = 22;
   @State fullscreen: boolean = false;
   @State errorText: string = '';
+  @State slowLoading: boolean = false;
   @StorageProp('livePlayerExitRequest') @Watch('onExitRequested') exitRequest: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
   private player: media.AVPlayer | null = null;
@@ -105,6 +106,8 @@ export struct LivePlayerView {
   private sourceIndex: number = 0;
   private hideTimer: number = -1;
   private fullscreenTimer: number = -1;
+  private startupHintTimer: number = -1;
+  private startupTimer: number = -1;
   private destroyed: boolean = false;
   private playerGeneration: number = 0;
   private playerCreating: boolean = false;
@@ -184,6 +187,7 @@ export struct LivePlayerView {
   }
 
   async restartForSource(): Promise<void> {
+    this.clearStartupTimers();
     const generation: number = ++this.playerGeneration;
     this.sourceIndex = 0;
     this.prepared = false;
@@ -197,6 +201,29 @@ export struct LivePlayerView {
       try { await old.release(); } catch (e) {}
     }
     if (!this.destroyed && generation === this.playerGeneration && this.surfaceId.length > 0) await this.initPlayer();
+  }
+
+  private clearStartupTimers(): void {
+    if (this.startupHintTimer >= 0) clearTimeout(this.startupHintTimer);
+    if (this.startupTimer >= 0) clearTimeout(this.startupTimer);
+    this.startupHintTimer = -1;
+    this.startupTimer = -1;
+    this.slowLoading = false;
+  }
+
+  private watchStartup(player: media.AVPlayer): void {
+    this.clearStartupTimers();
+    const generation: number = this.playerGeneration;
+    this.startupHintTimer = setTimeout(() => {
+      if (this.destroyed || this.playing || this.player !== player || generation !== this.playerGeneration) return;
+      this.startupHintTimer = -1;
+      this.slowLoading = true;
+    }, 5000);
+    this.startupTimer = setTimeout(() => {
+      if (this.destroyed || this.playing || this.player !== player || generation !== this.playerGeneration) return;
+      this.startupTimer = -1;
+      this.handleError(player, '连接直播超时').catch(() => {});
+    }, 15000);
   }
 
   async initPlayer(): Promise<void> {
@@ -218,18 +245,19 @@ export struct LivePlayerView {
         return;
       }
       this.player = createdPlayer;
+      this.watchStartup(createdPlayer);
       createdPlayer.on('stateChange', (state: media.AVPlayerState) => {
         if (this.player !== createdPlayer) return;
         if (state === 'initialized') {
           createdPlayer.surfaceId = this.surfaceId;
-          createdPlayer.prepare();
+          createdPlayer.prepare().catch(() => this.handleError(createdPlayer, '直播准备失败'));
         } else if (state === 'prepared') {
           this.prepared = true;
-          this.buffering = false;
           this.errorText = '';
           createdPlayer.videoScaleType = media.VideoScaleType.VIDEO_SCALE_TYPE_SCALED_ASPECT;
-          createdPlayer.play();
+          createdPlayer.play().catch(() => this.handleError(createdPlayer, '直播播放失败'));
         } else if (state === 'playing') {
+          this.clearStartupTimers();
           this.playing = true;
           this.buffering = false;
           this.errorText = '';
@@ -277,10 +305,12 @@ export struct LivePlayerView {
 
   async handleError(failed: media.AVPlayer, message: string): Promise<void> {
     if (this.destroyed || this.player !== failed) return;
+    this.clearStartupTimers();
     const generation: number = this.playerGeneration;
     this.player = null;
     this.prepared = false;
     this.playing = false;
+    this.buffering = true;
     this.dmRenderer.setPlayback(false, this.fullscreen);
     try { await failed.release(); } catch (e) {}
     if (this.destroyed || generation !== this.playerGeneration) return;
@@ -290,11 +320,12 @@ export struct LivePlayerView {
       await this.initPlayer();
     } else {
       this.buffering = false;
-      this.errorText = '直播暂时无法播放，请重新加载';
+      this.errorText = message === '连接直播超时' ? '连接直播超时，请检查网络后重试' : '直播暂时无法播放，请重新加载';
     }
   }
 
   release(): void {
+    this.clearStartupTimers();
     if (this.hideTimer >= 0) clearTimeout(this.hideTimer);
     this.hideTimer = -1;
     if (this.fullscreenTimer >= 0) clearTimeout(this.fullscreenTimer);
@@ -571,7 +602,15 @@ export struct LivePlayerView {
         })
 
       if (this.buffering) {
-        LoadingProgress().width(38).height(38).color('#FFFFFF')
+        Column({ space: 10 }) {
+          LoadingProgress().width(38).height(38).color('#FFFFFF')
+          if (this.errorText.length === 0) {
+            Text(this.slowLoading ? '连接较慢，即将重试…' : '正在加载直播…')
+              .fontSize(12).fontColor('#FFFFFF')
+              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+              .backgroundColor('#99000000').borderRadius(12)
+          }
+        }.hitTestBehavior(HitTestMode.None)
       }
       if (this.errorText.length > 0) {
         Column({ space: 10 }) {
