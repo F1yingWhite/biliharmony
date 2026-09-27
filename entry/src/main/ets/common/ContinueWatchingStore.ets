@@ -47,6 +47,7 @@ export class ContinueWatchingStore {
       .then((store: preferences.Preferences) => {
         ContinueWatchingStore.store = store;
       }).catch(() => {
+        ContinueWatchingStore.ready = null;
       });
     return ContinueWatchingStore.ready;
   }
@@ -81,11 +82,13 @@ export class ContinueWatchingStore {
 
   /** 深链恢复定位：EntryAbility 读出（与卡片展示同一条记录）。 */
   static async latestPosition(context: common.Context, bvid: string, aid: number): Promise<number> {
+    await ContinueWatchingStore.ensure(context);
     const record: ContinueWatchRecord | null = ContinueWatchingStore.latest();
     if (record === null) return 0;
     const r: ContinueWatchRecord = record;
-    if (r.bvid !== bvid && (aid <= 0 || r.aid !== aid)) return 0;
-    return r.position;
+    const matches: boolean = bvid.length > 0 ? r.bvid === bvid : aid > 0 && r.aid === aid;
+    if (!matches) return 0;
+    return Number.isFinite(r.position) ? Math.max(0, r.position) : 0;
   }
 
   static latest(): ContinueWatchRecord | null {
@@ -103,7 +106,7 @@ export class ContinueWatchingStore {
 
   private static progressText(position: number, duration: number): string {
     if (position <= 0) return '刚开始看';
-    if (duration > 0 && position >= duration - 30) return '已看完';
+    if (duration > 0 && position >= duration - Math.min(30, duration * 0.05)) return '已看完';
     return '看到 ' + ContinueWatchingStore.clock(position) +
       (duration > 0 ? ' / ' + ContinueWatchingStore.clock(duration) : '');
   }

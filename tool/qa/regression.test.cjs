@@ -14,6 +14,33 @@ function deferred() {
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+test('continue watching restores cold storage and rejects unrelated aid-only videos', async () => {
+  const record = { bvid: '', aid: 123, position: 42 };
+  const store = environment({ '@kit.ArkData': { preferences: {
+    getPreferences: async () => ({ getSync: () => JSON.stringify(record) })
+  } } }).load('common/ContinueWatchingStore').ContinueWatchingStore;
+  assert.equal(await store.latestPosition({}, '', 123), 42);
+  assert.equal(await store.latestPosition({}, '', 456), 0);
+  assert.equal(await store.latestPosition({}, '', 0), 0);
+  record.position = -10;
+  assert.equal(await store.latestPosition({}, '', 123), 0);
+});
+
+test('continue watching retries failed initialization and keeps short clips in progress', async () => {
+  let attempts = 0;
+  let saved = '';
+  const store = environment({ '@kit.ArkData': { preferences: {
+    getPreferences: async () => {
+      if (++attempts === 1) throw new Error('temporarily unavailable');
+      return { getSync: () => saved, putSync: (key, value) => { saved = value; }, flush: async () => {} };
+    }
+  } } }).load('common/ContinueWatchingStore').ContinueWatchingStore;
+  await store.ensure({});
+  await store.report({}, 'BVtest', 123, 'Short clip', '', 1, 20);
+  assert.equal(attempts, 2);
+  assert.equal(JSON.parse(saved).progressText, '看到 0:01 / 0:20');
+});
+
 test('private messages preserve full text without classifying it as a share card', () => {
   const { PrivateMessageItem } = environment().load('model/message/MessageModels');
   const text = '第一行\n' + '这是一条需要完整显示的长私信。'.repeat(30);

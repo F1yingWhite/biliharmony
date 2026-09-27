@@ -21,7 +21,7 @@ export struct LoadingSkeleton {
   }
 
   aboutToDisappear(): void {
-    this.visible = false;
+    this.setVisible(false);
   }
 
   @Builder
