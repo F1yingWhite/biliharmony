@@ -19,6 +19,8 @@ test('service card restores persisted aid-only records on cold add and update', 
   const updates = [];
   let opens = 0;
   const env = environment({
+    '@kit.CoreFileKit': { fileIo: {} },
+    'services/cache/RemoteAssetCache': { RemoteAssetCache: {} },
     '@kit.FormKit': {
       FormExtensionAbility: class { context = {}; },
       formBindingData: { createFormBindingData: value => value },
@@ -42,9 +44,42 @@ test('service card restores persisted aid-only records on cold add and update', 
   assert.equal(opens, 1);
 });
 
+test('service card sends downloaded images through formImages and closes descriptors on failure', async () => {
+  const requests = [], updates = [], closed = [];
+  let failUpdate = false;
+  const record = {bvid:'BVcover',aid:123,cover:'http://example.com/image.jpg'};
+  const env = environment({
+    '@kit.CoreFileKit': {fileIo:{OpenMode:{READ_ONLY:0},openSync:()=>({fd:7}),
+      statSync:()=>({size:1024}),closeSync:file=>closed.push(file.fd)}},
+    'services/cache/RemoteAssetCache': {RemoteAssetCache:{attach(){},ensureThumbnail:url=>{
+      const d=deferred();requests.push({url,...d});return d.promise;
+    }}},
+    '@kit.FormKit': {FormExtensionAbility:class {context={};},
+      formBindingData:{createFormBindingData:v=>v},formProvider:{updateForm:async(id,data)=>{
+        if(failUpdate)throw Error('removed');updates.push({id,data});
+      }}},
+    '@kit.ArkData': {preferences:{getPreferencesSync:()=>({getSync:()=>JSON.stringify(record)})}}
+  });
+  const Form=env.load('entryformability/EntryFormAbility').default;const form=new Form();
+  const initial=form.onAddForm({parameters:{'ohos.extra.param.key.form_identity':'card'}});
+  assert.equal(initial.cover,'');assert.equal(requests[0].url,'https://example.com/image.jpg');
+  requests[0].resolve('file://cache/cover');await tick();
+  assert.match(updates[0].data.cover,/^memory:\/\//);
+  assert.equal(updates[0].data.formImages[updates[0].data.cover.slice(9)],7);
+  assert.deepEqual(closed,[7]);
+  const old=form.updateCover('card');form.onRemoveForm('card');
+  const fresh=form.updateCover('card');
+  requests[1].resolve('file://cache/old');await old;
+  assert.equal(updates.length,1,'removed/recreated card ignores the old download');
+  failUpdate=true;requests[2].resolve('file://cache/new');await assert.rejects(fresh);
+  assert.deepEqual(closed,[7,7],'update failure still releases the file descriptor');
+});
+
 test('service card retries failed synchronous storage initialization', () => {
   let opens = 0;
   const env = environment({
+    '@kit.CoreFileKit': { fileIo: {} },
+    'services/cache/RemoteAssetCache': { RemoteAssetCache: {} },
     '@kit.FormKit': {
       FormExtensionAbility: class { context = {}; },
       formBindingData: { createFormBindingData: value => value }

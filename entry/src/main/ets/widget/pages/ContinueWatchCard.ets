@@ -1,8 +1,7 @@
 /**
  * 「继续观看」服务卡片（2x2 / 2x4）：展示最近观看的封面、标题与进度，
  * 点击直达应用内该视频详情页续播。
- * 卡片环境禁用网络图片？——Image 支持网络图但卡片刷新受限，优先用已缓存的
- * 封面 URL（系统图片栈会走磁盘缓存）；无封面时显示站标占位。
+ * 封面不可用时使用本地占位图；卡片宿主中的远程封面仍需通过 formImages 传输。
  */
 @Entry
 @Component
@@ -18,6 +17,7 @@ struct ContinueWatchCard {
     Stack({ alignContent: Alignment.BottomStart }) {
       if (this.cover.length > 0) {
         Image(this.cover)
+          .alt($r('app.media.placeholder_cover'))
           .width('100%')
           .height('100%')
           .objectFit(ImageFit.Cover)
@@ -57,8 +57,8 @@ struct ContinueWatchCard {
       .alignItems(HorizontalAlign.Start)
       .padding(10)
       .linearGradient({
-        angle: 270,
-        colors: [['#00000000', 0], ['#99000000', 0.75], ['#CC000000', 1]]
+        direction: GradientDirection.Bottom,
+        colors: [['#99000000', 0], ['#CC000000', 1]]
       })
     }
     .width('100%')
