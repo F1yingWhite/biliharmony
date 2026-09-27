@@ -245,6 +245,44 @@ test('HTTP: an old response cannot restore cookies after logout', async () => {
   assert.equal(HttpClient.getCookie('SESSDATA'), '');
 });
 
+test('HTTP: QR login accepts SDK cookies, repeated headers and case-insensitive header names', async () => {
+  const net = httpMock(() => ({ ...response({ code: 0 }, {
+    'Set-Cookie': ['SESSDATA=test-qr; Path=/; HttpOnly', 'bili_jct=test-csrf; Path=/']
+  }), cookies: 'DedeUserID=123; Expires=Wed, 21 Oct 2037 07:28:00 GMT,device=test-device; Path=/\r\nextra=test-extra; Path=/' }));
+  const { HttpClient } = environment({ '@kit.NetworkKit': net }).load('services/network/HttpClient');
+  HttpClient.setCookie('buvid3', 'test-buvid');
+  for (const method of ['get', 'post', 'postBinary']) {
+    HttpClient.removeCookie('SESSDATA');
+    if (method === 'get') await HttpClient.get('https://passport.bilibili.com/test');
+    else if (method === 'post') await HttpClient.post('https://passport.bilibili.com/test', '');
+    else await HttpClient.postBinary('https://passport.bilibili.com/test', 'application/octet-stream', new ArrayBuffer(0));
+    assert.equal(HttpClient.getCookie('SESSDATA'), 'test-qr');
+    assert.equal(HttpClient.getCookie('bili_jct'), 'test-csrf');
+    assert.equal(HttpClient.getCookie('DedeUserID'), '123');
+    assert.equal(HttpClient.getCookie('device'), 'test-device');
+    assert.equal(HttpClient.getCookie('extra'), 'test-extra');
+  }
+});
+
+test('HTTP: separate SDK cookies cannot bypass host or stale-session protection', async () => {
+  const pending = deferred();
+  const { HttpClient } = environment({ '@kit.NetworkKit': httpMock(() => pending.promise) }).load('services/network/HttpClient');
+  HttpClient.setCookie('buvid3', 'test-buvid');
+  await Promise.resolve().then(() => pending.resolve({ ...response({}), cookies: 'SESSDATA=foreign; Path=/' }));
+  await HttpClient.get('https://example.com/public');
+  assert.equal(HttpClient.getCookie('SESSDATA'), '');
+  const old = deferred();
+  const env = environment({ '@kit.NetworkKit': httpMock(() => old.promise) });
+  const client = env.load('services/network/HttpClient').HttpClient;
+  client.setCookie('buvid3', 'test-buvid');
+  const request = client.get('https://passport.bilibili.com/test');
+  await tick();
+  env.load('services/auth/AuthSession').AuthSession.advance();
+  old.resolve({ ...response({}), cookies: 'SESSDATA=stale; Path=/' });
+  assert.equal((await request).ok, false);
+  assert.equal(client.getCookie('SESSDATA'), '');
+});
+
 test('HTTP: concurrent transport failures retain their own platform code and release requests', async () => {
   const first = deferred(), second = deferred(); let destroyed = 0, calls = 0;
   const net = httpMock(() => ++calls === 1 ? first.promise : second.promise);

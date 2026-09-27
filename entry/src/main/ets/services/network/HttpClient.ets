@@ -327,8 +327,8 @@ export class HttpClient {
       return;
     }
     // 不能按 ',' 直接切：Expires=Wed, 21 Oct 2015 07:28:00 GMT 内含逗号。
-    // 真实分隔是“逗号 + 空白 + 新 cookie 的 name=”，lookahead 保证只在 name=value 前断开。
-    const parts: Array<string> = setCookie.split(/,\s+(?=[^;,]+=)/);
+    // 多个头可能以换行或逗号拼接；Expires 中的逗号后不是 cookie 的 name=。
+    const parts: Array<string> = setCookie.split(/\r?\n|,\s*(?=[^;,\s=]+=)/);
     for (let i: number = 0; i < parts.length; i++) {
       const part: string = parts[i].trim();
       const eq: number = part.indexOf('=');
@@ -391,15 +391,25 @@ export class HttpClient {
     return merged;
   }
 
-  /** 从响应头中提取 set-cookie 并合并到 cookie 罐 */
-  private static absorbCookies(header: Object): void {
+  /** SDK 可单独返回 cookies；响应头名称不区分大小写，重复头也可能是数组。 */
+  private static absorbCookies(header: Object, cookies: string = ''): void {
+    HttpClient.parseSetCookie(cookies);
     if (!header) {
       return;
     }
     const h: Record<string, Object> = asObject(header);
-    const sc: Object | undefined = h['set-cookie'];
-    if (sc !== undefined) {
-      HttpClient.parseSetCookie(asString(sc));
+    const keys: Array<string> = Object.keys(h);
+    for (let i: number = 0; i < keys.length; i++) {
+      if (keys[i].toLowerCase() !== 'set-cookie') continue;
+      const value: Object = h[keys[i]];
+      if (Array.isArray(value)) {
+        const values: Array<Object> = value as Array<Object>;
+        for (let j: number = 0; j < values.length; j++) {
+          HttpClient.parseSetCookie(asString(values[j]));
+        }
+      } else {
+        HttpClient.parseSetCookie(asString(value));
+      }
     }
   }
 
@@ -460,7 +470,7 @@ export class HttpClient {
       return new HttpResponse(-1, '', {}, execution.transportCode);
     }
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
-    if (trusted) HttpClient.absorbCookies(resp.header);
+    if (trusted) HttpClient.absorbCookies(resp.header, asString(resp.cookies));
     return HttpClient.prewarmParse(
       new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>));
   }
@@ -479,7 +489,7 @@ export class HttpClient {
       return new HttpResponse(-1, '', {}, execution.transportCode);
     }
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
-    if (trusted) HttpClient.absorbCookies(resp.header);
+    if (trusted) HttpClient.absorbCookies(resp.header, asString(resp.cookies));
     return HttpClient.prewarmParse(
       new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>));
   }
@@ -513,7 +523,7 @@ export class HttpClient {
       return new HttpResponse(-1, '', {}, execution.transportCode);
     }
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
-    if (trusted) HttpClient.absorbCookies(resp.header);
+    if (trusted) HttpClient.absorbCookies(resp.header, asString(resp.cookies));
     return HttpClient.prewarmParse(
       new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>));
   }
