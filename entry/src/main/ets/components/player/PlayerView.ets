@@ -274,7 +274,7 @@ export struct PlayerView {
   private dmInteraction: PlayerDanmakuInteractionController = new PlayerDanmakuInteractionController(this.dmEngine);
   private dmClock: PlayerDanmakuClock = new PlayerDanmakuClock({
     isPlaying: (): boolean => this.playing,
-    isDanmakuOn: (): boolean => this.danmakuOn,
+    isDanmakuOn: (): boolean => this.danmakuOn && !this.appInBackground,
     getFrameRate: (): number => this.dmFrameRate,
     getEngine: (): PlayerDanmakuEngine => this.dmEngine,
     clearPinned: (): void => {
@@ -753,6 +753,7 @@ if (this.runtimeSources.length === 0) {
   onAppBackgroundChanged(): void {
     if (this.destroyed) return;
     if (this.appInBackground) {
+      this.dmClock.pause();
       // 画中画异步启动期间也可能先收到后台通知，必须保留双轨播放。
       if (this.pipActive || this.pipStarting || this.pipRestoring) return;
       if (this.backgroundPlaybackEnabled) this.enterBackgroundAudioOnly();
@@ -763,7 +764,16 @@ if (this.runtimeSources.length === 0) {
       if (this.pipActive || this.pipStarting || this.pipRestoring) this.releasePictureInPicture();
       this.pipRestoring = false;
       this.leaveBackgroundAudioOnly();
+      this.restoreForegroundDanmaku();
     }
+  }
+
+  private restoreForegroundDanmaku(): void {
+    // 后台期间 DisplaySync 可能被系统挂起，但 running 仍为 true。
+    // 重新绑定前台帧回调，并从当前进度开始，避免旧弹幕停在画布上或集中补发。
+    this.dmClock.release();
+    this.resetDanmakuAt(this.playheadSec);
+    if (this.playing && !this.seekLocked) this.spawnDanmaku(this.playheadSec);
   }
 
   private setBackgroundPlayback(next: boolean): void {
@@ -3369,6 +3379,7 @@ if (this.runtimeSources.length === 0) {
   // ===== 弹幕引擎 =====
 
   spawnDanmaku(now: number): void {
+    if (this.appInBackground) return;
     this.dmEngine.spawn(now);
     if (this.dmEngine.active.length > 0) this.dmClock.start();
   }

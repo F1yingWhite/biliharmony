@@ -127,6 +127,7 @@ function backgroundHarness(enabled,playing) {
   const Harness=env.methodHarness('components/player/PlayerView','  onAppBackgroundChanged():','  private setBackgroundPlayback(');
   const actions=[];
   const view=Object.assign(new Harness(),{appInBackground:true,backgroundPlaybackEnabled:enabled,playing,
+    dmClock:{pause(){},release(){}},resetDanmakuAt(){},spawnDanmaku(){},
     releasePictureInPicture(){actions.push('stopPiP');this.pipActive=false;this.pipStarting=false;this.pipRestoring=false;},
     togglePlay(){actions.push('pause');},enterBackgroundAudioOnly(){actions.push('audio');},leaveBackgroundAudioOnly(){actions.push('foreground');}});
   return {view,actions};
@@ -568,11 +569,41 @@ function pipHarness(create) {
   const view = Object.assign(new Harness(), {pipController:null,pipActive:false,pipStarting:false,
     pipRestoring:false,pipGeneration:0,destroyed:false,prepared:true,player:{},surfaceId:'surface',
     realVideoWidth:1920,realVideoHeight:1080,playing:true,appInBackground:false,
+    dmClock:{pause(){}},restoreForegroundDanmaku(){},
     getUIContext:()=>({getHostContext:()=>({})}),closeSettingPanels(){},
     toast:message=>events.push(message),onAppBackgroundChanged:()=>actions.push('background'),
     togglePlay(){this.playing=!this.playing;actions.push('toggle');}});
   return {view, events, actions, PiPState};
 }
+test('foreground danmaku recovery rebinds the clock and resumes at the current playhead', () => {
+  for (const playing of [true,false]) {
+    const {view}=backgroundHarness(false,playing);const events=[];
+    view.pipActive=true;view.playheadSec=87;view.seekLocked=false;
+    view.dmClock={pause:()=>events.push('pause'),release:()=>events.push('release')};
+    view.resetDanmakuAt=time=>events.push(['reset',time]);
+    view.spawnDanmaku=time=>events.push(['spawn',time]);
+    view.onAppBackgroundChanged();assert.deepEqual(events,['pause']);
+    view.appInBackground=false;view.onAppBackgroundChanged();
+    assert.deepEqual(events,playing?['pause','release',['reset',87],['spawn',87]]:
+      ['pause','release',['reset',87]]);
+  }
+});
+test('released danmaku clock creates a fresh display callback instead of retaining a suspended one', () => {
+  const syncs=[],draws=[];
+  const env=environment({'@kit.ArkGraphics2D':{displaySync:{create:()=>{
+    const sync={setExpectedFrameRateRange(){},on(_event,cb){this.callback=cb;},
+      off(){this.callback=null;},start(){},stop(){}};syncs.push(sync);return sync;
+  }}}});
+  const {PlayerDanmakuClock}=env.load('components/player/PlayerDanmakuClock');
+  const engine={active:[{}],lastDrawMs:0,drawFrame:(_advance,time)=>draws.push(time)};
+  const clock=new PlayerDanmakuClock({isPlaying:()=>true,isDanmakuOn:()=>true,getFrameRate:()=>60,
+    getEngine:()=>engine,clearPinned(){}});
+  clock.start();syncs[0].callback({timestamp:1000000000});
+  clock.release();clock.start();
+  assert.equal(syncs.length,2);assert.equal(syncs[0].callback,null);
+  syncs[1].callback({timestamp:2000000000});
+  assert.deepEqual(draws,[1000,2000]);clock.release();
+});
 function fakePipController() {
   const callbacks = {}, states = [];
   return {callbacks,states,stops:0,starts:0,
