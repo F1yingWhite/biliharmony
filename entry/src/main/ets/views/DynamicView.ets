@@ -11,7 +11,7 @@ import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATI
   NAV_LIVE_ROOM, NAV_LOGIN,
   NAV_VIDEO_DETAIL,
   NAV_USER_SPACE, DynamicDetailParam, ImageViewerParam, ImageViewerSrcRect, LiveRoomParam, VideoDetailParam,
-    UserSpaceParam, NAV_BANGUMI_DETAIL, BangumiDetailParam, setHeroBgSnapshot } from '../common/AppRouter';
+    UserSpaceParam, NAV_BANGUMI_DETAIL, BangumiDetailParam, setHeroBgSnapshot, NAV_SEARCH } from '../common/AppRouter';
 import { ActionResult } from '../api/BiliApi';
 import { UserStore } from '../services/auth/UserStore';
 import { LoadingView } from '../components/LoadingView';
@@ -54,6 +54,8 @@ class DynamicContentPart {
   imageSize: number = 1;
   /** 表情标签（如 [doge]）：图加载失败时回退文字，避免行内空白。 */
   imageLabel: string = '';
+  /** 话题片段（#话题#）：强调色渲染，点击跳搜索。 */
+  isTopic: boolean = false;
 }
 
 // 表情拆分结果按动态 id 缓存（内容不可变），避免每次 build 重算 O(内容×表情数) 扫描。
@@ -157,7 +159,15 @@ function contentPartsOf(item: DynamicItem, emoteVersion: number): Array<DynamicC
         emotePart.key = item.dynId + '-node-emote-' + String(i);
         result.push(emotePart);
       } else if (node.text.length > 0) {
-        result = result.concat(splitDynamicText(node.text, [], item.dynId + '-node-' + String(i)));
+        if (node.isTopic) {
+          const topicPart: DynamicContentPart = new DynamicContentPart();
+          topicPart.text = node.text;
+          topicPart.key = item.dynId + '-node-topic-' + String(i);
+          topicPart.isTopic = true;
+          result.push(topicPart);
+        } else {
+          result = result.concat(splitDynamicText(node.text, [], item.dynId + '-node-' + String(i)));
+        }
       }
     }
   } else {
@@ -317,6 +327,15 @@ export struct DynCard {
     const cached: string = EmoteImageCache.localPathOf(image);
     return cached !== image ? cached : '';
   }
+
+  /** 话题点击：注入关键词并直达搜索页（与视频 TAG 同一机制）。 */
+  private searchTopic(text: string): void {
+    const name: string = text.replace(/^#+/, '').replace(/#+$/, '').trim();
+    if (name.length === 0) return;
+    AppStorage.setOrCreate<string>('searchPrefillKeyword', name);
+    AppNavStack.pushPathByName(NAV_SEARCH, null);
+  }
+
 
   private toast(message: string): void {
     try {
@@ -720,6 +739,10 @@ export struct DynCard {
               Span(part.imageLabel.length > 0 ? part.imageLabel : '[表情]')
             } else if (part.image.length > 0) {
               ImageSpan(this.emoteSrc(part.image)).width(part.imageSize > 1 ? 46 : 23).height(part.imageSize > 1 ? 46 : 23).objectFit(ImageFit.Contain).verticalAlign(ImageSpanAlignment.BOTTOM)
+            } else if (part.isTopic) {
+              Span(part.text)
+                .fontColor(this.accent)
+                .onClick(() => this.searchTopic(part.text))
             } else {
               Span(part.text)
             }
@@ -835,6 +858,10 @@ export struct DynCard {
               Span(part.imageLabel.length > 0 ? part.imageLabel : '[表情]')
             } else if (part.image.length > 0) {
               ImageSpan(this.emoteSrc(part.image)).width(part.imageSize > 1 ? 50 : 25).height(part.imageSize > 1 ? 50 : 25).objectFit(ImageFit.Contain).verticalAlign(ImageSpanAlignment.BOTTOM)
+            } else if (part.isTopic) {
+              Span(part.text)
+                .fontColor(this.accent)
+                .onClick(() => this.searchTopic(part.text))
             } else {
               Span(part.text)
             }
@@ -1068,10 +1095,16 @@ export struct DynamicView {
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
   @StorageProp('headerFade') fade: number = 0;
+  /** 惯用手侧：分类胶囊上滑让位的方向依据（左手头像在左，胶囊向右让位）。 */
+  @StorageProp(Handedness.KEY_SIDE) handSide: string = Handedness.RIGHT;
   @StorageProp('loginVersion') @Watch('onLoginChanged') loginVer: number = 0;
   private dynSource: BasicDataSource<DynamicItem> = new BasicDataSource<DynamicItem>();
   private dynTabsController: TabsController = new TabsController();
   private dynTypes: Array<string> = ['all', 'video', 'pgc', 'article'];
+  /** 分类页签会话级缓存：切回已看过的分类即时恢复列表，不重拉不闪烁（下拉刷新仍强制更新）。 */
+  private typeItems: Map<string, Array<DynamicItem>> = new Map<string, Array<DynamicItem>>();
+  private typeOffset: Map<string, string> = new Map<string, string>();
+  private typeHasMore: Map<string, boolean> = new Map<string, boolean>();
   private initializing: boolean = false;
   /** 初始化期间收到登录广播时补跑一次，避免 Tabs 保活页面永久停在旧登录态。 */
   private initPending: boolean = false;
@@ -1086,6 +1119,9 @@ export struct DynamicView {
     this.dynCount = 0;
     this.dynOffset = '';
     this.dynHasMore = true;
+    this.typeItems.clear();
+    this.typeOffset.clear();
+    this.typeHasMore.clear();
     this.followed = [];
     this.liveRooms = new Map<number, number>();
     this.followingLoaded = false;
@@ -1322,7 +1358,22 @@ export struct DynamicView {
 
   private changeDynType(type: string): void {
     if (this.dynType === type) return;
+    // 当前列表快照进缓存（同一数组引用，含已追加的分页）。
+    this.typeItems.set(this.dynType, this.dynSource.getAll());
+    this.typeOffset.set(this.dynType, this.dynOffset);
+    this.typeHasMore.set(this.dynType, this.dynHasMore);
     this.dynType = type;
+    const cached: Array<DynamicItem> | undefined = this.typeItems.get(type);
+    if (cached !== undefined && cached.length > 0) {
+      // 看过的分类：即时恢复，不重拉不闪烁。
+      this.dynSource.reset(cached);
+      this.dynOffset = this.typeOffset.get(type) ?? '';
+      this.dynHasMore = this.typeHasMore.get(type) ?? true;
+      this.dynCount = this.dynSource.totalCount();
+      this.errorText = '';
+      return;
+    }
+    // 首次进入的分类才清空重拉。
     this.dynOffset = '';
     this.dynHasMore = true;
     this.dynSource.clear();
@@ -1350,8 +1401,8 @@ export struct DynamicView {
       this.tapVibrate();
       const index: number = this.dynTypes.indexOf(type);
       if (index >= 0) {
+        // 直接改 $$ 双向绑定的 index：点击分类即时换内容（无横向滑动动画）。
         this.dynTab = index;
-        this.dynTabsController.changeIndex(index);
       }
       this.changeDynType(type);
     })
@@ -1436,8 +1487,12 @@ export struct DynamicView {
     .padding(3)
     .borderRadius(18)
     .backgroundColor(this.glassOn ? '#00000000' : (this.isDark ? '#D9202125' : '#E8FFFFFF'))
-    .margin({ top: this.embedded ? 4 : Immersive.statusBarHeight() + 54 * (1 - this.fade),
-      right: this.embedded ? 0 : 44 * this.fade })
+    // 上滑收起：垂直上移 + 向头像反方向平移让位（与首页频道胶囊同一套规则，静止时居中）。
+    .margin({
+      top: this.embedded ? 4 : Immersive.statusBarHeight() + 54 * (1 - this.fade),
+      left: (!this.embedded && this.handSide === Handedness.LEFT) ? 44 * this.fade : 0,
+      right: (!this.embedded && this.handSide !== Handedness.LEFT) ? 44 * this.fade : 0
+    })
   }
 
   @Builder
@@ -1818,8 +1873,8 @@ export struct DynamicView {
       .barHeight(0)
       .cachedMaxCount(1, TabsCacheMode.CACHE_BOTH_SIDE)
       .animationMode(AnimationMode.CONTENT_FIRST)
-      .animationDuration(MotionTokens.navigation)
-      .animationCurve(Curve.EaseInOut)
+      .animationDuration(MotionTokens.content)
+      .animationCurve(Curve.EaseOut)
       .onChange((index: number) => {
         this.dynTab = index;
         const type: string | undefined = this.dynTypes[index];

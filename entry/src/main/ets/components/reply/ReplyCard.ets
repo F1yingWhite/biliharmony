@@ -432,7 +432,24 @@ export struct ReplyCard {
     const isMine: boolean = UserStore.isLogin && UserStore.current !== null && UserStore.current.mid === this.item.mid;
     const darkText: string = this.isDark ? '#E6E6E6' : '#18191C';
     try {
-      if (isMine) {
+      const isOwner: boolean = this.upMid > 0 && UserStore.isLogin &&
+        UserStore.current !== null && UserStore.current.mid === this.upMid;
+      if (isMine && isOwner) {
+        // 视频 UP 主本人的评论：额外提供置顶/取消置顶。
+        this.getUIContext().getPromptAction().showActionMenu({
+          title: this.item.content.substring(0, Math.min(18, this.item.content.length)),
+          buttons: [
+            { text: '复制评论', color: darkText },
+            { text: this.item.isUpTop ? '取消置顶' : '置顶这条评论', color: darkText },
+            { text: '删除这条评论', color: AppTheme.DANGER },
+          ],
+        }).then((menuResult) => {
+          const pick: number = Number(menuResult.index);
+          if (pick === 0) this.copyComment();
+          else if (pick === 1) this.toggleTop();
+          else if (pick === 2) this.deleteOwnComment();
+        });
+      } else if (isMine) {
         this.getUIContext().getPromptAction().showActionMenu({
           title: this.item.content.substring(0, Math.min(18, this.item.content.length)),
           buttons: [
@@ -547,6 +564,18 @@ export struct ReplyCard {
     } catch (e) {
       // 组件销毁或窗口异常时忽略。
     }
+  }
+
+  /** UP 主置顶/取消置顶（仅视频 UP 本人可见入口）。 */
+  private toggleTop(): void {
+    CommentApi.topReply(this.item.oid, this.item.type, this.item.rpid, !this.item.isUpTop)
+      .then((r: ActionResult) => {
+        this.toast(r.message);
+        if (r.ok) this.item.isUpTop = !this.item.isUpTop;
+      })
+      .catch(() => {
+        this.toast('操作失败，请稍后重试');
+      });
   }
 
   /** 删除自己的评论：二次确认后调服务端删除，成功交给宿主移除该行。 */

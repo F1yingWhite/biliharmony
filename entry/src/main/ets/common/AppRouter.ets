@@ -158,6 +158,8 @@ export const NAV_BLACK_LIST: string = 'BlackList';
 export const NAV_LIVE_ZONE: string = 'LiveZone';
 export const NAV_FAV_SORT: string = 'FavSort';
 export const NAV_BANGUMI_TIMELINE: string = 'BangumiTimeline';
+export const NAV_DOWNLOAD_CENTER: string = 'DownloadCenter';
+export const NAV_NETWORK_PRIVACY: string = 'NetworkPrivacy';
 
 /** 全局唯一导航栈，由 Index 页的 Navigation 挂载 */
 export const AppNavStack: NavPathStack = new NavPathStack();

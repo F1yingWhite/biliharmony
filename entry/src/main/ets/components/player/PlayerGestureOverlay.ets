@@ -195,10 +195,17 @@ export struct PlayerGestureOverlay {
           .fontWeight(FontWeight.Medium)
           .fontColor('#FFFFFF')
       } else {
-        Text((this.gestureAdjustKind === '亮度' ? '☀' : '♪') + ' ' + this.gestureAdjustPercent + '%')
-          .fontSize(12)
-          .fontWeight(FontWeight.Medium)
-          .fontColor('#FFFFFF')
+        Row({ space: 5 }) {
+          Image(this.gestureAdjustKind === '亮度' ? $r('app.media.ic_hud_sun') : $r('app.media.ic_hud_volume'))
+            .width(14).height(14)
+            .renderMode(ImageRenderMode.Template)
+            .fillColor('#FFFFFF')
+          Text(this.gestureAdjustPercent + '%')
+            .fontSize(13)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#FFFFFF')
+        }
+        .alignItems(VerticalAlign.Center)
       }
     }
     .padding({ left: 18, right: 18, top: 10, bottom: 10 })

@@ -1,4 +1,4 @@
-import { VideoChapter } from '../../api/BiliApi';
+import { HotPoint, VideoChapter } from '../../api/BiliApi';
 import { SponsorBlockSegment, sponsorBlockCategory } from '../../common/SponsorBlock';
 
 /**
@@ -12,6 +12,7 @@ export struct PlayerProgressBar {
   @Prop compact: boolean = false;
   @Prop chapters: Array<VideoChapter> = [];
   @Prop sponsorSegments: Array<SponsorBlockSegment> = [];
+  @Prop hotPoints: Array<HotPoint> = [];
   onChange: (value: number, mode: SliderChangeMode) => void = () => {};
   /** Slider 节点在拖动中被替换时可能收不到 End，直接监听手指抬起/取消做保底。 */
   onInteractionEnd: () => void = () => {};
@@ -56,6 +57,28 @@ export struct PlayerProgressBar {
     .hitTestBehavior(HitTestMode.None)
   }
 
+  @Builder
+  HeatMarks() {
+    // 高能分段：宽度按时间占比、透明度按热度归一，叠加在轨道上方（不挡手势）。
+    Stack({ alignContent: Alignment.Start }) {
+      ForEach(this.hotPoints, (point: HotPoint, index: number) => {
+        if (this.duration > 0) {
+          Row()
+            .width(Math.max(0.3, (point.to - point.from) / this.duration * 100) + '%')
+            .height(this.compact ? 3 : 4)
+            .borderRadius(2)
+            .backgroundColor('#FB7299')
+            .opacity(point.alphaOf(this.hotPoints))
+            .position({ x: Math.max(0, Math.min(100, point.from / this.duration * 100)) + '%' })
+        }
+      }, (point: HotPoint, index: number) => 'heat-' + String(point.from) + '-' + String(index))
+    }
+    .width('100%')
+    .height(this.compact ? 3 : 4)
+    .padding({ left: 7, right: 7 })
+    .hitTestBehavior(HitTestMode.None)
+  }
+
   build() {
     Stack({ alignContent: Alignment.Center }) {
       if (this.chapters.length > 1) this.ChapterTicks()
@@ -82,6 +105,7 @@ export struct PlayerProgressBar {
           }
         })
       if (this.sponsorSegments.length > 0) this.SponsorMarks()
+      if (this.hotPoints.length > 0) this.HeatMarks()
     }
     .layoutWeight(1)
     // 由 layoutWeight 吃掉中间剩余宽度，确保紧凑态的全屏键始终贴在最右侧。

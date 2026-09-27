@@ -10,7 +10,7 @@ import { PlayUrlInfo, SubtitleCue, SubtitleTrack, VideoDetail, VideoItem,
   VideoRelationState } from '../model/Models';
 import { decodeDanmakuSeg, decodeDanmakuXml, SendableDanmaku } from '../common/DanmakuProto';
 import { ActionResult, actionWithCsrf, getData, postVideoAction, webGet, webGetSigned,
-  webGetWithPriority, webPost } from './internal/ApiCommon';
+  webGetWithPriority, webPost, getDataArray } from './internal/ApiCommon';
 import { CommentLog } from '../common/CommentLog';
 import { BangumiApi } from './BangumiApi';
 
@@ -47,6 +47,8 @@ export class DanmakuItem {
   fontsize: number = 25;
   /** 智能云屏蔽权重 0-10（越大越优质）；低于用户设定屏蔽等级的弹幕不喷出。 */
   weight: number = 10;
+  /** 重复弹幕合并后的簇计数（1 = 未合并）。 */
+  mergeCount: number = 1;
 
   constructor(time: number, mode: number, color: number, text: string, id: number = 0,
     fontsize: number = 25, weight: number = 10, idStr: string = '') {
@@ -69,6 +71,29 @@ export class VideoChapter {
 }
 
 /** 视频拖动预览：每张 image 是 xLen * yLen 的雪碧图，index 为每格对应的秒数。 */
+/** 视频标签（x/tag/archive/tags）。 */
+export class VideoTagInfo {
+  tagId: number = 0;
+  name: string = '';
+}
+
+/** 高能进度条：player/wbi/v2 view_points 的热度分段（detail 为弹幕密度值）。 */
+export class HotPoint {
+  from: number = 0;
+  to: number = 0;
+  detail: number = 0;
+
+  /** 归一化不透明度：以集合内最大热度为基准，落到 0.25-0.9。 */
+  alphaOf(all: Array<HotPoint>): number {
+    let max: number = 0;
+    for (let i: number = 0; i < all.length; i++) {
+      if (all[i].detail > max) max = all[i].detail;
+    }
+    if (max <= 0) return 0.5;
+    return 0.25 + 0.65 * Math.min(1, this.detail / max);
+  }
+}
+
 export class VideoShotData {
   images: Array<string> = [];
   index: Array<number> = [];
@@ -528,6 +553,54 @@ export class BiliApi {
       chapter.title = str(item, 'content', '章节 ' + String(i + 1));
       chapter.image = toHttps(str(item, 'imgUrl', str(item, 'img_url', '')));
       result.push(chapter);
+    }
+    return result;
+  }
+
+  /** 高能进度条数据：与章节同接口（view_points 非章节条目，detail 为热度值）。 */
+  static async getVideoHeatPoints(aid: number, bvid: string, cid: number): Promise<Array<HotPoint>> {
+    if (cid <= 0 || (aid <= 0 && bvid.length === 0)) return [];
+    const params: Record<string, string> = { 'cid': String(cid) };
+    if (bvid.length > 0) params['bvid'] = bvid;
+    else params['aid'] = String(aid);
+    const resp: HttpResponse = await webGetSigned(Api.playerInfo, params, '', undefined, RequestPriority.LOW);
+    const data: Record<string, Object> | null = getData(resp);
+    if (data === null) return [];
+    const points: Array<Object> = asArray(data['view_points']);
+    const result: Array<HotPoint> = [];
+    for (let i: number = 0; i < points.length; i++) {
+      const item: Record<string, Object> = asObject(points[i]);
+      const from: number = asNumber(item['from'], 0);
+      const to: number = asNumber(item['to'], from);
+      const detail: number = asNumber(item['detail'], 0);
+      // 章节条目（type=2）与非法分段不参与热度渲染。
+      if (to <= from || asNumber(item['type'], 0) === 2 || detail <= 0) continue;
+      const hot: HotPoint = new HotPoint();
+      hot.from = from;
+      hot.to = to;
+      hot.detail = detail;
+      result.push(hot);
+    }
+    return result;
+  }
+
+  /** 视频标签列表（公开接口，无需登录）。失败返回空数组。 */
+  static async getVideoTags(aid: number, bvid: string): Promise<Array<VideoTagInfo>> {
+    if (aid <= 0 && bvid.length === 0) return [];
+    const params: Record<string, string> = bvid.length > 0 ? { 'bvid': bvid } : { 'aid': String(aid) };
+    const resp: HttpResponse = await webGetWithPriority(Api.videoTags, params, '', RequestPriority.LOW);
+    const data: Array<Object> | null = getDataArray(resp);
+    if (data === null) return [];
+    const result: Array<VideoTagInfo> = [];
+    for (let i: number = 0; i < data.length; i++) {
+      const item: Record<string, Object> = asObject(data[i]);
+      const name: string = str(item, 'tag_name', '');
+      if (name.length === 0) continue;
+      const tag: VideoTagInfo = new VideoTagInfo();
+      tag.tagId = asNumber(item['tag_id'], 0);
+      tag.name = name;
+      result.push(tag);
+      if (result.length >= 12) break;
     }
     return result;
   }

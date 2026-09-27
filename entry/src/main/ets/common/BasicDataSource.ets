@@ -90,6 +90,15 @@ export class BasicDataSource<T> implements IDataSource {
     }
   }
 
+  /** 单条删除只通知受影响的位置，避免隐藏一张卡片时重载整份列表。 */
+  public removeAt(index: number): void {
+    if (index < 0 || index >= this.items.length) return;
+    this.items.splice(index, 1);
+    this.listeners.forEach((listener: DataChangeListener) => {
+      listener.onDataDelete(index);
+    });
+  }
+
   public clear(): void {
     this.reset([]);
   }

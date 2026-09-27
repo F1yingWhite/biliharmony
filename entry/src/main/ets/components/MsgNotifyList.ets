@@ -17,6 +17,7 @@ import { MessageApi } from '../api/MessageApi';
 export struct MsgNotifyList {
   /** reply | at | like | sys */
   tab: string = 'reply';
+  @Prop @Watch('onActiveChanged') active: boolean = true;
   @State loading: boolean = false;
   @State error: string = '';
   @State hasMore: boolean = true;
@@ -27,17 +28,27 @@ export struct MsgNotifyList {
   private cursorId: string = '';
   private cursorTime: string = '';
   private sysCursor: string = '';
-  private sysReadReported: boolean = false;
+  private lastReportedSysCursor: string = '';
+  private reloadPending: boolean = false;
 
   aboutToAppear(): void {
-    // 首次进入该分类即在本地清零头栏角标；系统通知在首屏拉取成功后向服务端上报已读游标。
-    MsgUnreadStore.clearCategory(this.tab);
-    this.load(true).catch(() => {
-    });
+    if (this.active) this.reload();
+  }
+
+  private onActiveChanged(): void {
+    if (this.active) this.reload();
+  }
+
+  private reload(): void {
+    this.load(true).catch(() => {});
   }
 
   async load(reset: boolean): Promise<void> {
-    if (this.loading || (!reset && !this.hasMore)) return;
+    if (this.loading) {
+      if (reset) this.reloadPending = true;
+      return;
+    }
+    if (!reset && !this.hasMore) return;
     this.loading = true;
     try {
       const data: MsgNotifyPageData = this.tab === 'sys' ?
@@ -59,13 +70,34 @@ export struct MsgNotifyList {
       this.cursorId = data.cursorId;
       this.cursorTime = data.cursorTime;
       this.sysCursor = data.sysCursor;
-      if (this.tab === 'sys' && !this.sysReadReported && data.items.length > 0) {
-        this.sysReadReported = true;
-        MessageApi.updateSysMsgCursor(data.items[0].sysCursor).catch(() => {
-        });
+      if (reset && this.tab !== 'sys') MsgUnreadStore.clearCategory(this.tab);
+      if (this.tab === 'sys') {
+        if (data.items.length === 0) {
+          MsgUnreadStore.clearCategory('sys');
+        } else {
+          const cursor: string = data.items[0].sysCursor;
+          if (cursor.length > 0 && cursor !== this.lastReportedSysCursor) {
+            try {
+              const result = await MessageApi.updateSysMsgCursor(cursor);
+              if (result.ok) {
+                this.lastReportedSysCursor = cursor;
+                MsgUnreadStore.clearCategory('sys');
+              }
+            } catch (e) {
+              // 保留未读角标，下次进入分类时重试上报。
+            }
+          } else if (cursor.length > 0) {
+            // 已确认过的游标重新展示时，清理滞后的本地角标。
+            MsgUnreadStore.clearCategory('sys');
+          }
+        }
       }
     } finally {
       this.loading = false;
+      if (this.reloadPending) {
+        this.reloadPending = false;
+        this.reload();
+      }
     }
   }
 

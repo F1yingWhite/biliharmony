@@ -1,5 +1,5 @@
 /**
- * 播放设置子页（对齐官方版式）：自动进入小窗 / 画质偏好 / 下载画质 / 视频或音频下载 / 缓存到网盘。
+ * 播放设置子页（对齐官方版式）：画质偏好 / 下载画质 / 视频或音频下载（下载任务在下载中心管理）。
  */
 @Component
 export struct PlayerPlaySettingsPage {
@@ -67,21 +67,59 @@ export struct PlayerPlaySettingsPage {
       })
   }
 
+  @StorageProp('pgcSkipIntroSeconds') @Watch('onSkipIntroChanged') skipIntroSeconds: number = 0;
+  @State skipIntroTick: number = 0;
+
+  private onSkipIntroChanged(): void {
+    this.skipIntroTick++;
+  }
+
+  private skipIntroLabel(seconds: number): string {
+    return seconds <= 0 ? '关闭' : String(seconds) + ' 秒';
+  }
+
+  private setSkipIntro(seconds: number): void {
+    AppStorage.setOrCreate<number>('pgcSkipIntroSeconds', seconds);
+    try {
+      this.getUIContext().getPromptAction().showToast({
+        message: seconds > 0 ? '番剧将自动跳过前 ' + String(seconds) + ' 秒片头' : '已关闭自动跳过片头',
+      });
+    } catch (e) {
+      // toast 失败忽略。
+    }
+  }
+
   build() {
     Column({ space: 10 }) {
       Column() {
         Row() {
-          Text('自动进入小窗')
+          Text('番剧跳过片头')
             .fontSize(15)
             .fontWeight(FontWeight.Medium)
             .fontColor(this.titleColor())
           Blank()
-          this.StubSwitch((): void => this.onStub('功能暂未开放'))
+          Row({ space: 6 }) {
+            ForEach([0, 15, 30, 90], (seconds: number) => {
+              Text(this.skipIntroLabel(seconds))
+                .fontSize(12)
+                .fontColor(this.skipIntroSeconds === seconds ? '#FFFFFF' : this.subColor())
+                .padding({ left: 9, right: 9, top: 4, bottom: 4 })
+                .borderRadius(12)
+                .backgroundColor(this.skipIntroSeconds === seconds ? this.accent : this.cardBg())
+                .onClick(() => this.setSkipIntro(seconds))
+            }, (seconds: number) => 'skip-' + String(seconds) + '-' + String(this.skipIntroTick))
+          }
         }
         .width('100%')
         .padding({ left: 16, right: 16, top: 14, bottom: 14 })
 
         Divider().strokeWidth(0.6).color(this.dividerColor())
+      }
+      .width('100%')
+      .borderRadius(14)
+      .backgroundColor(this.cardBg())
+
+      Column() {
 
         Row() {
           Text('画质偏好')
@@ -168,29 +206,6 @@ export struct PlayerPlaySettingsPage {
 
         Divider().strokeWidth(0.6).color(this.dividerColor())
 
-        Row() {
-          Text('缓存到网盘')
-            .fontSize(15)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.titleColor())
-          Blank()
-          this.StubSwitch((): void => this.onStub('功能暂未开放'))
-        }
-        .width('100%')
-        .padding({ left: 16, right: 16, top: 14, bottom: 14 })
-
-        Divider().strokeWidth(0.6).color(this.dividerColor())
-
-        Row() {
-          Text('缓存时自动进入小窗')
-            .fontSize(15)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.titleColor())
-          Blank()
-          this.StubSwitch((): void => this.onStub('功能暂未开放'))
-        }
-        .width('100%')
-        .padding({ left: 16, right: 16, top: 14, bottom: 14 })
       }
       .width('100%')
       .borderRadius(14)

@@ -26,6 +26,10 @@ export class DanmakuSettings {
   blockTop: boolean = false;
   blockBottom: boolean = false;
   blockColor: boolean = false;
+  /** 重复弹幕合并（相同内容 6 秒窗口内计为一簇）。 */
+  mergeDuplicates: boolean = false;
+  /** 合并簇显示 ×N 计数后缀。 */
+  mergeShowCount: boolean = true;
 }
 
 export class AppTheme {
@@ -53,6 +57,8 @@ export class AppTheme {
   /** 自选主题色一次性迁移标记：防止第二次启动起把平台生效色误当自选色（语义见 init 内迁移说明）。 */
   private static readonly KEY_USER_ACCENT_MIGRATED: string = 'userAccentMigrated';
   private static readonly KEY_DM_ENABLED: string = 'danmakuEnabled';
+  private static readonly KEY_DM_MERGE: string = 'danmakuMergeDuplicates';
+  private static readonly KEY_DM_MERGE_COUNT: string = 'danmakuMergeShowCount';
   private static readonly KEY_DM_FRAME_RATE: string = 'danmakuFrameRate';
   private static readonly KEY_DM_OPACITY: string = 'danmakuOpacity';
   private static readonly KEY_DM_SPEED: string = 'danmakuSpeed';
@@ -81,6 +87,7 @@ export class AppTheme {
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_USER_ACCENT_MIGRATED, false);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_DARK, false);
     PersistentStorage.persistProp<boolean>(AppTheme.KEY_GLASS_ENABLED, true);
+    PersistentStorage.persistProp<boolean>('wideSplitEnabled', false);
     PersistentStorage.persistProp<boolean>('playerDoubleTapEnabled', true);
     PersistentStorage.persistProp<boolean>('playerPanEnabled', true);
     PersistentStorage.persistProp<boolean>('playerHoldEnabled', true);
@@ -290,6 +297,8 @@ export class AppTheme {
       out.blockTop = (store.getSync(AppTheme.KEY_DM_BLOCK_TOP, '') as string) === 'true';
       out.blockBottom = (store.getSync(AppTheme.KEY_DM_BLOCK_BOTTOM, '') as string) === 'true';
       out.blockColor = (store.getSync(AppTheme.KEY_DM_BLOCK_COLOR, '') as string) === 'true';
+      out.mergeDuplicates = (store.getSync(AppTheme.KEY_DM_MERGE, '') as string) === 'true';
+      out.mergeShowCount = (store.getSync(AppTheme.KEY_DM_MERGE_COUNT, 'true') as string) !== 'false';
     } catch (e) {
       // 恢复失败保留默认态。
     }
@@ -313,6 +322,8 @@ export class AppTheme {
       store.putSync(AppTheme.KEY_DM_BLOCK_TOP, s.blockTop ? 'true' : 'false');
       store.putSync(AppTheme.KEY_DM_BLOCK_BOTTOM, s.blockBottom ? 'true' : 'false');
       store.putSync(AppTheme.KEY_DM_BLOCK_COLOR, s.blockColor ? 'true' : 'false');
+      store.putSync(AppTheme.KEY_DM_MERGE, s.mergeDuplicates ? 'true' : 'false');
+      store.putSync(AppTheme.KEY_DM_MERGE_COUNT, s.mergeShowCount ? 'true' : 'false');
     } catch (e) {
       return;
     }

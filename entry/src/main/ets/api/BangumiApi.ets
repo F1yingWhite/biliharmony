@@ -80,6 +80,14 @@ export class BangumiApi {
     });
   }
 
+  /** 更新追番状态：1 想看 / 2 在看 / 4 看过（B 站 web 端状态码）。 */
+  static async updateFollowStatus(seasonId: number, status: number): Promise<ActionResult> {
+    return postVideoAction(Api.bangumiFollowStatusUpdate, {
+      'season_id': String(seasonId),
+      'status': String(status),
+    });
+  }
+
   static async getFollowList(type: number, page: number, mid: number): Promise<Array<WatchLaterSeasonItem>> {
     if (mid <= 0) return [];
     const params: Record<string, string> = {

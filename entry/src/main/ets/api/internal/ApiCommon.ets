@@ -7,6 +7,7 @@ import { Constants } from '../../common/Constants';
 import { WbiSign } from '../../common/WbiSign';
 import { asNumber, asObject, str } from '../../common/Utils';
 import { ApiResult, ApiErrorKind } from '../../services/network/ApiResult';
+import { CookieRefresher } from '../../services/auth/CookieRefresher';
 
 /** 保留传输、登录、业务与解析错误，让列表明确区分失败和空结果。 */
 export function parseDataResult(resp: HttpResponse): ApiResult<Record<string, Object>> {
@@ -21,6 +22,7 @@ export function parseDataResult(resp: HttpResponse): ApiResult<Record<string, Ob
   const code: number = asNumber(json['code'], -1);
   if (code !== 0) {
     const auth: boolean = code === -101 || code === -111;
+    if (code === -101) CookieRefresher.onAuthFailure();
     return new ApiResult<Record<string, Object>>(null,
       auth ? '登录状态已失效，请重新登录' : failureText(resp, '加载失败'),
       auth ? ApiErrorKind.Auth : ApiErrorKind.Business, code);
@@ -58,6 +60,23 @@ export function getData(resp: HttpResponse): Record<string, Object> | null {
     return null;
   }
   return asObject(json['data']);
+}
+
+/** code===0 且 data 为数组的响应解析；失败返回 null。 */
+export function getDataArray(resp: HttpResponse): Array<Object> | null {
+  if (!resp.ok) {
+    return null;
+  }
+  const json: Record<string, Object> = resp.json();
+  const code: number = asNumber(json['code'], -1);
+  if (code !== 0) {
+    return null;
+  }
+  const data: Object = json['data'];
+  if (data === null || data === undefined || !Array.isArray(data)) {
+    return null;
+  }
+  return data as Array<Object>;
 }
 
 /**

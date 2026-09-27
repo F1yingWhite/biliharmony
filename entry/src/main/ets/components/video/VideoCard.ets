@@ -1,3 +1,4 @@
+import { LayoutTokens } from '../../common/LayoutTokens';
 import { MotionTokens } from '../../common/MotionTokens';
 /**
  * 视频卡片（B 站风格）：封面数据叠层 + 标题 + UP 主信息行
@@ -8,13 +9,13 @@ import { VideoRowCard } from './VideoRowCard';
 import { display } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { VideoItem } from '../../model/Models';
-import { formatCount, formatDuration, formatRelativeTime } from '../../common/Utils';
+import { formatCount, formatDuration } from '../../common/Utils';
 import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   NAV_VIDEO_DETAIL, VideoDetailParam, ImageViewerSrcRect, setHeroBgSnapshot } from '../../common/AppRouter';
 import { Haptic } from '../../common/Haptic';
 import { UserStore } from '../../services/auth/UserStore';
 import { FeedCardTitle, FeedCoverImage, FeedGradientMask } from '../FeedCardParts';
-import { biliImageThumbnail } from '../../common/ImageUrl';
+import { biliImageThumbnail, FEED_COVER_WIDTH, FEED_AVATAR_WIDTH } from '../../common/ImageUrl';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface CardMenuButtonItem {
@@ -75,7 +76,7 @@ export struct VideoCard {
   build() {
     if (this.horizontal) {
       VideoRowCard({
-        cover: biliImageThumbnail(this.video.cover, 900),
+        cover: biliImageThumbnail(this.video.cover, FEED_COVER_WIDTH),
         coverId: this.coverId(),
         title: this.video.title,
         highlightKeyword: this.highlightKeyword,
@@ -95,9 +96,9 @@ export struct VideoCard {
   }
 
   /**
-   * 首页卡片（BewlyBewly 风格，素材/设计来自 MIT 许可的 BewlyBewly 项目）：
-   * 16:9 封面只留时长胶囊与多P角标，信息区改为「头像行 → 标题 → 播放·弹幕 + 相对时间」，
-   * 无卡片底色，直接浮于页面背景。
+   * 首页卡片（BewlyBewly 素材 + 卡片化容器）：
+   * 4:3 封面通顶，左下角叠播放/弹幕、右下角时长；信息区「标题 → UP 行（头像 + ⋮）」，
+   * 卡片底色 + 细描边承载边界（用户反馈扁平无边框缺乏边界感后恢复卡片化）。
    */
   @Builder
   BewlyCard() {
@@ -105,98 +106,139 @@ export struct VideoCard {
       Stack() {
         FeedCoverImage({ cover: this.video.cover, isDark: this.isDark })
         Column() {
-          if (this.video.videos > 1) {
-            Text('多P · ' + this.video.videos)
-              .fontSize(10)
-              .fontColor('#FFFFFF')
-              .backgroundColor('#99000000')
-              .padding({ left: 6, right: 6, top: 2, bottom: 2 })
-              .borderRadius(4)
+          Row() {
+            if (this.video.videos > 1) {
+              Text('多P · ' + this.video.videos)
+                .fontSize(10)
+                .fontColor('#FFFFFF')
+                .backgroundColor('#99000000')
+                .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+                .borderRadius(4)
+            }
           }
+          .width('100%')
+          .padding({ left: 8, right: 8, top: 8 })
           Blank()
-          if (this.video.duration > 0) {
-            Text(formatDuration(this.video.duration))
-              .fontSize(10)
-              .fontColor('#FFFFFF')
-              .backgroundColor('#99000000')
-              .padding({ left: 5, right: 5, top: 2, bottom: 2 })
-              .borderRadius(4)
+          // 底部数据叠层：播放 / 弹幕贴左下角，时长贴右下角，渐变遮罩保证白色小字可读。
+          Stack({ alignContent: Alignment.Bottom }) {
+            FeedGradientMask({ height: 34, bottomColor: '#A6000000' })
+            Row({ space: 8 }) {
+              if (this.video.playText.length > 0 || this.video.play > 0) {
+                Row({ space: 3 }) {
+                  Image($r('app.media.ic_card_play'))
+                    .width(12)
+                    .height(12)
+                    .renderMode(ImageRenderMode.Template)
+                    .fillColor('#FFFFFF')
+                  Text(this.video.playText.length > 0 ? this.video.playText : formatCount(this.video.play))
+                    .fontSize(10)
+                    .fontColor('#FFFFFF')
+                    .maxLines(1)
+                }
+                .alignItems(VerticalAlign.Center)
+              }
+              if (this.video.danmakuText.length > 0 || this.video.danmaku > 0) {
+                Row({ space: 3 }) {
+                  Image($r('app.media.ic_card_danmaku'))
+                    .width(11)
+                    .height(11)
+                    .renderMode(ImageRenderMode.Template)
+                    .fillColor('#FFFFFF')
+                  Text(this.video.danmakuText.length > 0 ? this.video.danmakuText : formatCount(this.video.danmaku))
+                    .fontSize(10)
+                    .fontColor('#FFFFFF')
+                    .maxLines(1)
+                }
+                .alignItems(VerticalAlign.Center)
+              }
+              Blank()
+              if (this.video.duration > 0) {
+                Text(formatDuration(this.video.duration))
+                  .fontSize(10)
+                  .fontColor('#FFFFFF')
+                  .maxLines(1)
+              }
+            }
+            .width('100%')
+            .padding({ left: 8, right: 8, bottom: 5 })
+            .alignItems(VerticalAlign.Center)
           }
+          .width('100%')
         }
         .width('100%')
         .height('100%')
-        .padding(8)
         .alignItems(HorizontalAlign.Start)
-        .justifyContent(FlexAlign.SpaceBetween)
       }
       .width('100%')
       .aspectRatio(16 / 9)
-      .borderRadius(12)
+      // 封面通顶：外层卡片统一裁圆角，封面自身不再单独留边。
       .clip(true)
       .id(this.coverId())
       .onClick(() => this.openDetail())
 
-      // 头像 + UP 主行（App 推流卡片无头像时回退 UP 角标）
-      Row({ space: 5 }) {
-        if (this.video.upFace.length > 0) {
-          Image(this.video.upFace)
-            .width(20)
-            .height(20)
-            .borderRadius(10)
-            .alt($r('app.media.placeholder_cover'))
-        } else {
-          Text('UP')
-            .fontSize(8)
-            .fontColor(this.isDark ? '#8A8A8F' : '#9499A0')
-            .padding({ left: 3, right: 3, top: 1, bottom: 1 })
-            .border({ width: 0.8, color: this.isDark ? '#666970' : '#AEB2B8', radius: 2 })
+      // 信息区内缩：标题 → UP 行（底部收尾），播放/弹幕已上封面叠层，卡片不放点赞。
+      Column() {
+        // 标题（两行固定，卡片等高）
+        Row() {
+          FeedCardTitle({ title: this.video.title, isDark: this.isDark, highlightKeyword: this.highlightKeyword })
         }
-        Text(this.video.upName)
-          .fontSize(11)
-          .fontColor(this.isDark ? '#A5AAB5' : '#7D8490')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-          .onClick(() => this.openDetail())
-        if (this.showMore) {
-          this.MoreDot()
-        }
-      }
-      .width('100%')
-      .height(24)
-      .margin({ top: 8 })
-      .alignItems(VerticalAlign.Center)
+        .width('100%')
+        .height(40)
+        .alignItems(VerticalAlign.Top)
+        .onClick(() => this.openDetail())
 
-      // 标题（两行固定，卡片等高）
-      Row() {
-        FeedCardTitle({ title: this.video.title, isDark: this.isDark, highlightKeyword: this.highlightKeyword })
-      }
-      .width('100%')
-      .height(40)
-      .margin({ top: 2 })
-      .alignItems(VerticalAlign.Top)
-      .onClick(() => this.openDetail())
-
-      // 元信息行：播放 · 弹幕，右侧相对投稿时间
-      Row() {
-        Text((this.video.playText || formatCount(this.video.play)) + ' · ' +
-          (this.video.danmakuText || formatCount(this.video.danmaku)))
-          .fontSize(11)
-          .fontColor(this.isDark ? '#8A8A8F' : '#9499A0')
-          .maxLines(1)
-        Blank()
-        if (this.video.pubdate > 0) {
-          Text(formatRelativeTime(this.video.pubdate))
-            .fontSize(11)
-            .fontColor(this.isDark ? '#8A8A8F' : '#9499A0')
+        // 头像 + UP 主行 + ⋮（举报/不想看）：卡片底部收尾
+        Row({ space: 5 }) {
+          if (this.video.upFace.length > 0) {
+            Image(biliImageThumbnail(this.video.upFace, FEED_AVATAR_WIDTH))
+              .width(20)
+              .height(20)
+              .borderRadius(10)
+              .objectFit(ImageFit.Cover)
+              .syncLoad(false)
+              .alt($r('app.media.placeholder_avatar_noface'))
+          } else {
+            Text('UP')
+              .fontSize(10)
+              .fontColor(this.isDark ? '#8A8A8F' : '#9499A0')
+              .padding({ left: 3, right: 3, top: 1, bottom: 1 })
+              .border({ width: 0.8, color: this.isDark ? '#666970' : '#AEB2B8', radius: 2 })
+          }
+          Text(this.video.upName)
+            .fontSize(LayoutTokens.cardMetaFontSize)
+            .fontColor(this.isDark ? '#A5AAB5' : '#7D8490')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
+            .onClick(() => this.openDetail())
+          if (this.showMore) {
+            this.MoreDot()
+          }
         }
+        .width('100%')
+        .height(LayoutTokens.cardMetaHeight)
+        .margin({ top: 7 })
+        .alignItems(VerticalAlign.Center)
       }
       .width('100%')
-      .margin({ top: 3 })
-      .alignItems(VerticalAlign.Center)
+      .padding({ left: 10, right: 8, top: 8, bottom: 7 })
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
+    // 卡片化容器：中性底色 + 细描边，信息流不叠加逐卡阴影。
+    .backgroundColor(this.isDark ? '#24272E' : '#FFFFFF')
+    .borderRadius(LayoutTokens.cardRadius)
+    .clip(true)
+    .border({ width: 0.6, color: this.isDark ? '#1FFFFFFF' : '#14000000' })
+    .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
+    .stateStyles({
+      pressed: {
+        opacity: 0.92,
+      },
+      normal: {
+        opacity: 1,
+      },
+    })
     .id(this.cardId())
   }
 
@@ -228,17 +270,11 @@ export struct VideoCard {
               Row({ space: 10 }) {
                 if (this.video.playText.length > 0 || this.video.play > 0) {
                   Row({ space: 4 }) {
-                    Stack() {
-                      Image($r('app.media.ic_play'))
-                        .width(6)
-                        .height(6)
-                        .renderMode(ImageRenderMode.Template)
-                        .fillColor('#FFFFFF')
-                    }
-                    .width(17)
-                    .height(12)
-                    .alignContent(Alignment.Center)
-                    .border({ width: 1, color: '#FFFFFF', radius: 3 })
+                    Image($r('app.media.ic_card_play'))
+                      .width(12)
+                      .height(12)
+                      .renderMode(ImageRenderMode.Template)
+                      .fillColor('#FFFFFF')
                     Text(this.video.playText.length > 0 ? this.video.playText : formatCount(this.video.play))
                       .fontSize(11)
                       .fontColor('#FFFFFF')
@@ -248,9 +284,9 @@ export struct VideoCard {
                 }
                 if (this.video.danmakuText.length > 0 || this.video.danmaku > 0) {
                   Row({ space: 4 }) {
-                    Image($r('app.media.ic_danmaku_on'))
-                      .width(14)
-                      .height(14)
+                    Image($r('app.media.ic_card_danmaku'))
+                      .width(12)
+                      .height(12)
                       .renderMode(ImageRenderMode.Template)
                       .fillColor('#FFFFFF')
                     Text(this.video.danmakuText.length > 0 ? this.video.danmakuText : formatCount(this.video.danmaku))
@@ -306,12 +342,12 @@ export struct VideoCard {
         Row({ space: 6 }) {
           Row({ space: 5 }) {
             Text('UP')
-              .fontSize(8)
+              .fontSize(10)
               .fontColor(this.isDark ? '#8A8A8F' : '#9499A0')
               .padding({ left: 2, right: 2 })
               .border({ width: 0.8, color: this.isDark ? '#666970' : '#AEB2B8', radius: 2 })
             Text(this.video.upName)
-              .fontSize(11)
+              .fontSize(LayoutTokens.cardMetaFontSize)
               .fontColor(this.isDark ? '#A5AAB5' : '#7D8490')
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -325,7 +361,7 @@ export struct VideoCard {
           }
         }
         .width('100%')
-        .height(this.homeStyle ? 32 : (this.showMore ? 26 : 30))
+        .height(LayoutTokens.cardMetaHeight)
         .padding({ left: this.homeStyle ? 12 : 10, right: this.homeStyle ? 8 : 5 })
         .alignItems(VerticalAlign.Center)
       }
@@ -335,10 +371,10 @@ export struct VideoCard {
     .padding({ bottom: this.homeStyle ? 6 : (this.showMore ? 2 : 6) })
     .alignItems(HorizontalAlign.Start)
     // 白色卡片承载边界：封面通顶、文字区内缩，浅色白底/深色深灰底。
-    .backgroundColor(this.isDark ? (this.homeStyle ? '#24272E' : '#2B2D34') : '#FFFFFF')
-    .borderRadius(this.homeStyle ? 16 : 6)
+    .backgroundColor(this.isDark ? '#24272E' : '#FFFFFF')
+    .borderRadius(LayoutTokens.cardRadius)
     .clip(true)
-    .shadow({ radius: this.homeStyle ? 8 : 4, color: this.homeStyle ? '#08000000' : (this.isDark ? '#52000000' : '#18000000'), offsetX: 0, offsetY: 1 })
+    .border({ width: 0.6, color: this.isDark ? '#1FFFFFFF' : '#14000000' })
     .animation({ duration: MotionTokens.feedback, curve: Curve.EaseOut })
     .stateStyles({
       pressed: {
@@ -361,8 +397,9 @@ export struct VideoCard {
         .renderMode(ImageRenderMode.Template)
         .fillColor('#9499A0')
     }
-    .width(24)
-    .height(24)
+    .width(LayoutTokens.cardControlSize)
+    .height(LayoutTokens.cardControlSize)
+    .accessibilityText('更多视频操作')
     .alignContent(Alignment.Center)
     .onClick(() => {
       Haptic.light();
@@ -382,12 +419,12 @@ export struct VideoCard {
     })
   }
 
-  /** ⋮ 菜单内容：举报 + 不想看（实心图标，官方浮层样式）。 */
+  /** ⋮ 菜单内容：举报 + 不想看（与全局工具栏统一的线性图标）。 */
   @Builder
   MoreMenuBuilder() {
     Column() {
       this.MoreMenuItem($r('app.media.ic_report_flag'), '举报', () => this.onMoreReport())
-      this.MoreMenuItem($r('app.media.bilix_icon_dislike'), '不想看', () => this.onMoreHide())
+      this.MoreMenuItem($r('app.media.ic_dislike'), '不想看', () => this.onMoreHide())
     }
     .padding({ top: 6, bottom: 6 })
   }
@@ -451,7 +488,7 @@ export struct VideoCard {
     try {
       this.getUIContext().getPromptAction().showDialog({
         title: '不想看',
-        message: '确定不想看这条内容吗？将减少此类推荐。',
+        message: '隐藏后，这条视频将不再出现在首页与相关推荐，可在网络与隐私中清空隐藏记录。',
         buttons: buttons,
       }).then((dialogResult) => {
         if (Number(dialogResult.index) === 1) onHide(item);
@@ -477,8 +514,8 @@ export struct VideoCard {
         bvid: this.video.bvid,
         aid: this.video.aid,
         title: this.video.title,
-        // FeedCoverImage 使用 900w 缩略图；hero 传同一 URL 才能命中已解码纹理缓存。
-        cover: biliImageThumbnail(this.video.cover, 900),
+        // FeedCoverImage 使用统一列表规格；hero 传同一 URL 才能命中已解码纹理缓存。
+        cover: biliImageThumbnail(this.video.cover, FEED_COVER_WIDTH),
       };
       if (this.wholeCardTransition) {
         try {

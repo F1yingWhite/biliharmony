@@ -23,9 +23,11 @@ import { PlayerSideSettingsDrawer } from './PlayerSideSettingsDrawer';
 import { common } from '@kit.AbilityKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { picker } from '@kit.CoreFileKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { util } from '@kit.ArkTS';
 import { DEBUG } from 'BuildProfile';
-import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, VideoChapter } from '../../api/BiliApi';
+import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, HotPoint, VideoChapter } from '../../api/BiliApi';
 import { SponsorBlockApi, SponsorBlockResult, SponsorBlockUserInfo } from '../../api/SponsorBlockApi';
 import { UserStore } from '../../services/auth/UserStore';
 import { AppTheme, DanmakuSettings } from '../../common/AppTheme';
@@ -54,6 +56,9 @@ import { SponsorBlockCategory, SponsorBlockMode, SponsorBlockSegment, SponsorBlo
 import { SponsorBlockNotice } from './SponsorBlockNotice';
 import { HttpClient } from '../../services/network/HttpClient';
 import { VideoDownloadService } from '../../services/media/VideoDownloadService';
+import { DownloadCenter, DOWNLOAD_KIND_AUDIO, DOWNLOAD_KIND_VIDEO } from '../../services/media/DownloadCenter';
+import { PhotoLibrarySaver } from '../../services/media/PhotoLibrarySaver';
+import { ContinueWatchingStore } from '../../common/ContinueWatchingStore';
 
 /**
  * 非首帧关键请求的延后窗口：空降片段 / 章节 / 拖动预览 / 在看人数都属于增强能力，
@@ -193,6 +198,7 @@ export struct PlayerView {
   @State subtitleOn: boolean = false;
   @State subtitleIndex: number = -1;
   @State subtitleText: string = '';
+  @StorageProp('subtitleScale') @Watch('onSubtitleScaleChanged') subtitleScale: number = 1.0;
   @State subtitleLoading: boolean = false;
   @State dmFilterRulesCount: number = 0;
   @State dmFilterLoading: boolean = false;
@@ -200,6 +206,9 @@ export struct PlayerView {
   @State dmFilterType: number = 0;
   @State dmListCount: number = 0;
   @State chapters: Array<VideoChapter> = [];
+  @State hotPoints: Array<HotPoint> = [];
+  /** 每个源只做一次片头跳过判断（番剧）。 */
+  private pgcSkipTried: boolean = false;
   @State activeQuality: number = 0;
   @State qualityLoading: boolean = false;
   @State downloadBusy: boolean = false;
@@ -219,6 +228,8 @@ export struct PlayerView {
   @State blockTopDm: boolean = false;
   @State blockBottomDm: boolean = false;
   @State blockColorDm: boolean = false;
+  @State dmMerge: boolean = false;
+  @State dmMergeCount: boolean = true;
   @State holdSpeedActive: boolean = false;
   // 横滑预览时间下沉到 PlayerGestureOverlay 自持（scrubCtl 注入写回），
   // 父结构体不再随手势采样频率全量重渲染。这里只留非响应式镜像供手势结束时的 seekTo 读取落点。
@@ -248,6 +259,8 @@ export struct PlayerView {
   @StorageLink('autoContinuePlay') autoContinuePlay: boolean = true;
   private player: media.AVPlayer | null = null;
   private audioPlayer: media.AVPlayer | null = null;
+  private pendingAudioPause: Promise<void> | null = null;
+  private pendingAudioPausePlayer: media.AVPlayer | null = null;
   private audioPrepared: boolean = false;
   private videoReportDialog: CustomDialogController | null = null;
   private pipController: pictureInPicture.PiPController | null = null;
@@ -401,6 +414,10 @@ export struct PlayerView {
   private deferredLoadTimer: number = -1;
 
   aboutToAppear(): void {
+    PersistentStorage.persistProp<number>('subtitleScale', 1.0);
+    PersistentStorage.persistProp<number>('pgcSkipIntroSeconds', 0);
+    const persistedScale: number = AppStorage.get<number>('subtitleScale') ?? 1.0;
+    if (persistedScale > 0) this.subtitleScale = persistedScale;
     // 被其他 NavDestination 覆盖时 aboutToDisappear 已置位；返回同一实例时恢复。
     this.destroyed = false;
     try { this.systemVolumeLevel = this.systemVolume.level(); } catch (e) {}
@@ -466,6 +483,7 @@ export struct PlayerView {
         (video: media.AVPlayer | null, targetMs: number): void => {
           if (video !== null) this.recoverPlayersAfterSeekStall(video, targetMs);
         },
+        (): Promise<void> | null => this.pendingAudioPausePlayer === this.audioPlayer ? this.pendingAudioPause : null,
       );
     }
 
@@ -840,6 +858,10 @@ if (this.runtimeSources.length === 0) {
     const index: number = next ? (this.subtitleIndex >= 0 ? this.subtitleIndex : 0) : -1;
     if (ctl.loading && index === ctl.index) return;
     ctl.changeSubtitle(index);
+  }
+
+  private onSubtitleScaleChanged(): void {
+    // @StorageProp 自动更新渲染；持久化由 PersistentStorage 完成。
   }
 
   private syncSubtitleState(): void {
@@ -1369,6 +1391,43 @@ if (this.runtimeSources.length === 0) {
     return result;
   }
 
+  /** 服务卡片「继续观看」数据上报（内部 15 秒节流；失败静默）。 */
+  private reportContinueWatching(positionSec: number): void {
+    if (this.videoTitle.length === 0) return;
+    const context: common.Context | undefined = this.getUIContext().getHostContext();
+    if (context === undefined) return;
+    ContinueWatchingStore.report(context, this.bvid, this.aid, this.videoTitle, this.videoCover,
+      positionSec, this.duration).catch(() => {
+    });
+  }
+
+  /**
+   * 番剧跳过片头：仅 PGC（epId>0）生效；每次起播尝试一次，且仅在自然接近片头位置时跳。
+   * 用户手动拖动/续播到中段时不会回跳。
+   */
+  private applyPgcSkipIntroOnce(): void {
+    if (this.epId <= 0 || this.pgcSkipTried) return;
+    this.pgcSkipTried = true;
+    const seconds: number = AppStorage.get<number>('pgcSkipIntroSeconds') ?? 0;
+    if (seconds <= 0) return;
+    if (this.playheadSec > 30 || this.playheadSec >= seconds) return;
+    this.seekTo(seconds, true);
+    this.toast('已跳过片头');
+  }
+
+  async loadVideoHeatPoints(): Promise<void> {
+    const aid: number = this.aid;
+    const bvid: string = this.bvid;
+    const cid: number = this.cid;
+    try {
+      const points: Array<HotPoint> = await BiliApi.getVideoHeatPoints(aid, bvid, cid);
+      if (this.destroyed || this.aid !== aid || this.bvid !== bvid || this.cid !== cid) return;
+      this.hotPoints = points;
+    } catch (e) {
+      // 高能数据失败不影响播放与进度条。
+    }
+  }
+
   async loadVideoChapters(): Promise<void> {
     const aid: number = this.aid;
     const bvid: string = this.bvid;
@@ -1390,6 +1449,7 @@ if (this.runtimeSources.length === 0) {
     this.dmSegLoaded.clear();
     this.dmSegLoading.clear();
     this.dmSegFallback = false;
+    this.pgcSkipTried = false;
     this.dmSegLoading.add(0);
     try {
       // 优先 protobuf 分段接口（每 6 分钟一段）；首段失败才回退 XML 整段。
@@ -1505,6 +1565,7 @@ if (this.runtimeSources.length === 0) {
     this.cancelDeferredLoadTimer();
     this.sponsorCtl.loadSponsorSegments();
     this.loadVideoChapters();
+    this.loadVideoHeatPoints();
     this.seekPreviewCtl.preload(this.aid, this.bvid, this.cid);
     this.loadOnlineTotal();
   }
@@ -1548,6 +1609,7 @@ if (this.runtimeSources.length === 0) {
           this.backgroundVideoResumePending = false;
           this.resumeTransitionActive = false;
           this.playing = true;
+          this.applyPgcSkipIntroOnce();
           this.revealFirstFrameIfReady();
           this.onPlayingChange(true);
           this.scheduleControlsHide();
@@ -1635,6 +1697,7 @@ if (this.runtimeSources.length === 0) {
         if (systemPlaybackBucket !== this.lastSystemPlaybackBucket) {
           this.lastSystemPlaybackBucket = systemPlaybackBucket;
           this.updateAVSessionPlaybackState();
+          this.reportContinueWatching(nextTime);
         }
         if (this.timerFireAt > 0 && Date.now() >= this.timerFireAt) {
           this.timerFireAt = 0;
@@ -1654,9 +1717,12 @@ if (this.runtimeSources.length === 0) {
         this.updateAVSessionMetadata();
       });
       let bufferingAudioPause: Promise<void> | null = null;
+      let bufferingAudioGeneration: number = -1;
       let bufferGeneration: number = 0;
       let speedBufferTimer: number = -1;
       const pauseForBuffer = (): void => {
+        // 用户定位已经接管双轨，不能再排入一个会迟到的缓冲暂停。
+        if (this.seekLocked || (this.seekCtl?.seekInFlight ?? true)) return;
         // seek 的短暂缓冲由延迟提示管理，快速定位不闪 loading。
         if ((this.seekCtl?.seekInFlight ?? true) === false) this.buffering = true;
         this.dmClock.pause();
@@ -1664,14 +1730,24 @@ if (this.runtimeSources.length === 0) {
         if (audio !== null && this.audioPrepared && this.playing &&
           !(this.seekCtl?.seekInFlight ?? true) && bufferingAudioPause === null) {
           this.cancelAudioGate();
+          bufferingAudioGeneration = this.audioGateGeneration;
+          const pauseGeneration: number = bufferingAudioGeneration;
           audio.setVolume(0);
-          bufferingAudioPause = audio.state === 'playing' ? audio.pause().catch(() => {}) : Promise.resolve();
+          bufferingAudioPause = this.pauseAudioForSync(audio).catch(() => {
+            if (this.player === p && this.audioPlayer === audio &&
+              pauseGeneration === this.audioGateGeneration) {
+              this.handleAudioPlayerError(audio, '缓冲暂停失败');
+            }
+          });
         }
       };
       p.on('bufferingUpdate', (infoType: media.BufferingInfoType, value: number) => {
         if (this.player !== p || this.backgroundAudioOnly) return;
         if (infoType === media.BufferingInfoType.BUFFERING_START) {
           bufferGeneration++;
+          if (DEBUG) hilog.info(0x0000, 'BiliPlayback',
+            'buffer.start hold=%{public}s seek=%{public}s position=%{public}d',
+            String(this.holdSpeedActive), String(this.seekLocked), p.currentTime);
           // 切速时短暂重新排帧不立即暂停音轨；真正持续的缓冲最多延迟 180ms 处理。
           if (Date.now() < this.speedTransitionUntilMs) {
             if (speedBufferTimer < 0) {
@@ -1689,12 +1765,15 @@ if (this.runtimeSources.length === 0) {
             speedBufferTimer = -1;
           }
           const completedBuffer: number = bufferGeneration;
+          const completedAudioGeneration: number = bufferingAudioGeneration;
           const paused: Promise<void> | null = bufferingAudioPause;
           bufferingAudioPause = null;
           if (paused !== null) {
             paused.then(() => {
               if (this.player !== p || completedBuffer !== bufferGeneration || !this.playing ||
-                this.backgroundAudioOnly || this.seekLocked || this.buffering) return;
+                completedAudioGeneration !== this.audioGateGeneration ||
+                this.backgroundAudioOnly || this.seekLocked) return;
+              // 首帧恢复期间仍可能 buffering；保留待启动标记，后续 timeUpdate 再尝试。
               this.gateAudioStart();
               this.tryStartGatedAudio();
             });
@@ -1972,6 +2051,8 @@ if (this.runtimeSources.length === 0) {
   /** 视频已开始推进：先把尚未播放的 DASH 音轨定位到当前视频时间，再在 seekDone 后启动。 */
   private tryStartGatedAudio(): void {
     if (!this.audioStartPending || this.audioGateSeekPending || !this.playing) return;
+    if (this.buffering || this.seekLocked || this.backgroundAudioOnly ||
+      (this.seekCtl?.seekInFlight ?? false)) return;
     const video: media.AVPlayer | null = this.player;
     const audio: media.AVPlayer | null = this.audioPlayer;
     if (video === null || !this.prepared || audio === null || !this.audioPrepared) return;
@@ -1991,7 +2072,7 @@ if (this.runtimeSources.length === 0) {
     this.audioGateSeekPending = true;
     try {
       audio.setVolume(0);
-      if (audio.state === 'playing') await audio.pause();
+      await this.pauseAudioForSync(audio);
       if (generation !== this.audioGateGeneration || this.player !== video || this.audioPlayer !== audio ||
         !this.playing || this.seekLocked || this.backgroundAudioOnly) return;
       this.audioGateSeekTargetMs = Math.max(0, video.currentTime);
@@ -2027,6 +2108,22 @@ if (this.runtimeSources.length === 0) {
       audio.play();
     } catch (e) {
     }
+  }
+
+  /** 所有自动音轨暂停共用屏障，用户 seek 必须等旧暂停真正完成。 */
+  private pauseAudioForSync(audio: media.AVPlayer): Promise<void> {
+    if (this.pendingAudioPausePlayer === audio && this.pendingAudioPause !== null) return this.pendingAudioPause;
+    const pending: Promise<void> = audio.state === 'playing' ? audio.pause() : Promise.resolve();
+    this.pendingAudioPause = pending;
+    this.pendingAudioPausePlayer = audio;
+    const clearPending = (): void => {
+      if (this.pendingAudioPause === pending) {
+        this.pendingAudioPause = null;
+        this.pendingAudioPausePlayer = null;
+      }
+    };
+    pending.then(clearPending, clearPending);
+    return pending;
   }
 
   private cancelAudioGate(): void {
@@ -2894,26 +2991,232 @@ if (this.runtimeSources.length === 0) {
   }
 
   private promptDownloadType(): void {
-    if (this.downloadBusy || VideoDownloadService.isActive()) {
-      this.toast('已有下载任务正在进行');
-      return;
-    }
+    const dark: boolean = this.isDark;
+    const option: string = dark ? '#E6E6E6' : '#18191C';
     try {
       this.getUIContext().getPromptAction().showActionMenu({
-        title: '选择下载格式',
+        title: '选择下载内容',
         buttons: [
-          { text: '下载视频（MP4）', color: this.isDark ? '#E6E6E6' : '#18191C' },
-          { text: '只下载音频（M4A）', color: this.isDark ? '#E6E6E6' : '#18191C' },
+          { text: '缓存到下载中心 · 视频', color: option },
+          { text: '缓存到下载中心 · 音频', color: option },
+          { text: '导出视频（MP4）', color: option },
+          { text: '导出音频（M4A）', color: option },
+          { text: '弹幕 / 字幕 / 封面…', color: option },
         ],
       }).then((result) => {
         const index: number = Number(result.index);
-        if (index === 0 || index === 1) {
-          this.startMediaDownload(index === 1).catch(() => {
+        if (index === 0) {
+          this.enqueueCenterDownload(false).catch(() => {
           });
+        } else if (index === 1) {
+          this.enqueueCenterDownload(true).catch(() => {
+          });
+        } else if (index === 2) {
+          this.startMediaDownload(false).catch(() => {
+          });
+        } else if (index === 3) {
+          this.startMediaDownload(true).catch(() => {
+          });
+        } else if (index === 4) {
+          this.promptMediaExportMenu();
         }
       });
     } catch (e) {
       this.toast('无法打开下载格式选择');
+    }
+  }
+
+  /** 二级菜单：弹幕/字幕/封面（showActionMenu 最多 6 个按钮）。 */
+  private promptMediaExportMenu(): void {
+    const dark: boolean = this.isDark;
+    const option: string = dark ? '#E6E6E6' : '#18191C';
+    try {
+      this.getUIContext().getPromptAction().showActionMenu({
+        title: '导出内容',
+        buttons: [
+          { text: '下载弹幕（XML）', color: option },
+          { text: '下载字幕（SRT）', color: option },
+          { text: '下载封面（图片）', color: option },
+        ],
+      }).then((result) => {
+        const index: number = Number(result.index);
+        if (index === 0) {
+          this.exportDanmaku().catch(() => {
+          });
+        } else if (index === 1) {
+          this.exportSubtitle().catch(() => {
+          });
+        } else if (index === 2) {
+          this.exportCover().catch(() => {
+          });
+        }
+      });
+    } catch (e) {
+      this.toast('无法打开导出菜单');
+    }
+  }
+
+  /** 播放器截图：取进度预览雪碧图最近帧 → 存相册（系统安全组件确认）。 */
+  private async captureScreenshot(): Promise<void> {
+    const frame: image.PixelMap | null = await this.seekPreviewCtl.captureAt(this.playheadSec);
+    if (frame === null) {
+      this.toast('该视频暂不支持截图');
+      return;
+    }
+    try {
+      const packer: image.ImagePacker = image.createImagePacker();
+      const data: ArrayBuffer = await packer.packToData(frame, { format: 'image/jpeg', quality: 92 });
+      const context: common.UIAbilityContext | undefined =
+        this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+      if (context === undefined) return;
+      const saved: boolean = await PhotoLibrarySaver.saveImage(context, data, 'jpeg',
+        'BiliHaromny_' + String(Math.floor(this.playheadSec)) + 's');
+      this.toast(saved ? '截图已保存到相册' : '截图未保存');
+    } catch (e) {
+      this.toast('截图保存失败，请重试');
+    }
+  }
+
+  /** 缓存到下载中心：任务持久化、可排队/重试，不再依赖当前页面存活。 */
+  private async enqueueCenterDownload(audioOnly: boolean): Promise<void> {
+    if (this.epId > 0) {
+      this.toast('番剧下载暂未开放');
+      return;
+    }
+    if (this.cid <= 0 || (this.aid <= 0 && this.bvid.length === 0)) {
+      this.toast('当前视频信息不完整，无法下载');
+      return;
+    }
+    const context: common.UIAbilityContext | undefined =
+      this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+    if (context === undefined) return;
+    try {
+      await DownloadCenter.init(context);
+      let baseName: string = this.videoTitle;
+      if (this.videoPartTitle.trim().length > 0 && this.videoPartTitle.trim() !== this.videoTitle.trim()) {
+        baseName += ' - ' + this.videoPartTitle.trim();
+      }
+      const requestedQuality: number = this.downloadQualityValue();
+      const qualityLabel: string = audioOnly ? '音频' : this.downloadQualityText();
+      const title: string = this.safeDownloadName(baseName + ' [' + qualityLabel + ']');
+      await DownloadCenter.enqueue(audioOnly ? DOWNLOAD_KIND_AUDIO : DOWNLOAD_KIND_VIDEO,
+        this.aid, this.bvid, this.cid, 0, audioOnly ? 0 : requestedQuality, title, qualityLabel);
+      this.toast('已加入下载中心' + (DownloadCenter.hasActive() ? '，正在下载' : '，排队中'));
+    } catch (e) {
+      const message: string = e instanceof Error ? e.message : '';
+      this.toast(message.length > 0 ? message : '加入下载中心失败，请重试');
+    }
+  }
+
+  /** 弹幕导出：全部分段 protobuf → 标准 XML（官方弹幕XML格式 p 属性）。 */
+  private async exportDanmaku(): Promise<void> {
+    if (this.cid <= 0) {
+      this.toast('当前视频没有弹幕');
+      return;
+    }
+    this.toast('正在整理弹幕…');
+    let xml: string = '<?xml version="1.0" encoding="UTF-8"?><i><chatserver>chat.bilibili.com' +
+      '</chatserver><chatid>' + String(this.cid) + '</chatid><maxlimit>1500</maxlimit><source>k-v</source>';
+    let total: number = 0;
+    for (let seg: number = 1; seg <= 12; seg++) {
+      const items: Array<DanmakuItem> | null = await BiliApi.getDanmakuSeg(this.cid, this.aid, seg);
+      if (items === null || items.length === 0) break;
+      for (let i: number = 0; i < items.length; i++) {
+        const dm: DanmakuItem = items[i];
+        const text: string = dm.text.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        const p: string = dm.time.toFixed(2) + ',' + String(dm.mode) + ',' + String(dm.fontsize) + ',' +
+          String(dm.color) + ',0,0,0,' + (dm.idStr.length > 0 ? dm.idStr : String(dm.id));
+        xml += '<d p="' + p + '">' + text + '</d>';
+        total++;
+      }
+    }
+    xml += '</i>';
+    if (total === 0) {
+      this.toast('当前视频没有弹幕');
+      return;
+    }
+    const identity: string = this.bvid.length > 0 ? this.bvid : 'av' + String(this.aid);
+    await this.saveTextFile(this.safeDownloadName(this.videoTitle + ' [' + identity + ']') + '.xml',
+      '弹幕文件|.xml', xml);
+    this.toast('弹幕已保存（' + String(total) + ' 条）');
+  }
+
+  /** 字幕导出：当前轨道 CC JSON → SRT。 */
+  private async exportSubtitle(): Promise<void> {
+    const tracks: Array<SubtitleTrack> = this.subtitles;
+    if (tracks.length === 0) {
+      this.toast('该视频没有 CC 字幕');
+      return;
+    }
+    const track: SubtitleTrack = tracks[0];
+    const cues: Array<SubtitleCue> = await BiliApi.getSubtitleCues(track.url);
+    if (cues.length === 0) {
+      this.toast('字幕内容获取失败');
+      return;
+    }
+    let srt: string = '';
+    for (let i: number = 0; i < cues.length; i++) {
+      const cue: SubtitleCue = cues[i];
+      srt += String(i + 1) + '\n' + PlayerView.srtTime(cue.from) + ' --> ' + PlayerView.srtTime(cue.to) +
+        '\n' + cue.content + '\n\n';
+    }
+    const trackName: string = track.lanDoc.length > 0 ? track.lanDoc : (track.lan.length > 0 ? track.lan : '字幕');
+    await this.saveTextFile(this.safeDownloadName(this.videoTitle + ' [' + trackName + ']') + '.srt',
+      '字幕文件|.srt', srt);
+    this.toast('字幕已保存（' + String(cues.length) + ' 条）');
+  }
+
+  private static srtTime(seconds: number): string {
+    const total: number = Math.max(0, Math.round(seconds * 1000));
+    const ms: number = total % 1000;
+    const whole: number = Math.floor(total / 1000);
+    const h: number = Math.floor(whole / 3600);
+    const m: number = Math.floor((whole % 3600) / 60);
+    const sec: number = whole % 60;
+    const pad = (v: number, n: number): string => String(v).padStart(n, '0');
+    return pad(h, 2) + ':' + pad(m, 2) + ':' + pad(sec, 2) + ',' + pad(ms, 3);
+  }
+
+  /** 封面导出：原图字节经文件选择器落盘（JPG/PNG 按地址扩展名）。 */
+  private async exportCover(): Promise<void> {
+    if (this.videoCover.length === 0) {
+      this.toast('当前视频没有封面');
+      return;
+    }
+    try {
+      const bytes: ArrayBuffer = await HttpClient.getBytes(this.videoCover);
+      const lower: string = this.videoCover.split('?')[0].toLowerCase();
+      const extension: string = lower.endsWith('.png') ? '.png' : (lower.endsWith('.webp') ? '.webp' : '.jpg');
+      const identity: string = this.bvid.length > 0 ? this.bvid : 'av' + String(this.aid);
+      await this.saveBinaryFile(this.safeDownloadName(this.videoTitle + ' [封面] [' + identity + ']') + extension,
+        '图片文件|' + extension, bytes);
+      this.toast('封面已保存');
+    } catch (e) {
+      this.toast('封面下载失败，请重试');
+    }
+  }
+
+  private async saveTextFile(fileName: string, suffix: string, content: string): Promise<void> {
+    const encoder: util.TextEncoder = new util.TextEncoder();
+    await this.saveBinaryFile(fileName, suffix, encoder.encodeInto(content).buffer as ArrayBuffer);
+  }
+
+  private async saveBinaryFile(fileName: string, suffix: string, bytes: ArrayBuffer): Promise<void> {
+    const context: common.UIAbilityContext | undefined =
+      this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+    if (context === undefined) return;
+    const documentPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
+    const options: picker.DocumentSaveOptions = new picker.DocumentSaveOptions();
+    options.newFileNames = [fileName];
+    options.fileSuffixChoices = [suffix];
+    const targets: Array<string> = await documentPicker.save(options);
+    if (targets.length === 0) return;
+    const file: fs.File = fs.openSync(targets[0], fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(file.fd, bytes);
+    } finally {
+      fs.closeSync(file);
     }
   }
 
@@ -3114,6 +3417,8 @@ if (this.runtimeSources.length === 0) {
     this.blockTopDm = s.blockTop;
     this.blockBottomDm = s.blockBottom;
     this.blockColorDm = s.blockColor;
+    this.dmMerge = s.mergeDuplicates;
+    this.dmMergeCount = s.mergeShowCount;
     this.dmEngine.opacity = s.opacity;
     this.dmEngine.speed = s.speed;
     this.dmEngine.fontScale = s.fontScale;
@@ -3124,6 +3429,8 @@ if (this.runtimeSources.length === 0) {
     this.dmEngine.blockTopDm = s.blockTop;
     this.dmEngine.blockBottomDm = s.blockBottom;
     this.dmEngine.blockColorDm = s.blockColor;
+    this.dmEngine.mergeDuplicates = s.mergeDuplicates;
+    this.dmEngine.showMergeCount = s.mergeShowCount;
   }
 
   /** 当前弹幕设置全量快照落盘（存储层内部 flush 防抖，滑条高频触发安全）。 */
@@ -3141,7 +3448,24 @@ if (this.runtimeSources.length === 0) {
     s.blockTop = this.blockTopDm;
     s.blockBottom = this.blockBottomDm;
     s.blockColor = this.blockColorDm;
+    s.mergeDuplicates = this.dmMerge;
+    s.mergeShowCount = this.dmMergeCount;
     AppTheme.persistDanmakuSettings(s);
+  }
+
+  /** 重复弹幕合并开关：切换后重载弹幕以重新聚类（列表已被合并/展开过，无法原地逆变换）。 */
+  setDmMerge(on: boolean): void {
+    this.dmMerge = on;
+    this.dmEngine.mergeDuplicates = on;
+    this.persistDanmaku();
+    this.loadDanmaku();
+  }
+
+  setDmMergeCount(on: boolean): void {
+    this.dmMergeCount = on;
+    this.dmEngine.showMergeCount = on;
+    this.persistDanmaku();
+    if (on) this.loadDanmaku();
   }
 
   setDmOpacity(value: number): void {
@@ -3211,6 +3535,8 @@ if (this.runtimeSources.length === 0) {
     this.blockTopDm = defaults.blockTop;
     this.blockBottomDm = defaults.blockBottom;
     this.blockColorDm = defaults.blockColor;
+    this.dmMerge = defaults.mergeDuplicates;
+    this.dmMergeCount = defaults.mergeShowCount;
     this.applyDmFilters();
   }
 
@@ -3316,7 +3642,7 @@ if (this.runtimeSources.length === 0) {
       // CC 字幕层：底部黑底白字，开关与轨道选择见设置面板/更多菜单。
       if (this.subtitleOn && this.subtitleText.length > 0) {
         Text(this.subtitleText)
-          .fontSize(15)
+          .fontSize(Math.max(12, Math.min(30, Math.round(15 * this.subtitleScale))))
           .fontColor(this.sheetTitleColor())
           .backgroundColor('#66000000')
           .padding({ left: 10, right: 10, top: 4, bottom: 4 })
@@ -3450,6 +3776,7 @@ if (this.runtimeSources.length === 0) {
           if (this.compactMode && !this.fullscreen) {
             PlayerCompactControls({
               playing: this.playing,
+              hotPoints: this.hotPoints,
               progress: this.progressDisplayTime(),
               duration: this.duration,
               chapters: this.chapters,
@@ -3510,6 +3837,7 @@ if (this.runtimeSources.length === 0) {
             .layoutWeight(1)
             PlayerBottomControls({
               fullscreen: this.fullscreen,
+              hotPoints: this.hotPoints,
               playing: this.playing,
               danmakuOn: this.danmakuOn,
               sponsorEnabled: this.sponsorSkipEnabled,
@@ -3757,6 +4085,7 @@ if (this.runtimeSources.length === 0) {
       sponsorUserStats: $sponsorUserStats,
       sponsorWarningReason: $sponsorWarningReason,
       subtitleOn: this.subtitleOn,
+      subtitleScale: this.subtitleScale,
       backgroundPlaybackEnabled: this.backgroundPlaybackEnabled,
       subtitleIndex: this.subtitleIndex,
       subtitles: this.subtitles,
@@ -3776,6 +4105,8 @@ if (this.runtimeSources.length === 0) {
       blockTopDm: this.blockTopDm,
       blockBottomDm: this.blockBottomDm,
       blockColorDm: this.blockColorDm,
+      dmMerge: this.dmMerge,
+      dmMergeCount: this.dmMergeCount,
       dmListCount: this.dmListCount,
       dmFilterLoading: this.dmFilterLoading,
       dmFilterType: this.dmFilterType,
@@ -3809,6 +4140,8 @@ if (this.runtimeSources.length === 0) {
       onDmDensityChange: (value: number) => this.setDmDensity(value),
       onDmBlockLevelChange: (value: number) => this.setDmBlockLevel(value),
       onToggleDmBlock: (kind: string) => this.toggleDmBlock(kind),
+      onDmMergeChange: (next: boolean) => this.setDmMerge(next),
+      onDmMergeCountChange: (next: boolean) => this.setDmMergeCount(next),
       onQualityChange: (qn: number) => this.changeQuality(qn),
       onChapterChange: (seconds: number) => {
         this.seekTo(seconds, true);
@@ -3819,6 +4152,9 @@ if (this.runtimeSources.length === 0) {
       onTimerChange: (minutes: number) => this.onTimerChanged(minutes),
       onMirrorChange: (next: boolean) => this.mirrorOn = next,
       onSubtitleToggle: (next: boolean) => this.toggleSubtitle(next),
+      onSubtitleScaleChange: (scale: number) => {
+        AppStorage.setOrCreate<number>('subtitleScale', scale);
+      },
       onBackgroundPlaybackChange: (next: boolean) => this.setBackgroundPlayback(next),
       onPictureInPicture: () => { this.startPictureInPicture(); },
       onReportVideo: () => this.reportCurrentVideo(),

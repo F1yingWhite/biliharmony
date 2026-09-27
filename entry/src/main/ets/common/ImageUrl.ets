@@ -1,3 +1,7 @@
+/** 列表与详情转场必须使用同一封面规格，避免重复下载与解码。 */
+export const FEED_COVER_WIDTH: number = 720;
+export const FEED_AVATAR_WIDTH: number = 120;
+
 /** 去除哔哩哔哩图片 CDN 的 @缩放/格式后缀，恢复原图地址。 */
 export function biliImageOriginal(url: string): string {
   if (url.indexOf('hdslb.com') < 0) return url;

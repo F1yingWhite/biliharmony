@@ -101,6 +101,7 @@ export class Api {
   static readonly ugcUrl: string = HttpString.apiBaseUrl + '/x/player/playurl';
   static readonly ugcWbiUrl: string = HttpString.apiBaseUrl + '/x/player/wbi/playurl';
   static readonly relatedList: string = HttpString.apiBaseUrl + '/x/web-interface/archive/related';
+  static readonly videoTags: string = HttpString.apiBaseUrl + '/x/tag/archive/tags';
   static readonly onlineTotal: string = HttpString.apiBaseUrl + '/x/player/online/total';
   static readonly videoShot: string = HttpString.apiBaseUrl + '/x/player/videoshot';
   static readonly playerInfo: string = HttpString.apiBaseUrl + '/x/player/wbi/v2';
@@ -116,6 +117,7 @@ export class Api {
   static readonly bangumiSeason: string = HttpString.apiBaseUrl + '/pgc/view/web/season';
   static readonly bangumiFollowAdd: string = HttpString.apiBaseUrl + '/pgc/web/follow/add';
   static readonly bangumiFollowDel: string = HttpString.apiBaseUrl + '/pgc/web/follow/del';
+  static readonly bangumiFollowStatusUpdate: string = HttpString.apiBaseUrl + '/pgc/web/follow/status/update';
   // 我的追番/追剧列表（需登录；type: 1=番剧 2=影视 3=全部-后端取值）
   // 我的追番列表（space 域；对齐 PiliPlus favPgc；type 1番剧 / 2国创·影视）
   static readonly bangumiFollowList: string = HttpString.apiBaseUrl + '/x/space/bangumi/follow/list';
@@ -129,6 +131,7 @@ export class Api {
   static readonly replyReplyList: string = HttpString.apiBaseUrl + '/x/v2/reply/reply';
   static readonly replyAdd: string = HttpString.apiBaseUrl + '/x/v2/reply/add';
   static readonly replyDel: string = HttpString.apiBaseUrl + '/x/v2/reply/del';
+  static readonly replyTop: string = HttpString.apiBaseUrl + '/x/v2/reply/top';
   static readonly replyLike: string = HttpString.apiBaseUrl + '/x/v2/reply/action';
   static readonly replyHate: string = HttpString.apiBaseUrl + '/x/v2/reply/hate';
   static readonly replyReport: string = HttpString.apiBaseUrl + '/x/v2/reply/report';
@@ -139,6 +142,7 @@ export class Api {
   static readonly sessionAccountList: string = HttpString.tUrl + '/account/v1/user/cards';
   static readonly sessionMessages: string = HttpString.tUrl + '/svr_sync/v1/svr_sync/fetch_session_msgs';
   static readonly sessionRemove: string = HttpString.tUrl + '/session_svr/v1/session_svr/remove_session';
+  static readonly sessionPin: string = HttpString.tUrl + '/session_svr/v1/session_svr/pin-session';
   static readonly sessionReportIm: string = HttpString.tUrl + '/x/bplus/im/report/add';
   static readonly ackSessionMessage: string = HttpString.tUrl + '/session_svr/v1/session_svr/update_ack';
   static readonly sendMessage: string = HttpString.tUrl + '/web_im/v1/web_im/send_msg';
@@ -203,6 +207,8 @@ export class Api {
   // 关注分组（对齐 PiliPlus lib/http/api.dart followUpTag/createFollowTag/addUsers）
   static readonly followTags: string = HttpString.apiBaseUrl + '/x/relation/tags';
   static readonly followTagCreate: string = HttpString.apiBaseUrl + '/x/relation/tag/create';
+  static readonly followTagUpdate: string = HttpString.apiBaseUrl + '/x/relation/tag/update';
+  static readonly followTagDel: string = HttpString.apiBaseUrl + '/x/relation/tag/del';
   static readonly followTagsAddUsers: string = HttpString.apiBaseUrl + '/x/relation/tags/addUsers';
   static readonly userFollowings: string = HttpString.apiBaseUrl + '/x/relation/followings';
   static readonly userFollowers: string = HttpString.apiBaseUrl + '/x/relation/followers';
@@ -229,6 +235,20 @@ export class Api {
   // ===== 登录 (TV 扫码) =====
   static readonly getTVCode: string = HttpString.passBaseUrl + '/x/passport-tv-login/qrcode/auth_code';
   static readonly qrcodePoll: string = HttpString.passBaseUrl + '/x/passport-tv-login/qrcode/poll';
+
+  // ===== 风控验证（gaia-vgate + 极验滑块；v1/V 两代端点并存，请求时依次尝试） =====
+  static readonly gaiaVgateRegisterList: Array<string> = [
+    HttpString.appBaseUrl + '/x/gaia-vgate/v1/register',
+    HttpString.apiBaseUrl + '/x/gaia-vgate/V/register',
+  ];
+  static readonly gaiaVgateValidateList: Array<string> = [
+    HttpString.appBaseUrl + '/x/gaia-vgate/v1/validate',
+    HttpString.apiBaseUrl + '/x/gaia-vgate/V/validate',
+  ];
+
+  // ===== 登录 (Web 扫码：响应带 refresh_token，Cookie 自动续期的前提) =====
+  static readonly webQrGenerate: string = HttpString.passBaseUrl + '/x/passport-login/web/qrcode/generate';
+  static readonly webQrPoll: string = HttpString.passBaseUrl + '/x/passport-login/web/qrcode/poll';
 
   // ===== 登录 (密码 / 短信验证码，app 端 passport，移植自 PiliPlus lib/http/api.dart) =====
   static readonly loginWebKey: string = HttpString.passBaseUrl + '/x/passport-login/web/key';

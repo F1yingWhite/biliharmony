@@ -102,6 +102,13 @@ export struct SearchPage {
     this.loading = false;
     this.loadingMore = false;
     this.history = await SearchHistoryStore.ensureLoaded();
+    // 外部直达搜索（视频 TAG 等）：注入关键词并立即检索。
+    const prefill: string = AppStorage.get<string>('searchPrefillKeyword') ?? '';
+    if (prefill.length > 0) {
+      AppStorage.setOrCreate<string>('searchPrefillKeyword', '');
+      this.keyword = prefill;
+      this.submitSearch();
+    }
     this.loadHotSearch().catch(() => {
     });
     // 拉取 B 站搜索默认词作为占位（失败时保持现有占位不变）。

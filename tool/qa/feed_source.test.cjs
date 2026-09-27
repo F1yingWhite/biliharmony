@@ -27,6 +27,7 @@ function environment(mocks = {}) {
         return load(path.relative(root, path.resolve(path.dirname(filename), name)).replaceAll('\\', '/'));
       }
       if (name in mocks) return mocks[name];
+      if (name === '@kit.ArkWeb') return { webview: {} };
       if (name === '@kit.PerformanceAnalysisKit') {
         const noop = () => {};
         return { hilog: { debug: noop, info: noop, warn: noop, error: noop } };

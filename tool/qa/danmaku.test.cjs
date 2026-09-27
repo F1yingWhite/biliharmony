@@ -35,6 +35,8 @@ function environment(mocks = {}) {
       }
       if (name in mocks) return mocks[name];
       // LiveDanmakuClient 等模块引用 hilog：Node 沙箱以静默实现兜底。
+      if (name === '@kit.CryptoArchitectureKit') return { cryptoFramework: {} };
+      if (name === '@kit.ArkWeb') return { webview: {} };
       if (name === '@kit.PerformanceAnalysisKit') {
         const noop = () => {};
         return { hilog: { debug: noop, info: noop, warn: noop, error: noop } };

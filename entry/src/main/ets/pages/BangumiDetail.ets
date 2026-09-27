@@ -34,6 +34,8 @@ export struct BangumiDetailPage {
   @State errorText: string = '';
   @State currentEpId: number = 0;
   @State followed: boolean = false;
+  @State followStatus: number = 0;
+  @State showStatusPanel: boolean = false;
   @State favorites: number = 0;
   @State followBusy: boolean = false;
   @State viewportWidth: number = 360;
@@ -279,6 +281,34 @@ export struct BangumiDetailPage {
       if (!this.destroyed) this.toast('网络异常，操作失败');
     } finally {
       if (!this.destroyed) this.followBusy = false;
+    }
+  }
+
+  /** 追番状态：1 想看 / 2 在看 / 4 看过（与 B 站 web 端一致）。 */
+  private async setFollowStatus(status: number): Promise<void> {
+    if (this.season.seasonId <= 0) return;
+    if (!UserStore.isLogin) {
+      AppNavStack.pushPathByName(NAV_LOGIN, null);
+      return;
+    }
+    if (this.followBusy) return;
+    this.followBusy = true;
+    try {
+      const result: ActionResult = await BangumiApi.updateFollowStatus(this.season.seasonId, status);
+      if (this.destroyed) return;
+      this.toast(result.ok ? ['想看', '在看', '', '看过'][status - 1] ?? '已更新状态' : result.message);
+      if (result.ok) {
+        this.followStatus = status;
+        if (!this.followed) {
+          this.followed = true;
+          this.favorites = Math.max(0, this.favorites + 1);
+        }
+      }
+    } catch (e) {
+      if (!this.destroyed) this.toast('网络异常，操作失败');
+    } finally {
+      this.followBusy = false;
+      this.showStatusPanel = false;
     }
   }
 
@@ -613,6 +643,10 @@ export struct BangumiDetailPage {
                 this.toggleFollow().catch(() => {
                 });
               })
+            .gesture(LongPressGesture({ repeat: false })
+              .onAction(() => {
+                this.showStatusPanel = true;
+              }))
           }
           .layoutWeight(1)
           .alignItems(HorizontalAlign.Start)
@@ -903,7 +937,32 @@ export struct BangumiDetailPage {
     .alignItems(HorizontalAlign.Start)
   }
 
+  @Builder
+  FollowStatusPanel() {
+    Column({ space: 10 }) {
+      Text('标记状态')
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.isDark ? '#F1F2F4' : '#18191C')
+      Row({ space: 10 }) {
+        ForEach([1, 2, 4], (status: number) => {
+          Text(['想看', '在看', '', '看过'][status - 1] ?? '')
+            .fontSize(13)
+            .fontColor(this.followStatus === status ? '#FFFFFF' : (this.isDark ? '#D0D0D0' : '#5A5F66'))
+            .padding({ left: 16, right: 16, top: 7, bottom: 7 })
+            .borderRadius(16)
+            .backgroundColor(this.followStatus === status ? this.accent : (this.isDark ? '#2C2D33' : '#F1F2F3'))
+            .onClick(() => this.setFollowStatus(status))
+        }, (status: number) => 'status-' + String(status))
+      }
+    }
+    .padding(14)
+    .borderRadius(14)
+    .backgroundColor(this.isDark ? '#26272B' : '#FFFFFF')
+  }
+
   build() {
+    Stack({ alignContent: Alignment.Bottom }) {
     Column() {
       if (this.loading) {
         this.StateHeader()
@@ -1008,5 +1067,23 @@ export struct BangumiDetailPage {
       radius: { topLeft: 18, topRight: 18 },
       backgroundColor: this.isDark ? '#18191C' : '#FFFFFF',
     })
+    if (this.showStatusPanel) {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#40000000')
+        .onClick(() => {
+          this.showStatusPanel = false;
+        })
+      Column() {
+        this.FollowStatusPanel()
+      }
+      .width('100%')
+      .padding({ left: 16, right: 16, bottom: Immersive.bottomInset() + 24 })
+      .zIndex(90)
+    }
+    }
+    .width('100%')
+    .height('100%')
   }
 }

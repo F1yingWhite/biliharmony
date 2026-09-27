@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const ts = require(process.env.ARKTS_TEST_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript');
-function fixture() {
+function fixture(getAudioPause = () => null) {
   const timers = new Map(); let id = 0;
   const module = {exports: {}};
   const source = fs.readFileSync('entry/src/main/ets/components/player/PlayerSeekController.ets', 'utf8');
@@ -15,7 +15,7 @@ function fixture() {
     seek(ms) {this.calls.push(ms);}});
   const video = makePlayer(), audio = makePlayer(), done = [], stalled = [];
   const ctl = new module.exports.PlayerSeekController(() => video, () => audio, () => true, () => true,
-    () => {}, () => {}, (...args) => done.push(args), (...args) => stalled.push(args));
+    () => {}, () => {}, (...args) => done.push(args), (...args) => stalled.push(args), getAudioPause);
   return {ctl, video, audio, done, stalled, fire(ms) {
     for (const [key, timer] of [...timers]) if (timer.ms === ms) {timers.delete(key); timer.fn();}
   }};
@@ -50,7 +50,7 @@ test('missing audio callback is tolerated only when the playback head confirms a
 test('keyframe recovery aligns audio to the actual video landing position', async () => {
   const f = fixture(); f.ctl.request(10000, false, true); f.fire(60); await flush();
   f.ctl.onAudioSeekDone(f.audio, 10000); f.ctl.onVideoSeekDone(f.video, 7200);
-  assert.deepEqual(f.audio.calls, [10000, 7200]); assert.equal(f.done.length, 0);
+  assert.deepEqual(f.audio.calls, [7200]); assert.equal(f.done.length, 0);
   f.ctl.onAudioSeekDone(f.audio, 10000); assert.equal(f.done.length, 0);
   f.ctl.onAudioSeekDone(f.audio, 7200); assert.deepEqual(f.done, [[true, 7200]]);
 });
@@ -136,7 +136,7 @@ test('speed transition suppresses transient drift without changing audio rate', 
   assert.deepEqual(h.calls, [0.97]);
 });
 
-test('short speed-change buffering does not pause audio, sustained buffering still does', () => {
+function bufferHarness() {
   const source = fs.readFileSync('entry/src/main/ets/components/player/PlayerView.ets', 'utf8');
   const a = source.indexOf('      let bufferingAudioPause:');
   const b = source.indexOf("      p.on('videoSizeChange'", a);
@@ -144,20 +144,59 @@ test('short speed-change buffering does not pause audio, sustained buffering sti
   const code = ts.transpileModule(source.slice(a, b), {
     compilerOptions: {target: ts.ScriptTarget.ES2020}
   }).outputText;
-  let handler, timer, pauses = 0;
+  let handler, timer, pauses = 0, gates = 0, finishPause;
   const p = {on(name, callback) {handler = callback;}};
-  const h = {player: p, playing: true, audioPrepared: true, speedTransitionUntilMs: Date.now() + 1500,
-    seekCtl: {seekInFlight: false}, dmClock: {pause() {}, start() {}, stop() {}}, cancelAudioGate() {},
-    audioPlayer: {state: 'playing', setVolume() {}, pause() {pauses++; return Promise.resolve();}}};
-  new Function('p', 'media', 'setTimeout', 'clearTimeout', code).call(h, p,
+  const h = {player: p, playing: true, audioPrepared: true, audioGateGeneration: 0,
+    speedTransitionUntilMs: Date.now() + 1500, seekCtl: {seekInFlight: false},
+    dmClock: {pause() {}, start() {}, stop() {}},
+    cancelAudioGate() {this.audioGateGeneration++;},
+    gateAudioStart() {gates++; this.audioStartPending = true;}, tryStartGatedAudio() {},
+    pauseAudioForSync(audio) {return audio.pause();},
+    audioPlayer: {state: 'playing', setVolume() {}, pause() {
+      pauses++; return new Promise(resolve => {finishPause = resolve;});
+    }}};
+  new Function('p', 'media', 'setTimeout', 'clearTimeout', 'const DEBUG = false;\n' + code).call(h, p,
     {BufferingInfoType: {BUFFERING_START: 0, BUFFERING_END: 1}},
     callback => {timer = callback; return 1;}, () => {timer = null;});
-  handler(0, 0);
-  assert.equal(pauses, 0);
-  handler(1, 0);
-  assert.equal(timer, null);
-  assert.equal(pauses, 0);
-  handler(0, 0);
-  timer();
-  assert.equal(pauses, 1);
+  return {h, start: () => handler(0, 0), end: () => handler(1, 0),
+    fire: () => timer(), resolve: () => finishPause(),
+    pauses: () => pauses, gates: () => gates, timer: () => timer};
+}
+test('short speed-change buffering does not pause audio, sustained buffering still does', () => {
+  const f = bufferHarness(); f.start(); assert.equal(f.pauses(), 0);
+  f.end(); assert.equal(f.timer(), null); assert.equal(f.pauses(), 0);
+  f.start(); f.fire(); assert.equal(f.pauses(), 1);
+});
+test('buffer end during first-frame recovery retains the audio restart request', async () => {
+  const f = bufferHarness(); f.start(); f.fire();
+  f.h.seekRecoveryActive = true;
+  f.end(); f.resolve(); await flush();
+  assert.equal(f.h.buffering, true);
+  assert.equal(f.h.audioStartPending, true);
+  assert.equal(f.gates(), 1);
+});
+test('seek supersedes a delayed buffer completion without another audio seek', async () => {
+  const f = bufferHarness(); f.start(); f.fire(); f.end();
+  f.h.cancelAudioGate(); // seek owns audio now, even if it finishes before the old callback
+  f.resolve(); await flush(); assert.equal(f.gates(), 0);
+});
+test('delayed speed buffer timer cannot pause audio after a seek takes ownership', () => {
+  const f = bufferHarness(); f.start(); f.h.seekLocked = true; f.fire();
+  assert.equal(f.pauses(), 0);
+});
+test('seek waits for an already issued audio pause before seeking or resuming', async () => {
+  let resolvePause;
+  const pause = new Promise(resolve => {resolvePause = resolve;});
+  const f = fixture(() => pause);
+  f.audio.pause = () => assert.fail('must not enqueue a second pause');
+  f.ctl.request(10000, true, true); f.fire(60); await flush();
+  assert.deepEqual(f.video.calls, []); assert.deepEqual(f.audio.calls, []);
+  resolvePause(); await flush();
+  assert.deepEqual(f.video.calls, [10000]); assert.deepEqual(f.audio.calls, [10000]);
+});
+test('keyframe recovery also verifies missing audio seekDone at its actual landing point', async () => {
+  const f = fixture(); f.ctl.request(10000, false, true); f.fire(60); await flush();
+  assert.deepEqual(f.audio.calls, []);
+  f.ctl.onVideoSeekDone(f.video, 7200); f.audio.currentTime = 7200; f.fire(900);
+  assert.deepEqual(f.done, [[true, 7200]]);
 });

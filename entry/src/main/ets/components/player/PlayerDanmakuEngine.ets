@@ -24,6 +24,9 @@ export class DmViewportRect {
   /** 文字可见底（baseline + actualDescent）。 */
   visualBottom: number = 0;
 }
+/** 重复弹幕合并的聚类时间窗（秒）：与 pakku 默认量级一致。 */
+const MERGE_WINDOW_SECONDS: number = 6;
+
 export class PlayerDanmakuEngine {
   /** 已按 time 升序排列的全量弹幕。 */
   list: Array<DanmakuItem> = [];
@@ -46,6 +49,10 @@ export class PlayerDanmakuEngine {
   blockTopDm: boolean = false;
   blockBottomDm: boolean = false;
   blockColorDm: boolean = false;
+  /** 相同文本 6 秒窗内合并为一簇（只喷最早一条）。 */
+  mergeDuplicates: boolean = false;
+  /** 合并簇在喷出时显示 ×N 计数后缀。 */
+  showMergeCount: boolean = true;
   /** 智能云屏蔽等级 0-10：weight 低于该值的弹幕不喷出（B 站 app 同款，0 为关闭）。 */
   minWeight: number = 0;
   /** 有序弹幕列表消费游标。 */
@@ -70,8 +77,34 @@ export class PlayerDanmakuEngine {
   }
 
   setList(list: Array<DanmakuItem>): void {
-    this.list = list;
+    this.list = this.applyMerge(list);
     this.syncCursor(this.lastPlayerTime);
+  }
+
+  /** 重复弹幕合并：相同文本在窗口内只保留最早一条，计数累加到簇头。 */
+  private applyMerge(items: Array<DanmakuItem>): Array<DanmakuItem> {
+    if (!this.mergeDuplicates || items.length === 0) return items;
+    const out: Array<DanmakuItem> = [];
+    const heads: Map<string, DanmakuItem> = new Map();
+    for (let i: number = 0; i < items.length; i++) {
+      const item: DanmakuItem = items[i];
+      const head: DanmakuItem | undefined = heads.get(item.text);
+      if (head !== undefined && item.time - head.time <= MERGE_WINDOW_SECONDS) {
+        head.mergeCount++;
+        continue;
+      }
+      item.mergeCount = 1;
+      heads.set(item.text, item);
+      out.push(item);
+    }
+    return out;
+  }
+
+  /** 喷出文本：簇计数开启时为合并弹幕附加 ×N 后缀。 */
+  private renderTextFor(item: DanmakuItem): string {
+    const base: string = item.text.length > 80 ? item.text.substring(0, 79) + '…' : item.text;
+    if (this.showMergeCount && item.mergeCount > 1) return base + ' ×' + String(item.mergeCount);
+    return base;
   }
 
   /** 把分段弹幕合并进全局有序列表，并把游标推到播放头之后，避免重放已喷出的弹幕。 */
@@ -285,7 +318,7 @@ export class PlayerDanmakuEngine {
         // JSON 解析失败按普通滚动弹幕兜底（脏数据不丢弹幕）。
       }
       const sizeVp: number = this.sizeFor(item);
-      const renderText: string = item.text.length > 80 ? item.text.substring(0, 79) + '…' : item.text;
+      const renderText: string = this.renderTextFor(item);
       const textW: number = this.measure(renderText, sizeVp);
       const renderColor: string = this.colorFor(item.color);
       if (item.mode === 4 || item.mode === 5) {

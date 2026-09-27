@@ -30,6 +30,14 @@ function environment(mocks = {}) {
         return load(path.relative(root, path.resolve(path.dirname(filename), name)).replaceAll('\\', '/'));
       }
       if (name in mocks) return mocks[name];
+      if (name === '@kit.CryptoArchitectureKit') return { cryptoFramework: {} };
+      if (name === '@kit.ArkWeb') return { webview: {} };
+      if (name === '@kit.ArkTS') return {
+        collections: { Array },
+        taskpool: { execute: async (task, ...args) => task(...args) },
+        worker: { ThreadWorker: class { on() {} off() {} postMessage() {} terminate() {} } },
+        util: {},
+      };
       if (name === '@kit.PerformanceAnalysisKit') {
         const noop = () => {};
         return { hilog: { debug: noop, info: noop, warn: noop, error: noop } };

@@ -6,6 +6,8 @@ import { BiliEmote } from '../library/LibraryModels';
 export class DynamicRichNode {
   text: string = '';
   emote: BiliEmote | null = null;
+  /** 话题节点（#话题#）：点击可跳搜索。 */
+  isTopic: boolean = false;
 }
 export class DynamicItem {
   dynId: string = '';
@@ -87,6 +89,7 @@ export class DynamicItem {
       const node: Record<string, Object> = asObject(descNodes[i]);
       const richNode: DynamicRichNode = new DynamicRichNode();
       richNode.text = str(node, 'orig_text', str(node, 'text', ''));
+      richNode.isTopic = str(node, 'type', '').indexOf('TOPIC') >= 0;
       let emoji: Record<string, Object> = asObject(node['emoji']);
       if (Object.keys(emoji).length === 0 && str(node, 'type', '').indexOf('EMOJI') >= 0 &&
         str(node, 'icon_url', '').length > 0) {
@@ -151,6 +154,7 @@ export class DynamicItem {
       const node: Record<string, Object> = asObject(summaryNodes[i]);
       const richNode: DynamicRichNode = new DynamicRichNode();
       richNode.text = str(node, 'orig_text', str(node, 'text', ''));
+      richNode.isTopic = str(node, 'type', '').indexOf('TOPIC') >= 0;
       let emoji: Record<string, Object> = asObject(node['emoji']);
       if (Object.keys(emoji).length === 0 && str(node, 'type', '').indexOf('EMOJI') >= 0 &&
         str(node, 'icon_url', '').length > 0) {

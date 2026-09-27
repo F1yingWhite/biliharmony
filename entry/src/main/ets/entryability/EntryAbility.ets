@@ -6,6 +6,7 @@ import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
 import { UserStore } from '../services/auth/UserStore';
 import { SearchHistoryStore } from '../common/SearchHistoryStore';
+import { LocalVideoFilter } from '../common/LocalVideoFilter';
 import { YouTubeSearchHistoryStore } from '../common/YouTubeSearchHistoryStore';
 import { YouTubeWatchLaterStore } from '../common/YouTubeWatchLaterStore';
 import { YouTubeHistoryStore } from '../common/YouTubeHistoryStore';
@@ -14,6 +15,8 @@ import { EmoteResolver } from '../common/EmoteResolver';
 import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
 import { SponsorBlockStore } from '../common/SponsorBlock';
 import { HttpClient } from '../services/network/HttpClient';
+import { CookieRefresher } from '../services/auth/CookieRefresher';
+import { NetworkSettingsStore } from '../pages/NetworkPrivacyPage';
 import { WebProxy } from '../services/network/WebProxy';
 
 const DOMAIN: number = 0x0000;
@@ -22,9 +25,12 @@ const TAG: string = 'BiliHarmony';
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     EntryAbility.enableImageCaches();
+    this.handleCardDeepLink(want);
     AppStorage.setOrCreate<boolean>('appInBackground', false);
     UserStore.initPersistence(this.context);
     SearchHistoryStore.init(this.context);
+    // 本地「不想看」：持久化 aid 黑名单，首页/相关推荐入列前过滤。
+    LocalVideoFilter.init(this.context);
     // YouTube 侧搜索历史独立存储：两个平台的搜索词不混在一起。
     YouTubeSearchHistoryStore.init(this.context);
     // 本地稍后观看：不需要账号，游客也能用。
@@ -33,7 +39,8 @@ export default class EntryAbility extends UIAbility {
     YouTubeHistoryStore.init(this.context);
     // 顶层平台（哔哩哔哩 / YouTube）持久化：冷启动即确定首帧渲染哪个外壳。
     PlatformStore.init();
-    this.applyLaunchProxy(want);
+    this.applyLaunchProxy(want).catch(() => {
+    });
     // 表情占位符映射表磁盘缓存：冷启动即恢复，不依赖网络。
     EmoteResolver.attach(this.context);
     // 表情、用户装扮与典藏卡资源的 cacheDir 落盘入口，并回收旧版头像及评论分享缓存。
@@ -80,11 +87,19 @@ export default class EntryAbility extends UIAbility {
    * 不传时保持空值，HttpClient 不设置 usingProxy，行为与历史版本一致。
    * ArkWeb 播放器使用独立网络栈，同一取值必须单独下发（见 WebProxy）。
    */
-  private applyLaunchProxy(want: Want): void {
+  private async applyLaunchProxy(want: Want): Promise<void> {
     // QA 探针开关（默认关）：仅用于在播放层被风控挡住时验证 ArkWeb 全屏/返回联动。
     const probe: string = want.parameters === undefined ? '' : String(want.parameters['ytPlayerProbe'] ?? '');
     if (probe === '1') AppStorage.setOrCreate<boolean>('ytPlayerProbe', true);
-    const value: string = want.parameters === undefined ? '' : String(want.parameters['netProxy'] ?? '');
+    let value: string = want.parameters === undefined ? '' : String(want.parameters['netProxy'] ?? '');
+    if (value.length === 0) {
+      // 设置页保存的代理（网络与隐私）：无启动参数时使用，仍是重启后生效。
+      try {
+        value = await NetworkSettingsStore.loadProxy(this.context);
+      } catch (e) {
+        value = '';
+      }
+    }
     if (value.length === 0) return;
     HttpClient.setProxy(value);
     if (WebProxy.apply(value)) {
@@ -116,6 +131,21 @@ export default class EntryAbility extends UIAbility {
     if (DEBUG) hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onDestroy');
   }
 
+  /** 服务卡片 router 深链：取出目标视频，交由根页在导航栈就绪后打开详情。 */
+  private handleCardDeepLink(want: Want): void {
+    const params: object | undefined = want.parameters;
+    if (params === undefined) return;
+    const bvid: string = String(params['bvid'] ?? '');
+    const aid: string = String(params['aid'] ?? '0');
+    if (bvid.length === 0 && aid === '0') return;
+    AppStorage.setOrCreate<string>('pendingCardBvid', bvid);
+    AppStorage.setOrCreate<number>('pendingCardAid', Number(aid) || 0);
+  }
+
+  onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    this.handleCardDeepLink(want);
+  }
+
   onWindowStageCreate(windowStage: window.WindowStage): void {
     // 注入主窗口并开启边到边沉浸（透明系统栏；图标深浅由头栏按主题同步）
     Immersive.attach(windowStage);
@@ -136,6 +166,11 @@ export default class EntryAbility extends UIAbility {
         if (DEBUG) hilog.warn(DOMAIN, TAG, 'Set keyboard avoid mode failed: %{public}s', JSON.stringify(e));
       }
       if (DEBUG) hilog.info(DOMAIN, TAG, 'Succeeded in loading the content.');
+      // Cookie 自动续期：启动后错峰静默检查一次（内部 6 小时节流，失败不影响任何功能）。
+      setTimeout(() => {
+        CookieRefresher.maybeRefresh().catch(() => {
+        });
+      }, 10000);
     });
   }
 

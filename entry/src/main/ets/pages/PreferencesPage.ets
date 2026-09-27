@@ -61,6 +61,7 @@ export struct PreferencesPage {
   @StorageProp('playerPanEnabled') pan: boolean = true;
   @StorageProp('playerHoldEnabled') hold: boolean = true;
   @StorageProp('recommendMode') recommendMode: string = 'web';
+  @StorageProp('wideSplitEnabled') wideSplit: boolean = false;
   @State editingTime: boolean = false;
   @State startHour: number = 19;
   @State startMinute: number = 0;
@@ -203,6 +204,12 @@ export struct PreferencesPage {
     Column() {
       PreferenceRow({ title: '沉浸光感', detail: '为导航与浮层启用通透材质', toggle: true, checked: this.glassOn,
         onChange: (value: boolean) => AppTheme.setGlassEnabled(value) })
+      this.DividerLine()
+      PreferenceRow({ title: '宽屏分栏（实验性）', detail: '840vp 以上平板/折叠屏展开时，目标页以右侧分栏展示',
+        toggle: true, checked: this.wideSplit,
+        onChange: (value: boolean) => {
+          AppStorage.setOrCreate<boolean>('wideSplitEnabled', value);
+        } })
       this.DividerLine()
       PreferenceRow({ title: '首页推荐源', detail: this.recommendMode === 'app' ? 'App 推流：服务端个性化最强，翻页自动去重' : 'Web 个性化推荐：官方网页端同款会话协议',
         toggle: true, checked: this.recommendMode === 'app',

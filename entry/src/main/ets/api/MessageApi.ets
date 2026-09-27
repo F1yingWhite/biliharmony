@@ -38,10 +38,12 @@ export class MessageApi {
       hilog.info(0x0000, 'BiliApi', 'getMessageSessions ok: sessions=%{public}d',
         asArray(data['session_list']).length);
     }
+    const pinnedTalker: number = asNumber(data['pin_talker_id'], 0);
     const list: Array<Object> = asArray(data['session_list']);
     const accountIds: Array<string> = [];
     for (let i: number = 0; i < list.length; i++) {
       const session: MessageSessionItem = MessageSessionItem.from(list[i]);
+      session.pinned = pinnedTalker > 0 && session.talkerId === pinnedTalker;
       result.sessions.push(session);
       if (session.name.length === 0 && session.talkerId > 0) accountIds.push(String(session.talkerId));
     }
@@ -91,6 +93,21 @@ export class MessageApi {
   }
 
   /** 删除私信会话（api.vc.bilibili.com 域，需 WBI 签名 + csrf）。 */
+  /** 置顶/取消置顶私信会话（pin_type: 1 = 置顶，2 = 取消）。 */
+  static async pinSession(talkerId: number, pin: boolean): Promise<ActionResult> {
+    return actionWithCsrf('登录状态缺少 CSRF，请重新登录', pin ? '已置顶' : '已取消置顶', '操作失败',
+      (csrf: string): Promise<HttpResponse> => {
+        const params: Record<string, string> = {
+          'talker_id': String(talkerId),
+          'pin_type': pin ? '1' : '2',
+          'csrf': csrf,
+          'csrf_token': csrf,
+        };
+        return HttpClient.post(Api.sessionPin, HttpClient.buildQuery(params),
+          HttpClient.merge(Constants.webHeaders, { 'Referer': 'https://message.bilibili.com/' }));
+      });
+  }
+
   static async removeSession(talkerId: number): Promise<ActionResult> {
     if (talkerId <= 0) return new ActionResult(false, '会话参数无效');
     if (HttpClient.getCookie('SESSDATA').length === 0) {

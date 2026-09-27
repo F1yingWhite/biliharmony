@@ -1,4 +1,4 @@
-import { VideoChapter } from '../../api/BiliApi';
+import { HotPoint, VideoChapter } from '../../api/BiliApi';
 import { SponsorBlockSegment } from '../../common/SponsorBlock';
 import { formatDuration } from '../../common/Utils';
 import { PlayerProgressBar } from './PlayerProgressBar';
@@ -13,6 +13,7 @@ export struct PlayerBottomControls {
   @Prop sponsorEnabled: boolean = true;
   @Prop chapters: Array<VideoChapter> = [];
   @Prop sponsorSegments: Array<SponsorBlockSegment> = [];
+  @Prop hotPoints: Array<HotPoint> = [];
   @Prop progress: number = 0;
   @Prop duration: number = 0;
   /** 横滑快进的待落点：进度条跟手显示它，seek 完成后宿主清零回落真实进度。 */
@@ -81,6 +82,7 @@ export struct PlayerBottomControls {
             compact: false,
             chapters: this.chapters,
             sponsorSegments: this.sponsorSegments,
+            hotPoints: this.hotPoints,
             onChange: (value: number, mode: SliderChangeMode) => this.onProgressChange(value, mode),
             onInteractionEnd: () => this.onProgressInteractionEnd(),
           })
@@ -159,6 +161,7 @@ export struct PlayerBottomControls {
           compact: false,
           chapters: this.chapters,
           sponsorSegments: this.sponsorSegments,
+          hotPoints: this.hotPoints,
           onChange: (value: number, mode: SliderChangeMode) => this.onProgressChange(value, mode),
           onInteractionEnd: () => this.onProgressInteractionEnd(),
         })

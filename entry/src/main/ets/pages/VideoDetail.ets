@@ -1,5 +1,6 @@
 import { VideoReportDialog } from '../components/VideoReportDialog';
 import { PlayerQualityPreference } from '../common/PlayerQualityPreference';
+import { LocalVideoFilter } from '../common/LocalVideoFilter';
 /**
  * 视频详情页：沉浸式播放器 + 封面取色动态主题 + 简介/评论/相关。
  * 大区块已按职责拆到组件：评论 Tab（VideoReplyTab）、相关推荐行（RelatedVideoRow）、
@@ -19,10 +20,10 @@ import { Immersive } from '../common/Immersive';
 import { Haptic } from '../common/Haptic';
 import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   HERO_NAV_TRANSITION_FINISH_REQUEST_KEY, ImageViewerSrcRect, NAV_LOGIN, NAV_VIDEO_DETAIL, NAV_USER_SPACE,
-  VideoDetailParam, UserSpaceParam, releasePixelMap } from '../common/AppRouter';
+  VideoDetailParam, UserSpaceParam, releasePixelMap, NAV_SEARCH } from '../common/AppRouter';
 import { VideoDetail, VideoItem, ReplyItem, PlayUrlInfo, VideoPage, VideoQualityOption, VideoRelationState,
   BiliEmote, BiliEmotePackage, FavoriteFolderItem, UserStat, SpaceArcData, SubtitleTrack, UgcSeasonEpisode } from '../model/Models';
-import { ActionResult, BiliApi } from '../api/BiliApi';
+import { ActionResult, BiliApi, VideoTagInfo } from '../api/BiliApi';
 import { PlayerView } from '../components/player/PlayerView';
 import { AppTheme } from '../common/AppTheme';
 import { PlayerDanmakuEngine } from '../components/player/PlayerDanmakuEngine';
@@ -142,6 +143,7 @@ export struct VideoDetailPage {
   @State visualTab: number = 0; // 仅驱动标签颜色/下划线，不反向打断 Tabs 位移动画
   @State descExpanded: boolean = false;
   @State descNeedsExpand: boolean = false;
+  @State videoTags: Array<VideoTagInfo> = [];
   @State pageTint: string = '#FB7299';
   @State liked: boolean = false;
   @State disliked: boolean = false;
@@ -1120,6 +1122,7 @@ export struct VideoDetailPage {
         (item.bvid.length > 0 && seenBvid.has(item.bvid))) continue;
       if (item.aid > 0) seenAid.add(item.aid);
       if (item.bvid.length > 0) seenBvid.add(item.bvid);
+      if (LocalVideoFilter.contains(item.aid)) continue;
       appended.push(item);
     }
     if (appended.length > 0) {
@@ -1285,6 +1288,11 @@ export struct VideoDetailPage {
         const likeVersion: number = this.likeActionVersion;
         const coinVersion: number = this.coinActionVersion;
         const favoriteVersion: number = this.favoriteActionVersion;
+        BiliApi.getVideoTags(detail.aid, detail.bvid).then((tags: Array<VideoTagInfo>) => {
+          if (this.destroyed || this.detail.aid !== detail.aid) return;
+          this.videoTags = tags;
+        }).catch(() => {
+        });
         BiliApi.getVideoRelation(detail.aid, detail.bvid).then((relation: VideoRelationState | null) => {
           if (relation !== null && !this.destroyed && this.initialRequest.isCurrent(request)) {
             // 用户可能在关系请求返回前已经操作过；旧响应不能覆盖较新的本地成功状态。
@@ -2196,6 +2204,12 @@ export struct VideoDetailPage {
       actionBusy: this.actionBusy,
       descExpanded: this.descExpanded,
       descNeedsExpand: this.descNeedsExpand,
+      tags: this.videoTags,
+      onTagTap: (tag: VideoTagInfo) => {
+        AppStorage.setOrCreate<string>('searchPrefillKeyword', tag.name);
+        PlayerCommandBus.stop();
+        AppNavStack.pushPathByName(NAV_SEARCH, null);
+      },
       currentCid: this.currentCid,
       pageSwitchingCid: this.pageSwitchingCid,
       ugcPanelOpen: this.ugcPanelOpen,

@@ -1,6 +1,7 @@
 /**
- * 玻璃头栏：搜索、消息与头像随惯用手调整排列，头像靠惯用手一侧。
- * 随列表上滑逐渐淡出，消失进状态栏；仅本组件订阅滚动淡出值，避免列表重渲染。
+ * 玻璃头栏：搜索胶囊 + 消息 + 头像，按智感握姿的惯用手做结构化换边
+ * （直接条件重排子节点，不再用 translate 硬移，杜绝换边时压到头像）。
+ * 随列表上滑整体垂直收起并淡出；仅本组件订阅滚动淡出值，避免列表重渲染。
  */
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, NAV_LOGIN, NAV_MESSAGES, NAV_SEARCH } from '../common/AppRouter';
@@ -35,13 +36,11 @@ export struct HeaderBackdrop {
 @Component
 export struct GlassHeaderBar {
   @StorageProp(Handedness.KEY_SIDE) @Watch('onHandSideChanged') handSide: string = Handedness.RIGHT;
+  /** 0 = 右手（胶囊在左、头像在右）；1 = 左手（结构化换边：头像/铃铛在左、胶囊在右）。 */
   @State handPosition: number = 0;
-  @State headerRowWidth: number = 0;
-  private handLayoutMounted: boolean = false;
 
   onHandSideChanged(): void {
-    if (!this.handLayoutMounted) return;
-    this.getUIContext().animateTo({ duration: 320, curve: Curve.EaseInOut }, () => {
+    this.getUIContext().animateTo({ duration: 240, curve: Curve.EaseInOut }, () => {
       this.handPosition = this.handSide === Handedness.LEFT ? 1 : 0;
     });
   }
@@ -75,7 +74,6 @@ export struct GlassHeaderBar {
   aboutToAppear(): void {
     this.destroyed = false;
     this.handPosition = this.handSide === Handedness.LEFT ? 1 : 0;
-    this.handLayoutMounted = true;
     HotSearchStore.load().then(() => {
       if (!this.destroyed) HotSearchStore.publish(0);
     }).catch(() => {
@@ -88,7 +86,6 @@ export struct GlassHeaderBar {
 
   aboutToDisappear(): void {
     this.destroyed = true;
-    this.handLayoutMounted = false;
   }
 
   private headerContentOpacity(): number {
@@ -107,76 +104,17 @@ export struct GlassHeaderBar {
         HeaderBackdrop({ withChannels: false })
       }
       Row({ space: 5 }) {
-        Stack() {
-          GlassCapsuleSurface({ surfaceHeight: 35 })
-          Row({ space: 7 }) {
-            Image($r('app.media.ic_search'))
-              .width(18).height(18).renderMode(ImageRenderMode.Template)
-              .fillColor(this.isDark ? '#C3C5CD' : '#777D82')
-            Text(this.hotSearch.length > 0 ? this.hotSearch : '搜索')
-              .fontSize(14).fontWeight(FontWeight.Normal)
-              .fontColor(this.isDark ? '#C3C5CD' : '#777D82')
-              .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-              .layoutWeight(1)
-          }
-          .width('100%').height('100%').padding({ left: 13, right: 13 })
-          .hitTestBehavior(HitTestMode.None)
+        if (this.handPosition === 1) {
+          this.AvatarEntry()
+          this.BellEntry()
+          this.SearchCapsule()
+        } else {
+          this.SearchCapsule()
+          this.BellEntry()
+          this.AvatarEntry()
         }
-        .height(35).layoutWeight(1)
-        .margin({ right: 5 })
-        .opacity(this.headerContentOpacity())
-        .translate({ x: 79 * this.handPosition, y: -54 * this.fade })
-        .hitTestBehavior(this.fade >= 0.65 ? HitTestMode.None : HitTestMode.Default)
-        .accessibilityText('搜索：' + (this.hotSearch || '搜索'))
-        .id('home-search-entry')
-        .onClick(() => this.openSearch())
-
-        Stack() {
-          Image($r('app.media.ic_message'))
-            .width(22).height(22).renderMode(ImageRenderMode.Template)
-            .fillColor(this.accent)
-          if (this.msgUnread > 0) {
-            Text(this.msgUnread > 99 ? '99+' : String(this.msgUnread))
-              .fontSize(9).fontColor('#FFFFFF').backgroundColor(AppTheme.DANGER)
-              .padding({ left: 4, right: 4, top: 1, bottom: 1 }).borderRadius(8)
-              .position({ right: -2, top: -2 })
-          }
-        }
-        .width(32).height(32).borderRadius(16)
-        .backgroundColor(this.isDark ? '#34363C' : '#FFFFFF')
-        .opacity(this.headerContentOpacity())
-        .translate({ x: (106 - Math.max(106, this.headerRowWidth - 40)) * this.handPosition,
-          y: -54 * this.fade })
-        .hitTestBehavior(this.fade >= 0.65 ? HitTestMode.None : HitTestMode.Default)
-        .id('home-message-entry').accessibilityText('消息')
-        .onClick(() => {
-          Haptic.light();
-          if (UserStore.isLogin) {
-            AppNavStack.pushPathByName(NAV_MESSAGES, null);
-          } else {
-            this.getUIContext().getPromptAction().showToast({ message: '请先登录后查看私信' });
-            AppNavStack.pushPathByName(NAV_LOGIN, null);
-          }
-        })
-
-        // 展开中线为 10 + 35/2 = 27.5vp；收起频道行高 44vp，中线为 22vp。
-        // 头像仅上移 5.5vp，保证与推荐/热门气泡居中，而非旧值 9vp 导致偏高 3.5vp。
-        Stack() {
-          DecoratedAvatar({ face: this.userAvatar, pendant: this.userPendant,
-            avatarSize: 26, containerSize: 32, pendantScale: 1.22 })
-        }
-        .width(32).height(32).borderRadius(16)
-        .backgroundColor(this.isDark ? '#34363C' : '#FFFFFF')
-        .translate({ x: (32 - Math.max(106, this.headerRowWidth - 40)) * this.handPosition,
-          y: -5.5 * this.fade })
-        .accessibilityText('个人中心').id('home-avatar-entry')
-        .onClick(() => { Haptic.light(); this.onAvatarTap(); })
       }
       .width('100%').height(35)
-      // 保留节点顺序，以可插值的位移换边；文字、头像与点击区域随节点一起移动。
-      .onAreaChange((_old: Area, area: Area) => {
-        this.headerRowWidth = Number(area.width);
-      })
       .alignItems(VerticalAlign.Center)
       .padding({ left: 20, right: 20 })
       .margin({ top: this.statusBarInset + 10 })
@@ -185,5 +123,77 @@ export struct GlassHeaderBar {
     .width('100%').height(this.statusBarInset + 46)
     .clip(false)
     .hitTestBehavior(HitTestMode.Transparent)
+  }
+
+  /** 搜索胶囊：layoutWeight 占满剩余宽度，惯用手对侧；上滑垂直收起淡出。 */
+  @Builder
+  SearchCapsule() {
+    Stack() {
+      GlassCapsuleSurface({ surfaceHeight: 35 })
+      Row({ space: 7 }) {
+        Image($r('app.media.ic_search'))
+          .width(18).height(18).renderMode(ImageRenderMode.Template)
+          .fillColor(this.isDark ? '#C3C5CD' : '#777D82')
+        Text(this.hotSearch.length > 0 ? this.hotSearch : '搜索')
+          .fontSize(14).fontWeight(FontWeight.Normal)
+          .fontColor(this.isDark ? '#C3C5CD' : '#777D82')
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
+      }
+      .width('100%').height('100%').padding({ left: 13, right: 13 })
+      .hitTestBehavior(HitTestMode.None)
+    }
+    .height(35).layoutWeight(1)
+    .opacity(this.headerContentOpacity())
+    .translate({ y: -54 * this.fade })
+    .hitTestBehavior(this.fade >= 0.65 ? HitTestMode.None : HitTestMode.Default)
+    .accessibilityText('搜索：' + (this.hotSearch || '搜索'))
+    .id('home-search-entry')
+    .onClick(() => this.openSearch())
+  }
+
+  /** 消息入口（未读角标随 AccentColor）。 */
+  @Builder
+  BellEntry() {
+    Stack() {
+      Image($r('app.media.ic_notify_bell'))
+        .width(22).height(22).renderMode(ImageRenderMode.Template)
+        .fillColor(this.accent)
+      if (this.msgUnread > 0) {
+        Text(this.msgUnread > 99 ? '99+' : String(this.msgUnread))
+          .fontSize(9).fontColor('#FFFFFF').backgroundColor(AppTheme.DANGER)
+          .padding({ left: 4, right: 4, top: 1, bottom: 1 }).borderRadius(8)
+          .position({ right: -2, top: -2 })
+      }
+    }
+    .width(32).height(32).borderRadius(16)
+    .backgroundColor(this.isDark ? '#34363C' : '#FFFFFF')
+    .opacity(this.headerContentOpacity())
+    .translate({ y: -54 * this.fade })
+    .hitTestBehavior(this.fade >= 0.65 ? HitTestMode.None : HitTestMode.Default)
+    .id('home-message-entry').accessibilityText('消息')
+    .onClick(() => {
+      Haptic.light();
+      if (UserStore.isLogin) {
+        AppNavStack.pushPathByName(NAV_MESSAGES, null);
+      } else {
+        this.getUIContext().getPromptAction().showToast({ message: '请先登录后查看私信' });
+        AppNavStack.pushPathByName(NAV_LOGIN, null);
+      }
+    })
+  }
+
+  /** 头像入口：上滑仅上移 5.5vp 常驻（收起频道行高 44vp，中线 22vp 对齐）。 */
+  @Builder
+  AvatarEntry() {
+    Stack() {
+      DecoratedAvatar({ face: this.userAvatar, pendant: this.userPendant,
+        avatarSize: 26, containerSize: 32, pendantScale: 1.22 })
+    }
+    .width(32).height(32).borderRadius(16)
+    .backgroundColor(this.isDark ? '#34363C' : '#FFFFFF')
+    .translate({ y: -5.5 * this.fade })
+    .accessibilityText('个人中心').id('home-avatar-entry')
+    .onClick(() => { Haptic.light(); this.onAvatarTap(); })
   }
 }

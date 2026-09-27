@@ -217,6 +217,16 @@ export class CommentApi {
   }
 
   /** 评论举报（需登录；reason 参考网页端：21 违法违规 22 色情低俗…统一走 21 细分，传入具体 reason）。 */
+    /** UP 主置顶/取消置顶评论（action: 0 = 置顶，1 = 取消置顶）。 */
+  static async topReply(oid: number, type: number, rpid: number, pin: boolean): Promise<ActionResult> {
+    return postVideoAction(Api.replyTop, {
+      'oid': String(oid),
+      'type': String(type),
+      'rpid': String(rpid),
+      'action': pin ? '0' : '1',
+    });
+  }
+
   static async reportReply(oid: number, type: number, rpid: number, reason: string): Promise<ActionResult> {
     if (oid <= 0 || type <= 0 || rpid <= 0) {
       CommentLog.warn('api.report.invalid', 'oid=' + String(oid) + ' type=' + String(type) + ' rpid=' + String(rpid));

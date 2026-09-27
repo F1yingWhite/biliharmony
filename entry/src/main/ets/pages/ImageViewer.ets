@@ -39,10 +39,11 @@ struct ZoomableImage {
   @Prop previewSource: string = '';
   @Prop transitionId: string = '';
   @Prop snapshotId: string = '';
+  @Prop useSystemGeometry: boolean = false;
   onLongPress: () => void = () => {};
   onZoomChange: (zoomed: boolean) => void = () => {};
   @Prop @Watch('prepareExit') exitRequested: boolean = false;
-  onExitReady: () => void = () => {};
+  onExitReady: (scale: number, offsetX: number, offsetY: number) => void = () => {};
   onNaturalSize: (width: number, height: number) => void = () => {};
   /** 单击：参数=是否落在图片内容上。命中内容→切换顶/底 UI 栏（捏合误识别单击不会弹掉查看器）；
    * 落在黑色留白区→关闭查看器。 */
@@ -79,15 +80,21 @@ struct ZoomableImage {
 
   private prepareExit(): void {
     if (!this.exitRequested) return;
-    // 先把缩放与平移恢复到 hero 使用的 contain 矩形，避免两种尺寸的图片重叠。
-    this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut, onFinish: () => {
-      this.onZoomChange(false);
-      this.onExitReady();
-    } }, () => {
-      this.scaleValue = 1;
-      this.offsetX = 0;
-      this.offsetY = 0;
-    });
+    const scale: number = this.scaleValue;
+    const x: number = this.offsetX;
+    const y: number = this.offsetY;
+    if (this.useSystemGeometry) {
+      // 共享节点的手势变换与 pop 放进同一次动画事务，直接飞回来源图。
+      this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
+        this.scaleValue = 1;
+        this.offsetX = 0;
+        this.offsetY = 0;
+        this.onExitReady(scale, x, y);
+      });
+    } else {
+      // 手工 hero 从当前放大位置起飞，底下的图片保持原位直到 hero 接管。
+      this.onExitReady(scale, x, y);
+    }
   }
 
   private clampScale(value: number): number {
@@ -298,6 +305,10 @@ export struct ImageViewerPage {
   private heroExitPending: boolean = false;
   private heroExitTarget: ImageViewerSrcRect | undefined = undefined;
   private heroExitTimer: number = -1;
+  private exitWasZoomed: boolean = false;
+  private exitScale: number = 1;
+  private exitOffsetX: number = 0;
+  private exitOffsetY: number = 0;
   private interactionReadyTimer: number = -1;
   private swiperController: SwiperController = new SwiperController();
   /** 低于此体积（3MB）的图片直接加载原图，不再先缩略图后手动“查看原图”。 */
@@ -309,6 +320,10 @@ export struct ImageViewerPage {
     this.heroEntranceStarted = false;
     this.heroFlightFinished = false;
     this.heroExitPending = false;
+    this.exitWasZoomed = false;
+    this.exitScale = 1;
+    this.exitOffsetX = 0;
+    this.exitOffsetY = 0;
     this.heroExitTarget = undefined;
     this.heroVisible = false;
     this.heroOpacity = 1;
@@ -526,12 +541,20 @@ export struct ImageViewerPage {
 
   goBack(): void {
     if (this.closing) return;
+    this.exitWasZoomed = this.currentZoomed;
     this.closing = true;
     this.interactionReady = false;
     if (this.currentZoomed) {
       this.resetZoomForExit = true;
       return;
     }
+    this.finishBack();
+  }
+
+  private finishZoomedBack(scale: number, offsetX: number, offsetY: number): void {
+    this.exitScale = scale;
+    this.exitOffsetX = offsetX;
+    this.exitOffsetY = offsetY;
     this.finishBack();
   }
 
@@ -555,6 +578,11 @@ export struct ImageViewerPage {
       this.heroExitTimer = -1;
     }
     if (this.hasSystemGeometryTransition()) {
+      if (this.exitWasZoomed) {
+        // ZoomableImage 已把手势还原和 pop 包在同一动画事务内。
+        AppNavStack.pop(false);
+        return;
+      }
       this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
         AppNavStack.pop(false);
       });
@@ -572,14 +600,21 @@ export struct ImageViewerPage {
       const start: ImageViewerSrcRect | undefined = this.containRect(naturalWidth, naturalHeight);
       if (start !== undefined) {
         const target: ImageViewerSrcRect = targetRect;
-        this.freezeCurrentGifFrame(start);
+        const scale: number = this.exitWasZoomed ? this.exitScale : 1;
+        const flightStart: ImageViewerSrcRect = {
+          x: start.x - start.w * (scale - 1) / 2 + this.exitOffsetX,
+          y: start.y - start.h * (scale - 1) / 2 + this.exitOffsetY,
+          w: start.w * scale,
+          h: start.h * scale,
+        };
+        this.freezeCurrentGifFrame(flightStart);
         const exitSource: string = this.sourcePreviewFor(this.currentIndex);
         const residentHero: boolean = this.heroVisible && this.heroSource === exitSource;
         if (!residentHero) this.heroSource = exitSource;
-        this.heroX = start.x;
-        this.heroY = start.y;
-        this.heroWidth = start.w;
-        this.heroHeight = start.h;
+        this.heroX = flightStart.x;
+        this.heroY = flightStart.y;
+        this.heroWidth = flightStart.w;
+        this.heroHeight = flightStart.h;
         this.heroRadius = 0;
         // 先以透明状态创建并解码退出 hero，当前 Swiper 图片继续垫底；否则同一帧
         // 隐藏 Swiper、显示新 Image 时仍可能露出黑底。
@@ -964,8 +999,9 @@ export struct ImageViewerPage {
               previewSource: this.sourcePreviewFor(index),
               transitionId: this.transitionIdFor(index),
               snapshotId: this.snapshotIdFor(index),
+              useSystemGeometry: this.hasSystemGeometryTransition(),
               exitRequested: this.resetZoomForExit && index === this.currentIndex,
-              onExitReady: () => this.finishBack(),
+              onExitReady: (scale: number, x: number, y: number) => this.finishZoomedBack(scale, x, y),
                onLongPress: () => {
                  if (this.interactionReady) this.actionMenuOpen = true;
                },

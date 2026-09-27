@@ -75,6 +75,12 @@ export struct RelatedVideoRow {
             .lineHeight(17)
           Column({ space: 5 }) {
             Row({ space: 4 }) {
+              if (this.item.like >= 5000) {
+                Text(formatCount(this.item.like) + '点赞')
+                  .fontSize(10)
+                  .fontColor('#FF7F24')
+                  .maxLines(1)
+              }
               Text('UP')
                 .fontSize(8)
                 .fontColor('#9499A0')
@@ -149,6 +155,8 @@ struct RelatedMoreDot {
         .fillColor('#9499A0')
     }
     .height(68)
+    .width(32)
+    .accessibilityText('更多视频操作')
     .padding({ right: 2, left: 2, top: 6, bottom: 6 })
     .onClick(() => {
       Haptic.light();
@@ -172,7 +180,7 @@ struct RelatedMoreDot {
   menu() {
     Column() {
       this.menuRow($r('app.media.ic_report_flag'), '举报', this.onReport)
-      this.menuRow($r('app.media.bilix_icon_dislike'), '不想看', this.onHide)
+      this.menuRow($r('app.media.ic_dislike'), '不想看', this.onHide)
     }
     .padding({ top: 6, bottom: 6 })
   }

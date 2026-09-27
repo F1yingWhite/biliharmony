@@ -72,6 +72,8 @@ function environment(mocks = {}) {
       };
       // LiveDanmakuClient 等模块引用 hilog：Node 沙箱以静默实现兜底。
       if (name === 'BuildProfile') return { DEBUG: false };
+      if (name === '@kit.CryptoArchitectureKit') return { cryptoFramework: {} };
+      if (name === '@kit.ArkWeb') return { webview: {} };
       if (name === '@kit.PerformanceAnalysisKit') {
         const noop = () => {};
         return { hilog: { debug: noop, info: noop, warn: noop, error: noop } };
@@ -1207,7 +1209,7 @@ test('automatic audio alignment preserves video buffer and cancels stale pause c
   view.audioPlayer = {currentTime: 4500, state: 'playing', setVolume() {},
     pause: () => pause.promise, seek: () => audioSeeks++, play: () => plays++};
   Object.assign(view, {playing: true, prepared: true, audioPrepared: true, audioGateTimer: -1,
-    seekLocked: false, backgroundAudioOnly: false, restoreUserVolume() {}, resetAudioSyncRate() {},
+    pendingAudioPause: null, seekLocked: false, backgroundAudioOnly: false, restoreUserVolume() {}, resetAudioSyncRate() {},
     handleAudioPlayerError() { assert.fail('unexpected audio error'); }});
   view.gateAudioStart();
   view.tryStartGatedAudio();
@@ -1218,6 +1220,7 @@ test('automatic audio alignment preserves video buffer and cancels stale pause c
   view.audioPlayer.state = 'paused';
   view.gateAudioStart();
   view.tryStartGatedAudio();
+  await tick();
   assert.equal(audioSeeks, 1);
   assert.equal(videoSeeks, 0, 'background synchronization must not seek video');
   view.finishGatedAudioStart(view.audioPlayer);

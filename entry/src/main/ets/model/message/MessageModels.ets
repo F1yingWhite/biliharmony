@@ -10,6 +10,8 @@ export class MessageSessionItem {
   timestamp: number = 0;
   unread: number = 0;
   sessionTs: number = 0;
+  /** 是否置顶（接口 pin_talker_id 命中该会话）。 */
+  pinned: boolean = false;
 
   static from(o: Object): MessageSessionItem {
     const j: Record<string, Object> = asObject(o);

@@ -263,6 +263,30 @@ export class UserApi {
     return asNumber(asObject(json['data'])['tagid'], 0);
   }
 
+  /** 重命名关注分组（x/relation/tag/update）。 */
+  static async renameFollowTag(tagId: number, newName: string): Promise<ActionResult> {
+    if (tagId <= 0 || newName.length === 0) return new ActionResult(false, '分组信息无效');
+    const csrf: string = HttpClient.getCookie('bili_jct');
+    if (csrf.length === 0) return new ActionResult(false, '登录状态已失效，请重新登录', -111);
+    const resp: HttpResponse = await webPost(Api.followTagUpdate, { 'tagid': String(tagId), 'tag': newName, 'csrf': csrf },
+      'https://space.bilibili.com/');
+    const json: Record<string, Object> = resp.json();
+    const ok: boolean = asNumber(json['code'], -1) === 0;
+    return new ActionResult(ok, ok ? '分组已重命名' : str(json, 'message', '重命名失败'));
+  }
+
+  /** 删除关注分组（x/relation/tag/del）：组内用户回到默认分组。 */
+  static async deleteFollowTag(tagId: number): Promise<ActionResult> {
+    if (tagId <= 0) return new ActionResult(false, '分组信息无效');
+    const csrf: string = HttpClient.getCookie('bili_jct');
+    if (csrf.length === 0) return new ActionResult(false, '登录状态已失效，请重新登录', -111);
+    const resp: HttpResponse = await webPost(Api.followTagDel, { 'tagid': String(tagId), 'csrf': csrf },
+      'https://space.bilibili.com/');
+    const json: Record<string, Object> = resp.json();
+    const ok: boolean = asNumber(json['code'], -1) === 0;
+    return new ActionResult(ok, ok ? '分组已删除' : str(json, 'message', '删除失败'));
+  }
+
   static async addToFollowTags(mid: number, tagIds: Array<number>): Promise<ActionResult> {
     return postVideoAction(Api.followTagsAddUsers, {
       'fids': String(mid), 'tagids': tagIds.map((id: number) => String(id)).join(','),

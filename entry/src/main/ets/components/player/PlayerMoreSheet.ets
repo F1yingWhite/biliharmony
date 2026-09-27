@@ -1,6 +1,8 @@
 /**
- * 播放器“⋮”展开页（对齐官方版式）：分享宫格 + 设置卡（倍速/播放模式/定时关闭/后台听视频/字幕/弹幕设置/镜像翻转/清晰度/播放设置）+ 反馈卡（我不想看/举报/播放反馈）。
+ * 播放器“⋮”展开页（对齐官方版式）：常用操作栏 + 设置卡（倍速/播放模式/定时关闭/后台听视频/字幕/弹幕设置/镜像翻转/清晰度/播放设置）+ 反馈卡（我不想看/举报）。投屏与播放反馈无可用公开接口，入口已移除。
  */
+import { LocalVideoFilter } from '../../common/LocalVideoFilter';
+
 @Component
 export struct PlayerMoreSheet {
   @StorageProp('isDarkMode') isDark: boolean = false;
@@ -18,6 +20,7 @@ export struct PlayerMoreSheet {
   @Prop backgroundPlaybackEnabled: boolean = false;
   @Prop downloadBusy: boolean = false;
   @Prop downloadProgress: number = -1;
+  @Prop aid: number = 0;
   onSpeedChange: (rate: number) => void = () => {};
   onPlayModeChange: (mode: number) => void = () => {};
   onTimerChange: (minutes: number) => void = () => {};
@@ -78,40 +81,21 @@ export struct PlayerMoreSheet {
     return rate === 1 ? '1' : String(rate);
   }
 
+  /** 「我不想看」：持久化 aid 黑名单，首页/相关推荐入列前过滤（本地实现，无服务端负反馈接口）。 */
+  private hideThisVideo(): void {
+    if (this.aid <= 0) {
+      this.onStub('当前视频不支持该操作');
+      return;
+    }
+    LocalVideoFilter.hide(this.aid).catch(() => {
+      // 持久化失败保留提示；下一次启动该稿可能重新出现。
+    });
+    this.onStub('已加入「不想看」，将不再出现在首页与相关推荐');
+  }
+
   private downloadLabel(): string {
     if (!this.downloadBusy) return '下载';
     return this.downloadProgress >= 0 ? '下载 ' + String(this.downloadProgress) + '%' : '准备中';
-  }
-
-  // plain=true 时图标为 currentColor 线稿：套 Template 渲染并跟随主题色；
-  // 品牌彩色图标自带色值，不能加 fillColor（会把整图染成主题色）。
-  // 图标槽固定 44 高，保证一行内文字标签纵向对齐（图标本体可更小）。
-  @Builder
-  ShareCircle(icon: Resource, label: string, plain: boolean, size: number, onTap: () => void) {
-    Column() {
-      Stack({ alignContent: Alignment.Center }) {
-        if (plain) {
-          Image(icon)
-            .width(size)
-            .height(size)
-            .renderMode(ImageRenderMode.Template)
-            .fillColor(this.iconColor())
-        } else {
-          Image(icon)
-            .width(size)
-            .height(size)
-        }
-      }
-      .width(44)
-      .height(44)
-      Text(label)
-        .fontSize(11)
-        .fontColor(this.iconColor())
-        .margin({ top: 6 })
-        .maxLines(1)
-    }
-    .width('16.666%')
-    .onClick(() => onTap())
   }
 
   @Builder
@@ -119,8 +103,8 @@ export struct PlayerMoreSheet {
     Column() {
       Stack({ alignContent: Alignment.Center }) {
         Image(icon)
-          .width(26)
-          .height(26)
+          .width(24)
+          .height(24)
           .renderMode(ImageRenderMode.Template)
           .fillColor(this.iconColor())
       }
@@ -134,7 +118,8 @@ export struct PlayerMoreSheet {
         .margin({ top: 6 })
         .maxLines(1)
     }
-    .width('16.666%')
+    .width('20%')
+    .accessibilityText(label)
     .onClick(() => onTap())
   }
 
@@ -215,27 +200,18 @@ export struct PlayerMoreSheet {
       Scroll() {
         Column({ space: 10 }) {
           Column({ space: 14 }) {
-            // 六列随面板宽度伸缩，下行四项与上行对齐。
+            // 每个入口对应独立动作；平台选择交给系统分享面板。
             Row() {
-              this.ShareCircle($r('app.media.ic_share_wechat'), '微信', false, 44, (): void => this.onShare())
-              this.ShareCircle($r('app.media.ic_share_pengyouquan'), '朋友圈', false, 44, (): void => this.onShare())
-              this.ShareCircle($r('app.media.ic_share_qq'), 'QQ', false, 44, (): void => this.onShare())
-              this.ShareCircle($r('app.media.ic_share_qzone'), 'QQ空间', false, 44, (): void => this.onShare())
-              this.ShareCircle($r('app.media.ic_share_dynamic'), '动态', false, 44, (): void => this.onShare())
-              this.ShareCircle($r('app.media.ic_share_link'), '复制链接', true, 26, (): void => this.onCopyLink())
-            }
-            .width('100%')
-            .justifyContent(FlexAlign.SpaceBetween)
-            Row() {
+              this.ShareSquare($r('app.media.ic_share'), '分享', (): void => this.onShare())
+              this.ShareSquare($r('app.media.ic_copy'), '复制链接', (): void => this.onCopyLink())
               this.ShareSquare($r('app.media.ic_watch_later'), '稍后再看', (): void => this.onWatchLater())
-              this.ShareSquare($r('app.media.ic_share_cache'), this.downloadLabel(), (): void => {
+              this.ShareSquare($r('app.media.ic_download'), this.downloadLabel(), (): void => {
                 if (!this.downloadBusy) this.onDownload();
               })
               this.ShareSquare($r('app.media.ic_share_pip'), '小窗播放', (): void => this.onPictureInPicture())
-              this.ShareSquare($r('app.media.ic_share_cast'), '投屏', (): void => this.onStub('功能暂未开放'))
             }
             .width('100%')
-            .justifyContent(FlexAlign.Start)
+            .justifyContent(FlexAlign.SpaceBetween)
           }
           .width('100%')
           .alignItems(HorizontalAlign.Center)
@@ -413,7 +389,7 @@ export struct PlayerMoreSheet {
             }
             .width('100%')
             .padding({ left: 16, right: 16, top: 15, bottom: 15 })
-            .onClick(() => this.onStub('功能暂未开放'))
+            .onClick(() => this.hideThisVideo())
 
             Divider().strokeWidth(0.6).color(this.dividerColor())
 
@@ -424,16 +400,6 @@ export struct PlayerMoreSheet {
             .width('100%')
             .padding({ left: 16, right: 16, top: 15, bottom: 15 })
             .onClick(() => this.onReportVideo())
-
-            Divider().strokeWidth(0.6).color(this.dividerColor())
-
-            Row() {
-              this.RowIcon($r('app.media.ic_play_feedback'))
-              this.RowLabel('播放反馈')
-            }
-            .width('100%')
-            .padding({ left: 16, right: 16, top: 15, bottom: 15 })
-            .onClick(() => this.onStub('功能暂未开放'))
           }
           .width('100%')
           .borderRadius(16)

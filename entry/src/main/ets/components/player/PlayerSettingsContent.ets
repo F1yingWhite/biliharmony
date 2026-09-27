@@ -23,6 +23,7 @@ export struct PlayerSettingsContent {
   @Prop downloadQualityLabel: string = '';
   @Prop downloadBusy: boolean = false;
   @Prop downloadProgress: number = -1;
+  @Prop aid: number = 0;
   @Prop mirrorOn: boolean = false;
   @Prop timerMinutes: number = 0;
   @Prop sponsorOn: boolean = false;
@@ -38,6 +39,7 @@ export struct PlayerSettingsContent {
   @Link sponsorUserStats: string;
   @Link sponsorWarningReason: string;
   @Prop subtitleOn: boolean = false;
+  @Prop subtitleScale: number = 1.0;
   @Prop backgroundPlaybackEnabled: boolean = false;
   @Prop subtitleIndex: number = -1;
   @Prop subtitles: Array<SubtitleTrack> = [];
@@ -57,6 +59,8 @@ export struct PlayerSettingsContent {
   @Prop blockTopDm: boolean = false;
   @Prop blockBottomDm: boolean = false;
   @Prop blockColorDm: boolean = false;
+  @Prop dmMerge: boolean = false;
+  @Prop dmMergeCount: boolean = true;
   @Prop dmListCount: number = 0;
   @Prop dmFilterLoading: boolean = false;
   @Prop dmFilterType: number = 0;
@@ -87,6 +91,8 @@ export struct PlayerSettingsContent {
   onDmDensityChange: (value: number) => void = () => {};
   onDmBlockLevelChange: (value: number) => void = () => {};
   onToggleDmBlock: (kind: string) => void = () => {};
+  onDmMergeChange: (next: boolean) => void = () => {};
+  onDmMergeCountChange: (next: boolean) => void = () => {};
   onQualityChange: (qn: number) => void = () => {};
   onChapterChange: (seconds: number) => void = () => {};
   onSpeedChange: (rate: number) => void = () => {};
@@ -94,6 +100,7 @@ export struct PlayerSettingsContent {
   onTimerChange: (minutes: number) => void = () => {};
   onMirrorChange: (next: boolean) => void = () => {};
   onSubtitleToggle: (next: boolean) => void = () => {};
+  onSubtitleScaleChange: (scale: number) => void = () => {};
   onPictureInPicture: () => void = () => {};
   onReportVideo: () => void = () => {};
   onBackgroundPlaybackChange: (next: boolean) => void = () => {};
@@ -138,6 +145,8 @@ export struct PlayerSettingsContent {
       blockTopDm: this.blockTopDm,
       blockBottomDm: this.blockBottomDm,
       blockColorDm: this.blockColorDm,
+      dmMerge: this.dmMerge,
+      dmMergeCount: this.dmMergeCount,
       qualityOptions: this.qualityOptions,
       activeQuality: this.activeQuality,
       chapters: this.chapters,
@@ -146,8 +155,10 @@ export struct PlayerSettingsContent {
       subtitles: this.subtitles,
       subtitleIndex: this.subtitleIndex,
       subtitleOn: this.subtitleOn,
+      subtitleScale: this.subtitleScale,
       dmFilterRulesCount: this.dmFilterRulesCount,
       onSubtitleChange: (index: number) => this.onSubtitleChange(index),
+      onSubtitleScaleChange: (scale: number) => this.onSubtitleScaleChange(scale),
       onResetDanmaku: () => this.onResetDanmaku(),
       onDmOpacityChange: (value: number) => this.onDmOpacityChange(value),
       onDmFrameRateChange: (value: number) => this.onDmFrameRateChange(value),
@@ -159,6 +170,8 @@ export struct PlayerSettingsContent {
       onDmFilterTap: () => this.onDmFilterOpen(),
       onBlockAdvancedToggle: (next: boolean) => this.onDmBlockLevelChange(next ? 1 : 0),
       onToggleDmBlock: (kind: string) => this.onToggleDmBlock(kind),
+      onDmMergeChange: (next: boolean) => this.onDmMergeChange(next),
+      onDmMergeCountChange: (next: boolean) => this.onDmMergeCountChange(next),
       onQualityChange: (qn: number) => this.onQualityChange(qn),
       onChapterChange: (seconds: number) => this.onChapterChange(seconds),
       onSpeedChange: (rate: number) => this.onSpeedChange(rate),
@@ -286,6 +299,7 @@ export struct PlayerSettingsContent {
       } else {
         PlayerMoreSheet({
           forceDark: this.fullscreen,
+          aid: this.aid,
           playbackRate: this.playbackRate,
           playMode: this.playMode,
           qualityLabel: this.qualityLabel,

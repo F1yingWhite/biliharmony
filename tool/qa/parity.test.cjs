@@ -34,8 +34,17 @@ function environment(mocks = {}) {
         return load(path.relative(root, path.resolve(path.dirname(filename), name)).replaceAll('\\', '/'));
       }
       if (name in mocks) return mocks[name];
+      // 与 regression.test.cjs 同款 ArkTS 基础依赖兜底（collections/taskpool/worker/util）。
+      if (name === '@kit.ArkTS') return {
+        collections: { Array },
+        taskpool: { execute: async (task, ...args) => task(...args) },
+        worker: { ThreadWorker: class { on() {} off() {} postMessage() {} terminate() {} } },
+        util: {},
+      };
       // LiveDanmakuClient 等模块引用 hilog：Node 沙箱以静默实现兜底。
       if (name === 'BuildProfile') return { DEBUG: false };
+      if (name === '@kit.CryptoArchitectureKit') return { cryptoFramework: {} };
+      if (name === '@kit.ArkWeb') return { webview: {} };
       if (name === '@kit.PerformanceAnalysisKit') {
         const noop = () => {};
         return { hilog: { debug: noop, info: noop, warn: noop, error: noop } };

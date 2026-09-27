@@ -161,7 +161,7 @@ export struct PlayerEndScreen {
           this.ActionCell($r('app.media.ic_refresh'), '重播', '#DDE0E4', this.onReplay)
           this.ActionCell(this.liked ? $r('app.media.ic_like_fill') : $r('app.media.ic_like'), '点赞',
             this.liked ? this.accent : '#DDE0E4', this.onLike)
-          this.ActionCell($r('app.media.bilix_icon_dislike'), '不喜欢',
+          this.ActionCell($r('app.media.ic_dislike'), '不喜欢',
             this.disliked ? this.accent : '#DDE0E4', this.onDislike)
           this.ActionCell($r('app.media.ic_coin'), '投币', this.coined ? this.accent : '#DDE0E4', this.onCoin)
           this.ActionCell(this.favorited ? $r('app.media.ic_favorite_fill') : $r('app.media.ic_favorite'), '收藏',

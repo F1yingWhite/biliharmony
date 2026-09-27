@@ -299,11 +299,56 @@ export struct MessagesPage {
     .width('100%')
     .padding({ top: 11, bottom: 11 })
     .onClick(() => this.openSession(item))
-    // 长按删除会话（对齐 PiliPlus 私信会话删除）
+    // 长按会话：置顶/取消置顶、删除（对齐官方会话管理）
     .gesture(
       LongPressGesture({ repeat: false })
-        .onAction(() => this.confirmRemoveSession(item))
+        .onAction(() => this.promptSessionActions(item))
     )
+  }
+
+  /** 长按会话弹出操作菜单：置顶切换 + 删除。 */
+  private promptSessionActions(item: MessageSessionItem): void {
+    const isDark: boolean = this.isDark;
+    try {
+      this.getUIContext().getPromptAction().showActionMenu({
+        title: item.name.length > 0 ? item.name : '会话操作',
+        buttons: [
+          { text: item.pinned ? '取消置顶' : '置顶', color: isDark ? '#E6E6E6' : '#18191C' },
+          { text: '删除会话', color: AppTheme.DANGER },
+        ],
+      }).then((result) => {
+        const index: number = Number(result.index);
+        if (index === 0) this.togglePinSession(item);
+        else if (index === 1) this.confirmRemoveSession(item);
+      });
+    } catch (e) {
+      // 弹窗失败忽略。
+    }
+  }
+
+  /** 置顶/取消置顶会话：成功后更新本地 pinned 标记并重排（置顶在前）。 */
+  private togglePinSession(item: MessageSessionItem): void {
+    if (item.talkerId <= 0) {
+      this.getUIContext().getPromptAction().showToast({ message: '该会话不支持置顶' });
+      return;
+    }
+    MessageApi.pinSession(item.talkerId, !item.pinned)
+      .then((r: ActionResult) => {
+        this.getUIContext().getPromptAction().showToast({ message: r.message });
+        if (!r.ok) return;
+        const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
+        for (let i: number = 0; i < all.length; i++) {
+          all[i].pinned = all[i].talkerId === item.talkerId ? !item.pinned : false;
+        }
+        all.sort((a: MessageSessionItem, b: MessageSessionItem): number => {
+          if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+          return b.sessionTs - a.sessionTs;
+        });
+        this.sessionsSource.reset(all);
+      })
+      .catch(() => {
+        this.getUIContext().getPromptAction().showToast({ message: '网络异常，操作失败' });
+      });
   }
 
   /** 长按删除私信会话：确认后调服务端删除，成功后本地移除该会话行。 */
@@ -665,19 +710,19 @@ export struct MessagesPage {
         .height('100%')
         .visibility(this.activeTab === 0 ? Visibility.Visible : Visibility.Hidden)
         if (this.tabMounted[1]) {
-          MsgNotifyList({ tab: 'reply' })
+          MsgNotifyList({ tab: 'reply', active: this.activeTab === 1 })
             .visibility(this.activeTab === 1 ? Visibility.Visible : Visibility.Hidden)
         }
         if (this.tabMounted[2]) {
-          MsgNotifyList({ tab: 'at' })
+          MsgNotifyList({ tab: 'at', active: this.activeTab === 2 })
             .visibility(this.activeTab === 2 ? Visibility.Visible : Visibility.Hidden)
         }
         if (this.tabMounted[3]) {
-          MsgNotifyList({ tab: 'like' })
+          MsgNotifyList({ tab: 'like', active: this.activeTab === 3 })
             .visibility(this.activeTab === 3 ? Visibility.Visible : Visibility.Hidden)
         }
         if (this.tabMounted[4]) {
-          MsgNotifyList({ tab: 'sys' })
+          MsgNotifyList({ tab: 'sys', active: this.activeTab === 4 })
             .visibility(this.activeTab === 4 ? Visibility.Visible : Visibility.Hidden)
         }
       }

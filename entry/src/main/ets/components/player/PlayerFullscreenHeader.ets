@@ -53,8 +53,8 @@ export struct PlayerFullscreenHeader {
       .layoutWeight(1)
       this.IconButton(this.liked ? $r('app.media.ic_like_fill') : $r('app.media.ic_like'), 24,
         this.liked ? this.accent : '#FFFFFF', () => this.onLike())
-      this.IconButton($r('app.media.bilix_icon_coin'), 24, this.coined ? this.accent : '#FFFFFF', () => this.onCoin())
-      this.IconButton(this.favorited ? $r('app.media.ic_favorite_fill') : $r('app.media.bilix_icon_fav'), 24,
+      this.IconButton($r('app.media.ic_coin'), 24, this.coined ? this.accent : '#FFFFFF', () => this.onCoin())
+      this.IconButton(this.favorited ? $r('app.media.ic_favorite_fill') : $r('app.media.ic_favorite'), 24,
         this.favorited ? this.accent : '#FFFFFF', () => this.onFavorite())
       this.IconButton($r('app.media.ic_share'), 24, '#FFFFFF', () => this.onShare())
     }

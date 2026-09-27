@@ -1,4 +1,4 @@
-import { VideoChapter } from '../../api/BiliApi';
+import { HotPoint, VideoChapter } from '../../api/BiliApi';
 import { SponsorBlockSegment } from '../../common/SponsorBlock';
 import { formatDuration } from '../../common/Utils';
 import { PlayerProgressBar } from './PlayerProgressBar';
@@ -36,6 +36,7 @@ export struct PlayerCompactControls {
 
   @Prop chapters: Array<VideoChapter> = [];
   @Prop sponsorSegments: Array<SponsorBlockSegment> = [];
+  @Prop hotPoints: Array<HotPoint> = [];
   @Prop titleColor: string = '#FFFFFF';
   onBack: () => void = () => {};
   onHome: () => void = () => {};
@@ -111,6 +112,7 @@ export struct PlayerCompactControls {
             compact: true,
             chapters: this.chapters,
             sponsorSegments: this.sponsorSegments,
+            hotPoints: this.hotPoints,
             onChange: (value: number, mode: SliderChangeMode) => this.onProgressChange(value, mode),
             onInteractionEnd: () => this.onProgressInteractionEnd(),
           })

@@ -8,7 +8,7 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { common, bundleManager } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { DEBUG } from 'BuildProfile';
-import { AppNavStack, NAV_FAVORITES, NAV_HISTORY, NAV_LOGIN, NAV_RELATION_LIST, NAV_USER_SPACE, NAV_WATCH_LATER,
+import { AppNavStack, NAV_DOWNLOAD_CENTER, NAV_NETWORK_PRIVACY, NAV_FAVORITES, NAV_HISTORY, NAV_LOGIN, NAV_RELATION_LIST, NAV_USER_SPACE, NAV_WATCH_LATER,
   NAV_BANGUMI_LIST, NAV_BANGUMI_INDEX, NAV_BLACK_LIST,
   RelationListParam, UserSpaceParam } from '../common/AppRouter';
 import { UserInfo, UserStat } from '../model/Models';
@@ -283,6 +283,20 @@ export struct MineView {
 
         this.GroupDivider()
 
+        // 下载中心：游客可用（缓存到本地，导出走系统文件选择器）。
+        this.MenuRow($r('app.media.ic_download'), '下载中心', () => {
+          AppNavStack.pushPathByName(NAV_DOWNLOAD_CENTER, null);
+        })
+
+        this.GroupDivider()
+
+        // 网络与隐私：代理、本地不想看记录管理。
+        this.MenuRow($r('app.media.ic_privacy'), '网络与隐私', () => {
+          AppNavStack.pushPathByName(NAV_NETWORK_PRIVACY, null);
+        })
+
+        this.GroupDivider()
+
         this.MenuRow($r('app.media.ic_favorite'), '我的收藏', () => {
           if (UserStore.isLogin) AppNavStack.pushPathByName(NAV_FAVORITES, null);
           else AppNavStack.pushPathByName(NAV_LOGIN, null);
@@ -291,7 +305,7 @@ export struct MineView {
         this.GroupDivider()
 
         // 追番/追剧列表（需登录）
-        this.MenuRow($r('app.media.bilix_logo_tv'), '我的追番', () => {
+        this.MenuRow($r('app.media.ic_tv'), '我的追番', () => {
           if (UserStore.isLogin) AppNavStack.pushPathByName(NAV_BANGUMI_LIST, null);
           else AppNavStack.pushPathByName(NAV_LOGIN, null);
         })
@@ -299,14 +313,14 @@ export struct MineView {
         this.GroupDivider()
 
         // 番剧索引（无需登录的浏览聚合）
-        this.MenuRow($r('app.media.ic_favorite'), '番剧索引', () => {
+        this.MenuRow($r('app.media.ic_categories'), '番剧索引', () => {
           AppNavStack.pushPathByName(NAV_BANGUMI_INDEX, null);
         })
 
         this.GroupDivider()
 
         // 黑名单（需登录）
-        this.MenuRow($r('app.media.ic_dislike'), '黑名单', () => {
+        this.MenuRow($r('app.media.ic_user_block'), '黑名单', () => {
           if (UserStore.isLogin) AppNavStack.pushPathByName(NAV_BLACK_LIST, null);
           else AppNavStack.pushPathByName(NAV_LOGIN, null);
         })
@@ -315,7 +329,7 @@ export struct MineView {
 
         // 顶层平台切换：YouTube 与哔哩哔哩同级，切入后由 YouTube 自己的外壳接管
         // （自带玻璃头栏与底部 Dock），回程在 YouTube「我的」页。
-        this.MenuRow($r('app.media.ic_youtube'), 'YouTube', () => {
+        this.MenuRow($r('app.media.ic_youtube_outline'), 'YouTube', () => {
           PlatformStore.switchTo(PlatformStore.YOUTUBE);
         })
       }

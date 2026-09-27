@@ -75,16 +75,19 @@ function environment(mocks = {}) {
       }
       if (name in mocks) return mocks[name];
       // LiveDanmakuClient 等模块引用 hilog：Node 沙箱以静默实现兜底。
+      if (name === '@kit.CryptoArchitectureKit') return { cryptoFramework: {} };
+      if (name === '@kit.ArkWeb') return { webview: {} };
       if (name === '@kit.PerformanceAnalysisKit') {
         const noop = () => {};
         return { hilog: { debug: noop, info: noop, warn: noop, error: noop } };
       }
       throw new Error('Missing platform mock: ' + name);
     };
-    new Function('require', 'module', 'exports', 'AppStorage', 'PersistentStorage', code)(
+    new Function('require', 'module', 'exports', 'AppStorage', 'PersistentStorage', 'Builder', code)(
       localRequire, module, module.exports,
       { get: key => storage.get(key), setOrCreate: (key, value) => storage.set(key, value) },
-      { persistProp() {} }
+      { persistProp() {} },
+      (target) => target
     );
     return module.exports;
   }
@@ -202,7 +205,7 @@ test('recommendation reset supersedes old pagination and preserves new loading s
   Object.assign(p, {recEpoch:epoch(env), recFetching:false, recHasMore:true,
     recSource:source(env, [{aid:1}]), recCount:1,
     // 曝光窗口为独立行为，本用例注入恒等桩，聚焦 reset/epoch 语义。
-    filterSeen: l => l, rememberSeen: () => {}});
+    filterSeen: l => l, rememberSeen: () => {}, dedupVideos: (_source, list) => list});
   const first = p.loadRecommend(false), reset = p.loadRecommend(true);
   old.resolve([]); await first;
   assert.equal(calls, 2); assert.equal(p.recFetching, true); assert.equal(p.recHasMore, true);
@@ -222,8 +225,8 @@ function qrHarness(api) {
 
 test('old QR expiry cannot stop a refreshed QR or clear its inflight guard', async () => {
   const old = deferred(), latest = deferred(); let calls = 0;
-  const p = qrHarness({getTVCode:async()=>({authCode:'NEW',url:'new-qr'}),
-    pollTVCode:()=>++calls === 1 ? old.promise : latest.promise});
+  const p = qrHarness({getWebQRCode:async()=>({qrcodeKey:'NEW',url:'new-qr'}),
+    pollWebQRCode:()=>++calls === 1 ? old.promise : latest.promise});
   try {
     const first = p.poll(); await p.requestCode(); const second = p.poll();
     old.resolve({code:86038}); await first;
@@ -235,19 +238,19 @@ test('old QR expiry cannot stop a refreshed QR or clear its inflight guard', asy
 
 test('out-of-order QR creation cannot replace the newer code', async () => {
   const old = deferred(), latest = deferred(); let calls=0;
-  const p=qrHarness({getTVCode:()=>++calls===1?old.promise:latest.promise});
+  const p=qrHarness({getWebQRCode:()=>++calls===1?old.promise:latest.promise});
   try {
     const a=p.requestCode(), b=p.requestCode();
-    latest.resolve({authCode:'NEW',url:'new'}); await b;
-    old.resolve({authCode:'OLD',url:'old'}); await a;
+    latest.resolve({qrcodeKey:'NEW',url:'new'}); await b;
+    old.resolve({qrcodeKey:'OLD',url:'old'}); await a;
     assert.equal(p.authCode,'NEW'); assert.equal(p.qrUrl,'new');
   } finally {p.stopPoll();}
 });
 
 test('stopping QR polling ignores a late login success', async () => {
-  const pending=deferred(); const p=qrHarness({pollTVCode:()=>pending.promise});
+  const pending=deferred(); const p=qrHarness({pollWebQRCode:()=>pending.promise});
   const running=p.poll(); p.stopPoll(); p.tab=1;
-  pending.resolve({code:0,cookies:[],accessToken:''}); await running;
+  pending.resolve({code:0,refreshToken:'r'}); await running;
   assert.equal(p.loggedIn,false);
 });
 
@@ -395,7 +398,8 @@ test('dynamic category change supersedes an inflight feed', async () => {
     "import { DynamicApi } from '../api/DynamicApi';");
   const p=new Change();p.loadFeed=Load.prototype.loadFeed;
   Object.assign(p,{feedEpoch:epoch(env),dynType:'all',feedLoading:false,dynTab:0,hostMid:0,
-    dynHasMore:true,dynOffset:'',dynSource:source(env),dynCount:0});
+    dynHasMore:true,dynOffset:'',dynSource:source(env),dynCount:0,
+    typeItems:new Map(),typeOffset:new Map(),typeHasMore:new Map()});
   const first=p.loadFeed(false);p.dynTab=1;p.changeDynType('video');
   old.resolve({items:[{dynId:'old'}],offset:'old',hasMore:false});await first;
   assert.equal(p.dynType,'video');assert.equal(p.feedLoading,true);assert.deepEqual(calls,['all','video']);
@@ -508,7 +512,7 @@ test('recommendation empty batches remain retryable and duplicate batches do not
   let calls = 0;
   const env = environment({'api/FeedApi': {FeedApi: {getRecommend: async () => { calls++; return batches.shift(); }}}});
   const Harness = env.methodHarness('views/HomeView', '  private dedupVideos(', '  async loadHot(',
-    "import { FeedApi } from '../api/FeedApi';");
+    "import { FeedApi } from '../api/FeedApi'; const LocalVideoFilter={filterVideos:(l)=>l};");
   const p = new Harness();
   Object.assign(p, {recEpoch: epoch(env), recFetching: false, recHasMore: true, recIdx: 0,
     recError: '', recSource: source(env, [{aid: 1, bvid: 'BV1'}]), recCount: 1});
@@ -742,7 +746,7 @@ test('dynamic detail: failed continuation preserves comments and retries the sam
 });
 
 
-test('image return: zoomed image restores its transform before starting the return transition', () => {
+test('image return: zoomed picture starts a hero from its current transform', () => {
   const env = environment();
   const Parent = env.methodHarness('pages/ImageViewer', '  goBack(): void {', '  private finishBack():');
   const parent = new Parent(); let flights = 0;
@@ -750,25 +754,57 @@ test('image return: zoomed image restores its transform before starting the retu
     resetZoomForExit: false, finishBack: () => flights++});
   parent.goBack();
   assert.equal(parent.resetZoomForExit, true);
-  assert.equal(flights, 0);
-  parent.goBack();
+  assert.equal(parent.exitWasZoomed, true);
   assert.equal(flights, 0);
   const Child = env.methodHarness('pages/ImageViewer', '  private prepareExit(): void {', '  private clampScale(');
-  const child = new Child(); let finish;
-  Object.assign(child, {exitRequested: true, scaleValue: 3, offsetX: 100, offsetY: -50,
-    getUIContext: () => ({animateTo: (options, update) => {update(); finish = options.onFinish;}}),
-    onZoomChange: value => {parent.currentZoomed = value;}, onExitReady: () => parent.finishBack()});
-  global.Curve = {EaseOut: 0};
+  const child = new Child(); let start;
+  Object.assign(child, {exitRequested: true, useSystemGeometry: false,
+    scaleValue: 3, offsetX: 100, offsetY: -50,
+    onExitReady: (scale, x, y) => {start = [scale, x, y]; parent.finishBack();}});
+  child.prepareExit();
+  assert.deepEqual(start, [3, 100, -50]);
+  assert.deepEqual([child.scaleValue, child.offsetX, child.offsetY], [3, 100, -50]);
+  assert.equal(flights, 1);
+});
+test('shared image exit resets zoom and pops within the same animation transaction', () => {
+  const Child = environment().methodHarness('pages/ImageViewer',
+    '  private prepareExit(): void {', '  private clampScale(');
+  const child = new Child(); let finished = 0, duration = 0, start;
+  Object.assign(child, {exitRequested: true, useSystemGeometry: true,
+    scaleValue: 2.5, offsetX: 50, offsetY: -20,
+    getUIContext: () => ({animateTo: (options, update) => {
+      duration = options.duration; update(); finished++;
+    }}),
+    onExitReady: (scale, x, y) => {start = [scale, x, y]; assert.equal(finished, 0);}});
+  global.Curve = {EaseInOut: 0};
   try {
     child.prepareExit();
+    assert.equal(duration, 300);
+    assert.deepEqual(start, [2.5, 50, -20]);
     assert.deepEqual([child.scaleValue, child.offsetX, child.offsetY], [1, 0, 0]);
-    assert.equal(flights, 0);
-    finish();
-    assert.equal(flights, 1);
-    assert.equal(parent.currentZoomed, false);
   } finally {delete global.Curve;}
 });
-
+test('manual image hero starts from the zoomed position and keeps the source thumbnail target', () => {
+  const Exit = environment().methodHarness('pages/ImageViewer',
+    '  private finishBack(): void {', '  private startHeroExitFlight():');
+  const page = new Exit(); let captured;
+  Object.assign(page, {exitStarted: false, exitWasZoomed: true, exitScale: 3,
+    exitOffsetX: 50, exitOffsetY: -20, heroFallbackTimer: -1,
+    interactionReadyTimer: -1, heroHandoffTimer: -1, heroExitTimer: -1,
+    param: {initialIndex: 0}, currentIndex: 0, naturalSizes: new Map([[0, {w: 1000, h: 500}]]),
+    entryFromRect: true, heroVisible: false, heroSource: '',
+    hasSystemGeometryTransition: () => false,
+    exitSourceRectFor: () => ({x: 8, y: 9, w: 70, h: 40}),
+    containRect: () => ({x: 10, y: 20, w: 200, h: 100}),
+    freezeCurrentGifFrame: rect => {captured = rect;},
+    sourcePreviewFor: () => 'preview'});
+  page.finishBack();
+  assert.deepEqual(captured, {x: -140, y: -100, w: 600, h: 300});
+  assert.deepEqual([page.heroX, page.heroY, page.heroWidth, page.heroHeight], [-140, -100, 600, 300]);
+  assert.deepEqual(page.heroExitTarget, {x: 8, y: 9, w: 70, h: 40});
+  assert.equal(page.heroExitPending, true);
+  clearTimeout(page.heroExitTimer);
+});
 
 test('live quality: failed requests preserve playback and release busy state; late failure stays silent', async () => {
   let task = Promise.resolve(null); const notices = [];
@@ -1086,4 +1122,41 @@ test('dynamic recovery: expired login navigates to login while pagination retain
   p.recoverFeed();assert.equal(globalThis.__dynamicLoginCount,1);assert.deepEqual(resets,[]);
   p.feedNeedsLogin=false;p.recoverFeed();assert.deepEqual(resets,[false]);
   delete globalThis.__dynamicLoginCount;
+});
+
+
+test('feed filtering never restores a hidden item or drops the following visible item', () => {
+  const env = environment();
+  const Harness = env.methodHarness('views/HomeView', '  private dedupVideos(', '  // ===== 近期曝光窗口',
+    "const LocalVideoFilter={filterVideos:(items)=>items.filter(item=>item.aid!==2)};");
+  const p = new Harness();
+  const rows = [{aid:2,bvid:'BV2'}, {aid:3,bvid:'BV3'}, {aid:3,bvid:'BV3'}, {aid:4,bvid:'BV4'}];
+  assert.deepEqual(p.dedupVideos(source(env, [{aid:4,bvid:'BV4'}]), rows).map(v=>v.aid), [3]);
+  assert.deepEqual(p.dedupVideos(source(env, [{aid:4,bvid:'BV4'}]), rows, true).map(v=>v.aid), [3,4]);
+});
+
+test('refresh skips filtered batches and replaces the old feed with the first usable batch', async () => {
+  const batches = [[{aid:2,bvid:'BV2'}], [{aid:3,bvid:'BV3'},{aid:3,bvid:'BV3'}]];
+  const env = environment({'api/FeedApi': {FeedApi: {getRecommend: async () => batches.shift() || []}}});
+  const Harness = env.methodHarness('views/HomeView', '  private dedupVideos(', '  async loadHot(',
+    "import { FeedApi } from '../api/FeedApi'; const LocalVideoFilter={filterVideos:(items)=>items.filter(item=>item.aid!==2)};");
+  const p = new Harness();
+  Object.assign(p, {recEpoch:epoch(env), recFetching:false, recSource:source(env,[{aid:1,bvid:'BV1'}]), recCount:1});
+  await p.loadRecommend(true);
+  assert.deepEqual(p.recSource.getAll().map(v=>v.aid), [3]);
+  assert.equal(p.recCount,1);
+});
+
+test('removing one feed item preserves other objects and sends only a delete notification', () => {
+  const env=environment();
+  const a={aid:1},b={aid:2},c={aid:3};
+  const data=source(env,[a,b,c]);
+  const events=[];
+  data.registerDataChangeListener({onDataDelete:i=>events.push(['delete',i]),onDataReloaded:()=>events.push(['reload'])});
+  data.removeAt(1);
+  data.removeAt(-1);
+  data.removeAt(9);
+  assert.deepEqual(data.getAll(),[a,c]);
+  assert.equal(data.getData(1),c);
+  assert.deepEqual(events,[['delete',1]]);
 });
