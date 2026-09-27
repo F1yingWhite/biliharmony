@@ -758,6 +758,9 @@ if (this.runtimeSources.length === 0) {
       if (this.backgroundPlaybackEnabled) this.enterBackgroundAudioOnly();
       else if (this.playing) this.togglePlay();
     } else {
+      // 从桌面/任务列表回到视频页时，系统不一定发出 ABOUT_TO_RESTORE。
+      // 主动交还画面给页面，并取消仍在启动的浮窗，避免窗口继续覆盖播放器。
+      if (this.pipActive || this.pipStarting || this.pipRestoring) this.releasePictureInPicture();
       this.pipRestoring = false;
       this.leaveBackgroundAudioOnly();
     }

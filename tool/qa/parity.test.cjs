@@ -127,6 +127,7 @@ function backgroundHarness(enabled,playing) {
   const Harness=env.methodHarness('components/player/PlayerView','  onAppBackgroundChanged():','  private setBackgroundPlayback(');
   const actions=[];
   const view=Object.assign(new Harness(),{appInBackground:true,backgroundPlaybackEnabled:enabled,playing,
+    releasePictureInPicture(){actions.push('stopPiP');this.pipActive=false;this.pipStarting=false;this.pipRestoring=false;},
     togglePlay(){actions.push('pause');},enterBackgroundAudioOnly(){actions.push('audio');},leaveBackgroundAudioOnly(){actions.push('foreground');}});
   return {view,actions};
 }
@@ -549,7 +550,7 @@ test('PiP starting, active and restoring preserve background video even when bac
       assert.deepEqual(actions, []);
       view.appInBackground = false;
       view.onAppBackgroundChanged();
-      assert.deepEqual(actions, ['foreground']);
+      assert.deepEqual(actions, ['stopPiP', 'foreground']);
       assert.equal(view.pipRestoring, false);
     }
   }
@@ -590,6 +591,25 @@ test('PiP handles playback controls, restoration and background close without lo
   assert.equal(view.pipRestoring,true);assert.deepEqual(actions,['toggle','toggle']);
   view.pipRestoring=false;controller.callbacks.stateChange(4);
   assert.deepEqual(actions,['toggle','toggle','background']);
+});
+test('returning to the video page stops active PiP without pausing or replacing the player', async () => {
+  const controller=fakePipController();const {view,actions}=pipHarness(async()=>controller);
+  const foreground=backgroundHarness(false,true).view.onAppBackgroundChanged;
+  view.leaveBackgroundAudioOnly=()=>actions.push('foreground');
+  await view.startPictureInPicture();
+  const player=view.player;
+  foreground.call(view);
+  assert.equal(controller.stops,1);assert.equal(view.pipController,null);
+  assert.equal(view.pipActive,false);assert.equal(view.player,player);assert.equal(view.playing,true);
+  assert.deepEqual(actions,['foreground']);
+});
+test('returning during PiP startup invalidates a late window start', async () => {
+  const pending=deferred(),controller=fakePipController();controller.startPiP=()=>pending.promise;
+  const {view}=pipHarness(async()=>controller);view.leaveBackgroundAudioOnly=()=>{};
+  const starting=view.startPictureInPicture();await tick();
+  backgroundHarness(false,true).view.onAppBackgroundChanged.call(view);
+  pending.resolve();await starting;
+  assert.equal(controller.stops,2);assert.equal(view.pipController,null);assert.equal(view.pipStarting,false);
 });
 test('PiP creation after player disposal cannot start an orphan window', async () => {
   const pending=deferred(),controller=fakePipController();const {view}=pipHarness(()=>pending.promise);
