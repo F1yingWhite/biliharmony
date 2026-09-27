@@ -792,8 +792,8 @@ struct Index {
             this.DockNavigation()
           }
           .width(this.dockBarWidth())
-          // 深浅色均加稳定底衬，保留玻璃材质，同时限制彩色封面对导航文字的干扰。
-          .backgroundColor(this.glassOn ? (this.isDark ? '#CC101114' : '#E6FFFFFF') : Color.Transparent)
+          // 浅色保持透明，避免白色底衬遮住原生沉浸光感的背景采样；深色沿用原有对比度底衬。
+          .backgroundColor(this.glassOn && this.isDark ? '#CC101114' : Color.Transparent)
           .borderRadius(DOCK_BAR_HEIGHT / 2)
           .alignItems(HorizontalAlign.Center)
         }
