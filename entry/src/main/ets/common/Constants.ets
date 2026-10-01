@@ -202,6 +202,7 @@ export class Api {
   // ===== 用户 =====
   static readonly userInfo: string = HttpString.apiBaseUrl + '/x/web-interface/nav';
   static readonly userStat: string = HttpString.apiBaseUrl + '/x/relation/stat';
+  static readonly userRelations: string = HttpString.apiBaseUrl + '/x/relation/relations';
   static readonly userRelation: string = HttpString.apiBaseUrl + '/x/relation';
   static readonly modifyUserRelation: string = HttpString.apiBaseUrl + '/x/relation/modify';
   // 关注分组（对齐 PiliPlus lib/http/api.dart followUpTag/createFollowTag/addUsers）

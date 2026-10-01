@@ -113,43 +113,51 @@ export class DownloadCenter {
   static init(context: common.UIAbilityContext): Promise<void> {
     if (DownloadCenter.ready !== null) return DownloadCenter.ready;
     DownloadCenter.context = context;
-    DownloadCenter.ready = DownloadCenter.restore(context);
+    DownloadCenter.ready = DownloadCenter.restore(context).catch(() => {
+      // 只缓存成功的恢复；失败时禁用写入，下一次访问可以重新读盘。
+      DownloadCenter.store = null;
+      DownloadCenter.ready = null;
+      throw new Error('下载记录恢复失败，请重试');
+    });
     return DownloadCenter.ready;
   }
 
   private static async restore(context: common.UIAbilityContext): Promise<void> {
-    try {
-      const store: preferences.Preferences = await preferences.getPreferences(context, {
-        name: DownloadCenter.PREFS_NAME,
-      });
-      DownloadCenter.store = store;
-      const raw: string = store.getSync(DownloadCenter.TASKS_KEY, '[]') as string;
-      const parsed: Object = JSON.parse(raw.length > 0 ? raw : '[]') as Object;
-      if (Array.isArray(parsed)) {
-        const list: Array<Object> = parsed as Array<Object>;
-        DownloadCenter.tasks = list.map((item: Object): DownloadTaskItem => DownloadTaskItem.from(item))
-          .filter((t: DownloadTaskItem): boolean => t.id.length > 0);
+    const store: preferences.Preferences = await preferences.getPreferences(context, {
+      name: DownloadCenter.PREFS_NAME,
+    });
+    const raw: string = store.getSync(DownloadCenter.TASKS_KEY, '[]') as string;
+    const parsed: Object = JSON.parse(raw.length > 0 ? raw : '[]') as Object;
+    if (!Array.isArray(parsed)) throw new Error('下载记录格式错误');
+    const list: Array<Object> = parsed as Array<Object>;
+    const restored: Array<DownloadTaskItem> = list
+      .map((item: Object): DownloadTaskItem => DownloadTaskItem.from(item))
+      .filter((t: DownloadTaskItem): boolean => t.id.length > 0);
+    // 读取和解析全部成功后才发布 store，避免失败后把原记录覆盖成空列表。
+    DownloadCenter.tasks = restored;
+    DownloadCenter.store = store;
+    // 上次退出时还在排队/下载的任务：CDN URL 已失效，标记为中断等待重试。
+    let changed: boolean = false;
+    for (let i: number = 0; i < DownloadCenter.tasks.length; i++) {
+      const t: DownloadTaskItem = DownloadCenter.tasks[i];
+      if (t.status === DOWNLOAD_STATUS_QUEUED || t.status === DOWNLOAD_STATUS_RUNNING) {
+        t.status = DOWNLOAD_STATUS_INTERRUPTED;
+        t.progress = -1;
+        t.message = '应用退出导致下载中断，可重试';
+        changed = true;
       }
-      // 上次退出时还在排队/下载的任务：CDN URL 已失效，标记为中断等待重试。
-      let changed: boolean = false;
-      for (let i: number = 0; i < DownloadCenter.tasks.length; i++) {
-        const t: DownloadTaskItem = DownloadCenter.tasks[i];
-        if (t.status === DOWNLOAD_STATUS_QUEUED || t.status === DOWNLOAD_STATUS_RUNNING) {
-          t.status = DOWNLOAD_STATUS_INTERRUPTED;
-          t.progress = -1;
-          t.message = '应用退出导致下载中断，可重试';
-          changed = true;
-        }
-      }
-      if (changed) await DownloadCenter.persist();
-    } catch (e) {
-      // 记录恢复失败不阻断功能：空队列重新开始。
-      DownloadCenter.tasks = [];
     }
+    if (changed) await DownloadCenter.persist();
   }
 
   static async ensureLoaded(): Promise<void> {
-    if (DownloadCenter.ready !== null) await DownloadCenter.ready;
+    if (DownloadCenter.ready !== null) {
+      await DownloadCenter.ready;
+    } else if (DownloadCenter.context !== null) {
+      await DownloadCenter.init(DownloadCenter.context);
+    } else {
+      throw new Error('下载中心尚未初始化');
+    }
   }
 
   static list(): Array<DownloadTaskItem> {

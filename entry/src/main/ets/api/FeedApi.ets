@@ -30,8 +30,10 @@ export class FeedApi {
   private static webFeedId: string = '';
   private static webBucketId: string = '';
   private static appCursor: number = 0;
+  private static sessionVersion: number = 0;
 
   static resetRecommendSession(): void {
+    FeedApi.sessionVersion++;
     FeedApi.webFreshIdx = 0;
     FeedApi.webFeedId = '';
     FeedApi.webBucketId = '';
@@ -82,22 +84,23 @@ export class FeedApi {
     return params;
   }
 
-  /** App 推流响应解析（纯函数）：过滤广告/不可播卡，游标取最后一条有效卡的 idx。 */
+  /** App 推流响应解析（纯函数）：过滤广告/不可播卡，游标取原始响应最后一条的 idx，过滤不影响续页。 */
   static parseAppFeed(data: Record<string, Object>): FeedPage {
     const page: FeedPage = new FeedPage();
     const items: Array<Object> = asArray(data['items']);
     for (let i: number = 0; i < items.length; i++) {
       const item: Record<string, Object> = asObject(items[i]);
+      const idx: number = asNumber(item['idx'], 0);
+      if (idx > 0) page.cursor = idx;
       const cardGoto: string = asString(item['card_goto'], '');
       const canPlay: number = asNumber(item['can_play'], 0);
       const adInfo: Object | undefined = item['ad_info'];
       // 过滤广告卡片与不可播放卡片（与 PiliPlus 一致）
-      if (cardGoto === 'ad_av' || cardGoto === 'ad_web_s' || canPlay !== 1 || adInfo !== undefined) {
+      if (cardGoto !== 'av' || canPlay !== 1 || (adInfo !== undefined && adInfo !== null)) {
         continue;
       }
-      page.items.push(VideoItem.fromAppItem(items[i]));
-      const idx: number = asNumber(item['idx'], 0);
-      if (idx > 0) page.cursor = idx;
+      const video: VideoItem = VideoItem.fromAppItem(items[i]);
+      if (video.aid > 0 || video.bvid.length > 0) page.items.push(video);
     }
     return page;
   }
@@ -108,9 +111,12 @@ export class FeedApi {
    */
   static async getRecommend(reset: boolean): Promise<Array<VideoItem>> {
     if (reset) FeedApi.resetRecommendSession();
+    const session: number = FeedApi.sessionVersion;
     const loggedIn: boolean = HttpClient.getCookie('SESSDATA').length > 0 &&
       HttpClient.getCookie('DedeUserID').length > 0;
-    const preferApp: boolean = FeedApi.recommendMode() === 'app';
+    // Cookie 登录不代表拥有 App OAuth token；缺失时优先 Web 个性化，避免静默变成游客推流。
+    const preferApp: boolean = FeedApi.recommendMode() === 'app' &&
+      (!loggedIn || HttpClient.getAppAccessToken().length > 0);
     if (preferApp) {
       try {
         const appPage: Array<VideoItem> = await FeedApi.getRecommendApp();
@@ -118,6 +124,7 @@ export class FeedApi {
       } catch (e) {
         // App 推流被风控或网络失败：回退 Web。
       }
+      if (session !== FeedApi.sessionVersion) return [];
       try {
         const webPage: Array<VideoItem> = await FeedApi.getRecommendWeb();
         if (webPage.length > 0) return webPage;
@@ -134,17 +141,19 @@ export class FeedApi {
         // WBI key 获取或签名被风控时继续走 App 推荐，不能让首页永久停在加载态。
       }
     }
+    if (session !== FeedApi.sessionVersion) return [];
     return FeedApi.getRecommendApp();
   }
 
   static async getRecommendWeb(): Promise<Array<VideoItem>> {
+    const session: number = FeedApi.sessionVersion;
     // 官方协议：页序号从 1 起，每页 +1；把上一页的会话标识回传。
     const idx: number = FeedApi.webFreshIdx + 1;
     const params: Record<string, string> =
       FeedApi.buildWebRcmdParams(idx, FeedApi.webFeedId, FeedApi.webBucketId);
     const resp: HttpResponse = await webGetSigned(Api.recommendListWeb, params);
     const data: Record<string, Object> | null = getData(resp);
-    if (data === null) return [];
+    if (data === null || session !== FeedApi.sessionVersion) return [];
     const page: FeedPage = FeedApi.parseWebRcmd(data);
     // 只有拿到有效响应才推进会话；feed_id 服务端可能不回，保留旧值比清空好。
     FeedApi.webFreshIdx = idx;
@@ -154,6 +163,7 @@ export class FeedApi {
   }
 
   static async getRecommendApp(): Promise<Array<VideoItem>> {
+    const session: number = FeedApi.sessionVersion;
     const params: Record<string, string> =
       FeedApi.buildAppFeedParams(FeedApi.appCursor, HttpClient.getAppAccessToken());
     await appSign(params);
@@ -162,11 +172,11 @@ export class FeedApi {
     const headers: Record<string, string> = HttpClient.merge(Constants.appHeaders, { 'buvid': HttpClient.buvid });
     const resp: HttpResponse = await HttpClient.get(url, headers);
     const data: Record<string, Object> | null = getData(resp);
-    if (data === null) {
+    if (data === null || session !== FeedApi.sessionVersion) {
       return [];
     }
     const page: FeedPage = FeedApi.parseAppFeed(data);
-    if (page.items.length > 0 && page.cursor > 0) FeedApi.appCursor = page.cursor;
+    if (page.cursor > 0) FeedApi.appCursor = page.cursor;
     return page.items;
   }
 

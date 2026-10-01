@@ -59,6 +59,7 @@ export struct LiveRoomPage {
   private flushTimer: number = -1;
   private destroyed: boolean = false;
   private lifecycleGeneration: number = 0;
+  private sendRequestId: number = 0;
   private historyPollTimer: number = -1;
   private historyPollGeneration: number = -1;
   private lastLiveMessageAt: number = 0;
@@ -67,6 +68,8 @@ export struct LiveRoomPage {
   aboutToAppear(): void {
     this.destroyed = false;
     this.lifecycleGeneration++;
+    this.sendRequestId++;
+    this.sending = false;
     Immersive.setKeepScreenOn(true);
     this.roomInfo.roomId = this.param.roomId;
     this.roomInfo.uid = this.param.uid;
@@ -235,11 +238,17 @@ export struct LiveRoomPage {
   }
 
   async sendDanmaku(emote: LiveEmoteItem | null = null): Promise<void> {
-    const content: string = this.draft.trim();
-    if (this.sending || !this.ensureLogin() || (emote === null && content.length === 0)) return;
+    const submittedDraft: string = this.draft;
+    const content: string = submittedDraft.trim();
+    if (this.destroyed || this.sending || !this.ensureLogin() || (emote === null && content.length === 0)) return;
+    const generation: number = this.lifecycleGeneration;
+    const roomId: number = this.param.roomId;
+    const requestId: number = ++this.sendRequestId;
     this.sending = true;
     try {
-      const result: ActionResult = await LiveApi.sendLiveDanmaku(this.param.roomId, content, emote);
+      const result: ActionResult = await LiveApi.sendLiveDanmaku(roomId, content, emote);
+      if (this.destroyed || generation !== this.lifecycleGeneration ||
+        roomId !== this.param.roomId || requestId !== this.sendRequestId) return;
       if (!result.ok) {
         this.getUIContext().getPromptAction().showToast({ message: result.message });
         return;
@@ -254,13 +263,17 @@ export struct LiveRoomPage {
       this.appendChatMessages([local]);
       this.chatAtBottom = true;
       this.scrollChatToEnd();
-      this.draft = '';
-      this.emotePanelOpen = false;
+      if (this.draft === submittedDraft) {
+        this.draft = '';
+        this.emotePanelOpen = false;
+      }
       this.getUIContext().getPromptAction().showToast({ message: '弹幕发送成功' });
     } catch (e) {
+      if (this.destroyed || generation !== this.lifecycleGeneration ||
+        roomId !== this.param.roomId || requestId !== this.sendRequestId) return;
       this.getUIContext().getPromptAction().showToast({ message: '弹幕发送失败，请检查网络' });
     } finally {
-      if (!this.destroyed) this.sending = false;
+      if (!this.destroyed && requestId === this.sendRequestId) this.sending = false;
     }
   }
 
@@ -360,11 +373,13 @@ export struct LiveRoomPage {
 
   /** 列表贴底；首屏需跨过视频/顶栏和历史消息的多轮布局。 */
   private scrollChatToEnd(settleLayout: boolean = false): void {
+    const generation: number = this.lifecycleGeneration;
     const delays: Array<number> = settleLayout ? [80, 220, 500] : [40, 140];
     for (let i: number = 0; i < delays.length; i++) {
       setTimeout(() => {
-        if (this.destroyed || this.chatSource.totalCount() === 0) return;
-        this.chatAtBottom = true;
+        // 布局等待期间可能上滑、离开或同步直播；只跟随当前页面仍贴底的用户。
+        if (this.destroyed || generation !== this.lifecycleGeneration ||
+          !this.chatAtBottom || this.chatSource.totalCount() === 0) return;
         this.chatScroller.scrollToIndex(this.chatSource.totalCount() - 1, false, ScrollAlign.END);
         this.chatScroller.scrollEdge(Edge.End);
       }, delays[i]);

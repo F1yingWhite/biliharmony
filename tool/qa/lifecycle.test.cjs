@@ -67,7 +67,7 @@ function homeChannels(hot, live) {
     'api/LiveApi': { LiveApi: { getLiveRooms: live } },
   });
   const Harness = env.methodHarness('views/HomeView', '  async loadHot(', '  @Builder\n  SubTabItem(',
-    "import {FeedApi} from '../api/FeedApi'; import {LiveApi} from '../api/LiveApi';");
+    "import {FeedApi} from '../api/FeedApi'; import {LiveApi} from '../api/LiveApi'; const UserApi={loadFeedFollowStates:async()=>{}};");
   const p = new Harness();
   Object.assign(p, { hotFetching:false, liveFetching:false, hotEpoch:epoch(env), liveEpoch:epoch(env),
     hotPage:3, livePage:4, hotHasMore:true, liveHasMore:true, hotError:'', liveError:'', recError:'',
@@ -132,8 +132,12 @@ test('home disappearing invalidates outstanding pages and clears activity indica
   const env=environment();
   const Lifecycle=env.methodHarness('views/HomeView','  aboutToDisappear(): void {\n    this.recEpoch.invalidate();','  async onLoginChanged():');
   p.recEpoch=epoch(env);p.recFetching=true;
+  let dialogClosed=false;
+  p.videoReportDialog={close:()=>{dialogClosed=true;}};
   p.onRefresh(1);p.onReachEnd(2);
   Lifecycle.prototype.aboutToDisappear.call(p);
+  assert.equal(dialogClosed,true);
+  assert.equal(p.videoReportDialog,null);
   pending.resolve([{aid:99,roomId:99}]);await tick();
   assert.equal(p.hotSource.getData(0).aid,1);
   assert.equal(p.liveSource.getData(0).roomId,1);
@@ -281,7 +285,7 @@ test('recommendation reset supersedes old pagination and preserves new loading s
   const old = deferred(), latest = deferred(); let calls = 0;
   const env = environment({'api/FeedApi': {FeedApi: {getRecommend: () => ++calls === 1 ? old.promise : latest.promise}}});
   const Harness = env.methodHarness('views/HomeView', '  async loadRecommend(', '  async loadHot(',
-    "import { FeedApi } from '../api/FeedApi';");
+    "import { FeedApi } from '../api/FeedApi'; const UserApi={loadFeedFollowStates:async()=>{}};");
   const p = new Harness();
   Object.assign(p, {recEpoch:epoch(env), recFetching:false, recHasMore:true,
     recSource:source(env, [{aid:1}]), recCount:1,
@@ -746,7 +750,7 @@ test('recommendation empty batches remain retryable and duplicate batches do not
   let calls = 0;
   const env = environment({'api/FeedApi': {FeedApi: {getRecommend: async () => { calls++; return batches.shift(); }}}});
   const Harness = env.methodHarness('views/HomeView', '  private dedupVideos(', '  async loadHot(',
-    "import { FeedApi } from '../api/FeedApi'; const LocalVideoFilter={filterVideos:(l)=>l};");
+    "import { FeedApi } from '../api/FeedApi'; const UserApi={loadFeedFollowStates:async()=>{}}; const LocalVideoFilter={filterVideos:(l)=>l};");
   const p = new Harness();
   Object.assign(p, {recEpoch: epoch(env), recFetching: false, recHasMore: true, recIdx: 0,
     recError: '', recSource: source(env, [{aid: 1, bvid: 'BV1'}]), recCount: 1});
@@ -1371,13 +1375,15 @@ test('feed filtering never restores a hidden item or drops the following visible
   const rows = [{aid:2,bvid:'BV2'}, {aid:3,bvid:'BV3'}, {aid:3,bvid:'BV3'}, {aid:4,bvid:'BV4'}];
   assert.deepEqual(p.dedupVideos(source(env, [{aid:4,bvid:'BV4'}]), rows).map(v=>v.aid), [3]);
   assert.deepEqual(p.dedupVideos(source(env, [{aid:4,bvid:'BV4'}]), rows, true).map(v=>v.aid), [3,4]);
+  assert.deepEqual(p.dedupVideos(source(env, [{aid:3,bvid:'BV3'}]), [{aid:3,bvid:''}]), [],
+    'App aid and Web bvid must identify the same video');
 });
 
 test('refresh skips filtered batches and replaces the old feed with the first usable batch', async () => {
   const batches = [[{aid:2,bvid:'BV2'}], [{aid:3,bvid:'BV3'},{aid:3,bvid:'BV3'}]];
   const env = environment({'api/FeedApi': {FeedApi: {getRecommend: async () => batches.shift() || []}}});
   const Harness = env.methodHarness('views/HomeView', '  private dedupVideos(', '  async loadHot(',
-    "import { FeedApi } from '../api/FeedApi'; const LocalVideoFilter={filterVideos:(items)=>items.filter(item=>item.aid!==2)};");
+    "import { FeedApi } from '../api/FeedApi'; const UserApi={loadFeedFollowStates:async()=>{}}; const LocalVideoFilter={filterVideos:(items)=>items.filter(item=>item.aid!==2)};");
   const p = new Harness();
   Object.assign(p, {recEpoch:epoch(env), recFetching:false, recSource:source(env,[{aid:1,bvid:'BV1'}]), recCount:1});
   await p.loadRecommend(true);

@@ -1,6 +1,8 @@
 /**
  * 用户域 API：当前登录用户 / 用户统计 / 关系 / 用户空间信息 / 投稿列表。
  */
+import { AuthSession } from '../services/auth/AuthSession';
+import { FollowStateStore } from '../services/user/FollowStateStore';
 import { HttpClient, HttpResponse, RequestPriority } from '../services/network/HttpClient';
 import { appSign } from '../common/AppSign';
 import { Api, Constants } from '../common/Constants';
@@ -198,6 +200,35 @@ export class UserApi {
     return result;
   }
 
+  /** 按页批量补全关注关系，不阻塞视频首屏，也不为每张卡片单独发请求。 */
+  static async loadFeedFollowStates(items: Array<VideoItem>): Promise<void> {
+    if (HttpClient.getCookie('SESSDATA').length === 0) return;
+    const mids: Array<number> = [];
+    const seen: Set<number> = new Set<number>();
+    for (let i: number = 0; i < items.length; i++) {
+      const mid: number = items[i].upMid;
+      if (mid > 0 && !seen.has(mid) && FollowStateStore.needsLoad(mid)) {
+        seen.add(mid);
+        mids.push(mid);
+      }
+    }
+    const account: number = AuthSession.version;
+    const revision: number = FollowStateStore.version;
+    for (let offset: number = 0; offset < mids.length; offset += 50) {
+      if (account !== AuthSession.version) return;
+      const batch: Array<number> = mids.slice(offset, offset + 50);
+      const data: Record<string, Object> | null = getData(await webGetWithPriority(
+        Api.userRelations, { 'fids': batch.join(',') }, '', RequestPriority.LOW));
+      if (data === null) continue;
+      const states: Map<number, boolean> = new Map<number, boolean>();
+      for (let i: number = 0; i < batch.length; i++) {
+        const attribute: number = asNumber(asObject(data[String(batch[i])])['attribute'], 0);
+        states.set(batch[i], attribute === 2 || attribute === 6);
+      }
+      FollowStateStore.apply(states, account, revision);
+    }
+  }
+
   static async getRelation(mid: number): Promise<number | null> {
     if (mid <= 0) return null;
     const resp: HttpResponse = await webGetWithPriority(Api.userRelation, { 'fid': String(mid) },
@@ -208,9 +239,12 @@ export class UserApi {
 
   static async setFollowed(mid: number, followed: boolean): Promise<ActionResult> {
     if (mid <= 0) return new ActionResult(false, 'UP 主信息无效');
-    return postVideoAction(Api.modifyUserRelation, {
+    const account: number = AuthSession.version;
+    const result: ActionResult = await postVideoAction(Api.modifyUserRelation, {
       'fid': String(mid), 'act': followed ? '1' : '2', 're_src': '11', 'gaia_source': 'web_main',
     });
+    if (result.ok) FollowStateStore.set(mid, followed, account);
+    return result;
   }
 
   static async getBlackList(page: number): Promise<RelationUserPageData> {
@@ -230,9 +264,12 @@ export class UserApi {
 
   static async setBlocked(mid: number, blocked: boolean): Promise<ActionResult> {
     if (mid <= 0) return new ActionResult(false, '用户信息无效');
-    return postVideoAction(Api.modifyUserRelation, {
+    const account: number = AuthSession.version;
+    const result: ActionResult = await postVideoAction(Api.modifyUserRelation, {
       'fid': String(mid), 'act': blocked ? '5' : '6', 're_src': '11', 'gaia_source': 'web_main',
     });
+    if (result.ok && blocked) FollowStateStore.set(mid, false, account);
+    return result;
   }
 
   static async getFollowTags(): Promise<Array<FollowTagItem>> {

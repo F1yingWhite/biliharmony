@@ -6,6 +6,7 @@ import { RequestEpoch } from '../common/RequestEpoch';
 import { VideoItem } from '../model/Models';
 import { BiliApi } from '../api/BiliApi';
 import { VideoCard } from '../components/video/VideoCard';
+import { VideoReportDialog } from '../components/VideoReportDialog';
 import { LoadingView } from '../components/LoadingView';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { Immersive } from '../common/Immersive';
@@ -18,6 +19,7 @@ import { LiveRoomCard } from '../components/live/LiveRoomCard';
 import { NavEntryRow } from '../components/NavEntryRow';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { AppNavStack, NAV_RANK, NAV_ZONE, NAV_BANGUMI_INDEX, NAV_LIVE_ZONE } from '../common/AppRouter';
+import { UserApi } from '../api/UserApi';
 import { FeedApi } from '../api/FeedApi';
 import { LiveApi } from '../api/LiveApi';
 import { Haptic } from '../common/Haptic';
@@ -112,6 +114,7 @@ export struct HomeView {
   private readonly refreshTriggerOffset: number = 56;
   // 竖向行距与双列横向槽距共用（用户反馈 12 偏松，收紧到 8）。
   private readonly homeGap: number = 8;
+  private videoReportDialog: CustomDialogController | null = null;
 
   async aboutToAppear(): Promise<void> {
     // 切到首页 Tab 时强制回到顶部状态，避免残留 fade 导致搜索栏和搜索球同时出现。
@@ -127,6 +130,8 @@ export struct HomeView {
 
   aboutToDisappear(): void {
     this.recEpoch.invalidate();
+    this.videoReportDialog?.close();
+    this.videoReportDialog = null;
     this.hotEpoch.invalidate();
     this.liveEpoch.invalidate();
     this.recFetching = false;
@@ -147,6 +152,7 @@ export struct HomeView {
     FeedApi.resetRecommendSession();
     try {
       await UserStore.ensureLoaded();
+      UserApi.loadFeedFollowStates(this.hotSource.getAll()).catch(() => {});
       await this.loadRecommend(true);
     } catch (e) {
       if (this.recSource.isEmpty()) this.recError = '推荐加载失败，请检查网络后重试';
@@ -168,13 +174,23 @@ export struct HomeView {
     }
   }
 
-  /** 举报尚未接入提交服务，不能把本地提示当作提交成功。 */
+  /** 首页推荐和热门卡片共用视频举报表单。 */
   private reportCard(item: VideoItem): void {
-    try {
-      this.getUIContext().getPromptAction().showToast({ message: '暂不支持应用内举报，请前往哔哩哔哩官方客户端举报' });
-    } catch (e) {
-      // 弹 toast 失败忽略。
+    if (!UserStore.isLogin) {
+      this.getUIContext().getPromptAction().showToast({ message: '请先登录后再举报' });
+      return;
     }
+    if (item.aid <= 0) {
+      this.getUIContext().getPromptAction().showToast({ message: '当前视频不支持举报' });
+      return;
+    }
+    this.videoReportDialog?.close();
+    this.videoReportDialog = new CustomDialogController({
+      builder: VideoReportDialog({ aid: item.aid, title: item.title }),
+      autoCancel: false,
+      customStyle: true,
+    });
+    this.videoReportDialog.open();
   }
 
   /** 本地隐藏：从当前列表移除并写入持久化「不想看」，后续 feed 分页与相关推荐不再出现该稿。 */
@@ -204,11 +220,11 @@ export struct HomeView {
     const seen: Set<string> = new Set<string>();
     const base: Array<VideoItem> = reset ? [] : source.getAll();
     for (let i: number = 0; i < base.length; i++) {
-      seen.add(base[i].bvid.length > 0 ? base[i].bvid : 'a' + String(base[i].aid));
+      seen.add(base[i].aid > 0 ? 'a' + String(base[i].aid) : base[i].bvid);
     }
     const out: Array<VideoItem> = [];
     for (let i: number = 0; i < filtered.length; i++) {
-      const key: string = filtered[i].bvid.length > 0 ? filtered[i].bvid : 'a' + String(filtered[i].aid);
+      const key: string = filtered[i].aid > 0 ? 'a' + String(filtered[i].aid) : filtered[i].bvid;
       if (!seen.has(key)) {
         seen.add(key);
         out.push(filtered[i]);
@@ -223,7 +239,7 @@ export struct HomeView {
   private readonly seenWindowMax: number = 400;
 
   private videoKeyOf(item: VideoItem): string {
-    return item.bvid.length > 0 ? item.bvid : 'a' + String(item.aid);
+    return item.aid > 0 ? 'a' + String(item.aid) : item.bvid;
   }
 
   /** 过滤掉近期曝光窗口内的视频（不清窗口，仅读取）。 */
@@ -288,7 +304,7 @@ export struct HomeView {
         const unseen: Array<VideoItem> = this.filterSeen(list);
         const fresh: Array<VideoItem> = this.dedupVideos(this.recSource, unseen, reset);
         if (fresh.length === 0) continue;
-        this.rememberSeen(fresh);
+        UserApi.loadFeedFollowStates(fresh).catch(() => {});
         if (reset) this.recSource.reset(fresh);
         else this.recSource.append(fresh);
         this.recCount = this.recSource.totalCount();
@@ -334,6 +350,7 @@ export struct HomeView {
         this.hotSource.append(this.dedupVideos(this.hotSource, list));
       }
       this.hotCount = this.hotSource.totalCount();
+      UserApi.loadFeedFollowStates(list).catch(() => {});
     } catch (e) {
       if (this.hotEpoch.isCurrent(epoch)) {
         this.hotError = '热门加载失败，点击重试';
@@ -641,7 +658,10 @@ export struct HomeView {
           // ListItemGroup 内的 ListItem 不参与 List.space，行距靠卡片下 margin 撑出，
           // 与双列横向槽宽（lanes gutter）保持一致。
           .margin({ bottom: this.homeGap })
-        }, (item: VideoItem) => item.bvid.length > 0 ? item.bvid : String(item.aid) + '_' + feedTab)
+          .onVisibleAreaChange([0.5], (visible: boolean, ratio: number) => {
+            if (feedTab === 0 && this.tab === 0 && visible && ratio >= 0.5) this.rememberSeen([item]);
+          })
+        }, (item: VideoItem) => (item.aid > 0 ? String(item.aid) : item.bvid) + '_' + feedTab)
       }
     }
     .width('100%')

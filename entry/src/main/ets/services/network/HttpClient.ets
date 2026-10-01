@@ -471,8 +471,11 @@ export class HttpClient {
     }
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
     if (trusted) HttpClient.absorbCookies(resp.header, asString(resp.cookies));
-    return HttpClient.prewarmParse(
+    const parsed: HttpResponse = await HttpClient.prewarmParse(
       new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>));
+    // taskpool 解析也有异步窗口，结果返回前仍必须属于当前账号代次。
+    if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
+    return parsed;
   }
 
   static async post(url: string, body?: string, extraHeaders?: Record<string, string>,
@@ -490,8 +493,11 @@ export class HttpClient {
     }
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
     if (trusted) HttpClient.absorbCookies(resp.header, asString(resp.cookies));
-    return HttpClient.prewarmParse(
+    const parsed: HttpResponse = await HttpClient.prewarmParse(
       new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>));
+    // taskpool 解析也有异步窗口，结果返回前仍必须属于当前账号代次。
+    if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
+    return parsed;
   }
 
   /** 超过该长度的 body 才值得一次 taskpool 往返；小响应主线程解析更便宜。 */
@@ -524,8 +530,11 @@ export class HttpClient {
     }
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
     if (trusted) HttpClient.absorbCookies(resp.header, asString(resp.cookies));
-    return HttpClient.prewarmParse(
+    const parsed: HttpResponse = await HttpClient.prewarmParse(
       new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>));
+    // taskpool 解析也有异步窗口，结果返回前仍必须属于当前账号代次。
+    if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
+    return parsed;
   }
 
   /**

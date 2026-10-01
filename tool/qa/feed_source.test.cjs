@@ -150,7 +150,7 @@ test('parseWebRcmd: 过滤非视频卡并取出会话标识', async () => {
   assert.equal(page.bucketId, 'B9');
 });
 
-test('parseAppFeed: 过滤广告卡，游标取最后一条有效卡的 idx', async () => {
+test('parseAppFeed: 过滤广告卡，游标按原始响应推进', async () => {
   const { FeedApi } = environment({ 'services/network/HttpClient': stub(httpClientStub()), ...wbiStubs() }).load('api/FeedApi');
   const page = FeedApi.parseAppFeed({ items: appItems });
   assert.equal(page.items.length, 3);
@@ -236,4 +236,63 @@ test('App 模式失败时回退 Web，匿名 Web 模式直接走 App', async () 
   assert.equal(anon.length, 3);
   assert.equal(http.calls.length, 1);
   assert.ok(http.calls[0].url.includes('feed/index'));
+});
+
+
+test('App cursor advances past trailing ads and wholly filtered pages', async () => {
+  const http = httpClientStub();
+  const { FeedApi } = environment({ 'services/network/HttpClient': stub(http), ...wbiStubs() }).load('api/FeedApi');
+  const ad = {card_goto:'ad_av',can_play:1,idx:109};
+  const page = FeedApi.parseAppFeed({items:[appCard(201,100),ad]});
+  assert.equal(page.cursor,109);assert.equal(page.items.length,1);
+  assert.equal(FeedApi.parseAppFeed({items:[ad]}).cursor,109);
+  assert.equal(FeedApi.parseAppFeed({items:[{...appCard(0,110)}, {card_goto:'live',can_play:1,param:'123',idx:111}]}).items.length,0);
+  http.handler=()=>({ok:true,json:()=>({code:0,data:{items:[ad]}})});
+  await FeedApi.getRecommendApp();
+  await FeedApi.getRecommendApp();
+  assert.equal(queryParams(http.calls[1].url).idx,'109');
+});
+
+test('stale App response cannot overwrite a refreshed session cursor', async () => {
+  const http=httpClientStub();let resolveOld;let count=0;
+  http.handler=()=>++count===1 ? new Promise(resolve=>{resolveOld=resolve;}) :
+    {ok:true,json:()=>({code:0,data:{items:[appCard(202,200)]}})};
+  const {FeedApi}=environment({'services/network/HttpClient':stub(http),...wbiStubs()}).load('api/FeedApi');
+  const old=FeedApi.getRecommendApp();
+  while (!resolveOld) await new Promise(resolve=>setImmediate(resolve));
+  FeedApi.resetRecommendSession();await FeedApi.getRecommendApp();
+  resolveOld({ok:true,json:()=>({code:0,data:{items:[appCard(201,100)]}})});
+  assert.deepEqual(await old,[]);
+  await FeedApi.getRecommendApp();
+  assert.equal(queryParams(http.calls[2].url).idx,'200');
+});
+
+test('Cookie login without App token uses personalized Web even in App mode', async () => {
+  const http=httpClientStub();http.accessToken='';
+  const env=environment({'services/network/HttpClient':stub(http),...wbiStubs()});
+  env.storage.set('recommendMode','app');
+  const {FeedApi}=env.load('api/FeedApi');
+  await FeedApi.getRecommend(true);
+  assert.ok(http.calls[0].url.includes('feed/rcmd'));
+});
+
+test('feed follow batch handles following, mutual, missing and account changes', async () => {
+  const http=httpClientStub();
+  http.handler=()=>({ok:true,json:()=>({code:0,data:{'2':{attribute:2},'3':{attribute:6},'4':{attribute:128}}})});
+  const env=environment({'services/network/HttpClient':stub(http),...wbiStubs()});
+  const {UserApi}=env.load('api/UserApi');
+  const {FollowStateStore:store}=env.load('services/user/FollowStateStore');
+  const {AuthSession}=env.load('services/auth/AuthSession');
+  await UserApi.loadFeedFollowStates([2,3,4,5,2,0].map(upMid=>({upMid})));
+  assert.equal(http.calls.length,1);
+  assert.equal(queryParams(http.calls[0].url).fids,'2,3,4,5');
+  assert.equal(store.get(2),true);assert.equal(store.get(3),true);
+  assert.equal(store.get(4),false);assert.equal(store.get(5),false);
+  await UserApi.loadFeedFollowStates([{upMid:2}]);assert.equal(http.calls.length,1);
+  const revision=store.version;store.set(2,false,AuthSession.version);
+  store.apply(new Map([[2,true]]),AuthSession.version,revision);
+  assert.equal(store.get(2),false,'stale batch must not undo unfollow');
+  const account=AuthSession.version;AuthSession.advance();
+  assert.equal(store.get(3),false,'previous account state must disappear');
+  store.set(3,true,account);assert.equal(store.get(3),false);
 });

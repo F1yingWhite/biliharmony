@@ -4,6 +4,7 @@ import { picker } from '@kit.CoreFileKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { RequestEpoch } from '../common/RequestEpoch';
 import { AppTheme } from '../common/AppTheme';
+import { Immersive } from '../common/Immersive';
 import { PageHeader } from '../components/PageHeader';
 import { LoadingView } from '../components/LoadingView';
 import { DownloadCenter, DownloadTaskItem, DOWNLOAD_STATUS_DONE, DOWNLOAD_STATUS_FAILED,
@@ -12,6 +13,7 @@ import { DownloadCenter, DownloadTaskItem, DOWNLOAD_STATUS_DONE, DOWNLOAD_STATUS
 @Component
 export struct DownloadCenterPage {
   @State preparing: boolean = true;
+  @State prepareError: string = '';
   @State visibleTasks: Array<DownloadTaskItem> = [];
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
@@ -59,10 +61,12 @@ export struct DownloadCenterPage {
   private prepare(): void {
     const epoch: number = this.prepareEpoch.next();
     this.preparing = true;
+    this.prepareError = '';
     const context: common.UIAbilityContext | undefined =
       this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
     if (context === undefined) {
       this.preparing = false;
+      this.prepareError = '下载记录加载失败，请返回后重试';
       return;
     }
     DownloadCenter.init(context).then(() => {
@@ -70,7 +74,9 @@ export struct DownloadCenterPage {
       this.preparing = false;
       this.refreshTasks();
     }).catch(() => {
-      if (!this.destroyed) this.preparing = false;
+      if (this.destroyed || !this.prepareEpoch.isCurrent(epoch)) return;
+      this.preparing = false;
+      this.prepareError = '下载记录加载失败，请重试';
     });
   }
 
@@ -104,17 +110,20 @@ export struct DownloadCenterPage {
 
   private confirm(title: string, action: () => void): void {
     try {
-      this.getUIContext().getPromptAction().showActionMenu({
-        title: title,
+      this.getUIContext().getPromptAction().showDialog({
+        title: '确认删除',
+        message: title,
         buttons: [
           { text: '取消', color: this.isDark ? '#E6E6E6' : '#18191C' },
           { text: '确定', color: AppTheme.DANGER },
         ],
       }).then((result) => {
-        if (Number(result.index) === 1) action();
+        if (!this.destroyed && Number(result.index) === 1) action();
+      }).catch(() => {
+        // 用户取消或确认窗口不可用时，不执行删除。
       });
     } catch (e) {
-      action();
+      if (!this.destroyed) this.toast('无法打开确认，请重试');
     }
   }
 
@@ -129,13 +138,16 @@ export struct DownloadCenterPage {
     picker2.save(options).then((targets: Array<string>) => {
       if (targets.length === 0 || this.destroyed) return;
       try {
-        const target: fs.File = fs.openSync(targets[0],
-          fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
         const source: fs.File = fs.openSync(item.filePath, fs.OpenMode.READ_ONLY);
         try {
-          fs.copyFileSync(source.fd, target.fd);
+          const target: fs.File = fs.openSync(targets[0],
+            fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+          try {
+            fs.copyFileSync(source.fd, target.fd);
+          } finally {
+            fs.closeSync(target);
+          }
         } finally {
-          fs.closeSync(target);
           fs.closeSync(source);
         }
         this.toast('已导出到所选位置');
@@ -241,6 +253,13 @@ export struct DownloadCenterPage {
         .width('100%')
         .layoutWeight(1)
         .justifyContent(FlexAlign.Center)
+      } else if (this.prepareError.length > 0) {
+        Column() {
+          LoadingView({ loading: false, errorText: this.prepareError, onRetry: (): void => this.prepare() })
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
       } else {
         Column() {
           Row() {
@@ -261,19 +280,19 @@ export struct DownloadCenterPage {
           .width('100%')
           .padding({ left: 4, right: 4, bottom: 8 })
 
-          List({ space: 10 }) {
-            ForEach(this.tasks(), (item: DownloadTaskItem) => {
-              ListItem() {
-                this.TaskRow(item)
-              }
-            }, (item: DownloadTaskItem) => item.id + '_' + String(item.status) + '_' + String(item.progress))
-          }
-          .width('100%')
-          .layoutWeight(1)
-          .scrollBar(BarState.Off)
-          .edgeEffect(EdgeEffect.Spring)
-
-          if (this.tasks().length === 0) {
+          if (this.tasks().length > 0) {
+            List({ space: 10 }) {
+              ForEach(this.tasks(), (item: DownloadTaskItem) => {
+                ListItem() {
+                  this.TaskRow(item)
+                }
+              }, (item: DownloadTaskItem) => item.id + '_' + String(item.status) + '_' + String(item.progress))
+            }
+            .width('100%')
+            .layoutWeight(1)
+            .scrollBar(BarState.Off)
+            .edgeEffect(EdgeEffect.Spring)
+          } else {
             Column({ space: 10 }) {
               Text('暂无下载任务')
                 .fontSize(14)
@@ -282,10 +301,15 @@ export struct DownloadCenterPage {
                 .fontSize(12)
                 .fontColor(this.subColor())
                 .opacity(0.8)
+                .width('100%')
+                .constraintSize({ maxWidth: 320 })
+                .lineHeight(18)
                 .textAlign(TextAlign.Center)
             }
             .width('100%')
             .layoutWeight(1)
+            .padding({ left: 24, right: 24 })
+            .alignItems(HorizontalAlign.Center)
             .justifyContent(FlexAlign.Center)
           }
         }
@@ -296,6 +320,7 @@ export struct DownloadCenterPage {
     }
     .width('100%')
     .height('100%')
+    .padding({ top: Immersive.statusBarHeight(), bottom: Immersive.bottomInset() })
     .backgroundColor(this.bg())
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }

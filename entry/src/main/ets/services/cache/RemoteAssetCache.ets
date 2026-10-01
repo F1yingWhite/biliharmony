@@ -128,19 +128,24 @@ export class RemoteAssetCache {
       }
       return verified.uri;
     }
-    // 冷启动磁盘恢复：记录是内存态，进程重启后为空，但上次下载的文件可能仍在。
-    // 先异步校验文件头，命中直接复用，避免把整份缓存重新下载一遍。
-    if (await RemoteAssetCache.validateFile(path, media)) return RemoteAssetCache.remember(path, url);
     const key: string = subdir + '\n' + url;
     const running: Promise<string> | undefined = RemoteAssetCache.inFlight.get(key);
     if (running !== undefined) return running;
-    const task: Promise<string> = RemoteAssetCache.download(url, path, subdir, media);
+    // 冷盘校验也属于同一次恢复：避免迟到的未命中在首个下载完成后再次下载。
+    const task: Promise<string> = RemoteAssetCache.restoreOrDownload(url, path, subdir, media);
     RemoteAssetCache.inFlight.set(key, task);
     try {
       return await task;
     } finally {
       RemoteAssetCache.inFlight.delete(key);
     }
+  }
+
+  private static async restoreOrDownload(url: string, path: string, subdir: string,
+    media: boolean): Promise<string> {
+    // 进程重启后内存记录为空，优先校验并复用上次下载的磁盘文件。
+    if (await RemoteAssetCache.validateFile(path, media)) return RemoteAssetCache.remember(path, url);
+    return await RemoteAssetCache.download(url, path, subdir, media);
   }
 
   /** 过期记录的单飞重验入口：同一文件同时最多一次在途；下载在途时交给下载结果刷新。 */

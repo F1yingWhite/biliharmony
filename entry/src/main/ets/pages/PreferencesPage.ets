@@ -217,7 +217,7 @@ export struct PreferencesPage {
           AppStorage.setOrCreate<boolean>('wideSplitEnabled', value);
         } })
       this.DividerLine()
-      PreferenceRow({ title: '首页推荐源', detail: this.recommendMode === 'app' ? 'App 推流：服务端个性化最强，翻页自动去重' : 'Web 个性化推荐：官方网页端同款会话协议',
+      PreferenceRow({ title: '首页推荐源', detail: this.recommendMode === 'app' ? 'App 推荐：有 App 登录凭据时使用，否则优先 Web 个性化' : 'Web 个性化推荐：官方网页端同款会话协议',
         toggle: true, checked: this.recommendMode === 'app',
         onChange: (value: boolean) => {
           const mode: string = value ? 'app' : 'web';

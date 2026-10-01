@@ -686,6 +686,38 @@ test('video report checks login and content, sends selected reason, and only ack
   setPayload({code:0});assert.equal((await api.submit(123,10040,'描述')).ok,true);
 });
 
+test('home video card report opens the real form for the selected video', () => {
+  const env=environment();
+  const Card=env.methodHarness('components/video/VideoCard',
+    '  private onMoreReport(): void {','  /** ⋮-不想看');
+  const card=new Card();const selected={aid:123,title:'首页视频'};
+  card.video=selected;card.moreOpen=true;
+  let reported=null;card.onReport=item=>{reported=item;};
+  card.onMoreReport();
+  assert.equal(card.moreOpen,false);assert.equal(reported,selected);
+
+  const Host=env.methodHarness('views/HomeView','  private reportCard(item: VideoItem): void {',
+    '  /** 本地隐藏',`const UserStore={isLogin:true};
+    function VideoReportDialog(options){return options;}
+    class CustomDialogController {
+      constructor(options){this.options=options;this.opened=false;this.closed=false;}
+      open(){this.opened=true;}
+      close(){this.closed=true;}
+    }`);
+  const host=new Host();const toasts=[];
+  host.getUIContext=()=>({getPromptAction:()=>({showToast:({message})=>toasts.push(message)})});
+  host.reportCard({aid:0,title:'无效视频'});
+  assert.equal(host.videoReportDialog,undefined);
+  assert.deepEqual(toasts,['当前视频不支持举报']);
+  host.reportCard(selected);
+  assert.deepEqual(host.videoReportDialog.options.builder,selected);
+  assert.equal(host.videoReportDialog.opened,true);
+  const previous=host.videoReportDialog;
+  host.reportCard({aid:456,title:'另一个视频'});
+  assert.equal(previous.closed,true);
+  assert.deepEqual(host.videoReportDialog.options.builder,{aid:456,title:'另一个视频'});
+});
+
 test('PiP start completing after release is stopped again and leaves no orphan window', async () => {
   const pending=deferred(),controller=fakePipController();
   controller.startPiP=()=>pending.promise;

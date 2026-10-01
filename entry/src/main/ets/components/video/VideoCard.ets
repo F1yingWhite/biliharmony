@@ -12,8 +12,8 @@ import { VideoItem } from '../../model/Models';
 import { formatCount, formatDuration } from '../../common/Utils';
 import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   NAV_VIDEO_DETAIL, VideoDetailParam, ImageViewerSrcRect, setHeroBgSnapshot } from '../../common/AppRouter';
+import { FollowStateStore } from '../../services/user/FollowStateStore';
 import { Haptic } from '../../common/Haptic';
-import { UserStore } from '../../services/auth/UserStore';
 import { FeedCardTitle, FeedCoverImage, FeedGradientMask } from '../FeedCardParts';
 import { biliImageThumbnail, FEED_COVER_WIDTH, FEED_AVATAR_WIDTH } from '../../common/ImageUrl';
 
@@ -48,6 +48,17 @@ export struct VideoCard {
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @State moreOpen: boolean = false;
+  @State upFollowed: boolean = false;
+  @StorageProp('followStateVersion') @Watch('syncFollowState') followStateVersion: number = 0;
+  @StorageProp('loginVersion') @Watch('syncFollowState') loginVersion: number = 0;
+
+  aboutToAppear(): void {
+    this.syncFollowState();
+  }
+
+  private syncFollowState(): void {
+    this.upFollowed = FollowStateStore.get(this.video.upMid);
+  }
 
   aboutToReuse(params: Record<string, Object>): void {
     this.video = params.video as VideoItem;
@@ -64,6 +75,7 @@ export struct VideoCard {
     const hide: Object | undefined = params['onHide'];
     this.onHide = typeof hide === 'function' ? hide as (item: VideoItem) => void : null;
     this.moreOpen = false;
+    this.syncFollowState();
   }
 
   private cardId(): string {
@@ -212,6 +224,17 @@ export struct VideoCard {
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .layoutWeight(1)
             .onClick(() => this.openDetail())
+          if (this.upFollowed) {
+            Text('已关注')
+              .fontSize(9)
+              .fontColor(this.accent)
+              .padding({ left: 4, right: 4, top: 2, bottom: 2 })
+              .borderRadius(3)
+              .backgroundColor(this.isDark ? '#20FFFFFF' : '#0D000000')
+              .maxLines(1)
+              .flexShrink(0)
+              .accessibilityText('已关注该 UP 主')
+          }
           if (this.showMore) {
             this.MoreDot()
           }
@@ -447,33 +470,10 @@ export struct VideoCard {
     .onClick(() => onTap())
   }
 
-  /** ⋮-举报：选原因后交宿主反馈（Web 端无视频举报接口）。 */
+  /** ⋮-举报：由宿主打开视频举报表单。 */
   private onMoreReport(): void {
     this.moreOpen = false;
-    if (!UserStore.isLogin) {
-      this.toast('请先登录后再举报');
-      return;
-    }
-    const item: VideoItem = this.video;
-    const reasons: Array<string> = ['违法违规', '色情低俗', '垃圾广告', '人身攻击', '引战', '其他'];
-    const buttons: Array<CardMenuButtonItem> = [];
-    for (let i: number = 0; i < reasons.length; i++) {
-      buttons.push({ text: reasons[i], color: this.isDark ? '#CCFFFFFF' : '#18191C' });
-    }
-    buttons.push({ text: '取消', color: '#9499A0' });
-    try {
-      this.getUIContext().getPromptAction().showDialog({
-        title: '举报视频',
-        message: item.title.substring(0, Math.min(24, item.title.length)),
-        buttons: buttons,
-      }).then((dialogResult) => {
-        const pick: number = Number(dialogResult.index);
-        if (pick < 0 || pick >= reasons.length) return;
-        if (this.onReport !== null) this.onReport(item);
-      });
-    } catch (e) {
-      // 组件销毁或窗口异常时忽略。
-    }
+    this.onReport?.(this.video);
   }
 
   /** ⋮-不想看：确认后交宿主移除该卡（信息流本地屏蔽，本轮会话生效）。 */

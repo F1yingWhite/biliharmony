@@ -25,6 +25,8 @@ export struct YouTubeSavedPage {
   /** 封面 → 本地文件：ArkUI Image() 不读应用代理，统一走应用自己的缓存管线。 */
   @State thumbLocal: Map<string, string> = new Map<string, string>();
 
+  private loadGeneration: number = 0;
+
   private isHistory(): boolean {
     return this.mode === 'history';
   }
@@ -46,19 +48,26 @@ export struct YouTubeSavedPage {
   }
 
   aboutToAppear(): void {
+    const generation: number = ++this.loadGeneration;
     if (this.isHistory()) {
       YouTubeHistoryStore.ensureLoaded().then((list: Array<YouTubeLocalVideo>) => {
+        if (generation !== this.loadGeneration) return;
         this.loaded(list);
       }).catch(() => {
-        this.loading = false;
+        if (generation === this.loadGeneration) this.loading = false;
       });
       return;
     }
     YouTubeWatchLaterStore.ensureLoaded().then((list: Array<YouTubeLocalVideo>) => {
+      if (generation !== this.loadGeneration) return;
       this.loaded(list);
     }).catch(() => {
-      this.loading = false;
+      if (generation === this.loadGeneration) this.loading = false;
     });
+  }
+
+  aboutToDisappear(): void {
+    this.loadGeneration++;
   }
 
   private localImage(url: string): string {
@@ -67,6 +76,7 @@ export struct YouTubeSavedPage {
   }
 
   private primeThumbs(list: Array<YouTubeLocalVideo>): void {
+    const generation: number = this.loadGeneration;
     const hits: Map<string, string> = new Map<string, string>();
     const pending: Array<string> = [];
     for (const item of list) {
@@ -83,7 +93,7 @@ export struct YouTubeSavedPage {
     }
     for (const url of pending) {
       RemoteAssetCache.ensureThumbnail(url).then((local: string) => {
-        if (local === url || this.thumbLocal.get(url) === local) return;
+        if (generation !== this.loadGeneration || local === url || this.thumbLocal.get(url) === local) return;
         const next: Map<string, string> = new Map<string, string>(this.thumbLocal);
         next.set(url, local);
         this.thumbLocal = next;

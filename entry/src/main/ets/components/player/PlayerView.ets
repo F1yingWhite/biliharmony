@@ -2061,6 +2061,7 @@ if (this.runtimeSources.length === 0) {
   private invalidatePlayerCreation(): void {
     this.playerCreateGeneration++;
     this.playerCreating = false;
+    this.retryingSource = false;
   }
 
   private tryStartPreparedPlayers(): void {
@@ -2501,8 +2502,9 @@ if (this.runtimeSources.length === 0) {
       this.release();
       return;
     }
-    this.retryingSource = true;
     this.invalidatePlayerCreation();
+    const generation: number = this.playerCreateGeneration;
+    this.retryingSource = true;
     this.seekCtl?.cancel();
     this.cancelAudioGate();
     this.cancelFirstFrameMute(false);
@@ -2532,6 +2534,8 @@ if (this.runtimeSources.length === 0) {
         // 音频播放器可能也已进入错误态。
       }
     }
+    // 换源/换清晰度已取得新代次时，旧恢复不能推进线路或复位新重试锁。
+    if (generation !== this.playerCreateGeneration) return;
     // await 期间组件可能已销毁，放弃重建并复位重试标志。
     if (this.destroyed) {
       this.retryingSource = false;
@@ -2548,8 +2552,9 @@ if (this.runtimeSources.length === 0) {
       this.errorText = '音频播放出错：' + message.substring(0, 100);
       return;
     }
-    this.retryingSource = true;
     this.invalidatePlayerCreation();
+    const generation: number = this.playerCreateGeneration;
+    this.retryingSource = true;
     this.seekCtl?.cancel();
     this.cancelAudioGate();
     this.cancelFirstFrameMute(false);
@@ -2578,6 +2583,8 @@ if (this.runtimeSources.length === 0) {
         // ignore
       }
     }
+    // 换源/换清晰度已取得新代次时，旧恢复不能推进线路或复位新重试锁。
+    if (generation !== this.playerCreateGeneration) return;
     // await 期间组件可能已销毁，放弃重建并复位重试标志。
     if (this.destroyed) {
       this.retryingSource = false;
