@@ -74,7 +74,7 @@ print_section() {
   echo
 }
 
-echo "# BiliHaromny 自动构建"
+echo "# BiliHarmony 自动构建"
 echo
 if [ -n "$PREV" ]; then
   count=$(git rev-list --count "$RANGE")
@@ -97,7 +97,7 @@ echo
 echo "## 构建信息"
 echo
 echo "- 构建提交：\`$CUR\`"
-echo "- 质量：全量回归测试（7 个测试文件）通过后才会产出本包"
+echo "- 质量：全部服务回归测试通过后才会产出本包"
 echo "- 产物：\`entry-default-unsigned.hap\`（**未签名**，安装前需自行签名）与 \`hap.sha256\` 校验和"
 if [ -n "$PREV" ]; then
   echo "- [完整提交对比](https://github.com/$REPO_URL/compare/$PREV...$CUR)"
