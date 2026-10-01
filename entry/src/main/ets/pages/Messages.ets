@@ -10,6 +10,7 @@ import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATI
 import { BiliApi, ActionResult } from '../api/BiliApi';
 import { MessageSessionItem, MessageSessionPageData, PrivateMessageItem, PrivateMessagePageData } from '../model/Models';
 import { UserStore } from '../services/auth/UserStore';
+import { AuthSession } from '../services/auth/AuthSession';
 import { MsgUnreadStore } from '../services/message/MsgUnreadStore';
 import { colorWithAlpha, formatRelativeTime } from '../common/Utils';
 import { LoadingView } from '../components/LoadingView';
@@ -19,6 +20,7 @@ import { PageHeader } from '../components/PageHeader';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { MessageApi } from '../api/MessageApi';
 import { biliImageOriginal, biliImageThumbnail } from '../common/ImageUrl';
+import { compareMessageCursor } from '../common/MessageCursor';
 
 @Component
 export struct MessagesPage {
@@ -34,6 +36,7 @@ export struct MessagesPage {
   @State sessionHasMore: boolean = true;
   @State sessionCount: number = 0;
   @State minSeqno: number = 0;
+  private minSeqnoText: string = '';
   @State draft: string = '';
   @State sending: boolean = false;
   @State readAllLoading: boolean = false;
@@ -50,9 +53,12 @@ export struct MessagesPage {
   private sessionsSource: BasicDataSource<MessageSessionItem> = new BasicDataSource<MessageSessionItem>();
   private tabs: Array<string> = ['私信', '回复', '@我', '赞', '系统'];
   /** 通知列表惰性挂载：首次切到对应 Tab 才创建，避免一进页面就并发五个请求。 */
-  private tabMounted: Array<boolean> = [true, false, false, false, false];
+  @State tabMounted: Array<boolean> = [true, false, false, false, false];
   /** 会话请求代际：切换会话后丢弃旧会话返回的数据。 */
   private messageGeneration: number = 0;
+  /** 本页面已确认的最大序号，防止晚到的会话列表响应恢复旧未读数。 */
+  private confirmedReadSeqnos: Map<number, string> = new Map<number, string>();
+  private readAuthSession: number = AuthSession.version;
 
   aboutToAppear(): void {
     AppStorage.setOrCreate<boolean>('messageThreadOpen', false);
@@ -65,29 +71,32 @@ export struct MessagesPage {
   }
 
   async loadSessions(reset: boolean): Promise<void> {
+    const authSession: number = this.ensureReadSession();
     if (this.sessionLoading || (!reset && !this.sessionHasMore)) return;
     this.sessionLoading = true;
     try {
       const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
       const beginTs: number = reset || all.length === 0 ? 0 : all[all.length - 1].sessionTs;
       const data: MessageSessionPageData = await MessageApi.getMessageSessions(beginTs);
+      if (authSession !== AuthSession.version) return;
       if (data.error.length > 0) {
         // 失败不清空已有列表；首次加载失败时由 LoadingView 展示原因与重试。
         if (reset) this.sessionError = data.error;
         return;
       }
       this.sessionError = '';
+      const sessions: Array<MessageSessionItem> = this.applyConfirmedReads(data.sessions);
       if (reset) {
-        this.sessionsSource.reset(data.sessions);
+        this.sessionsSource.reset(sessions);
       } else {
-        this.sessionsSource.append(this.dedupSessions(data.sessions));
+        this.sessionsSource.append(this.dedupSessions(sessions));
       }
       // BasicDataSource 只会刷新已挂载的 LazyForEach；首屏列表尚未挂载时，
       // 必须用 @State 切换“加载态 / 列表”外层分支。
       this.sessionCount = this.sessionsSource.totalCount();
       this.sessionHasMore = data.hasMore;
     } finally {
-      this.sessionLoading = false;
+      if (authSession === AuthSession.version) this.sessionLoading = false;
     }
   }
 
@@ -117,18 +126,22 @@ export struct MessagesPage {
     this.messagesSource.clear();
     this.messageError = '';
     this.minSeqno = 0;
+    this.minSeqnoText = '';
     this.hasMore = true;
     await this.loadMessages(true);
   }
 
   async loadMessages(reset: boolean): Promise<void> {
+    const authSession: number = this.ensureReadSession();
     if (this.current.talkerId === 0 || (!reset && (this.messageLoading || !this.hasMore))) return;
     const generation: number = this.messageGeneration;
     this.messageLoading = true;
     const talkerId: number = this.current.talkerId;
+    const sessionSeqno: string = this.current.maxSeqno;
     try {
-      const data: PrivateMessagePageData = await MessageApi.getPrivateMessages(talkerId, reset ? 0 : this.minSeqno);
-      if (generation !== this.messageGeneration || this.current.talkerId !== talkerId) return;
+      const beginSeqno: number | string = reset ? 0 : (this.minSeqnoText.length > 0 ? this.minSeqnoText : this.minSeqno);
+      const data: PrivateMessagePageData = await MessageApi.getPrivateMessages(talkerId, beginSeqno);
+      if (authSession !== AuthSession.version || generation !== this.messageGeneration || this.current.talkerId !== talkerId) return;
       if (data.error.length > 0) {
         this.messageError = data.error;
         return;
@@ -146,34 +159,42 @@ export struct MessagesPage {
       this.pendingScrollIndex = reset ? -1 : firstVisible + this.messagesSource.totalCount() - previousCount;
       this.scheduleMessageScroll();
       this.minSeqno = data.minSeqno > 0 ? data.minSeqno : this.minSeqno;
+      if (/^\d+$/.test(data.minSeqnoText)) this.minSeqnoText = data.minSeqnoText;
       this.hasMore = data.hasMore;
-      if (reset && this.messagesSource.totalCount() > 0) {
-        const all: Array<PrivateMessageItem> = this.messagesSource.getAll();
-        const ackSeqno: number = all[all.length - 1].seqno;
-        // 服务端确认成功后再清本地红点，避免请求失败时退出会话又恢复成未读。
-        MessageApi.markPrivateMessagesRead(talkerId, ackSeqno).then((result: ActionResult) => {
-          if (result.ok) this.clearSessionUnread(talkerId);
-        }).catch(() => {
-        });
+      if (reset) {
+        let ackSeqno: string = data.messages.length === 0 ? sessionSeqno : '';
+        for (let i: number = 0; i < data.messages.length; i++) {
+          const seqno: string = data.messages[i].seqnoText;
+          if (/^\d+$/.test(seqno) && (ackSeqno.length === 0 || compareMessageCursor(seqno, ackSeqno) > 0)) {
+            ackSeqno = seqno;
+          }
+        }
+        // 空历史仍可按会话游标确认；有记录只确认已展示的最大精确序号。
+        this.acknowledgeSession(talkerId, ackSeqno, authSession).catch(() => {});
       }
     } catch (e) {
-      if (generation === this.messageGeneration) this.messageError = '消息加载失败，请重试';
+      if (authSession === AuthSession.version && generation === this.messageGeneration) this.messageError = '消息加载失败，请重试';
     } finally {
-      if (generation === this.messageGeneration) this.messageLoading = false;
+      if (authSession === AuthSession.version && generation === this.messageGeneration) this.messageLoading = false;
     }
   }
 
   /** 向前翻页去重：跳过本地已有 seqno（分页边界可能重复返回），只把新消息增量 prepend。 */
+  private messageIdentity(item: PrivateMessageItem): string {
+    return item.seqnoText.length > 0 ? item.seqnoText : 'local-' + String(item.seqno);
+  }
+
   private freshOlderMessages(older: Array<PrivateMessageItem>): Array<PrivateMessageItem> {
-    const seen: Set<number> = new Set<number>();
+    const seen: Set<string> = new Set<string>();
     const all: Array<PrivateMessageItem> = this.messagesSource.getAll();
     for (let i: number = 0; i < all.length; i++) {
-      seen.add(all[i].seqno);
+      seen.add(this.messageIdentity(all[i]));
     }
     const out: Array<PrivateMessageItem> = [];
     for (let i: number = 0; i < older.length; i++) {
-      if (!seen.has(older[i].seqno)) {
-        seen.add(older[i].seqno);
+      const identity: string = this.messageIdentity(older[i]);
+      if (!seen.has(identity)) {
+        seen.add(identity);
         out.push(older[i]);
       }
     }
@@ -388,34 +409,82 @@ export struct MessagesPage {
     }
   }
 
-  private clearSessionUnread(talkerId: number): void {
+  private ensureReadSession(): number {
+    const authSession: number = AuthSession.version;
+    if (this.readAuthSession !== authSession) {
+      this.confirmedReadSeqnos.clear();
+      this.readAuthSession = authSession;
+      this.sessionLoading = false;
+      this.messageLoading = false;
+    }
+    return authSession;
+  }
+
+  private applyConfirmedReads(sessions: Array<MessageSessionItem>): Array<MessageSessionItem> {
+    return sessions.map((item: MessageSessionItem): MessageSessionItem => {
+      const confirmed: string | undefined = this.confirmedReadSeqnos.get(item.talkerId);
+      if (confirmed === undefined || !/^\d+$/.test(item.maxSeqno) ||
+        compareMessageCursor(item.maxSeqno, confirmed) > 0 || item.unread === 0) return item;
+      const updated: MessageSessionItem = item.clone();
+      updated.unread = 0;
+      return updated;
+    });
+  }
+
+  private async acknowledgeSession(talkerId: number, ackSeqno: string, authSession: number): Promise<boolean> {
+    if (authSession !== AuthSession.version || !/^\d+$/.test(ackSeqno)) return false;
+    const result: ActionResult = await MessageApi.markPrivateMessagesRead(talkerId, ackSeqno);
+    if (authSession !== AuthSession.version) return false;
+    if (result.ok) this.clearSessionUnread(talkerId, ackSeqno, authSession);
+    return result.ok;
+  }
+
+  private clearSessionUnread(talkerId: number, ackSeqno: string, authSession: number): void {
+    if (authSession !== AuthSession.version || !/^\d+$/.test(ackSeqno)) return;
+    this.ensureReadSession();
+    const previous: string | undefined = this.confirmedReadSeqnos.get(talkerId);
+    const confirmed: string = previous !== undefined && compareMessageCursor(previous, ackSeqno) > 0 ? previous : ackSeqno;
+    this.confirmedReadSeqnos.set(talkerId, confirmed);
     const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
     for (let i: number = 0; i < all.length; i++) {
-      if (all[i].talkerId !== talkerId || all[i].unread === 0) continue;
+      if (all[i].talkerId !== talkerId || all[i].unread === 0 || !/^\d+$/.test(all[i].maxSeqno) ||
+        compareMessageCursor(all[i].maxSeqno, confirmed) > 0) continue;
       const updated: MessageSessionItem = all[i].clone();
       updated.unread = 0;
       all[i] = updated;
       this.sessionsSource.updateItem(i, updated);
     }
-    this.sessionsSource.reset(all);
-    if (this.current.talkerId === talkerId) this.current.unread = 0;
+    if (this.current.talkerId === talkerId && /^\d+$/.test(this.current.maxSeqno) &&
+      compareMessageCursor(this.current.maxSeqno, confirmed) <= 0) {
+      const updated: MessageSessionItem = this.current.clone();
+      updated.unread = 0;
+      this.current = updated;
+    }
+  }
+
+  private sessionRowKey(item: MessageSessionItem): string {
+    const fields: Array<string> = [String(item.talkerId), String(item.unread), item.maxSeqno, item.name,
+      item.avatar, item.preview, String(item.timestamp), String(item.pinned)];
+    return JSON.stringify(fields);
   }
 
   private async markAllRead(): Promise<void> {
+    const authSession: number = this.ensureReadSession();
     if (this.readAllLoading) return;
     this.readAllLoading = true;
     let failed: number = 0;
     try {
       const notifyResult: ActionResult = await MessageApi.markAllNotificationsRead();
+      if (authSession !== AuthSession.version) return;
       if (notifyResult.ok) MsgUnreadStore.clearAll();
       else failed++;
 
-      const sessions: Array<MessageSessionItem> = this.sessionsSource.getAll();
+      const sessions: Array<MessageSessionItem> = this.sessionsSource.getAll().slice();
       for (let i: number = 0; i < sessions.length; i++) {
         if (sessions[i].unread <= 0) continue;
-        const result: ActionResult = await MessageApi.markPrivateMessagesRead(sessions[i].talkerId);
-        if (result.ok) this.clearSessionUnread(sessions[i].talkerId);
-        else failed++;
+        const ok: boolean = await this.acknowledgeSession(sessions[i].talkerId, sessions[i].maxSeqno, authSession);
+        if (authSession !== AuthSession.version) return;
+        if (!ok) failed++;
       }
       this.getUIContext().getPromptAction().showToast({
         message: failed === 0 ? '已标记全部已读' : '部分消息标记失败，请稍后重试',
@@ -428,11 +497,11 @@ export struct MessagesPage {
   }
 
   private richMediaId(item: PrivateMessageItem): string {
-    return 'private-message-media-' + String(item.seqno);
+    return 'private-message-media-' + this.messageIdentity(item);
   }
 
   private richCardId(item: PrivateMessageItem): string {
-    return 'private-message-card-' + String(item.seqno);
+    return 'private-message-card-' + this.messageIdentity(item);
   }
 
   private imageMessageHeight(item: PrivateMessageItem): number {
@@ -675,7 +744,7 @@ export struct MessagesPage {
       List() {
         LazyForEach(this.sessionsSource, (item: MessageSessionItem) => {
           ListItem() { this.SessionRow(item) }
-        }, (item: MessageSessionItem) => String(item.talkerId))
+        }, (item: MessageSessionItem) => this.sessionRowKey(item))
         ListItem() {
           LoadMoreFooter({
             loading: this.sessionLoading,
@@ -833,7 +902,7 @@ export struct MessagesPage {
         }
         LazyForEach(this.messagesSource, (item: PrivateMessageItem) => {
           ListItem() { this.MessageBubble(item) }
-        }, (item: PrivateMessageItem) => String(item.seqno))
+        }, (item: PrivateMessageItem) => this.messageIdentity(item))
       }
       .layoutWeight(1)
       .padding({ left: 10, right: 10 })

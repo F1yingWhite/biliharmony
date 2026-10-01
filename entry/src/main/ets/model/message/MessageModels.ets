@@ -10,6 +10,8 @@ export class MessageSessionItem {
   timestamp: number = 0;
   unread: number = 0;
   sessionTs: number = 0;
+  /** 服务端消息序号为 int64，已读确认必须保留原始十进制值。 */
+  maxSeqno: string = '';
   /** 是否置顶（接口 pin_talker_id 命中该会话）。 */
   pinned: boolean = false;
 
@@ -25,6 +27,8 @@ export class MessageSessionItem {
     item.timestamp = asNumber(lastMsg['timestamp'], 0);
     item.sessionTs = asNumber(j['session_ts'], 0);
     item.unread = asNumber(j['unread_count'], 0) + asNumber(j['biz_msg_unread_count'], 0);
+    const maxSeqno: string = str(j, 'max_seqno', '');
+    item.maxSeqno = maxSeqno.length > 0 ? maxSeqno : str(lastMsg, 'msg_seqno', '');
     return item;
   }
 
@@ -37,6 +41,8 @@ export class MessageSessionItem {
     next.timestamp = this.timestamp;
     next.unread = this.unread;
     next.sessionTs = this.sessionTs;
+    next.maxSeqno = this.maxSeqno;
+    next.pinned = this.pinned;
     return next;
   }
 }
@@ -53,6 +59,8 @@ export class PrivateMessageItem {
   text: string = '';
   timestamp: number = 0;
   seqno: number = 0;
+  /** 精确序号用于已读确认；number 字段保留供现有分页与布局使用。 */
+  seqnoText: string = '';
   type: number = 1;
   /** 富文本/视频推荐卡片字段；普通文本消息为空。 */
   richTitle: string = '';
@@ -97,6 +105,7 @@ export class PrivateMessageItem {
     }
     item.timestamp = asNumber(j['timestamp'], 0);
     item.seqno = asNumber(j['msg_seqno'], 0);
+    item.seqnoText = str(j, 'msg_seqno', '');
     return item;
   }
 }
@@ -105,6 +114,7 @@ export class PrivateMessagePageData {
   messages: Array<PrivateMessageItem> = [];
   hasMore: boolean = false;
   minSeqno: number = 0;
+  minSeqnoText: string = '';
   /** 加载失败原因；空串表示请求成功，避免失败被 UI 误判成空会话。 */
   error: string = '';
 }

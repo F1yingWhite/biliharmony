@@ -153,6 +153,8 @@ export class Api {
   static readonly msgFeedAt: string = HttpString.apiBaseUrl + '/x/msgfeed/at';
   static readonly msgFeedLike: string = HttpString.apiBaseUrl + '/x/msgfeed/like';
   static readonly msgSysNotify: string = HttpString.messageBaseUrl + '/x/sys-msg/query_notify_list';
+  static readonly msgSysUnifiedNotify: string = HttpString.messageBaseUrl + '/x/sys-msg/query_unified_notify';
+  static readonly msgSysUserNotify: string = HttpString.messageBaseUrl + '/x/sys-msg/query_user_notify';
   static readonly msgSysUpdateCursor: string = HttpString.messageBaseUrl + '/x/sys-msg/update_cursor';
   // 通知删除（回复/@/赞走 x/msgfeed/del，系统通知走 sys-msg/del_notify_list，端点在 messageBase 域名）
   static readonly xMsgNotifyDel: string = HttpString.apiBaseUrl + '/x/msgfeed/del';

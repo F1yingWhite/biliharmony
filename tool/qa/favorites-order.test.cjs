@@ -11,7 +11,7 @@ function read(name) {
   const alternative = process.env.ARKTS_TEST_SOURCE_ROOT && path.join(process.env.ARKTS_TEST_SOURCE_ROOT, name + '.ets');
   return fs.readFileSync(alternative && fs.existsSync(alternative) ? alternative : path.join(root, name + '.ets'), 'utf8').replace(/\r\n/g, '\n');
 }
-function harness(result) {
+function harness(result = () => ({ok: true}), api = {}) {
   const modules = new Map(), calls = [], notices = [], pops = [];
   function compile(source, name, globals = {}) {
     const module = {exports: {}};
@@ -30,7 +30,8 @@ function harness(result) {
   const {Harness} = compile(source.slice(begin, end).replace('export struct FavoritesPage', 'export class Harness')
     .replace(/@(?:State|StorageProp|Watch)\s*(?:\([^)]*\))?\s*/g, '') + '\n}', name, {
     ...load('model/library/LibraryModels'), BasicDataSource: load('common/BasicDataSource').BasicDataSource,
-    FavoriteApi: {sortFavoriteVideos: async (id, aids) => {calls.push({id, aids}); return await result();}},
+    FavoriteApi: {sortFavoriteVideos: async (id, aids) => {calls.push({id, aids}); return await result();}, ...api},
+    UserStore: {current: {mid: 7}},
     AppNavStack: {pop: () => pops.push(true)}
   });
   const page = new Harness();
@@ -70,4 +71,97 @@ test('favorites unmodified edits exit locally without a server write', () => {
   const {page, calls} = harness(() => {throw new Error('should not be called');});
   page.toggleEdit(); page.goBack();
   assert.equal(page.editing, false); assert.equal(page.selected.id, 42); assert.deepEqual(calls, []);
+});
+
+test('returning from a folder preserves an exhausted root folder list', async () => {
+  const folderRequests = [];
+  const {page} = harness(undefined, {
+    getFavoriteFolders: async (_mid, pn) => {
+      folderRequests.push(pn);
+      return {folders: [{id: 42, type: 0}], hasMore: false};
+    },
+    getFavoriteVideos: async () => ({videos: [{aid: 1}], hasMore: true}),
+  });
+  page.selected.id = 0;
+  await page.loadFolders(true);
+  assert.equal(page.footerHasMore(), false);
+  await page.openFolder({id: 42, type: 0});
+  assert.equal(page.footerHasMore(), true);
+  page.goBack();
+  assert.equal(page.footerHasMore(), false, 'opening videos must not restart root pagination');
+  page.loadMore(); await tick();
+  assert.deepEqual(folderRequests, [1]);
+  assert.equal(page.foldersSource.totalCount(), 1);
+});
+
+test('a late root folder response cannot change the open video list pagination', async () => {
+  for (const [folderMore, videoMore] of [[false, true], [true, false]]) {
+    const pending = deferred(), videoRequests = [];
+    const {page} = harness(undefined, {
+      getFavoriteFolders: () => pending.promise,
+      getFavoriteVideos: async (_id, pn) => {
+        videoRequests.push(pn);
+        return {videos: [{aid: pn}], hasMore: videoMore};
+      },
+    });
+    page.selected.id = 0;
+    const rootLoad = page.loadFolders(true);
+    await page.openFolder({id: 42, type: 0});
+    pending.resolve({folders: [{id: 42, type: 0}], hasMore: folderMore});
+    await rootLoad;
+    assert.equal(page.footerHasMore(), videoMore);
+    page.loadMore(); await tick();
+    assert.deepEqual(videoRequests, videoMore ? [1, 2] : [1]);
+    page.goBack();
+    assert.equal(page.footerHasMore(), folderMore);
+  }
+});
+
+test('finishing edit mode discards a delayed move folder picker', async () => {
+  const pending = deferred();
+  const {page, notices} = harness(undefined, {getAllFavoriteFolders: () => pending.promise});
+  page.toggleEdit(); page.checkedAids = [1];
+  const opening = page.openMoveSheet();
+  page.toggleEdit();
+  pending.resolve([{id: 42, type: 0}, {id: 84, type: 0}]); await opening;
+  assert.equal(page.moveSheetVisible, false);
+  assert.deepEqual(page.moveTargets, []);
+  assert.deepEqual(page.checkedAids, []);
+  assert.deepEqual(notices, []);
+});
+
+test('a move picker from an earlier editing session cannot reopen over a new selection', async () => {
+  for (const revisitFolder of [false, true]) {
+    const pending = deferred();
+    const {page} = harness(undefined, {
+      getAllFavoriteFolders: () => pending.promise,
+      getFavoriteVideos: async () => ({videos: [{aid: 3}], hasMore: false}),
+    });
+    page.toggleEdit(); page.checkedAids = [1];
+    const opening = page.openMoveSheet();
+    page.toggleEdit();
+    if (revisitFolder) {
+      page.goBack();
+      await page.openFolder({id: 42, type: 0});
+    }
+    page.toggleEdit(); page.checkedAids = [3];
+    pending.resolve([{id: 42, type: 0}, {id: 84, type: 0}]); await opening;
+    assert.equal(page.moveSheetVisible, false);
+    assert.deepEqual(page.checkedAids, [3]);
+    assert.deepEqual(page.moveTargets, []);
+  }
+});
+
+test('an obsolete move picker failure stays quiet and a current request can still open', async () => {
+  const pending = deferred(); let calls = 0;
+  const {page, notices} = harness(undefined, {getAllFavoriteFolders: () => ++calls === 1 ?
+    pending.promise : Promise.resolve([{id: 42, type: 0}, {id: 84, type: 0}])});
+  page.toggleEdit(); page.checkedAids = [1];
+  const opening = page.openMoveSheet(); page.toggleEdit();
+  pending.reject(new Error('old request offline')); await opening;
+  assert.deepEqual(notices, []);
+  page.toggleEdit(); page.checkedAids = [2];
+  await page.openMoveSheet();
+  assert.equal(page.moveSheetVisible, true);
+  assert.deepEqual(page.moveTargets.map(folder => folder.id), [84]);
 });

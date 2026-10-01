@@ -1,5 +1,4 @@
 import { VideoReportDialog } from '../components/VideoReportDialog';
-import { PlayerQualityPreference } from '../common/PlayerQualityPreference';
 import { LocalVideoFilter } from '../common/LocalVideoFilter';
 /**
  * 视频详情页：沉浸式播放器 + 封面取色动态主题 + 简介/评论/相关。
@@ -7,8 +6,10 @@ import { LocalVideoFilter } from '../common/LocalVideoFilter';
  * 投币弹窗（CoinSheetView）、收藏夹多选（FavPickSheetView）、楼中楼面板（ReplyThreadPanel）。
  * hero 转场（VideoHeroTransitionController）与互动动作（VideoActionController）抽到
  * components/video/ 下的控制器：@State 留在本页，方法体经注入闭包访问页面状态。
+ * 播放选择/心跳由 VideoPlaybackController 管理；推荐候选与分页由 VideoRecommendations 管理；
+ * 收藏夹选择由 VideoFavoritePicker 发布快照，页面保留布局、导航和状态发布。
  */
-import { PlaybackSourceCoordinator, PlaybackSelection } from '../services/media/PlaybackSourceCoordinator';
+import { PlaybackSelection } from '../services/media/PlaybackSourceCoordinator';
 import { RequestEpoch } from '../common/RequestEpoch';
 import { display, UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
@@ -22,7 +23,7 @@ import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO
   HERO_NAV_TRANSITION_FINISH_REQUEST_KEY, ImageViewerSrcRect, NAV_LOGIN, NAV_VIDEO_DETAIL, NAV_USER_SPACE,
   VideoDetailParam, UserSpaceParam, releasePixelMap, NAV_SEARCH } from '../common/AppRouter';
 import { VideoDetail, VideoItem, ReplyItem, PlayUrlInfo, VideoPage, VideoQualityOption, VideoRelationState,
-  BiliEmote, BiliEmotePackage, FavoriteFolderItem, UserStat, SpaceArcData, SubtitleTrack, UgcSeasonEpisode } from '../model/Models';
+  BiliEmote, BiliEmotePackage, UserStat, SpaceArcData, SubtitleTrack, UgcSeasonEpisode } from '../model/Models';
 import { ActionResult, BiliApi, VideoTagInfo } from '../api/BiliApi';
 import { PlayerView } from '../components/player/PlayerView';
 import { AppTheme } from '../common/AppTheme';
@@ -45,9 +46,6 @@ import { VideoActionItem } from '../components/video/VideoActionItem';
 import { ReplyShareCard } from '../components/reply/ReplyShareCard';
 import { safeToast } from '../common/Toast';
 import { CommentApi } from '../api/CommentApi';
-import { FavoriteApi } from '../api/FavoriteApi';
-import { FeedApi } from '../api/FeedApi';
-import { HistoryApi } from '../api/HistoryApi';
 import { UserApi } from '../api/UserApi';
 import { CommentLog } from '../common/CommentLog';
 import { VideoDetailGeometry } from '../common/VideoDetailGeometry';
@@ -55,6 +53,9 @@ import { biliImageThumbnail } from '../common/ImageUrl';
 import { VideoIntroSection } from '../components/video/VideoIntroSection';
 import { VideoHeroTransitionController } from '../components/video/VideoHeroTransitionController';
 import { VideoActionController } from '../components/video/VideoActionController';
+import { VideoPlaybackController } from '../components/video/VideoPlaybackController';
+import { RelatedVideoStatus, VideoRecommendations } from '../components/video/VideoRecommendations';
+import { VideoFavoritePicker, VideoFavoritePickerState } from '../components/video/VideoFavoritePicker';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -158,6 +159,17 @@ export struct VideoDetailPage {
   @State coinWithLike: boolean = true;
   @State following: boolean = false;
   @State followLoading: boolean = false;
+  @State favoritePickerState: VideoFavoritePickerState = new VideoFavoritePickerState();
+  private favoritePicker: VideoFavoritePicker = new VideoFavoritePicker({
+    isDestroyed: (): boolean => this.destroyed,
+    ensureLogin: (): boolean => this.ensureLogin(),
+    getAid: (): number => this.detail.aid,
+    isActionBusy: (): boolean => this.actionBusy,
+    setActionBusy: (busy: boolean): void => { this.actionBusy = busy; },
+    setFavorited: (favorited: boolean): void => { this.favorited = favorited; },
+    toast: (message: string): void => this.toast(message),
+    publish: (state: VideoFavoritePickerState): void => { this.favoritePickerState = state; },
+  });
   @State @Watch('onPlayerGeomChanged') playerFullscreen: boolean = false;
   /** 退出全屏的视觉层：逻辑全屏保持到 DID_ROTATE，只让外层裁剪窗口边旋转边缩小。 */
   @State playerFullscreenExitVisual: boolean = false;
@@ -337,8 +349,39 @@ export struct VideoDetailPage {
   private replyScroller: Scroller = new Scroller();
   private threadScroller: Scroller = new Scroller();
   private videoProgressSeconds: number = 0;
-  private lastHeartbeatSeconds: number = -1;
-  private playbackSources: PlaybackSourceCoordinator = new PlaybackSourceCoordinator();
+  private playback: VideoPlaybackController = new VideoPlaybackController({
+    isDestroyed: (): boolean => this.destroyed,
+    getDetail: (): VideoDetail => this.detail,
+    getCurrentCid: (): number => this.currentCid,
+    hasPlaybackUrls: (): boolean => this.playUrls.length > 0,
+    getSwitchingCid: (): number => this.pageSwitchingCid,
+    getResumeCid: (): number => this.param.resumePosition !== undefined ? (this.param.cid ?? 0) : 0,
+    getResumePosition: (): number => this.param.resumePosition ?? 0,
+    beginInitial: (cid: number): void => {
+      this.playbackFailureText = '获取播放地址失败';
+      this.resetPlaybackSize();
+      this.currentCid = cid;
+      this.currentPageIndex = 0;
+    },
+    publish: (info: PlayUrlInfo, cid: number, index: number, seekSeconds: number): void =>
+      this.applyPlaybackSource(info, cid, index, seekSeconds),
+    initialFailed: (message: string): void => {
+      this.playbackAddressFailed = true;
+      this.playbackFailureText = message;
+    },
+    initialSelected: (selection: PlaybackSelection): void => {
+      CommentLog.info('resume', 'lastPlayTime=' + String(selection.info.lastPlayTime) +
+        ' lastPlayCid=' + String(selection.info.lastPlayCid) + ' pickedCid=' + String(selection.cid) +
+        ' seek=' + String(selection.resumeSeconds));
+    },
+    setSwitchingCid: (cid: number): void => { this.pageSwitchingCid = cid; },
+    pageSwitched: (): void => {
+      this.playerCollapseRaw = 0;
+      this.playerCollapse = 0;
+      this.playerEnded = false;
+    },
+    toast: (message: string): void => this.toast(message),
+  });
   private initialRequest: RequestEpoch = new RequestEpoch();
   private destroyed: boolean = false;
   private timers: Set<number> = new Set<number>();
@@ -426,9 +469,16 @@ export struct VideoDetailPage {
   private playerCollapseRaw: number = 0;
   private replySource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();  /** 已发布但评论列表接口尚未索引到的本地楼层；刷新/切排序时仍保留。 */
   private localSentReplies: Array<ReplyItem> = [];
-  private ugcSource: BasicDataSource<UgcSeasonEpisode> = new BasicDataSource<UgcSeasonEpisode>();
+  private recommendations: VideoRecommendations = new VideoRecommendations(
+    (): boolean => this.destroyed, (): VideoDetail => this.detail,
+    (status: RelatedVideoStatus): void => {
+      this.relatedLoading = status.loading;
+      this.relatedLoadError = status.error;
+      this.relatedCount = status.count;
+    });
+  private ugcSource: BasicDataSource<UgcSeasonEpisode> = this.recommendations.episodes;
   /** 相关推荐懒加载数据源（无限追加必须虚拟化；AutoPlay 取相关第一条也从这里读）。 */
-  private relatedSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
+  private relatedSource: BasicDataSource<VideoItem> = this.recommendations.related;
   @State threadAllReplies: Array<ReplyItem> = [];
   private mainReplyComposerFocused: boolean = false;
   private threadReplyComposerFocused: boolean = false;
@@ -886,20 +936,11 @@ export struct VideoDetailPage {
     this.playerPlaying = playing;
     // 重播/恢复播放：退出播完态，播放区恢复原画幅高度。
     if (playing) this.playerEnded = false;
-    if (playing === false) this.reportVideoHeartbeat(this.videoProgressSeconds, true);
+    if (playing === false) this.playback.reportHeartbeat(this.videoProgressSeconds, this.playerPlaying, true);
   }
 
   private toast(message: string): void {
     safeToast(this.getUIContext(), message);
-  }
-
-  /** 播放进度心跳：播放中每 5 秒报一次；暂停/离场强制补报。未登录时 BiliApi 内部直接跳过。 */
-  private reportVideoHeartbeat(seconds: number, force: boolean = false): void {
-    if (seconds <= 0) return;
-    if (force === false && (this.playerPlaying === false || seconds - this.lastHeartbeatSeconds < 5)) return;
-    this.lastHeartbeatSeconds = seconds;
-    BiliApi.reportHeartbeat(this.detail.aid, this.detail.bvid, this.currentCid, seconds).catch(() => {
-    });
   }
 
   expandPlayerForResume(): void {
@@ -981,6 +1022,7 @@ export struct VideoDetailPage {
     this.replySending = false;
     this.emoteLoading = false;
     this.actionBusy = false;
+    this.favoritePicker.reset();
     this.followLoading = false;
     this.danmakuSending = false;
     this.pageSwitchingCid = 0;
@@ -1052,9 +1094,11 @@ export struct VideoDetailPage {
     this.hero.openEntranceGate();
     this.replies.dispose();
     this.destroyed = true;
-    this.playbackSources.invalidate();
+    this.playback.invalidate();
+    this.recommendations.dispose();
+    this.favoritePicker.dispose();
     this.initialRequest.invalidate();
-    this.reportVideoHeartbeat(this.videoProgressSeconds, true);
+    this.playback.reportHeartbeat(this.videoProgressSeconds, this.playerPlaying, true);
     releasePixelMap(this.wholeCardSnapshot);
     this.wholeCardSnapshot = null;
     this.replies.releaseShareCard();
@@ -1103,35 +1147,6 @@ export struct VideoDetailPage {
     if (needsExpand !== this.descNeedsExpand) this.descNeedsExpand = needsExpand;
   }
 
-  /** 相关接口与推荐流会交叉返回同一稿件；aid 或 bvid 任一命中都视为重复。 */
-  private appendUniqueRelated(incoming: Array<VideoItem>): number {
-    const current: Array<VideoItem> = this.relatedSource.getAll();
-    const seenAid: Set<number> = new Set<number>();
-    const seenBvid: Set<string> = new Set<string>();
-    if (this.detail.aid > 0) seenAid.add(this.detail.aid);
-    if (this.detail.bvid.length > 0) seenBvid.add(this.detail.bvid);
-    for (let i: number = 0; i < current.length; i++) {
-      if (current[i].aid > 0) seenAid.add(current[i].aid);
-      if (current[i].bvid.length > 0) seenBvid.add(current[i].bvid);
-    }
-    const appended: Array<VideoItem> = [];
-    for (let i: number = 0; i < incoming.length; i++) {
-      const item: VideoItem = incoming[i];
-      if (item.aid <= 0 && item.bvid.length === 0) continue;
-      if ((item.aid > 0 && seenAid.has(item.aid)) ||
-        (item.bvid.length > 0 && seenBvid.has(item.bvid))) continue;
-      if (item.aid > 0) seenAid.add(item.aid);
-      if (item.bvid.length > 0) seenBvid.add(item.bvid);
-      if (LocalVideoFilter.contains(item.aid)) continue;
-      appended.push(item);
-    }
-    if (appended.length > 0) {
-      this.relatedSource.append(appended);
-      this.relatedCount = this.relatedSource.totalCount();
-    }
-    return appended.length;
-  }
-
   private loadUpStats(mid: number): void {
     if (mid <= 0) {
       this.upFollowerCount = 0;
@@ -1156,35 +1171,6 @@ export struct VideoDetailPage {
     return followers + ' 粉丝  ' + videos + ' 视频';
   }
 
-  /** 初次加载与手动分 P 使用同一协调器；过期结果既不换源，也不显示错误。 */
-  private async loadInitialPlayback(detail: VideoDetail): Promise<void> {
-    const request: number = this.playbackSources.next();
-    this.playbackFailureText = '获取播放地址失败';
-    this.resetPlaybackSize();
-    this.currentCid = detail.cid > 0 ? detail.cid : (detail.pages.length > 0 ? detail.pages[0].cid : 0);
-    this.currentPageIndex = 0;
-    const initialQuality: number = PlayerQualityPreference.requested();
-    try {
-      const selection: PlaybackSelection | null = await this.playbackSources.initial(detail, initialQuality, request,
-        this.param.resumePosition !== undefined ? (this.param.cid ?? 0) : 0, this.param.resumePosition ?? 0);
-      if (this.destroyed || !this.playbackSources.isCurrent(request)) return;
-      if (selection === null) {
-        this.playbackAddressFailed = true;
-        return;
-      }
-      this.applyPlaybackSource(selection.info, selection.cid, selection.pageIndex,
-        selection.resumeSeconds);
-      CommentLog.info('resume', 'lastPlayTime=' + String(selection.info.lastPlayTime) +
-        ' lastPlayCid=' + String(selection.info.lastPlayCid) + ' pickedCid=' + String(selection.cid) +
-        ' seek=' + String(selection.resumeSeconds));
-    } catch (e) {
-      if (!this.destroyed && this.playbackSources.isCurrent(request)) {
-        this.playbackAddressFailed = true;
-        this.playbackFailureText = detail.epId > 0 ? (e as Error).message : '获取播放地址失败';
-      }
-    }
-  }
-
   private applyPlaybackSource(info: PlayUrlInfo, cid: number, index: number, seekSeconds: number): void {
     this.previewPlayback = info.isPreview;
     this.playUrl = info.url;
@@ -1194,7 +1180,7 @@ export struct VideoDetailPage {
     this.subtitleTracks = info.subtitles;
     this.currentQuality = info.quality;
     this.initialSeekSeconds = seekSeconds;
-    this.lastHeartbeatSeconds = -1;
+    this.playback.resetHeartbeat();
     this.resetPlaybackSize();
     this.currentCid = cid;
     this.currentPageIndex = index;
@@ -1203,57 +1189,16 @@ export struct VideoDetailPage {
     this.playerSourceVersion++;
   }
 
-  private async loadInitialRelated(aid: number, bvid: string): Promise<void> {
-    if (this.relatedLoading) return;
-    this.relatedLoading = true;
-    this.relatedLoadError = '';
-    try {
-      const list: Array<VideoItem> = await BiliApi.getRelated(aid, bvid);
-      if (this.destroyed) return;
-      this.appendUniqueRelated(list);
-      if (this.relatedCount === 0) this.relatedLoadError = '相关推荐加载失败，点击刷新';
-    } catch (e) {
-      if (!this.destroyed) this.relatedLoadError = '相关推荐加载失败，点击刷新';
-    } finally {
-      if (!this.destroyed) this.relatedLoading = false;
-    }
-  }
-
-  private async loadMoreRelated(): Promise<void> {
-    if (this.relatedLoading) return;
-    this.relatedLoading = true;
-    this.relatedLoadError = '';
-    try {
-      // 续接全局推荐会话翻页（会话游标由 FeedApi 维护，与首页共享去重信号）。
-      const list: Array<VideoItem> = await FeedApi.getRecommend(false);
-      if (this.destroyed) return;
-      if (list.length === 0) {
-        this.relatedLoadError = '暂时没有刷新到新推荐，点击重试';
-        return;
-      }
-      if (this.appendUniqueRelated(list) === 0) {
-        this.relatedLoadError = '这批推荐已看过，点击继续刷新';
-      }
-    } catch (e) {
-      if (!this.destroyed) this.relatedLoadError = '刷新推荐失败，点击重试';
-    } finally {
-      if (!this.destroyed) this.relatedLoading = false;
-    }
-  }
-
   async init(): Promise<void> {
     const request: number = this.initialRequest.next();
-    this.playbackSources.invalidate();
+    this.playback.invalidate();
     this.pageSwitchingCid = 0;
     this.loading = true;
     this.errorText = '';
     this.playbackAddressFailed = false;
     this.descExpanded = false;
     this.descNeedsExpand = false;
-    this.relatedSource.clear();
-    this.relatedCount = 0;
-    this.relatedLoading = false;
-    this.relatedLoadError = '';
+    this.recommendations.reset();
     this.upFollowerCount = -1;
     this.upVideoCount = -1;
     try {
@@ -1269,7 +1214,8 @@ export struct VideoDetailPage {
       this.likeCount = detail.like;
       this.coinCount = detail.coin;
       this.favoriteCount = detail.favorite;
-      this.rebuildUgcSource();
+      this.recommendations.setEpisodes(detail);
+      this.ugcCount = this.ugcSource.totalCount();
       this.loadUpStats(detail.upMid);
 
       // 封面取色仅用于本页播放区氛围光，不改全局主题色（主题色由用户自选）
@@ -1280,8 +1226,8 @@ export struct VideoDetailPage {
       });
 
       // 并行加载相关 / 评论；播放地址单独走续播定位逻辑。
-      this.loadInitialPlayback(detail);
-      this.loadInitialRelated(detail.aid, detail.bvid).catch(() => {
+      this.playback.loadInitial(detail);
+      this.recommendations.loadInitial(detail.aid, detail.bvid).catch(() => {
         // 方法内部已经维护错误态；这里仅防止未处理的异步异常。
       });
       this.replies.load(true);
@@ -1405,156 +1351,6 @@ export struct VideoDetailPage {
     return false;
   }
 
-  // ===== 收藏夹多选：长按收藏按钮弹出夹列表勾选 =====
-  @State favPickOpen: boolean = false;
-  @State favPickFolders: Array<FavoriteFolderItem> = [];
-  @State favPickChecked: Array<number> = [];
-  @State favPickLoading: boolean = false;
-
-  /** 长按收藏：弹出多选夹弹层。 */
-  private async actionFavoritePick(): Promise<void> {
-    if (!this.ensureLogin() || this.actionBusy) return;
-    this.favPickLoading = true;
-    this.favPickOpen = true;
-    try {
-      const selfMid: number = UserStore.current !== null ? UserStore.current.mid : 0;
-      const folders: Array<FavoriteFolderItem> = await FavoriteApi.getFavoriteFoldersForVideo(this.detail.aid, selfMid);
-      if (this.destroyed) return;
-      this.favPickFolders = folders;
-      const checked: Array<number> = [];
-      for (let i: number = 0; i < folders.length; i++) {
-        if (folders[i].favorited) checked.push(folders[i].id);
-      }
-      this.favPickChecked = checked;
-    } catch (e) {
-      if (!this.destroyed) {
-        this.favPickOpen = false;
-        this.toast('收藏夹加载失败，请稍后重试');
-      }
-    } finally {
-      if (!this.destroyed) this.favPickLoading = false;
-    }
-  }
-
-  private toggleFavPick(id: number): void {
-    this.favPickChecked = this.favPickChecked.indexOf(id) >= 0 ?
-      this.favPickChecked.filter((x: number) => x !== id) : this.favPickChecked.concat([id]);
-  }
-
-  /** 保存多选结果：目标集合=勾选夹；原集合=夹的 favorited 状态。 */
-  private async saveFavPick(): Promise<void> {
-    if (this.actionBusy) return;
-    this.actionBusy = true;
-    try {
-      const all: Array<FavoriteFolderItem> = this.favPickFolders;
-      const prev: Array<number> = [];
-      for (let i: number = 0; i < all.length; i++) {
-        if (all[i].favorited) prev.push(all[i].id);
-      }
-      const keep: Array<number> = [];
-      for (let i: number = 0; i < this.favPickChecked.length; i++) {
-        if (prev.indexOf(this.favPickChecked[i]) < 0) keep.push(this.favPickChecked[i]);
-      }
-      const drop: Array<number> = [];
-      for (let i: number = 0; i < prev.length; i++) {
-        if (this.favPickChecked.indexOf(prev[i]) < 0) drop.push(prev[i]);
-      }
-      const result: ActionResult = await FavoriteApi.modifyVideoFavorite(this.detail.aid, keep, drop);
-      if (this.destroyed) return;
-      if (!result.ok) {
-        this.toast(result.message);
-        return;
-      }
-      this.favorited = this.favPickChecked.length > 0;
-      this.favPickOpen = false;
-      this.toast('收藏已更新');
-    } catch (e) {
-      if (!this.destroyed) this.toast('保存失败，请稍后重试');
-    } finally {
-      if (!this.destroyed) this.actionBusy = false;
-    }
-  }
-
-  /** 加入稍后再看：无本地状态需要乐观更新，直接请求后按结果 toast。 */
-  async actionWatchLater(): Promise<void> {
-    if (!this.ensureLogin() || this.actionBusy) return;
-    this.actionBusy = true;
-    try {
-      const result: ActionResult = await HistoryApi.addWatchLater(this.detail.aid, this.detail.bvid);
-      if (this.destroyed) return;
-      // 新代码统一走 UIContext 版 PromptAction，避开全局 promptAction 的废弃告警。
-      this.toast(result.ok ? '已加入稍后再看' : result.message);
-    } catch (e) {
-      if (!this.destroyed) {
-        this.toast('网络异常，请稍后重试');
-      }
-    } finally {
-      if (!this.destroyed) this.actionBusy = false;
-    }
-  }
-
-  async switchVideoPage(page: VideoPage, index: number): Promise<void> {
-    if (page.cid <= 0) return;
-    if (page.cid === this.currentCid && this.pageSwitchingCid === 0 && this.playUrls.length > 0) return;
-    const request: number = this.playbackSources.next();
-    this.pageSwitchingCid = page.cid;
-    try {
-      const qn: number = PlayerQualityPreference.requested();
-      const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(this.detail.aid, this.detail.bvid, page.cid, qn,
-        this.detail.epId);
-      // 已有更新的分 P 请求在途时，结果与标志复位都归更新的请求处理。
-      if (!this.playbackSources.isCurrent(request) || this.destroyed) return;
-      this.pageSwitchingCid = 0;
-      if (info === null || info.urls.length === 0) {
-        this.toast('该分 P 暂时无法播放');
-        return;
-      }
-      this.applyPlaybackSource(info, page.cid, index, 0);
-      this.playerCollapseRaw = 0;
-      this.playerCollapse = 0;
-      this.playerEnded = false;
-    } catch (e) {
-      if (this.playbackSources.isCurrent(request) && !this.destroyed) {
-        this.pageSwitchingCid = 0;
-        this.toast('网络异常，切换分 P 失败');
-      }
-    }
-  }
-
-  private rebuildUgcSource(): void {
-    const list: Array<UgcSeasonEpisode> = [];
-    const season = this.detail.ugcSeason;
-    if (season !== null) {
-      for (let i: number = 0; i < season.sections.length; i++) {
-        const section = season.sections[i];
-        for (let j: number = 0; j < section.episodes.length; j++) {
-          const ep: UgcSeasonEpisode = section.episodes[j];
-          ep.sectionTitle = section.title;
-          list.push(ep);
-        }
-      }
-    }
-    this.ugcSource.reset(list);
-    this.ugcCount = this.ugcSource.totalCount();
-  }
-
-  private currentUgcEpisodeIndex(): number {
-    const list: Array<UgcSeasonEpisode> = this.ugcSource.getAll();
-    for (let i: number = 0; i < list.length; i++) {
-      const ep: UgcSeasonEpisode = list[i];
-      if (ep.cid === this.currentCid && ep.bvid === this.detail.bvid) return i;
-      if (ep.cid === this.currentCid && ep.aid === this.detail.aid && ep.bvid.length === 0) return i;
-    }
-    return -1;
-  }
-
-  private nextUgcEpisode(): UgcSeasonEpisode | null {
-    if (this.detail.ugcSeason === null || this.ugcCount <= 0) return null;
-    const idx: number = this.currentUgcEpisodeIndex();
-    if (idx < 0 || idx + 1 >= this.ugcCount) return null;
-    return this.ugcSource.getData(idx + 1);
-  }
-
   private openUgcEpisode(ep: UgcSeasonEpisode): void {
     if (ep.aid <= 0 && ep.bvid.length === 0) return;
     if (ep.cid === this.currentCid && (ep.bvid === this.detail.bvid ||
@@ -1600,10 +1396,10 @@ export struct VideoDetailPage {
     this.playerEnded = true;
     this.syncDanmakuViewport();
     // 横屏结束画面的多卡片列表（与下方单卡推荐同一目标源）。
-    this.endRecList = this.buildEndRecList();
+    this.endRecList = this.recommendations.endList(this.detail, this.currentCid);
     // 播完：自动填入"推荐列表第一条"作为结束画面的推荐卡。
     // 优先合集下一集（合集里连续观看），否则用相关推荐第一条。
-    const next: UgcSeasonEpisode | null = this.nextUgcEpisode();
+    const next: UgcSeasonEpisode | null = this.recommendations.nextEpisode(this.detail, this.currentCid);
     if (next !== null) {
       this.endRecTitle = next.title;
       this.endRecCover = next.cover;
@@ -1636,7 +1432,7 @@ export struct VideoDetailPage {
 
   /** 结束画面「立即播放」：与旧"自动连播"同一跳转逻辑。 */
   private onPlayerEndPlayNow(): void {
-    const next: UgcSeasonEpisode | null = this.nextUgcEpisode();
+    const next: UgcSeasonEpisode | null = this.recommendations.nextEpisode(this.detail, this.currentCid);
     if (next !== null) {
       this.openUgcEpisode(next);
       return;
@@ -1650,38 +1446,6 @@ export struct VideoDetailPage {
         this.pushVideoDetail(param);
       }
     }
-  }
-
-  /** 横屏结束画面推荐列表：优先合集下一集（与竖屏"立即播放"同一目标），再补相关推荐，去重后最多 8 条。 */
-  private buildEndRecList(): Array<VideoItem> {
-    const list: Array<VideoItem> = [];
-    const next: UgcSeasonEpisode | null = this.nextUgcEpisode();
-    if (next !== null) {
-      const item: VideoItem = new VideoItem();
-      item.aid = next.aid;
-      item.bvid = next.bvid;
-      item.cid = next.cid;
-      item.title = next.title;
-      item.cover = next.cover;
-      item.upName = this.detail.upName;
-      list.push(item);
-    }
-    const relatedPool: Array<VideoItem> = this.relatedSource.getAll();
-    for (let i: number = 0; i < relatedPool.length && list.length < 8; i++) {
-      const related: VideoItem = relatedPool[i];
-      if (related.aid <= 0 && related.bvid.length === 0) continue;
-      let dup: boolean = false;
-      for (let j: number = 0; j < list.length; j++) {
-        if ((related.aid > 0 && list[j].aid === related.aid) ||
-          (related.bvid.length > 0 && related.bvid === list[j].bvid)) {
-          dup = true;
-          break;
-        }
-      }
-      if (dup) continue;
-      list.push(related);
-    }
-    return list;
   }
 
   /** 横屏结束画面点击推荐卡：push 入栈（返回回上一个视频，而非越过它）。 */
@@ -2240,7 +2004,7 @@ export struct VideoDetailPage {
       onDislike: () => this.actions.actionDislike(),
       onCoin: () => this.openCoinSheet(),
       onFavorite: () => this.actions.actionFavorite(),
-      onFavoritePick: () => this.actionFavoritePick(),
+      onFavoritePick: () => this.favoritePicker.open(),
       onShare: () => this.actionShare(),
       onDescAreaChange: (width: Length) => this.updateDescOverflow(width),
       onToggleDescription: () => {
@@ -2248,16 +2012,19 @@ export struct VideoDetailPage {
           this.descExpanded = !this.descExpanded;
         });
       },
-      onSwitchPage: (page: VideoPage, index: number) => this.switchVideoPage(page, index),
+      onSwitchPage: (page: VideoPage, index: number) => this.playback.switchPage(page, index),
       onToggleUgc: () => {
         this.ugcPanelOpen = !this.ugcPanelOpen;
-        if (this.ugcPanelOpen) this.rebuildUgcSource();
+        if (this.ugcPanelOpen) {
+          this.recommendations.setEpisodes(this.detail);
+          this.ugcCount = this.ugcSource.totalCount();
+        }
       },
       onOpenUgc: (episode: UgcSeasonEpisode) => this.openUgcEpisode(episode),
       onOpenRelated: (item: VideoItem) => this.openRelatedVideo(item),
       onReportRelated: (item: VideoItem) => this.reportRelated(item),
       onHideRelated: (item: VideoItem) => this.hideRelated(item),
-      onLoadMoreRelated: () => this.loadMoreRelated(),
+      onLoadMoreRelated: () => this.recommendations.loadMore(),
       onScrollFrame: (offset: number, scroller: Scroller, state: ScrollState): number =>
         this.onContentScrollFrame(offset, scroller, state),
     })
@@ -2279,13 +2046,7 @@ export struct VideoDetailPage {
 
   /** ⋮ 菜单-不想看：移除该条相关推荐并提示。 */
   private hideRelated(item: VideoItem): void {
-    const kept: Array<VideoItem> = this.relatedSource.getAll().filter((v: VideoItem) =>
-      !((item.aid > 0 && v.aid === item.aid) ||
-        (item.bvid.length > 0 && v.bvid.length > 0 && v.bvid === item.bvid)));
-    if (kept.length !== this.relatedSource.totalCount()) {
-      this.relatedSource.reset(kept);
-      this.relatedCount = kept.length;
-    }
+    this.recommendations.hide(item);
     this.toast('已减少相似推荐');
   }
 
@@ -2605,7 +2366,7 @@ export struct VideoDetailPage {
               },
               onProgress: (seconds: number) => {
                 this.videoProgressSeconds = seconds;
-                this.reportVideoHeartbeat(seconds);
+                this.playback.reportHeartbeat(seconds, this.playerPlaying);
               },
               onOnlineCount: (value: string) => {
                 this.playerOnlineTotal = value;
@@ -2646,7 +2407,7 @@ export struct VideoDetailPage {
               onShare: () => {
                 this.actionShare();
               },
-              onWatchLater: () => this.actionWatchLater(),
+              onWatchLater: () => this.actions.actionWatchLater(),
               moreSheetHeight: this.moreSheetHeightValue(),
             })
           }
@@ -2679,7 +2440,7 @@ export struct VideoDetailPage {
                 .backgroundColor('#66373C45').borderRadius(18).margin({ top: 10 })
                 .onClick(() => {
                   this.playbackAddressFailed = false;
-                  this.loadInitialPlayback(this.detail);
+                  this.playback.loadInitial(this.detail);
                 })
             }
           }
@@ -2761,20 +2522,21 @@ export struct VideoDetailPage {
           },
         })
       }
-      if (this.favPickOpen) {
+      if (this.favoritePickerState.open) {
         FavPickSheetView({
-          loading: this.favPickLoading,
-          folders: this.favPickFolders,
-          checked: this.favPickChecked,
+          loading: this.favoritePickerState.loading,
+          saving: this.favoritePickerState.saving,
+          folders: this.favoritePickerState.folders,
+          checked: this.favoritePickerState.checked,
           onToggle: (id: number) => {
-            this.toggleFavPick(id);
+            this.favoritePicker.toggle(id);
           },
           onConfirm: () => {
-            this.saveFavPick().catch(() => {
+            this.favoritePicker.save().catch(() => {
             });
           },
           onClose: () => {
-            this.favPickOpen = false;
+            this.favoritePicker.setOpen(false);
           },
         })
       }

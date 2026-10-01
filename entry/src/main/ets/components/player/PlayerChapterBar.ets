@@ -1,5 +1,5 @@
 import { VideoChapter } from '../../api/BiliApi';
-import { chapterEnd, chapterIndexAt, chapterTitleAt } from './PlayerChapterSupport';
+import { chapterEnd, chapterTitleAt } from './PlayerChapterSupport';
 import { PlayerScrubController, PlayerScrubTarget } from './PlayerGestureOverlay';
 
 /** 收起时按时间比例贴底显示分段文字；展开时显示当前章节与列表入口。 */
@@ -47,6 +47,14 @@ export struct PlayerChapterBar {
       this.duration * 100) - this.start(this.chapters[index])) : 0;
   }
 
+  private playedPercent(index: number): number {
+    const from: number = Math.max(0, this.chapters[index].from);
+    const end: number = chapterEnd(this.chapters, index, this.duration);
+    const progress: number = this.displayProgress();
+    return end > from && Number.isFinite(progress) ?
+      Math.max(0, Math.min(100, (progress - from) / (end - from) * 100)) : 0;
+  }
+
   build() {
     if (this.controlsVisible) {
       Row({ space: 6 }) {
@@ -64,14 +72,21 @@ export struct PlayerChapterBar {
       Stack({ alignContent: Alignment.BottomStart }) {
         ForEach(this.chapters, (chapter: VideoChapter, index: number) => {
           if (this.span(index) > 0) {
-            Text(chapter.title)
-              .fontSize(this.fullscreen ? 10 : 8).fontColor('#E6FFFFFF')
-              .maxLines(1).textOverflow({ overflow: TextOverflow.Clip })
-              .textAlign(TextAlign.Center)
+            Stack({ alignContent: Alignment.TopStart }) {
+              // 背景按实际进度分成已看/未看两部分，标题始终覆盖完整章节。
+              Row() {
+                Row().width(this.playedPercent(index) + '%').height('100%').backgroundColor('#45FFFFFF')
+                Blank().height('100%').backgroundColor('#55000000')
+              }.width('100%').height('100%').hitTestBehavior(HitTestMode.None)
+              Text(chapter.title)
+                .fontSize(this.fullscreen ? 10 : 8).fontColor('#E6FFFFFF')
+                .maxLines(1).textOverflow({ overflow: TextOverflow.Clip })
+                .textAlign(TextAlign.Center)
+                .width('100%').height('100%')
+                .padding({ left: 2, right: 2 })
+                .hitTestBehavior(HitTestMode.None)
+            }
               .width(this.span(index) + '%').height(18)
-              .padding({ left: 2, right: 2 })
-              .backgroundColor(chapterIndexAt(this.chapters, this.displayProgress(), this.duration) === index ?
-                '#45FFFFFF' : '#55000000')
               .border({ width: { right: 0.6 }, color: '#70FFFFFF' })
               .position({ x: this.start(chapter) + '%', y: 0 })
               .clip(true).id('player-chapter-segment-' + String(index))

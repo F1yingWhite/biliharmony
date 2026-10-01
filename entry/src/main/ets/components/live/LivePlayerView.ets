@@ -6,6 +6,8 @@ import { PlayerGestureOverlay } from '../player/PlayerGestureOverlay';
 import { LiveSuperChatFeed, LiveSuperChatShelf } from './LiveSuperChatShelf';
 import { LiveDanmakuClock } from './LiveDanmakuClock';
 import { media } from '@kit.MediaKit';
+import { image } from '@kit.ImageKit';
+import { FrameCallback } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Immersive } from '../../common/Immersive';
 import { Constants } from '../../common/Constants';
@@ -13,6 +15,20 @@ import { LiveChatMessage, LivePlayInfo, LiveQualityOption } from '../../model/Li
 import { LiveDanmakuFrameClock, LiveDanmakuRenderer } from './LiveDanmakuRenderer';
 import { PlayerSettingsPanel } from '../player/PlayerSettingsPanel';
 import { AppTheme, DanmakuSettings } from '../../common/AppTheme';
+
+/** onIdle 在实际帧渲染完成后执行，保持层就位后才允许释放旧视频 Surface。 */
+class LiveHeldFrameCallback extends FrameCallback {
+  private readonly done: () => void;
+
+  constructor(done: () => void) {
+    super();
+    this.done = done;
+  }
+
+  onIdle(_timeLeftInNano: number): void {
+    this.done();
+  }
+}
 
 /**
  * 直播间 → 播放器的数据直通道：父页面持有引用并在合批边界直呼，
@@ -66,6 +82,7 @@ export class LivePlayerFeed {
 export struct LivePlayerView {
   @Prop @Watch('onPlayInfoChanged') playInfo: LivePlayInfo = new LivePlayInfo();
   @Prop title: string = '';
+  @Prop cover: string = '';
   @Prop retrying: boolean = false;
   onRetry: () => void = () => {};
   feed: LivePlayerFeed = new LivePlayerFeed();
@@ -98,6 +115,9 @@ export struct LivePlayerView {
   @State fullscreen: boolean = false;
   @State errorText: string = '';
   @State slowLoading: boolean = false;
+  @State firstFrameShown: boolean = false;
+  @State heldFrame: image.PixelMap | null = null;
+  @State capturingFrame: boolean = false;
   @StorageProp('livePlayerExitRequest') @Watch('onExitRequested') exitRequest: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
   private player: media.AVPlayer | null = null;
@@ -112,6 +132,14 @@ export struct LivePlayerView {
   private playerGeneration: number = 0;
   private playerCreating: boolean = false;
   private playerRestartPending: boolean = false;
+  private firstRenderReady: boolean = false;
+  private nativeBuffering: boolean = false;
+  private bufferingStartTimer: number = -1;
+  private bufferingEndTimer: number = -1;
+  private frameCaptureOwner: media.AVPlayer | null = null;
+  private pendingPlayerRelease: Promise<void> | null = null;
+  /** 抓帧/等待替代层时旧播放器仍活着，退出必须同步静音这些实例。 */
+  private releasingPlayers: Set<media.AVPlayer> = new Set<media.AVPlayer>();
   private dmContext: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
   private dmRenderer: LiveDanmakuRenderer = new LiveDanmakuRenderer(this.dmContext);
 
@@ -188,19 +216,154 @@ export struct LivePlayerView {
 
   async restartForSource(): Promise<void> {
     this.clearStartupTimers();
+    this.clearBufferingTimers();
     const generation: number = ++this.playerGeneration;
+    const hadFrame: boolean = this.firstFrameShown;
+    const old: media.AVPlayer | null = this.player;
+    this.player = null;
+    this.capturingFrame = hadFrame && old !== null;
+    this.frameCaptureOwner = null;
+    this.firstFrameShown = false;
+    this.firstRenderReady = false;
+    this.nativeBuffering = false;
     this.sourceIndex = 0;
     this.prepared = false;
     this.playing = false;
     this.dmRenderer.setPlayback(false, this.fullscreen);
     this.buffering = true;
     this.errorText = '';
-    const old: media.AVPlayer | null = this.player;
-    this.player = null;
-    if (old !== null) {
-      try { await old.release(); } catch (e) {}
-    }
+    if (old !== null) await this.releasePlayerWithFrame(old, generation, hadFrame);
     if (!this.destroyed && generation === this.playerGeneration && this.surfaceId.length > 0) await this.initPlayer();
+  }
+
+  /** 换线路/画质前抓取实际视频帧；捕获不可用时保留已有帧或使用房间封面。 */
+  private async captureLastFrame(player: media.AVPlayer, generation: number, hadFrame: boolean): Promise<void> {
+    if (!hadFrame || this.surfaceId.length === 0) {
+      if (generation === this.playerGeneration) this.capturingFrame = false;
+      return;
+    }
+    this.frameCaptureOwner = player;
+    let finished: boolean = false;
+    let captureTimer: number = -1;
+    try {
+      const capture: Promise<image.PixelMap | null> = image.createPixelMapFromSurface(this.surfaceId)
+        .then((frame: image.PixelMap): image.PixelMap | null => {
+          if (finished || this.destroyed || generation !== this.playerGeneration || this.frameCaptureOwner !== player) {
+            frame.release().catch(() => {});
+            return null;
+          }
+          return frame;
+        }).catch((): null => null);
+      const timeout: Promise<image.PixelMap | null> = new Promise<image.PixelMap | null>((resolve) => {
+        captureTimer = setTimeout(() => resolve(null), 250);
+      });
+      const frame: image.PixelMap | null = await Promise.race([capture, timeout]);
+      finished = true;
+      if (frame === null) return;
+      if (this.destroyed || generation !== this.playerGeneration || this.frameCaptureOwner !== player ||
+        this.player !== null) {
+        frame.release().catch(() => {});
+        return;
+      }
+      this.releaseHeldFrame();
+      this.heldFrame = frame;
+    } catch (e) {
+      // 模拟器/特殊 Surface 可能无法抓帧，换源仍继续，封面保持到真实首帧。
+    } finally {
+      finished = true;
+      if (captureTimer >= 0) clearTimeout(captureTimer);
+      if (generation === this.playerGeneration) this.capturingFrame = false;
+    }
+  }
+
+  /** 新播放器须等旧 Surface 的读取/释放结束，避免旧 release 迟到后清掉新画面。 */
+  private async releasePlayerWithFrame(player: media.AVPlayer, generation: number, hadFrame: boolean,
+    waitForPaint: boolean = true): Promise<void> {
+    this.releasingPlayers.add(player);
+    const previous: Promise<void> | null = this.pendingPlayerRelease ?? null;
+    const task: Promise<void> = this.captureLastFrame(player, generation, hadFrame).then(async (): Promise<void> => {
+      if (previous !== null) await previous;
+      if (waitForPaint) await this.waitForReplacementPaint(generation);
+      try { await player.release(); } catch (e) {}
+    });
+    this.pendingPlayerRelease = task;
+    try {
+      await task;
+    } finally {
+      this.releasingPlayers.delete(player);
+      if (this.pendingPlayerRelease === task) this.pendingPlayerRelease = null;
+    }
+  }
+
+  /** 状态赋值不等于 Image 已经绘制；等待实际一帧完成，API 不可用/后台挂起时有界退出。 */
+  private waitForReplacementPaint(generation: number): Promise<void> {
+    if (this.destroyed || generation !== this.playerGeneration ||
+      ((this.heldFrame ?? null) === null && (this.cover ?? '').length === 0)) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let finished: boolean = false;
+      let timer: number = -1;
+      const finish: () => void = (): void => {
+        if (finished) return;
+        finished = true;
+        if (timer >= 0) clearTimeout(timer);
+        resolve();
+      };
+      timer = setTimeout(finish, 250);
+      try {
+        this.getUIContext().postFrameCallback(new LiveHeldFrameCallback(finish));
+      } catch (e) {
+        finish();
+      }
+    });
+  }
+
+  private releaseHeldFrame(): void {
+    this.frameCaptureOwner = null;
+    const frame: image.PixelMap | null = this.heldFrame ?? null;
+    this.heldFrame = null;
+    if (frame !== null) frame.release().catch(() => {});
+  }
+
+  private clearBufferingTimers(): void {
+    if (this.bufferingStartTimer >= 0) clearTimeout(this.bufferingStartTimer);
+    if (this.bufferingEndTimer >= 0) clearTimeout(this.bufferingEndTimer);
+    this.bufferingStartTimer = -1;
+    this.bufferingEndTimer = -1;
+  }
+
+  /** 短暂缺包不闪加载层；持续缓冲结束稳定 200ms 后再收起。Surface 本身保留最后一帧。 */
+  private onBufferingChanged(player: media.AVPlayer, buffering: boolean): void {
+    if (this.destroyed || this.player !== player) return;
+    this.nativeBuffering = buffering;
+    this.clearBufferingTimers();
+    if (!this.firstFrameShown) {
+      this.buffering = true;
+      return;
+    }
+    const generation: number = this.playerGeneration;
+    if (buffering) {
+      if (this.buffering) return;
+      this.bufferingStartTimer = setTimeout(() => {
+        if (this.destroyed || this.player !== player || generation !== this.playerGeneration) return;
+        this.bufferingStartTimer = -1;
+        if (this.nativeBuffering) this.buffering = true;
+      }, 200);
+    } else if (this.buffering) {
+      this.bufferingEndTimer = setTimeout(() => {
+        if (this.destroyed || this.player !== player || generation !== this.playerGeneration) return;
+        this.bufferingEndTimer = -1;
+        if (!this.nativeBuffering) this.buffering = false;
+      }, 200);
+    }
+  }
+
+  /** playing 只表示状态；真实首帧事件也到达后才交还 Surface 并释放保持帧。 */
+  private revealFirstFrameIfReady(): void {
+    if (this.destroyed || this.firstFrameShown || !this.playing || !this.firstRenderReady) return;
+    this.firstFrameShown = true;
+    this.releaseHeldFrame();
+    this.clearStartupTimers();
+    this.buffering = this.nativeBuffering === true;
   }
 
   private clearStartupTimers(): void {
@@ -215,12 +378,12 @@ export struct LivePlayerView {
     this.clearStartupTimers();
     const generation: number = this.playerGeneration;
     this.startupHintTimer = setTimeout(() => {
-      if (this.destroyed || this.playing || this.player !== player || generation !== this.playerGeneration) return;
+      if (this.destroyed || this.firstFrameShown || this.player !== player || generation !== this.playerGeneration) return;
       this.startupHintTimer = -1;
       this.slowLoading = true;
     }, 5000);
     this.startupTimer = setTimeout(() => {
-      if (this.destroyed || this.playing || this.player !== player || generation !== this.playerGeneration) return;
+      if (this.destroyed || this.firstFrameShown || this.player !== player || generation !== this.playerGeneration) return;
       this.startupTimer = -1;
       this.handleError(player, '连接直播超时').catch(() => {});
     }, 15000);
@@ -229,12 +392,17 @@ export struct LivePlayerView {
   async initPlayer(): Promise<void> {
     if (this.destroyed || this.player !== null || this.surfaceId.length === 0 ||
       this.playInfo.urls.length === 0) return;
+    const generation: number = this.playerGeneration;
+    const pendingRelease: Promise<void> | null = this.pendingPlayerRelease ?? null;
+    if (pendingRelease !== null) {
+      await pendingRelease;
+      if (this.destroyed || generation !== this.playerGeneration || this.player !== null) return;
+    }
     if (this.playerCreating) {
       this.playerRestartPending = true;
       return;
     }
     this.playerRestartPending = false;
-    const generation: number = this.playerGeneration;
     this.playerCreating = true;
     let p: media.AVPlayer | null = null;
     try {
@@ -257,9 +425,8 @@ export struct LivePlayerView {
           createdPlayer.videoScaleType = media.VideoScaleType.VIDEO_SCALE_TYPE_SCALED_ASPECT;
           createdPlayer.play().catch(() => this.handleError(createdPlayer, '直播播放失败'));
         } else if (state === 'playing') {
-          this.clearStartupTimers();
           this.playing = true;
-          this.buffering = false;
+          this.revealFirstFrameIfReady();
           this.errorText = '';
           this.dmRenderer.setPlayback(true, this.fullscreen);
           this.scheduleHide();
@@ -269,10 +436,15 @@ export struct LivePlayerView {
           this.controls = true;
         }
       });
+      createdPlayer.on('startRenderFrame', () => {
+        if (this.player !== createdPlayer) return;
+        this.firstRenderReady = true;
+        this.revealFirstFrameIfReady();
+      });
       createdPlayer.on('bufferingUpdate', (type: media.BufferingInfoType) => {
         if (this.player !== createdPlayer) return;
-        if (type === media.BufferingInfoType.BUFFERING_START) this.buffering = true;
-        if (type === media.BufferingInfoType.BUFFERING_END) this.buffering = false;
+        if (type === media.BufferingInfoType.BUFFERING_START) this.onBufferingChanged(createdPlayer, true);
+        if (type === media.BufferingInfoType.BUFFERING_END) this.onBufferingChanged(createdPlayer, false);
       });
       createdPlayer.on('error', (err: BusinessError) => this.handleError(createdPlayer, err.message));
       const url: string = this.playInfo.urls[this.sourceIndex] ?? '';
@@ -282,8 +454,9 @@ export struct LivePlayerView {
       });
       await createdPlayer.setMediaSource(source, {
         preferredBufferDuration: 8,
-        preferredBufferDurationForPlaying: 0.8,
-        thresholdForAutoQuickPlay: 2,
+        // 按 SDK 建议将快追阈值设为起播水位 + 2s；接受额外恢复缓冲，避免弱网反复起停。
+        preferredBufferDurationForPlaying: 2,
+        thresholdForAutoQuickPlay: 4,
         showFirstFrameOnPrepare: true,
       });
     } catch (e) {
@@ -306,13 +479,20 @@ export struct LivePlayerView {
   async handleError(failed: media.AVPlayer, message: string): Promise<void> {
     if (this.destroyed || this.player !== failed) return;
     this.clearStartupTimers();
+    this.clearBufferingTimers();
     const generation: number = this.playerGeneration;
+    const hadFrame: boolean = this.firstFrameShown;
     this.player = null;
+    this.capturingFrame = hadFrame;
+    this.frameCaptureOwner = null;
+    this.firstFrameShown = false;
+    this.firstRenderReady = false;
+    this.nativeBuffering = false;
     this.prepared = false;
     this.playing = false;
     this.buffering = true;
     this.dmRenderer.setPlayback(false, this.fullscreen);
-    try { await failed.release(); } catch (e) {}
+    await this.releasePlayerWithFrame(failed, generation, hadFrame);
     if (this.destroyed || generation !== this.playerGeneration) return;
     if (this.sourceIndex + 1 < this.playInfo.urls.length) {
       this.sourceIndex++;
@@ -326,18 +506,26 @@ export struct LivePlayerView {
 
   release(): void {
     this.clearStartupTimers();
+    this.clearBufferingTimers();
     if (this.hideTimer >= 0) clearTimeout(this.hideTimer);
     this.hideTimer = -1;
     if (this.fullscreenTimer >= 0) clearTimeout(this.fullscreenTimer);
     this.fullscreenTimer = -1;
     this.playerGeneration++;
+    this.releaseHeldFrame();
+    this.capturingFrame = false;
+    this.firstFrameShown = false;
+    this.firstRenderReady = false;
     this.dmRenderer.release();
     this.playerRestartPending = false;
+    this.releasingPlayers.forEach((player: media.AVPlayer) => {
+      try { player.setVolume(0); } catch (e) {}
+    });
     const p: media.AVPlayer | null = this.player;
     this.player = null;
     if (p !== null) {
       try { p.setVolume(0); } catch (e) {}
-      p.release().catch(() => {
+      this.releasePlayerWithFrame(p, this.playerGeneration, false, false).catch(() => {
       });
     }
   }
@@ -581,6 +769,19 @@ export struct LivePlayerView {
         .width('100%')
         .height('100%')
         .onLoad(() => this.onSurfaceReady())
+
+      // 缓冲不盖住视频；只有播放器替换阶段用实际保持帧（抓帧失败时用封面）遮住空 Surface。
+      if (!this.firstFrameShown && !this.capturingFrame) {
+        if (this.heldFrame !== null) {
+          Image(this.heldFrame)
+            .width('100%').height('100%').objectFit(ImageFit.Contain)
+            .hitTestBehavior(HitTestMode.None)
+        } else if (this.cover.length > 0) {
+          Image(this.cover)
+            .width('100%').height('100%').objectFit(ImageFit.Cover)
+            .hitTestBehavior(HitTestMode.None)
+        }
+      }
 
       // 控件隐藏时才铺手势层；控件显示时移除，避免它抢走画质/弹幕/全屏按钮事件。
       if (!this.controls) {

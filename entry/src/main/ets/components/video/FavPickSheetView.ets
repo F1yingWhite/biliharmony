@@ -1,6 +1,6 @@
 /**
  * 收藏夹多选底部抽屉（视频详情页，长按收藏触发）：夹列表勾选 + 取消/保存。
- * 纯展示组件：夹数据、勾选集与保存逻辑（saveFavPick）都在详情页。
+ * 纯展示组件：夹数据与勾选集来自 VideoFavoritePicker 发布的快照，操作经回调提交。
  */
 import { FavoriteFolderItem } from '../../model/Models';
 import { Immersive } from '../../common/Immersive';
@@ -10,6 +10,7 @@ export struct FavPickSheetView {
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @Prop loading: boolean = false;
+  @Prop saving: boolean = false;
   @Prop folders: Array<FavoriteFolderItem> = [];
   @Prop checked: Array<number> = [];
   onToggle: (id: number) => void = () => {};
@@ -46,6 +47,7 @@ export struct FavPickSheetView {
                   .width(24).height(24)
                 }
                 .width('100%').padding({ top: 8, bottom: 8 })
+                .enabled(!this.saving)
                 .onClick(() => this.onToggle(f.id))
               }
             }, (f: FavoriteFolderItem) => String(f.id))
@@ -58,9 +60,13 @@ export struct FavPickSheetView {
           Text('取消').fontSize(14).fontColor('#9499A0')
             .layoutWeight(1).height(38).textAlign(TextAlign.Center)
             .backgroundColor(this.isDark ? '#2A2C31' : '#F5F7F9').borderRadius(19)
+            .enabled(!this.saving)
+            .opacity(this.saving ? 0.5 : 1)
             .onClick(() => this.onClose())
-          Text('保存').fontSize(14).fontColor('#FFFFFF').backgroundColor(this.accent)
+          Text(this.saving ? '保存中…' : '保存').fontSize(14).fontColor('#FFFFFF').backgroundColor(this.accent)
             .layoutWeight(1).height(38).textAlign(TextAlign.Center).borderRadius(19)
+            .enabled(!this.loading && !this.saving && this.folders.length > 0)
+            .opacity(this.loading || this.saving || this.folders.length === 0 ? 0.5 : 1)
             .onClick(() => {
               this.onConfirm();
             })

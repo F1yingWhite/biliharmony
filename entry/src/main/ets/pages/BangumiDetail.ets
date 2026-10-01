@@ -2,8 +2,9 @@ import { BasicDataSource } from '../common/BasicDataSource';
 /**
  * 番剧/影视（PGC）详情页：封面氛围头部（海报 + 评分 + 追番）+ 选集 + 简介 + 评论。
  * 入口：动态流 PGC 卡片。评论区复用动态详情的组装方式（type=1，oid 为当前集 aid）。
+ * 集选择与 PGC 参数由 BangumiEpisodeCatalog 定义，选集展示与追番动作独立于评论编排。
  */
-import { LengthMetrics, UIContext } from '@kit.ArkUI';
+import { UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { AppNavStack, BangumiDetailParam, NAV_BANGUMI_DETAIL, NAV_LOGIN, NAV_VIDEO_DETAIL, VideoDetailParam } from '../common/AppRouter';
 import { BangumiEpisode, BangumiSeason, ReplyItem } from '../model/Models';
@@ -22,9 +23,12 @@ import { ReplyShareCard } from '../components/reply/ReplyShareCard';
 import { ReplySortChips } from '../components/reply/ReplySortChips';
 import { UserStore } from '../services/auth/UserStore';
 import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
-import { asNumber, asObject, colorWithAlpha, formatCount, formatDuration } from '../common/Utils';
+import { asNumber, asObject, colorWithAlpha, formatCount } from '../common/Utils';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { CommentApi } from '../api/CommentApi';
+import { BangumiEpisodeCatalog } from '../components/bangumi/BangumiEpisodeCatalog';
+import { BangumiEpisodeSection } from '../components/bangumi/BangumiEpisodeSection';
+import { BangumiFollowController, BangumiFollowState } from '../components/bangumi/BangumiFollowController';
 
 @Component
 export struct BangumiDetailPage {
@@ -33,11 +37,8 @@ export struct BangumiDetailPage {
   @State loading: boolean = true;
   @State errorText: string = '';
   @State currentEpId: number = 0;
-  @State followed: boolean = false;
-  @State followStatus: number = 0;
+  @State followState: BangumiFollowState = new BangumiFollowState();
   @State showStatusPanel: boolean = false;
-  @State favorites: number = 0;
-  @State followBusy: boolean = false;
   @State viewportWidth: number = 360;
   // ===== 评论（挂在当前集 aid 上，type=1） =====
   /** 评论懒加载数据源（无限翻页必须虚拟化；主列表统一从这里读写）。 */
@@ -68,6 +69,19 @@ export struct BangumiDetailPage {
   private destroyed: boolean = false;
   private replyLikeBusy: Set<number> = new Set<number>();
   private scroller: Scroller = new Scroller();
+  private follow: BangumiFollowController = new BangumiFollowController({
+    getSeason: (): BangumiSeason => this.season,
+    isDestroyed: (): boolean => this.destroyed,
+    ensureLogin: (message: string): boolean => {
+      if (UserStore.isLogin) return true;
+      if (message.length > 0) this.toast(message);
+      AppNavStack.pushPathByName(NAV_LOGIN, null);
+      return false;
+    },
+    toast: (message: string): void => this.toast(message),
+    publish: (state: BangumiFollowState): void => { this.followState = state; },
+    closeStatusPanel: (): void => { this.showStatusPanel = false; },
+  });
   /**
    * 评论编排控制器：游标/请求代际/分享卡临时状态都在控制器，@State 经下方闭包读写。
    * clearOnSort=true：切换评论排序时清空列表与游标，重新拉第一页。
@@ -163,6 +177,7 @@ export struct BangumiDetailPage {
   aboutToDisappear(): void {
     this.replies.dispose();
     this.destroyed = true;
+    this.follow.dispose();
     this.replies.releaseShareCard();
   }
 
@@ -186,10 +201,9 @@ export struct BangumiDetailPage {
         return;
       }
       this.season = season;
-      this.followed = season.followed;
-      this.favorites = season.favorites;
+      this.follow.initialize(season);
       // 定位当前集：优先入口参数 epId，否则第一集；评论区挂在当前集 aid 上。
-      this.currentEpId = this.pickCurrentEpId(season);
+      this.currentEpId = BangumiEpisodeCatalog.pick(season, this.param.epId);
       this.replies.load(true).catch(() => {
       });
     } catch (e) {
@@ -199,48 +213,10 @@ export struct BangumiDetailPage {
     }
   }
 
-  private pickCurrentEpId(season: BangumiSeason): number {
-    if (this.param.epId > 0) {
-      for (let i: number = 0; i < season.episodes.length; i++) {
-        if (season.episodes[i].epId === this.param.epId) return this.param.epId;
-      }
-    }
-    return season.episodes.length > 0 ? season.episodes[0].epId : 0;
-  }
-
-  private currentEpisode(): BangumiEpisode | null {
-    const episodes: Array<BangumiEpisode> = this.season.episodes;
-    for (let i: number = 0; i < episodes.length; i++) {
-      if (episodes[i].epId === this.currentEpId) return episodes[i];
-    }
-    return episodes.length > 0 ? episodes[0] : null;
-  }
-
   /** 评论 oid：当前集 aid；无剧集或未上线时为 0，评论区与输入框整体隐藏。 */
   private replyOid(): number {
-    const ep: BangumiEpisode | null = this.currentEpisode();
+    const ep: BangumiEpisode | null = BangumiEpisodeCatalog.current(this.season, this.currentEpId);
     return ep !== null ? ep.aid : 0;
-  }
-
-  private followLabel(): string {
-    return this.season.seasonType === 1 || this.season.seasonType === 4 ? '追番' : '追剧';
-  }
-
-  private episodeUnit(): string {
-    return this.season.seasonType === 1 || this.season.seasonType === 4 ? '话' : '集';
-  }
-
-  private currentEpLabel(): string {
-    const ep: BangumiEpisode | null = this.currentEpisode();
-    if (ep === null || ep.title.length === 0) return '';
-    // title 是纯数字时展示"第 x 话"，PV/SP 等标签原样展示。
-    return /^[0-9]+$/.test(ep.title) ? '第 ' + ep.title + ' ' + this.episodeUnit() : ep.title;
-  }
-
-  private episodeFullTitle(ep: BangumiEpisode): string {
-    let label: string = this.season.title + ' ' + ep.title;
-    if (ep.longTitle.length > 0) label += ' ' + ep.longTitle;
-    return label;
   }
 
   /** 保留集 ID 与 CID，详情和换画质始终使用 PGC 鉴权取流。 */
@@ -256,60 +232,8 @@ export struct BangumiDetailPage {
       this.replies.load(true).catch(() => {
       });
     }
-    const param: VideoDetailParam = { bvid: ep.bvid, aid: ep.aid, title: this.episodeFullTitle(ep),
-      epId: ep.epId, cid: ep.cid, cover: ep.cover };
+    const param: VideoDetailParam = BangumiEpisodeCatalog.playbackParam(this.season, ep);
     AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
-  }
-
-  private async toggleFollow(): Promise<void> {
-    if (!UserStore.isLogin) {
-      this.toast('请先登录后再' + this.followLabel());
-      AppNavStack.pushPathByName(NAV_LOGIN, null);
-      return;
-    }
-    if (this.followBusy || this.season.seasonId <= 0) return;
-    this.followBusy = true;
-    try {
-      const result: ActionResult = await BangumiApi.setFollowed(this.season.seasonId, !this.followed);
-      if (this.destroyed) return;
-      this.toast(result.message);
-      if (result.ok) {
-        this.followed = !this.followed;
-        this.favorites = Math.max(0, this.favorites + (this.followed ? 1 : -1));
-      }
-    } catch (e) {
-      if (!this.destroyed) this.toast('网络异常，操作失败');
-    } finally {
-      if (!this.destroyed) this.followBusy = false;
-    }
-  }
-
-  /** 追番状态：1 想看 / 2 在看 / 4 看过（与 B 站 web 端一致）。 */
-  private async setFollowStatus(status: number): Promise<void> {
-    if (this.season.seasonId <= 0) return;
-    if (!UserStore.isLogin) {
-      AppNavStack.pushPathByName(NAV_LOGIN, null);
-      return;
-    }
-    if (this.followBusy) return;
-    this.followBusy = true;
-    try {
-      const result: ActionResult = await BangumiApi.updateFollowStatus(this.season.seasonId, status);
-      if (this.destroyed) return;
-      this.toast(result.ok ? ['想看', '在看', '', '看过'][status - 1] ?? '已更新状态' : result.message);
-      if (result.ok) {
-        this.followStatus = status;
-        if (!this.followed) {
-          this.followed = true;
-          this.favorites = Math.max(0, this.favorites + 1);
-        }
-      }
-    } catch (e) {
-      if (!this.destroyed) this.toast('网络异常，操作失败');
-    } finally {
-      this.followBusy = false;
-      this.showStatusPanel = false;
-    }
   }
 
   // ===== 评论（组装方式同动态详情，编排在 RepliesController） =====
@@ -530,13 +454,6 @@ export struct BangumiDetailPage {
     return parts.join(' · ');
   }
 
-  /** 选集格子宽度：手机双列，折叠屏/平板逐级加列。 */
-  private episodeCellWidth(): number {
-    const content: number = Math.min(this.viewportWidth, LayoutTokens.pageMaxWidth) - 28;
-    const cols: number = this.viewportWidth >= 820 ? 4 : (this.viewportWidth >= 560 ? 3 : 2);
-    return (content - 8 * (cols - 1)) / cols;
-  }
-
   // ===== 加载/错误态的简易头栏：返回键 + 入口带入的标题占位 =====
   @Builder
   StateHeader() {
@@ -629,19 +546,19 @@ export struct BangumiDetailPage {
               }
               .alignItems(VerticalAlign.Bottom)
             }
-            Text(formatCount(this.season.views) + ' 播放 · ' + formatCount(this.favorites) + ' ' + this.followLabel())
+            Text(formatCount(this.season.views) + ' 播放 · ' + formatCount(this.followState.favorites) + ' ' + BangumiEpisodeCatalog.followLabel(this.season))
               .fontSize(12)
               .fontColor('#E6FFFFFF')
-            Text((this.followed ? '已' : '+ ') + this.followLabel())
+            Text((this.followState.followed ? '已' : '+ ') + BangumiEpisodeCatalog.followLabel(this.season))
               .fontSize(13)
               .fontColor('#FFFFFF')
               .padding({ left: 20, right: 20, top: 6, bottom: 6 })
               .borderRadius(17)
-              .backgroundColor(this.followed ? '#40FFFFFF' : this.accent)
+              .backgroundColor(this.followState.followed ? '#40FFFFFF' : this.accent)
               .margin({ top: 2 })
-              .opacity(this.followBusy ? 0.6 : 1)
+              .opacity(this.followState.busy ? 0.6 : 1)
               .onClick(() => {
-                this.toggleFollow().catch(() => {
+                this.follow.toggle().catch(() => {
                 });
               })
             .gesture(LongPressGesture({ repeat: false })
@@ -660,123 +577,6 @@ export struct BangumiDetailPage {
     }
     .width('100%')
     .height(Immersive.statusBarHeight() + 224)
-  }
-
-  @Builder
-  EpisodeCell(ep: BangumiEpisode) {
-    Column({ space: 4 }) {
-      Stack({ alignContent: Alignment.TopEnd }) {
-        // 占位底色：封面加载失败/未返回时保持格子形状
-        Column()
-          .width('100%')
-          .aspectRatio(16 / 10)
-          .borderRadius(6)
-          .backgroundColor(this.isDark ? '#26272B' : '#E3E5E7')
-        if (ep.cover.length > 0) {
-          Image(biliImageThumbnail(ep.cover, 480))
-            .width('100%')
-            .aspectRatio(16 / 10)
-            .objectFit(ImageFit.Cover)
-            .borderRadius(6)
-        }
-        // 底部压暗渐变 + 集数/时长
-        Column()
-          .width('100%')
-          .aspectRatio(16 / 10)
-          .borderRadius(6)
-          .linearGradient({
-            angle: 180,
-            colors: [['#00000000', 0.55], ['#73000000', 1.0]],
-          })
-          .hitTestBehavior(HitTestMode.None)
-        Column() {
-          Row() {
-            Text(ep.title)
-              .fontSize(11)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#FFFFFF')
-            Blank()
-            if (ep.duration > 0) {
-              Text(formatDuration(ep.duration))
-                .fontSize(10)
-                .fontColor('#FFFFFF')
-            }
-          }
-          .width('100%')
-          .padding({ left: 8, right: 8, bottom: 6 })
-          .alignItems(VerticalAlign.Center)
-        }
-        .width('100%')
-        .height('100%')
-        .justifyContent(FlexAlign.End)
-        .hitTestBehavior(HitTestMode.None)
-        if (ep.badge.length > 0) {
-          Text(ep.badge)
-            .fontSize(9)
-            .fontColor('#FFFFFF')
-            .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-            .borderRadius(4)
-            .backgroundColor(this.accent)
-            .margin(6)
-        }
-        // 当前集高亮描边
-        Column()
-          .width('100%')
-          .aspectRatio(16 / 10)
-          .borderRadius(6)
-          .border({ width: ep.epId === this.currentEpId ? 1.5 : 0, color: this.accent, radius: 6 })
-          .hitTestBehavior(HitTestMode.None)
-      }
-      .width('100%').aspectRatio(16 / 10).clip(true)
-      Text(ep.longTitle.length > 0 ? ep.longTitle : this.episodeFullTitle(ep))
-        .fontSize(11)
-        .fontColor(ep.epId === this.currentEpId ? this.accent : (this.isDark ? '#D8D8DC' : '#303236'))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .width('100%')
-    }
-    .width(this.episodeCellWidth())
-    .alignItems(HorizontalAlign.Start)
-    .onClick(() => {
-      this.playEpisode(ep);
-    })
-  }
-
-  @Builder
-  EpisodeSection() {
-    if (this.season.episodes.length > 0) {
-      Column({ space: 10 }) {
-        Row({ space: 8 }) {
-          Text('选集')
-            .fontSize(16)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-          if (this.season.total > 0) {
-            Text('共 ' + String(this.season.total) + ' ' + this.episodeUnit())
-              .fontSize(12)
-              .fontColor('#9499A0')
-          }
-          if (this.season.newEpDesc.length > 0) {
-            Text(this.season.newEpDesc)
-              .layoutWeight(1)
-              .fontSize(12)
-              .fontColor('#9499A0')
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          }
-        }
-        .width('100%')
-        Flex({ wrap: FlexWrap.Wrap, space: { main: LengthMetrics.vp(8), cross: LengthMetrics.vp(10) } }) {
-          ForEach(this.season.episodes, (ep: BangumiEpisode) => {
-            this.EpisodeCell(ep)
-          }, (ep: BangumiEpisode) => String(ep.epId))
-        }
-        .width('100%')
-      }
-      .width('100%')
-      .padding({ left: 14, right: 14, top: 14 })
-      .alignItems(HorizontalAlign.Start)
-    }
   }
 
   @Builder
@@ -891,8 +691,8 @@ export struct BangumiDetailPage {
           .fontSize(16)
           .fontWeight(FontWeight.Bold)
           .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-        if (this.currentEpLabel().length > 0) {
-          Text(this.currentEpLabel())
+        if (BangumiEpisodeCatalog.currentLabel(this.season, this.currentEpId).length > 0) {
+          Text(BangumiEpisodeCatalog.currentLabel(this.season, this.currentEpId))
             .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
             .fontSize(12)
             .fontColor('#9499A0')
@@ -949,11 +749,11 @@ export struct BangumiDetailPage {
         ForEach([1, 2, 4], (status: number) => {
           Text(['想看', '在看', '', '看过'][status - 1] ?? '')
             .fontSize(13)
-            .fontColor(this.followStatus === status ? '#FFFFFF' : (this.isDark ? '#D0D0D0' : '#5A5F66'))
+            .fontColor(this.followState.status === status ? '#FFFFFF' : (this.isDark ? '#D0D0D0' : '#5A5F66'))
             .padding({ left: 16, right: 16, top: 7, bottom: 7 })
             .borderRadius(16)
-            .backgroundColor(this.followStatus === status ? this.accent : (this.isDark ? '#2C2D33' : '#F1F2F3'))
-            .onClick(() => this.setFollowStatus(status))
+            .backgroundColor(this.followState.status === status ? this.accent : (this.isDark ? '#2C2D33' : '#F1F2F3'))
+            .onClick(() => this.follow.setStatus(status))
         }, (status: number) => 'status-' + String(status))
       }
     }
@@ -984,7 +784,12 @@ export struct BangumiDetailPage {
           ListItem() {
             Column() {
               this.Header()
-              this.EpisodeSection()
+              BangumiEpisodeSection({
+                season: this.season,
+                currentEpId: this.currentEpId,
+                viewportWidth: this.viewportWidth,
+                onPlay: (episode: BangumiEpisode): void => this.playEpisode(episode),
+              })
               this.RelatedSection()
               this.IntroSection()
               this.CommentSection()

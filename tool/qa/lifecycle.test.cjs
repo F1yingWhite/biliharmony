@@ -394,7 +394,7 @@ function liveHarness(create, clock = liveClock()) {
   const p=new Harness(); Object.assign(p,{destroyed:false,player:null,playerCreating:false,
     playerRestartPending:false,surfaceId:'test',playInfo:{urls:['first','backup']},playerGeneration:0,sourceIndex:0,
     dmRenderer:{setPlayback(){},release(){}},hideTimer:-1,fullscreenTimer:-1,
-    startupHintTimer:-1,startupTimer:-1,slowLoading:false,testClock:clock});
+    startupHintTimer:-1,startupTimer:-1,slowLoading:false,testClock:clock,releasingPlayers:new Set()});
   return p;
 }
 function fakePlayer(setSource=async()=>{},release=async()=>{}) {
@@ -443,6 +443,8 @@ test('live backup clears the failure overlay once prepared and playing', async (
   assert.equal(starts, 1);
   backup.handlers.stateChange('playing');
   assert.equal(p.playing, true);
+  assert.equal(p.buffering, true, 'playing alone cannot uncover a blank Surface');
+  backup.handlers.startRenderFrame();
   assert.equal(p.buffering, false);
   assert.equal(p.errorText, '');
   assert.equal(p.testClock.pending.size, 0);
@@ -535,8 +537,9 @@ test('live error cannot advance a new source while old release is pending', asyn
   const old=fakePlayer(async()=>{},()=>release.promise), next=fakePlayer();
   const p=liveHarness(async()=>{creations++;return next;}); p.player=old;
   const failed=p.handleError(old,'failed');
-  p.playInfo={urls:['new-first','new-backup']}; await p.restartForSource();
-  release.resolve(); await failed;
+  p.playInfo={urls:['new-first','new-backup']}; const restarting=p.restartForSource();
+  await tick(); assert.equal(creations,0,'new Surface must wait for old release');
+  release.resolve(); await Promise.all([failed,restarting]);
   assert.equal(p.player,next); assert.equal(p.sourceIndex,0); assert.equal(creations,1);
 });
 

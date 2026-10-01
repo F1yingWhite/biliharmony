@@ -11,6 +11,8 @@ import { MessageSessionItem, MessageSessionPageData, PrivateMessageItem, Private
   MsgFeedUnread, MsgNotifyItem, MsgNotifyPageData } from '../model/Models';
 import { ActionResult, actionWithCsrf, getData, webGet, webGetSigned, webPost,
   failureText } from './internal/ApiCommon';
+import { parseMessageJson, compareMessageCursor } from '../common/MessageCursor';
+import { AuthSession } from '../services/auth/AuthSession';
 
 export class MessageApi {
   static async getMessageSessions(beginTs: number = 0): Promise<MessageSessionPageData> {
@@ -21,7 +23,8 @@ export class MessageApi {
     };
     if (beginTs > 0) params['begin_ts'] = String(beginTs);
     const resp: HttpResponse = await webGetSigned(Api.sessionList, params, 'https://message.bilibili.com/');
-    const data: Record<string, Object> | null = getData(resp);
+    const data: Record<string, Object> | null = getData(resp) === null ? null :
+      asObject(parseMessageJson(resp.body)['data']);
     const result: MessageSessionPageData = new MessageSessionPageData();
     if (data === null) {
       // 失败原因透出到 UI（区分网络错误与业务错误），同时留 hilog 便于定位风控/签名问题。
@@ -132,14 +135,16 @@ export class MessageApi {
     return new ActionResult(ok, ok ? '会话已删除' : (String(json['message'] ?? '删除失败') + ' (' + String(code) + ')'), code);
   }
 
-  static async getPrivateMessages(talkerId: number, beginSeqno: number = 0): Promise<PrivateMessagePageData> {
+  static async getPrivateMessages(talkerId: number, beginSeqno: number | string = 0): Promise<PrivateMessagePageData> {
     const params: Record<string, string> = {
       'talker_id': String(talkerId), 'session_type': '1', 'size': '30', 'sender_device_id': '1',
       'build': '0', 'mobi_app': 'web', 'web_location': '333.1296',
     };
-    if (beginSeqno > 0) params['begin_seqno'] = String(beginSeqno);
+    const begin: string = String(beginSeqno);
+    if (/^\d+$/.test(begin) && begin !== '0') params['begin_seqno'] = begin;
     const resp: HttpResponse = await webGetSigned(Api.sessionMessages, params, 'https://message.bilibili.com/');
-    const data: Record<string, Object> | null = getData(resp);
+    const data: Record<string, Object> | null = getData(resp) === null ? null :
+      asObject(parseMessageJson(resp.body)['data']);
     const result: PrivateMessagePageData = new PrivateMessagePageData();
     if (data === null) {
       const json: Record<string, Object> = resp.json();
@@ -154,22 +159,26 @@ export class MessageApi {
     }
     const list: Array<Object> = asArray(data['messages']);
     for (let i: number = 0; i < list.length; i++) result.messages.push(PrivateMessageItem.from(list[i]));
-    result.messages.sort((a: PrivateMessageItem, b: PrivateMessageItem) => a.seqno - b.seqno);
-    if (result.messages.length > 0) result.minSeqno = result.messages[0].seqno;
+    result.messages.sort((a: PrivateMessageItem, b: PrivateMessageItem) =>
+      compareMessageCursor(a.seqnoText, b.seqnoText));
+    if (result.messages.length > 0) {
+      result.minSeqno = result.messages[0].seqno;
+      result.minSeqnoText = result.messages[0].seqnoText;
+    }
     result.hasMore = asNumber(data['has_more'], 0) === 1 || list.length >= 30;
     return result;
   }
 
-  /** 将指定会话确认到最后一条已展示消息；ackSeqno=0 时由服务端确认到最新消息。 */
-  static async markPrivateMessagesRead(talkerId: number, ackSeqno: number = 0): Promise<ActionResult> {
-    if (talkerId <= 0) return new ActionResult(false, '无可确认的私信');
+  /** 确认到明确的会话序号；与官方 Web update_ack 保持一致，不省略 ack_seqno。 */
+  static async markPrivateMessagesRead(talkerId: number, ackSeqno: string): Promise<ActionResult> {
+    if (talkerId <= 0 || !/^\d+$/.test(ackSeqno)) return new ActionResult(false, '无可确认的私信');
     return actionWithCsrf('登录状态缺少 CSRF', '已读', '标记已读失败',
       async (csrf: string): Promise<HttpResponse> => {
         const params: Record<string, string> = {
           'talker_id': String(talkerId), 'session_type': '1',
+          'ack_seqno': ackSeqno,
           'build': '0', 'mobi_app': 'web', 'csrf_token': csrf, 'csrf': csrf,
         };
-        if (ackSeqno > 0) params['ack_seqno'] = String(ackSeqno);
         return webPost(Api.ackSessionMessage, params, 'https://message.bilibili.com/');
       });
   }
@@ -217,6 +226,7 @@ export class MessageApi {
    * 调用方不能先清本地角标再用成功提示掩盖服务端失败。
    */
   static async markAllNotificationsRead(): Promise<ActionResult> {
+    const session: number = AuthSession.version;
     const kinds: Array<string> = ['reply', 'at', 'like'];
     const pages: Array<MsgNotifyPageData> = await Promise.all([
       MessageApi.getMsgFeedNotify(kinds[0]),
@@ -224,12 +234,15 @@ export class MessageApi {
       MessageApi.getMsgFeedNotify(kinds[2]),
       MessageApi.getSysNotifications(),
     ]);
+    // 首屏数据属于请求开始时的账号，不能用切换后的 cookie 确认旧账号游标。
+    if (session !== AuthSession.version) return new ActionResult(false, '登录状态已变化，请重试');
     for (let i: number = 0; i < pages.length; i++) {
       if (pages[i].error.length > 0) return new ActionResult(false, pages[i].error);
     }
     const sysPage: MsgNotifyPageData = pages[3];
     if (sysPage.items.length > 0 && sysPage.items[0].sysCursor.length > 0) {
       const result: ActionResult = await MessageApi.updateSysMsgCursor(sysPage.items[0].sysCursor);
+      if (session !== AuthSession.version) return new ActionResult(false, '登录状态已变化，请重试');
       if (!result.ok) return result;
     }
     return new ActionResult(true, '已标记全部已读');
@@ -304,39 +317,48 @@ export class MessageApi {
     result.cursorTime = timeMatch !== null ? timeMatch[1] : '';
   }
 
-  /** 系统通知：data 为数组，cursor 为纳秒级 int64（超出 number 精度，按字符串截取）。 */
+  /** 首屏合并公共和个人系统通知；分页使用旧游标，最新游标用于确认已读。 */
   static async getSysNotifications(cursor: string = ''): Promise<MsgNotifyPageData> {
-    const params: Record<string, string> = {
-      'page_size': '20', 'mobi_app': 'web', 'build': '0', 'web_location': '333.40164',
-    };
-    if (cursor.length > 0) params['cursor'] = cursor;
-    const resp: HttpResponse = await webGet(Api.msgSysNotify, params, 'https://message.bilibili.com/');
     const result: MsgNotifyPageData = new MsgNotifyPageData();
-    const json: Record<string, Object> = resp.json();
-    if (!resp.ok || asNumber(json['code'], -1) !== 0) {
-      result.error = failureText(resp, '接口异常');
-      if (DEBUG) {
-        hilog.warn(0x0000, 'BiliApi', 'getSysNotifications failed: status=%{public}d code=%{public}d',
-          resp.status, asNumber(json['code'], -999));
+    const params: Record<string, string> = { 'mobi_app': 'web', 'build': '0' };
+    let responses: Array<HttpResponse>;
+    if (cursor.length === 0) {
+      responses = await Promise.all([
+        webGet(Api.msgSysUnifiedNotify, { 'page_size': '10', 'mobi_app': 'web', 'build': '0' },
+          'https://message.bilibili.com/'),
+        webGet(Api.msgSysUserNotify, { 'page_size': '20', 'mobi_app': 'web', 'build': '0' },
+          'https://message.bilibili.com/'),
+      ]);
+    } else {
+      params['cursor'] = cursor;
+      params['data_type'] = '1';
+      responses = [await webGet(Api.msgSysNotify, params, 'https://message.bilibili.com/')];
+    }
+    const seen: Set<string> = new Set<string>();
+    for (let i: number = 0; i < responses.length; i++) {
+      const resp: HttpResponse = responses[i];
+      const json: Record<string, Object> = parseMessageJson(resp.body);
+      if (!resp.ok || asNumber(json['code'], -1) !== 0) {
+        result.error = failureText(resp, '系统通知加载失败');
+        return result;
       }
-      return result;
+      const list: Array<Object> = cursor.length === 0 ?
+        asArray(asObject(json['data'])['system_notify_list']) : asArray(json['data']);
+      for (let j: number = 0; j < list.length; j++) {
+        const raw: Record<string, Object> = asObject(list[j]);
+        const itemCursor: string = str(raw, 'cursor', '');
+        const key: string = String(raw['id'] ?? '') + ':' + itemCursor;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.items.push(MsgNotifyItem.fromSys(raw, itemCursor));
+      }
     }
-    const list: Array<Object> = asArray(json['data']);
-    // 每条 item 的 cursor 按报文出现顺序一一对应（JSON.parse 会把纳秒游标截成浮点）。
-    const cursors: Array<string> = [];
-    const re: RegExp = new RegExp('"cursor":(\\d+)', 'g');
-    let match: RegExpExecArray | null = re.exec(resp.body);
-    while (match !== null) {
-      cursors.push(match[1]);
-      match = re.exec(resp.body);
-    }
-    for (let i: number = 0; i < list.length; i++) {
-      result.items.push(MsgNotifyItem.fromSys(list[i], i < cursors.length ? cursors[i] : ''));
-    }
+    result.items.sort((a: MsgNotifyItem, b: MsgNotifyItem) => compareMessageCursor(b.sysCursor, a.sysCursor));
     if (result.items.length > 0) {
       result.sysCursor = result.items[result.items.length - 1].sysCursor;
     }
-    result.hasMore = list.length >= 20;
+    result.hasMore = result.items.length > 0 && result.sysCursor.length > 0 &&
+      (cursor.length === 0 || compareMessageCursor(result.sysCursor, cursor) < 0);
     return result;
   }
 

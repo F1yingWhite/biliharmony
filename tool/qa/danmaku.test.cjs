@@ -85,6 +85,160 @@ function engine(density=30) {
   return e;
 }
 
+function pausedCanvasFixture() {
+  const syncs = [], pixels = [];
+  const env = environment({'api/BiliApi': {}, '@kit.ArkGraphics2D': {displaySync: {create() {
+    const sync = {setExpectedFrameRateRange() {}, start() {}, stop() {},
+      on(_event, callback) {this.callback = callback;}, off() {this.callback = null;}};
+    syncs.push(sync);
+    return sync;
+  }}}});
+  const Engine = env.load('components/player/PlayerDanmakuEngine').PlayerDanmakuEngine;
+  const Clock = env.load('components/player/PlayerDanmakuClock').PlayerDanmakuClock;
+  const Harness = env.methodHarness('components/player/PlayerView',
+    '  togglePlay(): void {', '  /** 结束画面「重播」');
+  const ctx = {measureText: text => ({width: text.length * 12}),
+    clearRect() {pixels.length = 0;}, strokeText() {},
+    fillText(text, x, y) {pixels.push({text, x, y});}};
+  const e = new Engine(ctx);
+  Object.assign(e, {width: 844, height: 391, fullscreen: true, density: 30, lastPlayerTime: 10});
+  e.list = [dm(1, 10, 1, '滚动'), dm(2, 10, 6, '逆向'), dm(3, 10, 5, '顶部'),
+    dm(4, 10, 4, '底部'), dm(5, 10, 1, '已固定')];
+  e.spawn(10);
+  e.active.forEach((item, index) => {if (!item.isFixed) item.x = 180 + index * 30;});
+  e.pinned = e.active.find(item => item.item.id === 5);
+  const view = new Harness();
+  let pauseRequests = 0, pinClears = 0;
+  Object.assign(view, {playing: true, prepared: true, backgroundAudioOnly: false,
+    appInBackground: false, danmakuOn: true, danmakuFixedHeight: e.height, ctx,
+    player: {pause() {pauseRequests++;}}, audioPlayer: null, audioPrepared: false,
+    seekCtl: null, seekRecoveryActive: false, cancelAudioGate() {}, cancelFirstFrameMute() {},
+    onPlayingChange() {}, updateAVSessionPlaybackState() {}});
+  const clock = new Clock({isPlaying: () => view.playing,
+    isDanmakuOn: () => view.danmakuOn && !view.appInBackground, getFrameRate: () => 60,
+    getEngine: () => e, clearPinned() {pinClears++; e.pinned = null;}});
+  view.dmClock = clock;
+  clock.start();
+  syncs[0].callback({timestamp: 1_000_000_000});
+  syncs[0].callback({timestamp: 1_200_000_000});
+  const positions = () => e.active.map(item => ({id: item.item.id, x: item.x, lane: item.lane,
+    fixedUntil: item.fixedUntil, born: item.born}));
+  return {env, e, clock, ctx, view, pixels, syncs, positions,
+    pauseRequests: () => pauseRequests, pinClears: () => pinClears};
+}
+
+// Execute the production Canvas modifier chain to capture its real lifecycle callback.
+// ArkUI clears the backing buffer before onReady on creation and native size changes.
+function bindProductionCanvasReady(view) {
+  const source = readSource(path.join(root, 'components/player/PlayerView.ets'));
+  const begin = source.indexOf('        Canvas(this.ctx)');
+  const end = source.indexOf("\n      }\n      .id('qa_player_danmaku_viewport')", begin);
+  assert.ok(begin >= 0 && end > begin, 'player Canvas modifier chain must be present');
+  const code = ts.transpileModule('function bindCanvas() {\n' + source.slice(begin, end) + '\n}', {
+    compilerOptions: {target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS}
+  }).outputText;
+  let ready;
+  const canvas = {id() {return this;}, width() {return this;}, height() {return this;},
+    hitTestBehavior() {return this;}, onReady(callback) {ready = callback; return this;}};
+  new Function('Canvas', 'HitTestMode', code + '\nreturn bindCanvas;')(
+    () => canvas, {None: 0}).call(view);
+  assert.equal(typeof ready, 'function', 'Canvas must restore its pixels after native buffer clears');
+  return ready;
+}
+
+test('first user pause freezes and restores visible danmaku before the native paused event', () => {
+  const f = pausedCanvasFixture();
+  const positions = f.positions(), pixels = f.pixels.slice(), pinned = f.e.pinned, cursor = f.e.cursor;
+  assert.equal(pixels.length, 5);
+  f.ctx.clearRect();
+  f.view.togglePlay(); // The fake player submits pause but emits no stateChange yet.
+  assert.equal(f.pauseRequests(), 1);
+  assert.equal(f.view.playing, false);
+  assert.equal(f.clock.isRunning(), false, 'stop the frame source at the user action');
+  assert.deepEqual(f.pixels, pixels, 'retain scroll, reverse, top, bottom and pinned text');
+  assert.deepEqual(f.positions(), positions);
+  assert.equal(f.e.cursor, cursor);
+  assert.equal(f.e.pinned, pinned);
+  f.syncs[0].callback({timestamp: 8_000_000_000});
+  assert.deepEqual(f.positions(), positions, 'a queued frame cannot move paused comments');
+  f.clock.release();
+});
+
+test('Canvas onReady restores the paused frame after initial and later native buffer resets', () => {
+  const f = pausedCanvasFixture();
+  f.view.playing = false;
+  f.clock.pause();
+  const ready = bindProductionCanvasReady(f.view);
+  const pixels = f.pixels.slice(), positions = f.positions(), cursor = f.e.cursor;
+  for (let reset = 0; reset < 2; reset++) {
+    f.ctx.clearRect();
+    assert.equal(f.pixels.length, 0);
+    ready();
+    assert.deepEqual(f.pixels, pixels);
+    assert.deepEqual(f.positions(), positions);
+    assert.equal(f.e.cursor, cursor);
+    assert.equal(f.clock.isRunning(), false);
+  }
+  f.clock.release();
+});
+
+test('resuming after a long pause excludes paused wall time from movement and keeps pinned text frozen', () => {
+  const f = pausedCanvasFixture();
+  f.view.playing = false;
+  f.clock.pause();
+  const positions = f.positions(), cursor = f.e.cursor, pinned = f.e.pinned;
+  f.view.playing = true;
+  f.clock.start();
+  f.syncs[0].callback({timestamp: 31_200_000_000});
+  assert.deepEqual(f.positions(), positions, 'the first resumed frame starts a fresh time baseline');
+  f.syncs[0].callback({timestamp: 31_220_000_000});
+  for (const item of f.e.active) {
+    const old = positions.find(position => position.id === item.item.id);
+    const expected = item.isFixed || item === pinned ? old.x :
+      old.x + (item.reverse ? 1 : -1) * item.speed * 0.02;
+    assert.ok(Math.abs(item.x - expected) < 1e-8);
+  }
+  assert.equal(f.e.cursor, cursor);
+  assert.equal(f.e.pinned, pinned);
+  f.clock.release();
+});
+
+test('Canvas recovery respects hidden and background states and clock teardown preserves clear semantics', () => {
+  const f = pausedCanvasFixture(), ready = bindProductionCanvasReady(f.view);
+  f.view.playing = false;
+  f.clock.pause();
+  const positions = f.positions();
+  for (const hidden of ['danmakuOff', 'background']) {
+    f.view.danmakuOn = hidden !== 'danmakuOff';
+    f.view.appInBackground = hidden === 'background';
+    f.ctx.clearRect();
+    ready();
+    f.clock.pause();
+    assert.equal(f.pixels.length, 0);
+    assert.deepEqual(f.positions(), positions);
+  }
+  f.view.danmakuOn = true;
+  f.view.appInBackground = false;
+  ready();
+  const pixels = f.pixels.slice();
+  f.clock.release();
+  assert.deepEqual(f.pixels, pixels, 'release detaches the clock without erasing the retained frame');
+  assert.deepEqual(f.positions(), positions);
+  f.clock.stop(false);
+  assert.equal(f.pixels.length, 0);
+  assert.deepEqual(f.positions(), positions, 'stop(false) clears pixels but retains active comments');
+  assert.equal(f.pinClears(), 0);
+  ready();
+  assert.deepEqual(f.pixels, pixels);
+  f.clock.stop(true);
+  assert.equal(f.pixels.length, 0);
+  assert.equal(f.e.active.length, 0);
+  assert.equal(f.e.pinned, null);
+  assert.equal(f.pinClears(), 1);
+  ready();
+  assert.equal(f.pixels.length, 0, 'empty active state stays clear');
+});
+
 test('overlap density displays all 180 simultaneous comments without 24-per-update or 96-onscreen caps',()=>{
   const e=engine();e.list=Array.from({length:180},(_,i)=>dm(i+1));
   e.spawn(10);

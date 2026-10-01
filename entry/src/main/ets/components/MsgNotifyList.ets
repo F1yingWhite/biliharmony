@@ -12,6 +12,7 @@ import { MsgNotifyItem, MsgNotifyPageData } from '../model/Models';
 import { LoadingView } from './LoadingView';
 import { LoadMoreFooter } from './LoadMoreFooter';
 import { MessageApi } from '../api/MessageApi';
+import { AuthSession } from '../services/auth/AuthSession';
 
 @Component
 export struct MsgNotifyList {
@@ -29,6 +30,7 @@ export struct MsgNotifyList {
   private cursorTime: string = '';
   private sysCursor: string = '';
   private lastReportedSysCursor: string = '';
+  private lastReportedSysSession: number = AuthSession.version;
   private reloadPending: boolean = false;
 
   aboutToAppear(): void {
@@ -44,6 +46,11 @@ export struct MsgNotifyList {
   }
 
   async load(reset: boolean): Promise<void> {
+    const session: number = AuthSession.version;
+    if (this.lastReportedSysSession !== session) {
+      this.lastReportedSysCursor = '';
+      this.lastReportedSysSession = session;
+    }
     if (this.loading) {
       if (reset) this.reloadPending = true;
       return;
@@ -54,6 +61,7 @@ export struct MsgNotifyList {
       const data: MsgNotifyPageData = this.tab === 'sys' ?
         await MessageApi.getSysNotifications(reset ? '' : this.sysCursor) :
         await MessageApi.getMsgFeedNotify(this.tab, reset ? '' : this.cursorId, reset ? '' : this.cursorTime);
+      if (session !== AuthSession.version) return;
       if (data.error.length > 0) {
         // 失败不清空已有列表；首次加载失败时由 LoadingView 展示原因与重试。
         if (reset) this.error = data.error;
@@ -71,7 +79,7 @@ export struct MsgNotifyList {
       this.cursorTime = data.cursorTime;
       this.sysCursor = data.sysCursor;
       if (reset && this.tab !== 'sys') MsgUnreadStore.clearCategory(this.tab);
-      if (this.tab === 'sys') {
+      if (reset && this.tab === 'sys') {
         if (data.items.length === 0) {
           MsgUnreadStore.clearCategory('sys');
         } else {
@@ -79,7 +87,7 @@ export struct MsgNotifyList {
           if (cursor.length > 0 && cursor !== this.lastReportedSysCursor) {
             try {
               const result = await MessageApi.updateSysMsgCursor(cursor);
-              if (result.ok) {
+              if (result.ok && session === AuthSession.version) {
                 this.lastReportedSysCursor = cursor;
                 MsgUnreadStore.clearCategory('sys');
               }

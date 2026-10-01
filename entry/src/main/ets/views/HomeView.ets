@@ -588,15 +588,27 @@ export struct HomeView {
 
   @Builder
   LiveFooter() {
-    LoadMoreFooter({
-      loading: this.loadingChannels[2],
-      hasMore: this.liveHasMore,
-      moreText: this.liveError,
-      endText: '—— 到底啦 ——',
-      loadingText: '加载中…',
-      fixedHeight: 48,
-      onLoadMore: () => this.retryMore(2),
-    })
+    Column() {
+      if (this.liveCount === 0) {
+        LoadingView({ skeleton: 'grid',
+          loading: this.liveError.length === 0 &&
+            (this.liveHasMore || this.loadingChannels[2] || this.refreshingChannels[2]),
+          empty: this.liveError.length === 0 && !this.liveHasMore &&
+            !this.loadingChannels[2] && !this.refreshingChannels[2],
+          emptyText: '暂时没有直播内容',
+          errorText: this.liveError,
+          onRetry: () => this.onRefresh(2) })
+      }
+      LoadMoreFooter({
+        loading: this.loadingChannels[2],
+        hasMore: this.liveHasMore || this.liveError.length > 0,
+        moreText: this.liveError,
+        endText: '—— 到底啦 ——',
+        loadingText: '加载中…',
+        fixedHeight: this.loadingChannels[2] || !this.liveHasMore || this.liveError.length > 0 ? 48 : 1,
+        onLoadMore: () => this.retryMore(2),
+      })
+    }.width('100%')
   }
 
   @Builder
@@ -708,31 +720,13 @@ export struct HomeView {
   @Builder
   LiveFeedList() {
     List({ space: this.homeGap, scroller: this.liveScroller }) {
-      ListItemGroup({ header: this.LiveFeedHeader() }) {
+      // Group 的 footer 跨越所有 lanes；普通 ListItem 的 100% 仅覆盖一列。
+      ListItemGroup({ header: this.LiveFeedHeader(), footer: this.LiveFooter() }) {
         LazyForEach(this.liveSource, (item: LiveRoomItem) => {
           ListItem() {
             LiveRoomCard({ room: item })
           }.margin({ bottom: this.homeGap })
         }, (item: LiveRoomItem) => String(item.roomId))
-      }
-      ListItemGroup() {
-        if (this.liveCount === 0) {
-          ListItem() {
-            LoadingView({ skeleton: 'grid', loading: this.liveError.length === 0, errorText: this.liveError,
-              onRetry: () => this.loadLive(true).catch(() => {}) })
-          }
-        }
-        ListItem() {
-          LoadMoreFooter({
-            loading: this.loadingChannels[2],
-            hasMore: this.liveHasMore || this.liveError.length > 0,
-            moreText: this.liveError,
-            endText: '—— 到底啦 ——',
-            loadingText: '加载中…',
-            fixedHeight: this.loadingChannels[2] || !this.liveHasMore || this.liveError.length > 0 ? 48 : 1,
-            onLoadMore: () => this.retryMore(2),
-          })
-        }
       }
     }
     .width('100%').height('100%').lanes(LayoutTokens.feedColumns(this.viewportWidth), this.homeGap)
@@ -751,7 +745,8 @@ export struct HomeView {
 
   @Builder
   FeedPage(feedTab: number) {
-    if (feedTab === 2 && this.liveCount === 0 && this.liveError.length === 0) {
+    if (feedTab === 2 && this.liveCount === 0 && this.liveError.length === 0 &&
+      (this.liveHasMore || this.loadingChannels[2] || this.refreshingChannels[2])) {
       LoadingView({ loading: true, skeleton: 'grid' })
         .height('100%')
         .padding({ top: this.statusBarInset + 98 })

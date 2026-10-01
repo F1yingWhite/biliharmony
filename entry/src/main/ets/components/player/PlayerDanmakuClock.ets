@@ -35,6 +35,15 @@ export class PlayerDanmakuClock {
   pause(): void {
     this.stopClock();
     this.access.getEngine().lastDrawMs = 0;
+    this.redraw();
+  }
+
+  /** Canvas 就绪/尺寸变化会清空后备缓冲；补画当前弹幕，不推进位置或重置播放时间。 */
+  redraw(): void {
+    const engine: PlayerDanmakuEngine = this.access.getEngine();
+    if (this.access.isDanmakuOn() && engine.active.length > 0) {
+      engine.drawFrame(false);
+    }
   }
 
   stop(clearActive: boolean): void {

@@ -10,6 +10,7 @@ import { UIContext } from '@kit.ArkUI';
 import { ActionResult, BiliApi } from '../../api/BiliApi';
 import { FavoriteApi } from '../../api/FavoriteApi';
 import { UserApi } from '../../api/UserApi';
+import { HistoryApi } from '../../api/HistoryApi';
 import { UserStore } from '../../services/auth/UserStore';
 import { FavoriteFolderItem } from '../../model/Models';
 
@@ -75,6 +76,20 @@ export class VideoActionController {
 
   constructor(access: VideoActionAccess) {
     this.access = access;
+  }
+
+  async actionWatchLater(): Promise<void> {
+    if (!this.access.ensureLogin() || this.access.isActionBusy()) return;
+    this.access.setActionBusy(true);
+    try {
+      const result: ActionResult = await HistoryApi.addWatchLater(this.access.getAid(), this.access.getBvid());
+      if (this.access.isDestroyed()) return;
+      this.access.toast(result.ok ? '已加入稍后再看' : result.message);
+    } catch (e) {
+      if (!this.access.isDestroyed()) this.access.toast('网络异常，请稍后重试');
+    } finally {
+      if (!this.access.isDestroyed()) this.access.setActionBusy(false);
+    }
   }
 
   async actionFollow(): Promise<void> {

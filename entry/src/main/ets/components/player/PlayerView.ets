@@ -870,7 +870,6 @@ if (this.runtimeSources.length === 0) {
   private changeSubtitle(index: number): void {
     const ctl: PlayerSubtitleController | null = this.subtitleCtl;
     if (ctl === null) return;
-    if (ctl.loading && index === ctl.index) return;
     ctl.changeSubtitle(index);
     this.closeSettingPanels();
   }
@@ -884,7 +883,6 @@ if (this.runtimeSources.length === 0) {
       return;
     }
     const index: number = next ? (this.subtitleIndex >= 0 ? this.subtitleIndex : 0) : -1;
-    if (ctl.loading && index === ctl.index) return;
     ctl.changeSubtitle(index);
   }
 
@@ -2612,6 +2610,7 @@ if (this.runtimeSources.length === 0) {
         // AVPlayer 状态回调可能滞后一帧以上；点击后立即刷新按钮，回调再做最终校准。
         this.playing = false;
         this.showControls = true;
+        this.dmClock.pause();
         this.onPlayingChange(false);
         if (this.backgroundAudioOnly) this.updateAVSessionPlaybackState();
       } catch (e) {
@@ -3666,6 +3665,8 @@ if (this.runtimeSources.length === 0) {
           .width('100%')
           .height(this.danmakuFixedHeight > 0 ? this.danmakuFixedHeight : '100%')
           .hitTestBehavior(HitTestMode.None)
+          // onReady 也在 Canvas 尺寸变化、缓冲清空后触发；暂停时需补画保留的静止弹幕。
+          .onReady(() => this.dmClock.redraw())
       }
       .id('qa_player_danmaku_viewport')
       .width('100%')

@@ -22,6 +22,7 @@ export struct FavoritesPage {
   @State folderPage: number = 0;
   @State collectionPage: number = 0;
   @State videoPage: number = 0;
+  @State folderHasMore: boolean = true;
   @State hasMore: boolean = true;
   @State loading: boolean = false;
   @State videoLoading: boolean = false;
@@ -47,6 +48,7 @@ export struct FavoritesPage {
   private videosSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
   /** 收藏夹视频请求代际：切换/返回后，旧文件夹响应不得写入当前列表。 */
   private videoRequestGeneration: number = 0;
+  private moveRequestGeneration: number = 0;
   /** 重命名目标收藏夹（保留 intro/公开状态，避免重命名时被重置） */
   private dialogFolder: FavoriteFolderItem = new FavoriteFolderItem();
 
@@ -87,7 +89,7 @@ export struct FavoritesPage {
   }
 
   async loadFolders(reset: boolean): Promise<void> {
-    if (this.loading || (!reset && !this.hasMore)) return;
+    if (this.loading || (!reset && !this.folderHasMore)) return;
     const user = UserStore.current;
     if (user === null) return;
     this.loading = true;
@@ -101,7 +103,7 @@ export struct FavoritesPage {
         this.foldersSource.append(data.folders);
       }
       this.folderPage = page;
-      this.hasMore = data.hasMore;
+      this.folderHasMore = data.hasMore;
     } catch (e) {
       this.folderError = '加载失败，请检查网络后重试';
     } finally {
@@ -158,7 +160,6 @@ export struct FavoritesPage {
       this.videoLoading = false;
       this.selected = new FavoriteFolderItem();
       this.videosSource.clear();
-      this.hasMore = this.folderPage > 0;
     } else {
       AppNavStack.pop();
     }
@@ -271,6 +272,7 @@ export struct FavoritesPage {
   // ===== 夹内视频编辑模式：多选删除 / 批量移动 / 排序 =====
   private toggleEdit(): void {
     if (this.actionBusy) return;
+    this.moveRequestGeneration++;
     if (this.editing && this.orderDirty) {
       // 退出编辑时提交排序（本地顺序已改，服务端同步）。
       this.saveVideoOrder().catch(() => {
@@ -383,22 +385,32 @@ export struct FavoritesPage {
   }
 
   private async openMoveSheet(): Promise<void> {
+    if (!this.editing || this.selected.id <= 0 || this.actionBusy) return;
     if (this.checkedAids.length === 0) {
       this.toast('请先选择视频');
       return;
     }
     const user = UserStore.current;
     if (user === null) return;
+    const generation: number = this.videoRequestGeneration;
+    const folderId: number = this.selected.id;
+    const moveRequest: number = ++this.moveRequestGeneration;
     try {
       const all: Array<FavoriteFolderItem> = await FavoriteApi.getAllFavoriteFolders(user.mid);
-      this.moveTargets = all.filter((f: FavoriteFolderItem) => f.id !== this.selected.id);
+      // 用户可能在请求期间退出编辑或切换收藏夹，旧响应不能重新打开移动弹层。
+      if (moveRequest !== this.moveRequestGeneration || generation !== this.videoRequestGeneration ||
+        this.selected.id !== folderId || !this.editing || this.checkedAids.length === 0) return;
+      this.moveTargets = all.filter((f: FavoriteFolderItem) => f.id !== folderId);
       if (this.moveTargets.length === 0) {
         this.toast('没有其他收藏夹可移动');
         return;
       }
       this.moveSheetVisible = true;
     } catch (e) {
-      this.toast('收藏夹列表加载失败，请稍后重试');
+      if (moveRequest === this.moveRequestGeneration && generation === this.videoRequestGeneration &&
+        this.selected.id === folderId && this.editing && this.checkedAids.length > 0) {
+        this.toast('收藏夹列表加载失败，请稍后重试');
+      }
     }
   }
 
@@ -463,7 +475,8 @@ export struct FavoritesPage {
   }
 
   private footerHasMore(): boolean {
-    return this.selected.id === 0 && this.category === 1 ? this.collectionHasMore : this.hasMore;
+    if (this.selected.id > 0) return this.hasMore;
+    return this.category === 1 ? this.collectionHasMore : this.folderHasMore;
   }
 
   @Builder

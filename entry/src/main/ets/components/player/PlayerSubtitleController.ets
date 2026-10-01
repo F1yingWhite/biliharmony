@@ -12,6 +12,7 @@ export class PlayerSubtitleController {
   loading: boolean = false;
   text: string = '';
   private cues: Array<SubtitleCue> = [];
+  private playbackTimeSec: number = 0;
   private requestSeq: number = 0;
   private onStateChange: () => void;
 
@@ -27,6 +28,7 @@ export class PlayerSubtitleController {
     this.loading = false;
     this.text = '';
     this.cues = [];
+    this.playbackTimeSec = 0;
     this.requestSeq++;
     this.onStateChange();
   }
@@ -35,11 +37,7 @@ export class PlayerSubtitleController {
   setTracks(tracks: Array<SubtitleTrack>, refreshTime: number): void {
     this.tracks = tracks;
     if (this.tracks.length === 0) {
-      this.index = -1;
-      this.enabled = false;
-      this.text = '';
-      this.cues = [];
-      this.onStateChange();
+      this.reset();
       return;
     }
     if (this.index < 0 || this.index >= this.tracks.length) {
@@ -55,39 +53,46 @@ export class PlayerSubtitleController {
   }
 
   async load(index: number, refreshTime: number = -1): Promise<void> {
+    const seq: number = ++this.requestSeq;
+    if (refreshTime >= 0) this.playbackTimeSec = refreshTime;
     if (index < 0 || index >= this.tracks.length) {
       this.cues = [];
       this.text = '';
-      this.index = index;
+      this.index = -1;
+      this.enabled = false;
+      this.loading = false;
       this.onStateChange();
       return;
     }
     const track: SubtitleTrack = this.tracks[index];
     this.index = index;
     this.loading = true;
-    const seq: number = ++this.requestSeq;
+    // 换轨时旧语言不能被后续 timeUpdate 再画回屏幕。
+    this.cues = [];
+    this.text = '';
     this.onStateChange();
     try {
       const cues: Array<SubtitleCue> = await BiliApi.getSubtitleCues(track.url);
       if (seq !== this.requestSeq || this.index !== index) return;
       this.cues = cues;
-      this.text = '';
-      if (refreshTime >= 0) this.update(refreshTime);
-      this.onStateChange();
+      // 暂停时没有新的 timeUpdate；加载完成也要按保留的播放头显示当前字幕。
+      this.text = this.match(this.playbackTimeSec);
     } catch (e) {
       if (seq === this.requestSeq) {
         this.cues = [];
         this.text = '';
+      }
+    } finally {
+      if (seq === this.requestSeq) {
         this.loading = false;
         this.onStateChange();
       }
-    } finally {
-      if (seq === this.requestSeq) this.loading = false;
     }
   }
 
   /** 当前播放头更新字幕。 */
   update(timeSec: number): void {
+    this.playbackTimeSec = timeSec;
     const nextText: string = this.match(timeSec);
     if (nextText !== this.text) {
       this.text = nextText;
@@ -97,18 +102,15 @@ export class PlayerSubtitleController {
 
   /** 切换字幕轨道；-1 为关闭。 */
   changeSubtitle(index: number): void {
-    if (this.loading && index === this.index) return;
-    this.index = index;
-    if (index < 0) {
-      this.enabled = false;
-      this.text = '';
-      this.cues = [];
-      this.onStateChange();
+    if (this.loading && index === this.index) {
+      // 初次预载时轨道已选中但字幕仍关闭；开启可复用请求，不能忽略用户的开关。
+      if (!this.enabled && index >= 0) {
+        this.enabled = true;
+        this.onStateChange();
+      }
       return;
     }
-    this.enabled = true;
-    this.text = '';
-    this.onStateChange();
+    this.enabled = index >= 0;
     this.load(index, -1);
   }
 

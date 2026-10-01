@@ -39,6 +39,8 @@ $env:ARKTS_TEST_TYPESCRIPT = 'D:\DevEco Studio\tools\hvigor\hvigor\node_modules\
 UI DSL 的合法性仍由完整 `CompileArkTS` 构建验证。这些测试不能替代真机播放与 UI 验收。
 生命周期用例还覆盖二维码刷新、评论切根、动态分类、稍后再看读写竞争、直播换源、AVSession 和 PixelMap 释放、下载取消。
 这些用例由审查复现转为正确行为断言；通过表示这些边界没有回归。
+`video-controllers.test.cjs` 与 `video-favorite-picker.test.cjs` 直接加载拆分后的完整生产控制器，覆盖分 P 乱序、推荐重置、
+回退后的观看心跳及收藏提交竞态，平台输入用可控替身提供，无需维护页面文本切片锚点。
 弹幕用例覆盖同屏数量、固定轨道、混合模式、时间与屏蔽规则，以及 protobuf 未知字段的解析。
 对齐用例覆盖综合搜索排序/筛选和图文混排、失败与空结果的区别、后台播放开关、SC 合并和选中状态。
 

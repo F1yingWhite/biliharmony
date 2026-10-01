@@ -265,6 +265,9 @@ def walk(root: Any) -> List[Any]:
     stack = [root]
     while stack:
         n = stack.pop()
+        if isinstance(n, list):
+            stack.extend(reversed(n))
+            continue
         if isinstance(n, dict):
             out.append(n)
             children = n.get('children')

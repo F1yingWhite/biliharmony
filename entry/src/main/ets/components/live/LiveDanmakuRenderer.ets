@@ -65,6 +65,7 @@ export class LiveDanmakuRenderer {
   private readonly pendingTtlMs: number = 3000;
   private lastReleaseMs: number = 0;
   private lastDrawMs: number = 0;
+  private loopRunning: boolean = false;
   private nextLane: number = 0;
   private seenMessageIds: Set<string> = new Set<string>();
   private messageBaselineReady: boolean = false;
@@ -207,6 +208,10 @@ export class LiveDanmakuRenderer {
     if (!fullscreen) {
       this.pending = [];
       this.stopLoop(true);
+      return;
+    }
+    if (!playing) {
+      this.pauseLoop();
       return;
     }
     if (playing && this.enabled && (this.active.length > 0 || this.pending.length > 0)) this.startLoop();
@@ -375,7 +380,7 @@ export class LiveDanmakuRenderer {
     this.ctx.clearRect(0, 0, this.width, this.height);
     // DisplaySync 给出的帧时间与 setInterval 兜底同源使用；位移按两次绘制的真实间隔推进。
     const delta: number = this.lastDrawMs > 0 ?
-      Math.min(0.12, Math.max(0.012, (frameTimeMs - this.lastDrawMs) / 1000)) : 0.033;
+      Math.min(0.12, Math.max(0, (frameTimeMs - this.lastDrawMs) / 1000)) : 0;
     this.lastDrawMs = frameTimeMs;
     const fontSize: number = this.fontSize();
     const topInset: number = 6;
@@ -413,8 +418,10 @@ export class LiveDanmakuRenderer {
   }
 
   private startLoop(): void {
-    if (!this.enabled || (this.active.length === 0 && this.pending.length === 0)) return;
+    // 消息合批/逐条喷发都会请求 start；已运行时保留时间基准，避免每批都按首帧重算位移。
+    if (this.loopRunning || !this.playing || !this.enabled || !this.fullscreen || !this.hasWork()) return;
     this.lastDrawMs = 0;
+    this.loopRunning = true;
     if (this.clock !== null) this.clock.start();
     // 未注入时钟的纯逻辑测试环境不驱动帧循环；drainQueue/drawFrame 由测试直接调用。
   }
@@ -427,8 +434,7 @@ export class LiveDanmakuRenderer {
   }
 
   private stopLoop(clear: boolean): void {
-    if (this.clock !== null) this.clock.stop();
-    this.lastDrawMs = 0;
+    this.pauseLoop();
     if (clear) {
       this.active.length = 0;
       this.activeBack.length = 0;
@@ -437,6 +443,13 @@ export class LiveDanmakuRenderer {
       this.laneBuckets.length = 0;
     }
     this.ctx.clearRect(0, 0, this.width, this.height);
+  }
+
+  /** 暂停只停帧时钟并清时间基准，保留画布与活动弹幕；恢复后的首帧不计暂停时长。 */
+  private pauseLoop(): void {
+    this.loopRunning = false;
+    if (this.clock !== null) this.clock.stop();
+    this.lastDrawMs = 0;
   }
 
   /** 文本测量缓存：同字号键控，超限后淘汰最早插入的一半（Map 迭代序即插入序）。 */

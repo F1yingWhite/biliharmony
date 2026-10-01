@@ -5,6 +5,21 @@ import { Immersive } from '../common/Immersive';
 import { PlayerQualityPreference } from '../common/PlayerQualityPreference';
 import { PageHeader } from '../components/PageHeader';
 
+function linearColorChannel(value: number): number {
+  const channel: number = value / 255;
+  return channel <= 0.04045 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);
+}
+
+/** 预设色包含黄色和粉色，主题色实底的文字需要随亮度选择深浅。 */
+function accentInk(color: string): string {
+  const red: number = parseInt(color.substring(1, 3), 16);
+  const green: number = parseInt(color.substring(3, 5), 16);
+  const blue: number = parseInt(color.substring(5, 7), 16);
+  const luminance: number = 0.2126 * linearColorChannel(red) + 0.7152 * linearColorChannel(green) +
+    0.0722 * linearColorChannel(blue);
+  return 1.05 / (luminance + 0.05) >= (luminance + 0.05) / 0.05 ? '#FFFFFF' : '#000000';
+}
+
 @Component
 struct PreferenceRow {
   @Prop title: string = '';
@@ -24,7 +39,14 @@ struct PreferenceRow {
         Text(this.title).fontSize(16).fontWeight(FontWeight.Medium)
           .fontColor(this.isDark ? '#F2F3F5' : '#202127')
         if (this.detail.length > 0) {
-          Text(this.detail).fontSize(12).fontColor(this.isDark ? '#A1A5AE' : '#737985').lineHeight(18)
+          Text(this.detail).fontSize(12).fontColor(this.isDark ? '#A1A5AE' : '#737985').lineHeight('18fp')
+        }
+        if (!this.toggle && this.value.length > 0) {
+          Text(this.value).fontSize(12).fontWeight(FontWeight.Medium)
+            .fontColor(this.isDark ? '#E2E4EB' : '#434955')
+            .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+            .padding({ left: 9, right: 9, top: 4, bottom: 4 })
+            .backgroundColor(this.isDark ? '#34353D' : '#F0F1F5').borderRadius(8)
         }
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
       if (this.toggle) {
@@ -32,7 +54,6 @@ struct PreferenceRow {
           .hitTestBehavior(HitTestMode.None)
           .accessibilityText(this.title)
       } else {
-        Text(this.value).fontSize(13).fontColor(this.accent).constraintSize({ maxWidth: 110 })
         Text('›').fontSize(22).fontColor('#9499A0')
       }
     }.width('100%').constraintSize({ minHeight: 76 }).padding(18)
@@ -69,6 +90,7 @@ export struct PreferencesPage {
   @State startMinute: number = 0;
   @State endHour: number = 7;
   @State endMinute: number = 0;
+  @State contentWidth: number = 360;
 
   private surface(): string { return this.isDark ? '#25262C' : '#FFFFFF'; }
   private ink(): string { return this.isDark ? '#F2F3F5' : '#202127'; }
@@ -123,8 +145,8 @@ export struct PreferencesPage {
 
   @Builder
   Section(title: string) {
-    Text(title).fontSize(13).fontWeight(FontWeight.Medium).fontColor('#9297A2')
-      .width('100%').padding({ left: 8, top: 10, bottom: 2 })
+    Text(title).fontSize(13).fontWeight(FontWeight.Medium).fontColor(this.isDark ? '#ADB2BD' : '#6D7480')
+      .width('100%').padding({ left: 8, top: 12, bottom: 4 })
   }
 
   @Builder
@@ -135,23 +157,24 @@ export struct PreferencesPage {
   @Builder
   Preview() {
     Column({ space: 18 }) {
-      Row() {
+      Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
         Text('你的观看空间').fontSize(19).fontWeight(FontWeight.Bold).fontColor(this.ink())
-        Blank()
-        Text('实时预览').fontSize(10).fontColor(this.accent).padding({ left: 9, right: 9, top: 5, bottom: 5 })
+          .margin({ right: 10 })
+        Text('实时预览').fontSize(10).fontColor(this.isDark ? '#D3D6DE' : '#626A77')
+          .padding({ left: 9, right: 9, top: 5, bottom: 5 })
           .backgroundColor(this.isDark ? '#18FFFFFF' : '#09000000').borderRadius(10)
-      }
-      Row({ space: 14 }) {
-        Stack() {
-          Rect().fill(this.accent).width('100%').height('100%').opacity(0.15)
-          SymbolGlyph($r('sys.symbol.play_fill')).fontSize(25).fontColor([this.accent])
-          Text('08:24').fontSize(10).fontColor(this.ink()).position({ right: 8, bottom: 7 })
-        }.width(110).height(72).borderRadius(14).clip(true)
-        Column({ space: 7 }) {
-          Text('把喜欢的内容\n留给每一次打开').fontSize(15).fontWeight(FontWeight.Medium).fontColor(this.ink()).lineHeight(22)
-          Text('视频卡片 · 播放进度').fontSize(11).fontColor('#9499A0')
-        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
       }.width('100%')
+      if (this.contentWidth < 360) {
+        Column({ space: 12 }) {
+          this.PreviewCover()
+          this.PreviewCaption()
+        }.width('100%').alignItems(HorizontalAlign.Start)
+      } else {
+        Row({ space: 14 }) {
+          this.PreviewCover()
+          Column() { this.PreviewCaption() }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        }.width('100%')
+      }
       Progress({ value: 38, total: 100, type: ProgressType.Linear }).color(this.accent)
         .backgroundColor(this.isDark ? '#15FFFFFF' : '#0A000000').width('100%')
       Row({ space: 10 }) {
@@ -170,6 +193,23 @@ export struct PreferencesPage {
   }
 
   @Builder
+  PreviewCover() {
+    Stack() {
+      Rect().fill(this.accent).width('100%').height('100%').opacity(0.15)
+      SymbolGlyph($r('sys.symbol.play_fill')).fontSize(25).fontColor([this.accent])
+      Text('08:24').fontSize(10).fontColor(this.ink()).position({ right: 8, bottom: 7 })
+    }.width(110).height(72).borderRadius(14).clip(true)
+  }
+
+  @Builder
+  PreviewCaption() {
+    Column({ space: 7 }) {
+      Text('把喜欢的内容\n留给每一次打开').fontSize(15).fontWeight(FontWeight.Medium).fontColor(this.ink()).lineHeight('22fp')
+      Text('视频卡片 · 播放进度').fontSize(11).fontColor(this.isDark ? '#ADB2BD' : '#737985')
+    }.alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
   PreviewSearch() {
     SymbolGlyph($r('sys.symbol.magnifyingglass')).fontSize(18).fontColor([this.accent])
       .width(42).height(42).borderRadius(21).backgroundColor(this.isDark ? '#18FFFFFF' : '#09000000')
@@ -184,8 +224,9 @@ export struct PreferencesPage {
       Row({ space: 8 }) {
         ForEach(['跟随系统', '浅色', '深色'], (label: string, index: number) => {
           Button(label).fontSize(12).layoutWeight(1).height(38)
-            .fontColor(this.themeMode === ['system', 'light', 'dark'][index] ? '#FFFFFF' : this.ink())
+            .fontColor(this.themeMode === ['system', 'light', 'dark'][index] ? accentInk(this.accent) : this.ink())
             .backgroundColor(this.themeMode === ['system', 'light', 'dark'][index] ? this.accent : (this.isDark ? '#34353D' : '#F0F1F5'))
+            .accessibilitySelected(this.themeMode === ['system', 'light', 'dark'][index])
             .onClick(() => AppTheme.setMode(['system', 'light', 'dark'][index]))
         })
       }.width('100%')
@@ -197,8 +238,11 @@ export struct PreferencesPage {
             Circle().fill(color).width(28).height(28)
             if (this.userAccent === color) {
               Circle().fill(Color.Transparent).stroke(color).strokeWidth(2).width(36).height(36)
+              Text('✓').fontSize(18).fontWeight(FontWeight.Bold).fontColor(accentInk(color))
             }
-          }.width(40).height(44).accessibilityText('主题色 ' + color + (this.userAccent === color ? '，已选择' : ''))
+          }.width(this.contentWidth < 400 ? '25%' : '12.5%').height(44)
+            .accessibilityText('主题色 ' + color + (this.userAccent === color ? '，已选择' : ''))
+            .accessibilitySelected(this.userAccent === color)
             .onClick(() => AppTheme.setAccent(color))
         })
       }.width('100%')
@@ -246,7 +290,7 @@ export struct PreferencesPage {
           }.padding(12)
           Row({ space: 12 }) {
             Button('取消').layoutWeight(1).onClick(() => { this.editingTime = false; })
-            Button('保存时段').layoutWeight(1).backgroundColor(this.accent).onClick(() => this.saveTime())
+            Button('保存时段').layoutWeight(1).fontColor(accentInk(this.accent)).backgroundColor(this.accent).onClick(() => this.saveTime())
           }.padding(18)
         }
       }
@@ -289,7 +333,7 @@ export struct PreferencesPage {
       Column({ space: 7 }) {
         Text('从播放器进入小窗').fontSize(16).fontWeight(FontWeight.Medium).fontColor(this.ink())
         Text('播放时点右上角「⋮」→「小窗播放」。小窗在桌面继续播放画面与声音，不受后台听视频开关限制。')
-          .fontSize(12).lineHeight(19).fontColor('#9499A0')
+          .fontSize(12).lineHeight('19fp').fontColor(this.isDark ? '#ADB2BD' : '#737985')
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
     }.padding(20).width('100%').borderRadius(20).backgroundColor(this.surface())
     this.Section('播放器手势')
@@ -313,6 +357,10 @@ export struct PreferencesPage {
           if (this.playback) { this.Playback() } else { this.Appearance() }
           Text('更改自动保存').fontSize(11).fontColor('#9499A0').margin({ top: 10, bottom: 8 })
         }.width('100%').constraintSize({ maxWidth: 640 }).padding({ left: 18, right: 18, top: 12, bottom: 24 })
+        .onAreaChange((_oldArea: Area, area: Area) => {
+          const width: number = Number(area.width);
+          if (!Number.isNaN(width) && width > 0) this.contentWidth = width;
+        })
       }.width('100%').layoutWeight(1).scrollBar(BarState.Off)
     }.width('100%').height('100%')
     .padding({ top: Immersive.statusBarHeight(), bottom: Immersive.bottomInset() })

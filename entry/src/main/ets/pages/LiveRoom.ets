@@ -699,6 +699,7 @@ export struct LiveRoomPage {
           retrying: this.refreshing,
           onRetry: () => this.syncLive(),
           title: this.roomInfo.title, uname: this.roomInfo.uname,
+          cover: biliImageThumbnail(this.roomInfo.cover, PLAYER_COVER_RENDER_WIDTH),
           onQualityChange: (qn: number) => this.changeQuality(qn),
           onFullscreenChange: (value: boolean) => this.animateFullscreenChange(value),
         })
