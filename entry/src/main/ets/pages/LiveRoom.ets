@@ -1,10 +1,12 @@
 /** 直播间：观看直播、切换画质、实时弹幕/表情与 SC。 */
 
-import { ActionResult, BiliApi } from '../api/BiliApi';
+import { ActionResult } from '../api/BiliApi';
 import { AppNavStack, LiveRoomParam, NAV_LOGIN } from '../common/AppRouter';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { Immersive } from '../common/Immersive';
-import { LiveDanmakuClient } from '../common/LiveDanmakuClient';
+import { LiveChatBuffer, LiveChatOutput } from '../components/live/LiveChatBuffer';
+import { LiveRoomSession, LiveRoomState } from '../components/live/LiveRoomSession';
+import { AuthSession } from '../services/auth/AuthSession';
 import { MotionTokens } from '../common/MotionTokens';
 import { biliImageThumbnail } from '../common/ImageUrl';
 import { LiveSuperChatShelf } from '../components/live/LiveSuperChatShelf';
@@ -26,8 +28,6 @@ export struct LiveRoomPage {
   @State roomInfo: LiveRoomInfo = new LiveRoomInfo();
   @State playInfo: LivePlayInfo = new LivePlayInfo();
   // 播放器消息走 liveFeed 直通道（保持时间正序，挂载时建立增量基线）；不再用 @State 驱动播放器 @Prop 深拷贝。
-  /** 聊天列表懒加载数据源：220ms 合帧批次只做增量追加/头部裁剪，避免整组 @State 数组换引用全量 diff。 */
-  private chatSource: BasicDataSource<LiveChatMessage> = new BasicDataSource<LiveChatMessage>();
   private chatScroller: Scroller = new Scroller();
   /** 用户是否停留在弹幕列表底部附近（在底部新消息才自动跟滚）。 */
   private chatAtBottom: boolean = true;
@@ -51,182 +51,92 @@ export struct LiveRoomPage {
   @State roomHeaderHeight: number = 69;
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
-  private client: LiveDanmakuClient = new LiveDanmakuClient();
   /** 播放器数据直通道：聊天合帧批次/SC 合并结果直呼播放器与 SC 浮层，替代 @Prop 数组深拷贝。 */
   private liveFeed: LivePlayerFeed = new LivePlayerFeed();
-  // 弹幕合帧缓冲：高频消息攒 220ms 批量写入 @State，避免每条消息驱动整页重渲染
-  private pendingMsgs: Array<LiveChatMessage> = [];
-  private flushTimer: number = -1;
+  private chatOutput: LiveChatOutput = {
+    resetMessages: (messages: Array<LiveChatMessage>) => { this.liveFeed.resetMessages(messages); },
+    publishMessages: (messages: Array<LiveChatMessage>) => { this.liveFeed.publishMessages(messages); },
+    publishSuperChats: (messages: Array<LiveChatMessage>) => { this.liveFeed.publishSuperChats(messages); },
+  };
+  private chat: LiveChatBuffer = new LiveChatBuffer(this.chatOutput, (baseline: boolean) => {
+    if (baseline) this.chatAtBottom = true;
+    if (this.chatAtBottom) this.scrollChatToEnd(baseline);
+  }, (messages: Array<LiveChatMessage>) => { this.superChats = messages; });
+  private chatSource: BasicDataSource<LiveChatMessage> = this.chat.source;
+  private session: LiveRoomSession = new LiveRoomSession(this.chat, (state: LiveRoomState) => {
+    this.roomInfo = state.info;
+    this.playInfo = state.play;
+    this.loading = state.loading;
+    this.refreshing = state.refreshing;
+    this.qualityLoading = state.qualityLoading;
+    this.connected = state.connected;
+    this.danmakuGaveUp = state.gaveUp;
+    this.errorText = state.error;
+  }, (message: string) => {
+    if (!this.destroyed) this.getUIContext().getPromptAction().showToast({ message: message });
+  });
   private destroyed: boolean = false;
   private lifecycleGeneration: number = 0;
   private sendRequestId: number = 0;
-  private historyPollTimer: number = -1;
-  private historyPollGeneration: number = -1;
-  private lastLiveMessageAt: number = 0;
-  private knownMessageIds: Set<string> = new Set<string>();
+  private emoteRequestId: number = 0;
+  @StorageProp('loginVersion') @Watch('onAccountChanged') loginVersion: number = 0;
 
   aboutToAppear(): void {
     this.destroyed = false;
-    this.lifecycleGeneration++;
-    this.sendRequestId++;
-    this.sending = false;
     Immersive.setKeepScreenOn(true);
-    this.roomInfo.roomId = this.param.roomId;
-    this.roomInfo.uid = this.param.uid;
-    this.roomInfo.title = this.param.title;
-    this.roomInfo.uname = this.param.uname;
-    this.roomInfo.face = this.param.face;
-    this.roomInfo.cover = this.param.cover;
-    this.client.onMessage = (message: LiveChatMessage) => this.appendMessage(message);
-    this.client.onConnected = (value: boolean) => {
-      this.connected = value;
-      if (value) this.danmakuGaveUp = false;
-    };
-    this.client.onGiveUp = () => this.danmakuGaveUp = true;
-    this.loadRoom().catch(() => {
-    });
-    this.loadEmoticons().catch(() => {
-    });
+    this.openSession();
   }
 
   aboutToDisappear(): void {
     this.destroyed = true;
     this.lifecycleGeneration++;
+    this.sendRequestId++;
+    this.emoteRequestId++;
     Immersive.setKeepScreenOn(false);
-    if (this.flushTimer >= 0) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = -1;
-    }
-    this.pendingMsgs = [];
-    if (this.historyPollTimer >= 0) {
-      clearInterval(this.historyPollTimer);
-      this.historyPollTimer = -1;
-    }
-    this.client.close();
+    this.session.dispose();
   }
 
-  async loadRoom(): Promise<void> {
-    const generation: number = this.lifecycleGeneration;
-    this.loading = true;
-    this.errorText = '';
-    try {
-      const info: LiveRoomInfo | null = await LiveApi.getLiveRoomInfo(this.param.roomId, this.param.uid);
-      if (this.destroyed || generation !== this.lifecycleGeneration) return;
-      if (info !== null) this.roomInfo = info;
-      const play: LivePlayInfo | null = await LiveApi.getLivePlayInfo(this.param.roomId, 10000);
-      if (this.destroyed || generation !== this.lifecycleGeneration) return;
-      if (play === null || play.url.length === 0) {
-        this.errorText = info !== null && info.liveStatus !== 1 ? '主播当前未开播' : '直播播放地址获取失败';
-        return;
-      }
-      const history: Array<LiveChatMessage> = await LiveApi.getLiveDanmakuHistory(this.param.roomId);
-      if (this.destroyed || generation !== this.lifecycleGeneration) return;
-      this.knownMessageIds.clear();
-      for (let i: number = 0; i < history.length; i++) this.knownMessageIds.add(history[i].id);
-      this.liveFeed.resetMessages(history);
-      this.chatSource.reset(history.slice(-200));
-      this.chatAtBottom = true;
-      this.scrollChatToEnd(true);
-      this.lastLiveMessageAt = Date.now();
-      // 先建立首屏历史基线再挂播放器，避免把历史消息一次性灌入画面轨道。
-      this.playInfo = play;
-      // SC 快照是独立补充，不能阻塞实时弹幕连接或把视频判定为加载失败。
-      this.client.connect(this.param.roomId).catch(() => {});
-      this.startHistoryFallback();
-      this.refreshSuperChats(generation).catch(() => {});
-    } catch (e) {
-      if (!this.destroyed && generation === this.lifecycleGeneration) {
-        this.errorText = '直播间加载失败，请检查网络后重试';
-      }
-    } finally {
-      if (!this.destroyed && generation === this.lifecycleGeneration) this.loading = false;
-    }
+  onAccountChanged(): void {
+    if (!this.destroyed) this.openSession();
   }
 
-  private async refreshSuperChats(generation: number): Promise<void> {
-    const snapshot: Array<LiveChatMessage> = await LiveApi.getLiveSuperChats(this.param.roomId);
-    if (this.destroyed || generation !== this.lifecycleGeneration) return;
-    this.superChats = this.mergeSuperChats(this.superChats, snapshot);
-    this.liveFeed.publishSuperChats(this.superChats);
+  private openSession(): void {
+    this.lifecycleGeneration++;
+    this.sendRequestId++;
+    this.emoteRequestId++;
+    this.sending = false;
+    this.emoteLoading = false;
+    this.emotePackages = [];
+    this.emotePackageIndex = 0;
+    this.session.activate(this.param);
+    this.loadRoom().catch(() => {});
+    this.loadEmoticons().catch(() => {});
   }
 
-  async changeQuality(qn: number): Promise<void> {
-    if (this.qualityLoading || this.refreshing || this.loading || this.destroyed) return;
-    this.qualityLoading = true;
-    const generation: number = this.lifecycleGeneration;
-    try {
-      const next: LivePlayInfo | null = await LiveApi.getLivePlayInfo(this.param.roomId, qn);
-      if (this.destroyed || generation !== this.lifecycleGeneration) return;
-      if (next === null || next.url.length === 0) throw new Error('empty quality url');
-      this.playInfo = next;
-    } catch (e) {
-      if (!this.destroyed && generation === this.lifecycleGeneration) {
-        this.getUIContext().getPromptAction().showToast({ message: '画质切换失败，已保留当前画质，请稍后重试' });
-      }
-    } finally {
-      if (!this.destroyed && generation === this.lifecycleGeneration) this.qualityLoading = false;
-    }
-  }
+  async loadRoom(): Promise<void> { await this.session.load(); }
 
-  /** 同步到直播最新状态：播放源、历史弹幕基线和实时连接从同一刷新边界重新建立。 */
+  async changeQuality(qn: number): Promise<void> { await this.session.changeQuality(qn); }
+
+  /** 同步到直播最新状态：同时失效表单与旧列表的延迟 UI 回调。 */
   async syncLive(): Promise<void> {
     if (this.refreshing || this.loading || this.destroyed) return;
-    this.refreshing = true;
-    this.qualityLoading = false;
-    const generation: number = ++this.lifecycleGeneration;
-    const qn: number = this.playInfo.currentQn > 0 ? this.playInfo.currentQn : 10000;
-    let synced: boolean = false;
-
-    this.client.close();
-    this.connected = false;
-    this.stopHistoryFallback();
-    this.clearPendingMessages();
-
-    try {
-      // 两个请求同时发出，尽量缩小播放源与弹幕快照之间的时间差。
-      const playTask: Promise<LivePlayInfo | null> = LiveApi.getLivePlayInfo(this.param.roomId, qn);
-      const historyTask: Promise<Array<LiveChatMessage>> = LiveApi.getLiveDanmakuHistory(this.param.roomId);
-      const play: LivePlayInfo | null = await playTask;
-      const history: Array<LiveChatMessage> = await historyTask;
-      if (this.destroyed || generation !== this.lifecycleGeneration) return;
-      if (play === null || play.url.length === 0) throw new Error('empty live url');
-
-      this.knownMessageIds.clear();
-      for (let i: number = 0; i < history.length; i++) this.knownMessageIds.add(history[i].id);
-      this.liveFeed.resetMessages(history);
-      this.chatSource.reset(history.slice(-200));
-      this.chatAtBottom = true;
-      this.lastLiveMessageAt = Date.now();
-      this.playInfo = play;
-      this.errorText = '';
-      this.scrollChatToEnd(true);
-      synced = true;
-      this.getUIContext().getPromptAction().showToast({ message: '已同步到直播最新状态' });
-    } catch (e) {
-      if (!this.destroyed && generation === this.lifecycleGeneration) {
-        this.getUIContext().getPromptAction().showToast({ message: '同步失败，请检查网络后重试' });
-      }
-    } finally {
-      if (!this.destroyed && generation === this.lifecycleGeneration) {
-        // 即使刷新失败，也恢复旧播放源对应的实时弹幕连接，避免房间停在离线状态。
-        this.client.connect(this.param.roomId).catch(() => {
-        });
-        this.lastLiveMessageAt = Date.now();
-        this.startHistoryFallback();
-        this.refreshing = false;
-        if (!synced) this.connected = false;
-      }
-    }
+    this.lifecycleGeneration++;
+    await this.session.sync();
   }
 
   async loadEmoticons(): Promise<void> {
-    if (this.emoteLoading || this.emotePackages.length > 0) return;
+    if (this.destroyed || this.emoteLoading || this.emotePackages.length > 0) return;
+    const generation: number = this.lifecycleGeneration;
+    const account: number = AuthSession.version;
+    const roomId: number = this.param.roomId;
+    const request: number = ++this.emoteRequestId;
     this.emoteLoading = true;
     try {
-      const packages: Array<LiveEmotePackage> = await LiveApi.getLiveEmoticons(this.param.roomId);
-      if (!this.destroyed) this.emotePackages = packages;
+      const packages: Array<LiveEmotePackage> = await LiveApi.getLiveEmoticons(roomId);
+      if (!this.destroyed && generation === this.lifecycleGeneration && account === AuthSession.version &&
+        roomId === this.param.roomId && request === this.emoteRequestId) this.emotePackages = packages;
     } finally {
-      if (!this.destroyed) this.emoteLoading = false;
+      if (!this.destroyed && request === this.emoteRequestId) this.emoteLoading = false;
     }
   }
 
@@ -243,26 +153,24 @@ export struct LiveRoomPage {
     if (this.destroyed || this.sending || !this.ensureLogin() || (emote === null && content.length === 0)) return;
     const generation: number = this.lifecycleGeneration;
     const roomId: number = this.param.roomId;
+    const account: number = AuthSession.version;
     const requestId: number = ++this.sendRequestId;
     this.sending = true;
     try {
       const result: ActionResult = await LiveApi.sendLiveDanmaku(roomId, content, emote);
       if (this.destroyed || generation !== this.lifecycleGeneration ||
-        roomId !== this.param.roomId || requestId !== this.sendRequestId) return;
+        roomId !== this.param.roomId || requestId !== this.sendRequestId || account !== AuthSession.version) return;
       if (!result.ok) {
         this.getUIContext().getPromptAction().showToast({ message: result.message });
         return;
       }
       const local: LiveChatMessage = new LiveChatMessage();
-      local.id = 'local_' + String(Date.now());
+      local.id = 'local_' + String(Date.now()) + '_' + String(requestId);
       local.uname = UserStore.current?.uname ?? '我';
       local.text = emote === null ? content : (emote.emoji.length > 0 ? emote.emoji : emote.unique);
       if (emote !== null) local.emotes.push(emote);
-      this.knownMessageIds.add(local.id);
-      this.liveFeed.publishMessages(this.liveFeed.currentMessages().concat([local]));
-      this.appendChatMessages([local]);
       this.chatAtBottom = true;
-      this.scrollChatToEnd();
+      this.chat.appendLocal(local);
       if (this.draft === submittedDraft) {
         this.draft = '';
         this.emotePanelOpen = false;
@@ -270,105 +178,11 @@ export struct LiveRoomPage {
       this.getUIContext().getPromptAction().showToast({ message: '弹幕发送成功' });
     } catch (e) {
       if (this.destroyed || generation !== this.lifecycleGeneration ||
-        roomId !== this.param.roomId || requestId !== this.sendRequestId) return;
+        roomId !== this.param.roomId || requestId !== this.sendRequestId || account !== AuthSession.version) return;
       this.getUIContext().getPromptAction().showToast({ message: '弹幕发送失败，请检查网络' });
     } finally {
       if (!this.destroyed && requestId === this.sendRequestId) this.sending = false;
     }
-  }
-
-  appendMessage(message: LiveChatMessage): void {
-    if (this.destroyed) return;
-    if (this.knownMessageIds.has(message.id)) return;
-    this.knownMessageIds.add(message.id);
-    this.lastLiveMessageAt = Date.now();
-    if (message.type === 'sc') {
-      this.superChats = this.mergeSuperChats([message], this.superChats);
-      this.liveFeed.publishSuperChats(this.superChats);
-    }
-    this.pendingMsgs.push(message);
-    if (this.flushTimer < 0) {
-      this.flushTimer = setTimeout(() => {
-        this.flushTimer = -1;
-        this.flushMessages();
-      }, 220);
-    }
-  }
-
-  private mergeSuperChats(first: Array<LiveChatMessage>, second: Array<LiveChatMessage>): Array<LiveChatMessage> {
-    const seen: Set<string> = new Set<string>();
-    return first.concat(second).filter((message: LiveChatMessage): boolean => {
-      if (seen.has(message.id)) return false;
-      seen.add(message.id);
-      return true;
-    }).sort((a: LiveChatMessage, b: LiveChatMessage): number => b.timestamp - a.timestamp).slice(0, 50);
-  }
-
-  private startHistoryFallback(): void {
-    this.stopHistoryFallback();
-    this.historyPollTimer = setInterval(() => {
-      if (this.destroyed || Date.now() - this.lastLiveMessageAt < 8000) return;
-      this.pollRecentHistory().catch(() => {
-      });
-    }, 5000);
-  }
-
-  private stopHistoryFallback(): void {
-    if (this.historyPollTimer >= 0) {
-      clearInterval(this.historyPollTimer);
-      this.historyPollTimer = -1;
-    }
-  }
-
-  private clearPendingMessages(): void {
-    if (this.flushTimer >= 0) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = -1;
-    }
-    this.pendingMsgs = [];
-  }
-
-  /** WebSocket 安静超过 8 秒时低频补拉，只追加未见 ID，不重放进房快照。 */
-  private async pollRecentHistory(): Promise<void> {
-    const generation: number = this.lifecycleGeneration;
-    if (this.historyPollGeneration === generation) return;
-    this.historyPollGeneration = generation;
-    try {
-      const results: Array<Array<LiveChatMessage>> = await Promise.all([
-        LiveApi.getLiveDanmakuHistory(this.param.roomId).catch(() => new Array<LiveChatMessage>()),
-        LiveApi.getLiveSuperChats(this.param.roomId).catch(() => new Array<LiveChatMessage>()),
-      ]);
-      if (this.destroyed || generation !== this.lifecycleGeneration) return;
-      for (let i: number = 0; i < results[0].length; i++) {
-        if (!this.knownMessageIds.has(results[0][i].id)) this.appendMessage(results[0][i]);
-      }
-      this.superChats = this.mergeSuperChats(this.superChats, results[1]);
-      this.liveFeed.publishSuperChats(this.superChats);
-    } finally {
-      if (this.historyPollGeneration === generation) this.historyPollGeneration = -1;
-    }
-  }
-
-  /** 追加聊天消息并维持 200 条窗口：增量通知数据源，避免整组数组换引用。 */
-  private appendChatMessages(batch: Array<LiveChatMessage>): void {
-    if (batch.length === 0) return;
-    this.chatSource.append(batch);
-    const overflow: number = this.chatSource.totalCount() - 200;
-    if (overflow > 0) this.chatSource.trimHead(overflow);
-  }
-
-  /** 合帧落盘：正序 messages 经 liveFeed 直供播放器浮层；chatSource 同为正序，新消息追加在底部。 */
-  private flushMessages(): void {
-    if (this.destroyed || this.pendingMsgs.length === 0) {
-      return;
-    }
-    const batch: Array<LiveChatMessage> = this.pendingMsgs;
-    this.pendingMsgs = [];
-    const next: Array<LiveChatMessage> = this.liveFeed.currentMessages().concat(batch);
-    this.liveFeed.publishMessages(next.length > 240 ? next.slice(next.length - 200) : next);
-    this.appendChatMessages(batch);
-    // 用户本就在底部时才跟滚；翻上去读历史不打断。
-    if (this.chatAtBottom) this.scrollChatToEnd();
   }
 
   /** 列表贴底；首屏需跨过视频/顶栏和历史消息的多轮布局。 */
@@ -457,8 +271,7 @@ export struct LiveRoomPage {
         .borderRadius(9).backgroundColor(this.isDark ? '#26272C' : '#EEF0F2')
         .onClick(() => {
           if (this.danmakuGaveUp && !this.connected) {
-            this.danmakuGaveUp = false;
-            this.client.manualReconnect();
+            this.session.manualReconnect();
           }
         })
     }

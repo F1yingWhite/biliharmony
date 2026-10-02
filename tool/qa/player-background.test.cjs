@@ -1,134 +1,75 @@
-// Execute production lifecycle/start/seek completion code; only platform effects are faked.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const ts = require(process.env.ARKTS_TEST_TYPESCRIPT ||
-  '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript');
-const root = path.resolve(__dirname, '../../entry/src/main/ets');
-const sourceRoot = process.env.ARKTS_TEST_SOURCE_ROOT || root;
-const source = fs.readFileSync(path.join(sourceRoot, 'components/player/PlayerView.ets'), 'utf8').replace(/\r\n/g, '\n');
-function between(start, end) {
-  const a = source.indexOf(start), b = source.indexOf(end, a + start.length);
-  assert.ok(a >= 0 && b > a, 'production anchors: ' + start);
-  return source.slice(a, b);
-}
-const seekBody = between('          this.seekRecoveryAttempts = 0;', '        },\n        (video: media.AVPlayer | null, targetMs: number): void => {');
-const playingBody = between("        } else if (state === 'playing') {", "        } else if (state === 'paused' && (this.backgroundAudioOnly")
-  .slice("        } else if (state === 'playing') {".length);
-const moduleBody = 'export class Harness {\n' +
-  between('  onAppBackgroundChanged():', '  private setBackgroundPlayback(') +
-  between('  private tryStartPreparedPlayers():', '  /** 起播时先等待') +
-  between('  private finishGatedAudioStart(', '  /** 所有自动音轨暂停') +
-  between('  togglePlay():', '  /** 结束画面「重播」') +
-  between('  private async recoverPlayersAfterSeekStall(', '  toggleFullscreen():') +
-  '  seekCompleted(resume: boolean, targetMs: number): void {\n' + seekBody + '\n}\n' +
-  '  bindAudioEvents(audio: any): void {\n' + between("    audio.on('stateChange'", "    audio.on('playbackRateDone'") + '\n}\n' +
-  '  playingEvent(p: any): void {\n' + playingBody + '\n}\n}\n';
-const mod = {exports: {}};
-new Function('module', 'exports', 'Immersive', ts.transpileModule(moduleBody, {
-  compilerOptions: {target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS}
-}).outputText)(mod, mod.exports, {setKeepScreenOn() {}});
+const {fixture, tick} = require('./player-session-fixture.cjs');
+const plays = f => f.players.reduce((count, player) => count + f.calls(player, 'play').length, 0);
 
-function setup(patch = {}) {
-  const effects = [];
-  const player = name => ({state: 'prepared', currentTime: 4000, handlers: {},
-    on(event, handler) {this.handlers[event] = handler;},
-    play() {effects.push(name + '.play'); this.state = 'playing'; return Promise.resolve();},
-    pause() {effects.push(name + '.pause'); this.state = 'paused'; return Promise.resolve();}});
-  const view = Object.assign(new mod.exports.Harness(), {
-    destroyed: false, appInBackground: false, backgroundPlaybackEnabled: false,
-    pipActive: false, pipStarting: false, pipRestoring: false,
-    playing: false, prepared: false, audioPrepared: false, player: player('video'), audioPlayer: null,
-    shouldPlayAfterPrepare: true, resumeAfterPrepare: -1, seekRecoveryAttempts: 0,
-    audioGateTimer: -1, audioStartPending: false, buffering: true, seekLocked: false,
-    seekCtl: {seekResumePlaying: true, cancel() {}}, seekTargetCtl: {show() {}},
-    dmClock: {pause() {}, start() {}, release() {}},
-    cancelAudioGate() {this.audioStartPending = false;}, cancelFirstFrameMute() {},
-    disarmFirstFrameMute() {}, armFirstFrameMute() {}, restoreUserVolume() {},
-    gateAudioStart() {this.audioStartPending = true;},
-    resetDanmakuAt() {}, spawnDanmaku() {}, leaveBackgroundAudioOnly() {},
-    enterBackgroundAudioOnly() {effects.push('backgroundAudio');},
-    onPlayingChange() {}, updateAVSessionPlaybackState() {}, onResumeRequest() {},
-    scheduleControlsHide() {}, applyPgcSkipIntroOnce() {}, revealFirstFrameIfReady() {}, ensureAVSession() {},
-    ...patch,
-  });
-  return {view, effects, makeAudio() {view.audioPlayer = player('audio'); view.audioPrepared = true;}};
-}
-
-test('preparing then background then prepared never starts playback when disabled', () => {
-  const {view, effects} = setup();
-  view.appInBackground = true; view.onAppBackgroundChanged();
-  view.prepared = true; view.tryStartPreparedPlayers();
-  assert.deepEqual(effects, []);
-  assert.equal(view.shouldPlayAfterPrepare, false);
-  view.appInBackground = false; view.onAppBackgroundChanged();
-  view.tryStartPreparedPlayers();
-  assert.deepEqual(effects, [], 'returning does not revive cancelled autoplay');
-  view.togglePlay();
-  assert.deepEqual(effects, ['video.play'], 'explicit foreground play remains usable');
+test('preparing then background then prepared never starts playback when disabled', async () => {
+  const f = fixture(); await f.boot(); f.policy.background = true; f.session.onBackgroundChanged(); f.prepared();
+  assert.equal(plays(f), 0); assert.equal(f.session.shouldPlayAfterPrepare, false);
+  f.policy.background = false; f.session.onBackgroundChanged(); f.session.startPrepared();
+  assert.equal(plays(f), 0, 'returning does not revive cancelled autoplay');
+  f.session.toggle(); assert.equal(plays(f), 1); f.session.deactivate();
 });
 
-test('a source prepared while already in background checks current policy without another Watch event', () => {
-  const {view, effects} = setup({appInBackground: true, prepared: true});
-  view.tryStartPreparedPlayers();
-  assert.deepEqual(effects, []);
-  assert.equal(view.shouldPlayAfterPrepare, false);
+test('a source prepared while already in background checks current policy without another Watch event', async () => {
+  const f = fixture({background: true}); await f.boot(); f.prepared();
+  assert.equal(plays(f), 0); assert.equal(f.session.shouldPlayAfterPrepare, false); f.session.deactivate();
 });
 
-test('seek completion captured before background cannot resume either prepared track', () => {
-  const f = setup({prepared: true, playing: false, seekLocked: true}); f.makeAudio();
-  f.view.appInBackground = true; f.view.onAppBackgroundChanged();
-  f.view.seekCompleted(true, 4000);
-  assert.deepEqual(f.effects, []);
-  assert.equal(f.view.seekCtl.seekResumePlaying, false);
-  assert.equal(f.view.seekLocked, false);
-  assert.equal(f.view.buffering, false);
+test('seek completion captured before background cannot resume either prepared track', async () => {
+  const f = fixture(); const {video, audio} = await f.boot(); f.playing(); f.session.seekTo(4); f.advance(60); await tick();
+  f.policy.background = true; f.session.onBackgroundChanged(); const before = plays(f);
+  video.currentTime = 4000; audio.currentTime = 4000; video.emit('seekDone', 4000); audio.emit('seekDone', 4000);
+  assert.equal(plays(f), before); assert.equal(f.session.seek.seekResumePlaying, false);
+  assert.equal(f.state().seekLocked, false); assert.equal(f.state().buffering, false); f.session.deactivate();
 });
 
-test('late audio alignment completion checks background policy independently of playing flag', () => {
-  const f = setup({appInBackground: true, prepared: true, playing: true}); f.makeAudio();
-  f.view.finishGatedAudioStart(f.view.audioPlayer);
-  assert.deepEqual(f.effects, []);
-  assert.equal(f.view.audioStartPending, false);
+test('late audio alignment completion checks background policy independently of playing flag', async () => {
+  const f = fixture(); const {audio} = await f.boot(); f.playing(); const before = plays(f);
+  f.policy.background = true; f.session.audioSync.finishGatedAudioStart(audio);
+  assert.equal(plays(f), before); assert.equal(f.session.audioSync.audioStartPending, false); f.session.deactivate();
 });
 
-test('late native playing event is paused instead of reactivating a disabled background session', () => {
-  const f = setup({appInBackground: true, prepared: true}); f.makeAudio();
-  f.view.player.state = 'playing'; f.view.audioPlayer.state = 'playing';
-  f.view.playingEvent(f.view.player);
-  assert.equal(f.view.playing, false);
-  assert.equal(f.view.player.state, 'paused');
-  assert.equal(f.view.audioPlayer.state, 'paused');
-  assert.equal(f.effects.some(x => x.endsWith('.play')), false);
+test('late native playing event is paused instead of reactivating a disabled background session', async () => {
+  const f = fixture(); const {video, audio} = await f.boot(); f.prepared();
+  f.policy.background = true; audio.state = 'playing'; const before = plays(f); video.emit('stateChange', 'playing');
+  assert.equal(f.state().playing, false); assert.equal(video.state, 'paused'); assert.equal(audio.state, 'paused');
+  assert.equal(plays(f), before); f.session.deactivate();
 });
 
-test('late native audio playing event pauses an audio start that was already submitted before background', () => {
-  const f = setup({prepared: true}); f.makeAudio();
-  f.view.bindAudioEvents(f.view.audioPlayer);
-  f.view.appInBackground = true; f.view.onAppBackgroundChanged();
-  f.view.audioPlayer.state = 'playing'; // Native completion arrives after the background Watch.
-  f.view.audioPlayer.handlers.stateChange('playing');
-  assert.equal(f.view.audioPlayer.state, 'paused');
-  assert.deepEqual(f.effects, ['audio.pause']);
+test('late native audio playing event pauses an audio start that was already submitted before background', async () => {
+  const f = fixture(); const {audio} = await f.boot(); f.prepared();
+  f.policy.background = true; f.session.onBackgroundChanged(); audio.emit('stateChange', 'playing');
+  assert.equal(audio.state, 'paused'); assert.equal(f.calls(audio, 'pause').length, 1); f.session.deactivate();
 });
 
 test('exhausted seek recovery cannot restart video in a disabled background session', async () => {
-  const f = setup({appInBackground: true, prepared: true, seekRecoveryAttempts: 1});
-  await f.view.recoverPlayersAfterSeekStall(f.view.player, 4000);
-  assert.deepEqual(f.effects, []);
+  const f = fixture(); await f.boot(); f.prepared(); f.policy.background = true;
+  f.session.seekRecoveryAttempts = 1; f.session.seek.seekResumePlaying = true; const before = plays(f);
+  await f.session.recoverSeek(4000); assert.equal(plays(f), before); f.session.deactivate();
 });
 
-for (const policy of ['foreground', 'backgroundPlaybackEnabled', 'pipActive', 'pipStarting', 'pipRestoring']) {
-  test(`prepared and seek restoration stay allowed for ${policy}`, () => {
-    const f = setup({prepared: true, appInBackground: policy !== 'foreground',
-      ...(policy === 'foreground' ? {} : {[policy]: true})});
-    f.makeAudio();
-    if (f.view.appInBackground) f.view.onAppBackgroundChanged();
-    f.view.tryStartPreparedPlayers();
-    assert.ok(f.effects.includes('video.play'));
-    f.effects.length = 0; f.view.player.state = 'paused';
-    f.view.seekCompleted(true, 4000);
-    assert.deepEqual(f.effects, ['video.play', 'audio.play']);
+for (const mode of ['foreground', 'backgroundPlaybackEnabled', 'pipActive', 'pipStarting', 'pipRestoring']) {
+  test(`prepared and seek restoration stay allowed for ${mode}`, async () => {
+    const f = fixture({background: mode !== 'foreground', allowBackground: mode === 'backgroundPlaybackEnabled',
+      pipKeepsAlive: mode.startsWith('pip'), pipVisible: mode === 'pipActive' || mode === 'pipStarting'});
+    const {video, audio} = await f.boot(); f.session.onBackgroundChanged(); f.prepared();
+    assert.equal(f.calls(video, 'play').length, 1);
+    f.session.state.playing = true; f.session.seekTo(4); f.advance(60); await tick();
+    const videoBefore = f.calls(video, 'play').length, audioBefore = f.calls(audio, 'play').length;
+    video.currentTime = 4000; audio.currentTime = 4000; video.emit('seekDone', 4000); audio.emit('seekDone', 4000);
+    assert.equal(f.calls(video, 'play').length, videoBefore + 1); assert.equal(f.calls(audio, 'play').length, audioBefore + 1);
+    f.session.deactivate();
   });
 }
+
+test('background audio keeps logical playback and returns through the real dual-track seek controller', async () => {
+  const f = fixture({allowBackground: true}); const {video, audio} = await f.boot(); f.playing();
+  f.policy.background = true; f.session.onBackgroundChanged();
+  assert.equal(video.state, 'paused'); assert.equal(audio.state, 'playing'); assert.equal(f.state().playing, true);
+  audio.currentTime = 12000; audio.emit('timeUpdate', 12000); assert.equal(f.progress.at(-1).background, true);
+  f.policy.background = false; f.session.onBackgroundChanged(); f.advance(60); await tick();
+  assert.equal(f.calls(video, 'seek').at(-1)[1], 12000); assert.equal(f.calls(audio, 'seek').at(-1)[1], 12000);
+  video.currentTime = 12000; video.emit('seekDone', 12000); audio.emit('seekDone', 12000);
+  assert.equal(video.state, 'playing'); assert.equal(audio.state, 'playing'); f.session.deactivate();
+});

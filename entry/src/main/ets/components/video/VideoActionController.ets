@@ -12,6 +12,7 @@ import { FavoriteApi } from '../../api/FavoriteApi';
 import { UserApi } from '../../api/UserApi';
 import { HistoryApi } from '../../api/HistoryApi';
 import { UserStore } from '../../services/auth/UserStore';
+import { AuthSession } from '../../services/auth/AuthSession';
 import { FavoriteFolderItem } from '../../model/Models';
 
 /**
@@ -71,40 +72,75 @@ export interface VideoActionAccess {
   getUIContext: () => UIContext;
 }
 
+interface VideoActionSession {
+  readonly generation: number;
+  readonly account: number;
+  readonly aid: number;
+  readonly bvid: string;
+  readonly upMid: number;
+  readonly selfMid: number;
+}
+
 export class VideoActionController {
   private readonly access: VideoActionAccess;
+  private generation: number = 0;
 
   constructor(access: VideoActionAccess) {
     this.access = access;
   }
 
+  reset(): void {
+    this.generation++;
+    if (this.access.isDestroyed()) return;
+    this.access.setActionBusy(false);
+    this.access.setFollowLoading(false);
+  }
+
+  dispose(): void {
+    this.generation++;
+  }
+
+  private capture(): VideoActionSession {
+    return { generation: this.generation, account: AuthSession.version,
+      aid: this.access.getAid(), bvid: this.access.getBvid(), upMid: this.access.getUpMid(),
+      selfMid: UserStore.current !== null ? UserStore.current.mid : 0 };
+  }
+
+  private isCurrent(scope: VideoActionSession): boolean {
+    return !this.access.isDestroyed() && scope.generation === this.generation &&
+      scope.account === AuthSession.version && scope.aid === this.access.getAid() &&
+      scope.bvid === this.access.getBvid() && scope.upMid === this.access.getUpMid();
+  }
+
   async actionWatchLater(): Promise<void> {
-    if (!this.access.ensureLogin() || this.access.isActionBusy()) return;
+    if (this.access.isDestroyed() || !this.access.ensureLogin() || this.access.isActionBusy()) return;
+    const scope: VideoActionSession = this.capture();
     this.access.setActionBusy(true);
     try {
-      const result: ActionResult = await HistoryApi.addWatchLater(this.access.getAid(), this.access.getBvid());
-      if (this.access.isDestroyed()) return;
+      const result: ActionResult = await HistoryApi.addWatchLater(scope.aid, scope.bvid);
+      if (!this.isCurrent(scope)) return;
       this.access.toast(result.ok ? '已加入稍后再看' : result.message);
     } catch (e) {
-      if (!this.access.isDestroyed()) this.access.toast('网络异常，请稍后重试');
+      if (this.isCurrent(scope)) this.access.toast('网络异常，请稍后重试');
     } finally {
-      if (!this.access.isDestroyed()) this.access.setActionBusy(false);
+      if (this.isCurrent(scope)) this.access.setActionBusy(false);
     }
   }
 
   async actionFollow(): Promise<void> {
-    if (!this.access.ensureLogin() || this.access.getFollowLoading() || this.access.getUpMid() <= 0) return;
+    if (this.access.isDestroyed() || !this.access.ensureLogin() || this.access.getFollowLoading() || this.access.getUpMid() <= 0) return;
     if (UserStore.current !== null && UserStore.current.mid === this.access.getUpMid()) {
       this.access.toast('不能关注自己');
       return;
     }
+    const scope: VideoActionSession = this.capture();
     const previous: boolean = this.access.getFollowing();
     const next: boolean = !previous;
     this.access.setFollowing(next);
     this.access.setFollowLoading(true);
     try {
-      const result: ActionResult = await UserApi.setFollowed(this.access.getUpMid(), next);
-      if (this.access.isDestroyed()) return;
+      const result: ActionResult = await UserApi.setFollowed(scope.upMid, next);
+      if (!this.isCurrent(scope)) return;
       if (!result.ok) {
         this.access.setFollowing(previous);
         this.access.toast(result.message);
@@ -112,19 +148,28 @@ export class VideoActionController {
       }
       this.access.toast(next ? '关注成功' : '已取消关注');
     } catch (e) {
-      if (!this.access.isDestroyed()) {
+      if (this.isCurrent(scope)) {
         this.access.setFollowing(previous);
         this.access.toast('网络异常，请稍后重试');
       }
     } finally {
-      if (!this.access.isDestroyed()) this.access.setFollowLoading(false);
+      if (this.isCurrent(scope)) this.access.setFollowLoading(false);
     }
   }
 
   async actionLike(): Promise<void> {
-    if (!this.access.ensureLogin() || this.access.isActionBusy()) return;
+    if (this.access.isDestroyed() || !this.access.ensureLogin() || this.access.isActionBusy()) return;
+    const scope: VideoActionSession = this.capture();
     this.access.setActionBusy(true);
     this.access.bumpLikeVersion();
+    const likedBefore: boolean = this.access.getLiked();
+    const dislikedBefore: boolean = this.access.getDisliked();
+    const countBefore: number = this.access.getLikeCount();
+    const rollback = (): void => {
+      this.access.setLiked(likedBefore);
+      this.access.setDisliked(dislikedBefore);
+      this.access.setLikeCount(countBefore);
+    };
     const next: boolean = !this.access.getLiked();
     // 先给出本地主题色反馈，网络失败再回滚，避免按钮点击后长时间仍是灰色。
     this.access.setLiked(next);
@@ -132,59 +177,63 @@ export class VideoActionController {
     // 赞与踩互斥：点赞成功时顺带清掉本地踩状态（服务端 like=1 会自动取消踩）。
     if (next && this.access.getDisliked()) this.access.setDisliked(false);
     try {
-      const result: ActionResult = await BiliApi.likeVideo(this.access.getAid(), this.access.getBvid(), next);
-      if (this.access.isDestroyed()) return;
+      const result: ActionResult = await BiliApi.likeVideo(scope.aid, scope.bvid, next);
+      if (!this.isCurrent(scope)) return;
       if (!result.ok) {
-        this.access.setLiked(!next);
-        this.access.setLikeCount(Math.max(0, this.access.getLikeCount() + (next ? -1 : 1)));
+        rollback();
         this.access.toast(result.message);
         return;
       }
       this.access.toast(next ? '点赞成功' : '已取消点赞');
     } catch (e) {
-      if (!this.access.isDestroyed()) {
-        this.access.setLiked(!next);
-        this.access.setLikeCount(Math.max(0, this.access.getLikeCount() + (next ? -1 : 1)));
+      if (this.isCurrent(scope)) {
+        rollback();
         this.access.toast('网络异常，请稍后重试');
       }
     } finally {
-      if (!this.access.isDestroyed()) this.access.setActionBusy(false);
+      if (this.isCurrent(scope)) this.access.setActionBusy(false);
     }
   }
 
   /** 点踩（App 端协议，需 App 授权）：与赞本地互斥。 */
   async actionDislike(): Promise<void> {
-    if (!this.access.ensureLogin() || this.access.isActionBusy()) return;
+    if (this.access.isDestroyed() || !this.access.ensureLogin() || this.access.isActionBusy()) return;
+    const scope: VideoActionSession = this.capture();
     this.access.setActionBusy(true);
+    this.access.bumpLikeVersion();
+    const likedBefore: boolean = this.access.getLiked();
     const next: boolean = !this.access.getDisliked();
     this.access.setDisliked(next);
     if (next && this.access.getLiked()) this.access.setLiked(false);
     try {
-      const result: ActionResult = await BiliApi.dislikeVideo(this.access.getAid(), this.access.getBvid(), next);
-      if (this.access.isDestroyed()) return;
+      const result: ActionResult = await BiliApi.dislikeVideo(scope.aid, scope.bvid, next);
+      if (!this.isCurrent(scope)) return;
       if (!result.ok) {
         this.access.setDisliked(!next);
+        this.access.setLiked(likedBefore);
         this.access.toast(result.message);
         return;
       }
       this.access.toast(next ? '已点踩' : '已取消点踩');
     } catch (e) {
-      if (!this.access.isDestroyed()) {
+      if (this.isCurrent(scope)) {
         this.access.setDisliked(!next);
+        this.access.setLiked(likedBefore);
         this.access.toast('网络异常，请稍后重试');
       }
     } finally {
-      if (!this.access.isDestroyed()) this.access.setActionBusy(false);
+      if (this.isCurrent(scope)) this.access.setActionBusy(false);
     }
   }
 
   /** 点赞按钮长按：一键三连（点赞+投一币+收藏），弹确认后执行。 */
   actionTriple(): void {
-    if (!this.access.ensureLogin() || this.access.isActionBusy()) return;
+    if (this.access.isDestroyed() || !this.access.ensureLogin() || this.access.isActionBusy()) return;
     if (this.access.getLiked() && this.access.getCoinCountByMe() > 0 && this.access.getFavorited()) {
       this.access.toast('已三连过啦');
       return;
     }
+    const scope: VideoActionSession = this.capture();
     try {
       this.access.getUIContext().getPromptAction().showDialog({
         title: '一键三连',
@@ -194,55 +243,62 @@ export class VideoActionController {
           { text: '三连', color: this.access.getAccent() },
         ],
       }).then((dialogResult) => {
-        if (Number(dialogResult.index) !== 1) return;
-        this.doTriple();
-      });
+        if (Number(dialogResult.index) !== 1 || !this.isCurrent(scope)) return;
+        this.doTriple().catch(() => {});
+      }).catch(() => {});
     } catch (e) {
       // 弹窗失败不阻塞。
     }
   }
 
   async doTriple(): Promise<void> {
+    if (this.access.isDestroyed() || !this.access.ensureLogin() || this.access.isActionBusy()) return;
+    if (this.access.getLiked() && this.access.getCoinCountByMe() > 0 && this.access.getFavorited()) return;
+    this.access.bumpLikeVersion();
+    this.access.bumpCoinVersion();
+    this.access.bumpFavoriteVersion();
+    const scope: VideoActionSession = this.capture();
     this.access.setActionBusy(true);
     try {
-      const result: ActionResult = await BiliApi.likeTriple(this.access.getAid());
-      if (this.access.isDestroyed()) return;
+      const result: ActionResult = await BiliApi.likeTriple(scope.aid);
+      if (!this.isCurrent(scope)) return;
       if (result.ok) {
         this.access.setLiked(true);
-        this.access.setCoinCountByMe(1);
+        this.access.setCoinCountByMe(Math.max(1, this.access.getCoinCountByMe()));
+        if (!this.access.getFavorited()) this.access.setFavoriteCount(this.access.getFavoriteCount() + 1);
         this.access.setFavorited(true);
-        this.access.setFavoriteCount(this.access.getFavoriteCount() + 1);
         this.access.toast('三连成功 🎉');
       } else {
         this.access.toast(result.message);
       }
     } catch (e) {
-      if (!this.access.isDestroyed()) this.access.toast('三连失败，请稍后重试');
+      if (this.isCurrent(scope)) this.access.toast('三连失败，请稍后重试');
     } finally {
-      if (!this.access.isDestroyed()) this.access.setActionBusy(false);
+      if (this.isCurrent(scope)) this.access.setActionBusy(false);
     }
   }
 
   async actionFavorite(): Promise<void> {
-    if (!this.access.ensureLogin() || this.access.isActionBusy()) return;
+    if (this.access.isDestroyed() || !this.access.ensureLogin() || this.access.isActionBusy()) return;
+    const scope: VideoActionSession = this.capture();
     this.access.setActionBusy(true);
     this.access.bumpFavoriteVersion();
     const next: boolean = !this.access.getFavorited();
     this.access.setFavorited(next);
     this.access.setFavoriteCount(Math.max(0, this.access.getFavoriteCount() + (next ? 1 : -1)));
     try {
-      const selfMid: number = UserStore.current !== null ? UserStore.current.mid : 0;
-      let folders: Array<FavoriteFolderItem> = await FavoriteApi.getFavoriteFoldersForVideo(this.access.getAid(),
+      const selfMid: number = scope.selfMid;
+      let folders: Array<FavoriteFolderItem> = await FavoriteApi.getFavoriteFoldersForVideo(scope.aid,
         selfMid);
-      if (this.access.isDestroyed()) return;
+      if (!this.isCurrent(scope)) return;
       if (folders.length === 0 && next) {
         // 没有可用收藏夹：先自动创建一个默认收藏夹再收藏，避免"未找到可用的收藏夹"卡住收藏。
         const created: ActionResult = await FavoriteApi.addFavoriteFolder('默认收藏夹');
-        if (this.access.isDestroyed()) return;
+        if (!this.isCurrent(scope)) return;
         if (created.ok) {
-          folders = await FavoriteApi.getFavoriteFoldersForVideo(this.access.getAid(), selfMid);
+          folders = await FavoriteApi.getFavoriteFoldersForVideo(scope.aid, selfMid);
         }
-        if (this.access.isDestroyed()) return;
+        if (!this.isCurrent(scope)) return;
       }
       if (folders.length === 0) {
         this.access.setFavorited(!next);
@@ -257,8 +313,8 @@ export class VideoActionController {
       const addIds: Array<number> = next ? [folders[0].id] : [];
       const deleteIds: Array<number> = next ? [] : selected;
       if (!next && deleteIds.length === 0) deleteIds.push(folders[0].id);
-      const result: ActionResult = await FavoriteApi.modifyVideoFavorite(this.access.getAid(), addIds, deleteIds);
-      if (this.access.isDestroyed()) return;
+      const result: ActionResult = await FavoriteApi.modifyVideoFavorite(scope.aid, addIds, deleteIds);
+      if (!this.isCurrent(scope)) return;
       if (!result.ok) {
         this.access.setFavorited(!next);
         this.access.setFavoriteCount(Math.max(0, this.access.getFavoriteCount() + (next ? -1 : 1)));
@@ -267,32 +323,34 @@ export class VideoActionController {
       }
       this.access.toast(next ? '收藏成功' : '已取消收藏');
     } catch (e) {
-      if (!this.access.isDestroyed()) {
+      if (this.isCurrent(scope)) {
         this.access.setFavorited(!next);
         this.access.setFavoriteCount(Math.max(0, this.access.getFavoriteCount() + (next ? -1 : 1)));
         this.access.toast('网络异常，请稍后重试');
       }
     } finally {
-      if (!this.access.isDestroyed()) this.access.setActionBusy(false);
+      if (this.isCurrent(scope)) this.access.setActionBusy(false);
     }
   }
 
   async submitCoin(): Promise<void> {
-    if (this.access.isActionBusy()) return;
+    if (this.access.isDestroyed() || !this.access.ensureLogin() || this.access.isActionBusy()) return;
     const available: number = Math.max(0, 2 - this.access.getCoinCountByMe());
     const multiply: number = Math.min(this.access.getCoinChoice(), available);
     if (multiply <= 0) {
       this.access.setCoinSheetOpen(false);
       return;
     }
+    const scope: VideoActionSession = this.capture();
     this.access.setActionBusy(true);
+    const withLike: boolean = this.access.getCoinWithLike();
     this.access.bumpCoinVersion();
-    if (this.access.getCoinWithLike()) this.access.bumpLikeVersion();
+    if (withLike) this.access.bumpLikeVersion();
     // 乐观更新：先变红并收起弹层，失败再整体回滚。
     const likedBefore: boolean = this.access.getLiked();
     this.access.setCoinCountByMe(this.access.getCoinCountByMe() + multiply);
     this.access.setCoinCount(this.access.getCoinCount() + multiply);
-    if (this.access.getCoinWithLike() && !this.access.getLiked()) {
+    if (withLike && !this.access.getLiked()) {
       this.access.setLiked(true);
       this.access.setLikeCount(this.access.getLikeCount() + 1);
     }
@@ -300,15 +358,15 @@ export class VideoActionController {
     const rollback = (): void => {
       this.access.setCoinCountByMe(Math.max(0, this.access.getCoinCountByMe() - multiply));
       this.access.setCoinCount(Math.max(0, this.access.getCoinCount() - multiply));
-      if (this.access.getCoinWithLike() && !likedBefore) {
+      if (withLike && !likedBefore) {
         this.access.setLiked(false);
         this.access.setLikeCount(Math.max(0, this.access.getLikeCount() - 1));
       }
     };
     try {
-      const result: ActionResult = await BiliApi.coinVideo(this.access.getAid(), this.access.getBvid(), multiply,
-        this.access.getCoinWithLike());
-      if (this.access.isDestroyed()) return;
+      const result: ActionResult = await BiliApi.coinVideo(scope.aid, scope.bvid, multiply,
+        withLike);
+      if (!this.isCurrent(scope)) return;
       if (!result.ok) {
         rollback();
         this.access.toast(result.message);
@@ -316,12 +374,12 @@ export class VideoActionController {
       }
       this.access.toast('投币成功');
     } catch (e) {
-      if (!this.access.isDestroyed()) {
+      if (this.isCurrent(scope)) {
         rollback();
         this.access.toast('网络异常，请稍后重试');
       }
     } finally {
-      if (!this.access.isDestroyed()) this.access.setActionBusy(false);
+      if (this.isCurrent(scope)) this.access.setActionBusy(false);
     }
   }
 

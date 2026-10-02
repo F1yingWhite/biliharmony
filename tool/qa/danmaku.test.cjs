@@ -3,6 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const {fixture: playbackFixture} = require('./player-session-fixture.cjs');
 const root = path.resolve(__dirname, '../../entry/src/main/ets');
 const sourceOverride = process.env.ARKTS_TEST_SOURCE_ROOT;
 function readSource(filename) {
@@ -96,7 +97,9 @@ function pausedCanvasFixture() {
   const Engine = env.load('components/player/PlayerDanmakuEngine').PlayerDanmakuEngine;
   const Clock = env.load('components/player/PlayerDanmakuClock').PlayerDanmakuClock;
   const Harness = env.methodHarness('components/player/PlayerView',
-    '  togglePlay(): void {', '  /** 结束画面「重播」');
+    '  togglePlay(): void {', '  /** UI 的结束画面');
+  const Events = env.methodHarness('components/player/PlayerView',
+    '  private onPlaybackEvent(', '  private onPlaybackProgress(', 'const Immersive = {setKeepScreenOn() {}};');
   const ctx = {measureText: text => ({width: text.length * 12}),
     clearRect() {pixels.length = 0;}, strokeText() {},
     fillText(text, x, y) {pixels.push({text, x, y});}};
@@ -109,15 +112,23 @@ function pausedCanvasFixture() {
   e.pinned = e.active.find(item => item.item.id === 5);
   const view = new Harness();
   let pauseRequests = 0, pinClears = 0;
-  Object.assign(view, {playing: true, prepared: true, backgroundAudioOnly: false,
+  Object.assign(view, {playing: true, prepared: true,
     appInBackground: false, danmakuOn: true, danmakuFixedHeight: e.height, ctx,
-    player: {pause() {pauseRequests++;}}, audioPlayer: null, audioPrepared: false,
-    seekCtl: null, seekRecoveryActive: false, cancelAudioGate() {}, cancelFirstFrameMute() {},
+    onPlaybackEvent: Events.prototype.onPlaybackEvent,
     onPlayingChange() {}, updateAVSessionPlaybackState() {}});
   const clock = new Clock({isPlaying: () => view.playing,
     isDanmakuOn: () => view.danmakuOn && !view.appInBackground, getFrameRate: () => 60,
     getEngine: () => e, clearPinned() {pinClears++; e.pinned = null;}});
   view.dmClock = clock;
+  const playback = playbackFixture();
+  playback.session.activate(playback.source());
+  playback.session.pair.video = {state: 'playing', setVolume() {}, pause() {pauseRequests++; return Promise.resolve();}};
+  playback.session.pair.prepared = true;
+  playback.session.state.prepared = true;
+  playback.session.state.playing = true;
+  playback.session.observer.state = state => {view.playing = state.playing;};
+  playback.session.observer.event = event => view.onPlaybackEvent(event);
+  view.playback = playback.session;
   clock.start();
   syncs[0].callback({timestamp: 1_000_000_000});
   syncs[0].callback({timestamp: 1_200_000_000});

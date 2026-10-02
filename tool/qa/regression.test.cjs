@@ -1,5 +1,6 @@
 // Run actual ArkTS service code with fake platform boundaries. No network, credentials or device required.
 const test = require('node:test');
+const {fixture: playbackFixture} = require('./player-session-fixture.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -13,88 +14,6 @@ function deferred() {
   return { promise, resolve, reject };
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
-
-test('service card restores persisted aid-only records on cold add and update', () => {
-  let record = { bvid: '', aid: 123, title: 'Saved video', progressText: '看到 0:42', position: 42 };
-  const updates = [];
-  let opens = 0;
-  const env = environment({
-    '@kit.CoreFileKit': { fileIo: {} },
-    'services/cache/RemoteAssetCache': { RemoteAssetCache: {} },
-    '@kit.FormKit': {
-      FormExtensionAbility: class { context = {}; },
-      formBindingData: { createFormBindingData: value => value },
-      formProvider: { updateForm: async (id, data) => { updates.push({ id, data }); } }
-    },
-    '@kit.ArkData': { preferences: { getPreferencesSync: () => {
-      opens++;
-      return { getSync: () => JSON.stringify(record) };
-    } } }
-  });
-  const Form = env.load('entryformability/EntryFormAbility').default;
-  const form = new Form();
-  const first = form.onAddForm({});
-  assert.equal(first.hasRecord, true);
-  assert.equal(first.aid, 123);
-  assert.equal(first.progressText, '看到 0:42');
-  record = { bvid: 'BVnext', aid: 456, title: 'Next video' };
-  form.onUpdateForm('card-1');
-  assert.equal(updates[0].id, 'card-1');
-  assert.equal(updates[0].data.bvid, 'BVnext');
-  assert.equal(opens, 1);
-});
-
-test('service card sends downloaded images through formImages and closes descriptors on failure', async () => {
-  const requests = [], updates = [], closed = [];
-  let failUpdate = false;
-  const record = {bvid:'BVcover',aid:123,cover:'http://example.com/image.jpg'};
-  const env = environment({
-    '@kit.CoreFileKit': {fileIo:{OpenMode:{READ_ONLY:0},openSync:()=>({fd:7}),
-      statSync:()=>({size:1024}),closeSync:file=>closed.push(file.fd)}},
-    'services/cache/RemoteAssetCache': {RemoteAssetCache:{attach(){},ensureThumbnail:url=>{
-      const d=deferred();requests.push({url,...d});return d.promise;
-    }}},
-    '@kit.FormKit': {FormExtensionAbility:class {context={};},
-      formBindingData:{createFormBindingData:v=>v},formProvider:{updateForm:async(id,data)=>{
-        if(failUpdate)throw Error('removed');updates.push({id,data});
-      }}},
-    '@kit.ArkData': {preferences:{getPreferencesSync:()=>({getSync:()=>JSON.stringify(record)})}}
-  });
-  const Form=env.load('entryformability/EntryFormAbility').default;const form=new Form();
-  const initial=form.onAddForm({parameters:{'ohos.extra.param.key.form_identity':'card'}});
-  assert.equal(initial.cover,'');assert.equal(requests[0].url,'https://example.com/image.jpg');
-  requests[0].resolve('file://cache/cover');await tick();
-  assert.match(updates[0].data.cover,/^memory:\/\//);
-  assert.equal(updates[0].data.formImages[updates[0].data.cover.slice(9)],7);
-  assert.deepEqual(closed,[7]);
-  const old=form.updateCover('card');form.onRemoveForm('card');
-  const fresh=form.updateCover('card');
-  requests[1].resolve('file://cache/old');await old;
-  assert.equal(updates.length,1,'removed/recreated card ignores the old download');
-  failUpdate=true;requests[2].resolve('file://cache/new');await assert.rejects(fresh);
-  assert.deepEqual(closed,[7,7],'update failure still releases the file descriptor');
-});
-
-test('service card retries failed synchronous storage initialization', () => {
-  let opens = 0;
-  const env = environment({
-    '@kit.CoreFileKit': { fileIo: {} },
-    'services/cache/RemoteAssetCache': { RemoteAssetCache: {} },
-    '@kit.FormKit': {
-      FormExtensionAbility: class { context = {}; },
-      formBindingData: { createFormBindingData: value => value }
-    },
-    '@kit.ArkData': { preferences: { getPreferencesSync: () => {
-      if (++opens === 1) throw new Error('storage unavailable');
-      return { getSync: () => JSON.stringify({ bvid: 'BVrestored', aid: 123 }) };
-    } } }
-  });
-  const Form = env.load('entryformability/EntryFormAbility').default;
-  const form = new Form();
-  assert.equal(form.onAddForm({}).hasRecord, false);
-  assert.equal(form.onAddForm({}).bvid, 'BVrestored');
-  assert.equal(opens, 2);
-});
 
 test('continue watching restores cold storage and rejects unrelated aid-only videos', async () => {
   const record = { bvid: '', aid: 123, position: 42 };
@@ -571,90 +490,67 @@ test('Playback: manual selection invalidates initial and resume-part requests', 
 });
 
 test('Playback: stale quality response must not release the new video player', async () => {
-  const pending = deferred();
-  const env = environment({ 'api/BiliApi': { BiliApi: { getPlayUrl: () => pending.promise } } });
-  const { RequestEpoch } = env.load('common/RequestEpoch');
-  const Harness = env.methodHarness('components/player/PlayerView', '  async changeQuality(', '  setPlaybackSpeed',
-    "import { BiliApi } from '../../api/BiliApi'; import { PlayerQualityPreference } from '../../common/PlayerQualityPreference';");
-  const view = Object.assign(new Harness(), { destroyed: false, qualityLoading: false, activeQuality: 80,
-    sourceVersion: 1, cid: 10, sourceRequests: new RequestEpoch() });
-  const request = view.changeQuality(64);
-  view.sourceRequests.next();
-  view.sourceVersion = 2;
-  view.cid = 20;
-  view.qualityLoading = true;
-  view.player = { release() { assert.fail('stale request released a new player'); } };
-  pending.resolve({ urls: ['old-quality'] });
+  const f = playbackFixture(); await f.boot();
+  const request = f.session.changeQuality(64);
+  await f.session.replaceSource(f.source({version: 2, cid: 20}));
+  const player = f.session.pair.video;
+  const newer = f.session.changeQuality(120);
+  f.apiCalls[0].resolve({ urls: ['old-quality'], audioUrls: [], qualities: [], quality: 64 });
   await request;
-  assert.equal(view.qualityLoading, true, 'old finally must not clear a newer request');
+  assert.equal(f.calls(player, 'release').length, 0, 'stale request must not release the new player');
+  assert.equal(f.state().qualityLoading, true, 'old finally must not clear a newer request');
+  f.apiCalls[1].resolve(null); await newer; f.session.deactivate();
 });
 
 test('Playback: a source change during release prevents obsolete player recreation', async () => {
   const release = deferred();
-  const env = environment({ 'api/BiliApi': { BiliApi: { getPlayUrl: async () => ({ urls: ['quality'], audioUrls: [], qualities: [], quality: 64 }) } } });
-  const { RequestEpoch } = env.load('common/RequestEpoch');
-  const Harness = env.methodHarness('components/player/PlayerView', '  async changeQuality(', '  setPlaybackSpeed',
-    "import { BiliApi } from '../../api/BiliApi'; import { PlayerQualityPreference } from '../../common/PlayerQualityPreference';");
-  let audioReleased = 0;
-  const view = Object.assign(new Harness(), { destroyed: false, qualityLoading: false, activeQuality: 80,
-    sourceVersion: 1, cid: 10, sourceRequests: new RequestEpoch(),
-    player: { release: () => release.promise }, audioPlayer: { async release() { audioReleased++; } },
-    invalidatePlayerCreation() {}, cancelAudioGate() {}, cancelFirstFrameMute() {}, closeSettingPanels() {},
-    dmClock: { stop() {}, pause() {} }, sponsorCtl: { invalidateForSourceChange() {} },
-    initPlayer() { assert.fail('obsolete source recreated a player'); } });
-  const request = view.changeQuality(64);
+  const f = playbackFixture(); const {video, audio} = await f.boot();
+  video.release = () => release.promise;
+  const request = f.session.changeQuality(64);
+  f.apiCalls[0].resolve({urls: ['quality'], audioUrls: [], qualities: [], quality: 64});
   await tick();
-  view.sourceRequests.next();
-  view.sourceVersion = 2;
+  const replacing = f.session.replaceSource(f.source({version: 2, urls: ['latest']}));
   release.resolve();
-  await request;
-  assert.equal(audioReleased, 1, 'detached audio still belongs to the old operation and must be released');
+  await Promise.all([request, replacing]); await tick();
+  assert.equal(f.calls(audio, 'release').length, 1, 'detached audio still belongs to the old operation and must be released');
+  assert.equal(f.creations.length, 4, 'only the latest source creates a new pair');
+  assert.equal(f.session.pair.video.source.url, 'latest'); f.session.deactivate();
 });
 
 test('Search: new query starts immediately; old completion cannot replace results or clear loading', async () => {
   const pending = [];
-  const env = environment({ 'api/SearchApi': { SearchApi: { searchAll(keyword, page) { const d = deferred(); pending.push({ keyword, page, ...d }); return d.promise; } } } });
-  const { RequestEpoch } = env.load('common/RequestEpoch');
-  const { BasicDataSource } = env.load('common/BasicDataSource');
-  const { SearchAllResult, SearchAllSection, SearchTypes, VideoItem } = env.load('model/Models');
-  const Harness = env.methodHarness('pages/Search', '  async doSearch(', '  submitSearch(): void {',
-    "import { SearchApi } from '../api/SearchApi'; import { SearchTypes, SearchAllSection, VIDEO_DURATION_OPTIONS, VIDEO_PUBTIME_OPTIONS } from '../model/Models';");
-  const response = (bvid, aid, total) => {
-    const video = Object.assign(new VideoItem(), { bvid, aid });
-    const section = Object.assign(new SearchAllSection(), { type: SearchTypes.video, videos: [video] });
-    return Object.assign(new SearchAllResult(), { sections: [section], totals: new Map([[SearchTypes.video, total]]) });
+  const env = environment({ 'api/SearchApi': { SearchApi: { searchAll(keyword, page) {
+    const request=deferred();pending.push({keyword,page,...request});return request.promise;
+  } } } });
+  const {SearchResultsController}=env.load('components/search/SearchResultsController');
+  const {SearchQuery,SearchCategory}=env.load('components/search/SearchQuery');
+  const {SearchAllResult,SearchAllSection,SearchTypes,VideoItem}=env.load('model/Models');
+  const response=(bvid,aid,total)=>{
+    const video=Object.assign(new VideoItem(),{bvid,aid});
+    const section=Object.assign(new SearchAllSection(),{type:SearchTypes.video,videos:[video]});
+    return Object.assign(new SearchAllResult(),{sections:[section],totals:new Map([[SearchTypes.video,total]])});
   };
-  const oldResult = response('BVold', 1, 10);
-  const newResult = response('BVnew', 2, 2);
-  const view = Object.assign(new Harness(), { keyword: 'old', resultKeyword: 'old', searchTab: 0, videoOrder: 'totalrank',
-    filterDuration: 0, filterPubtime: 0, filterTids: 0, destroyed: false, searchRequests: new RequestEpoch(),
-    allSections: [], allVideoSource: new BasicDataSource(), videoTotal: -1, allPage: 1, searchTabStates: new Map() });
-  const first = view.doSearch(true);
-  view.keyword = 'new';
-  view.resultKeyword = 'new';
-  const second = view.doSearch(true);
-  assert.deepEqual(pending.map(x => [x.keyword, x.page]), [['old', 1], ['new', 1]]);
-  pending[0].resolve(oldResult);
-  await first;
-  assert.deepEqual(view.allSections, []);
-  assert.equal(view.allVideoSource.totalCount(), 0);
-  assert.equal(view.videoTotal, -1);
-  assert.equal(view.allPage, 1);
-  assert.equal(view.loading, true);
-  assert.equal(view.searchInflight, true);
-  pending[1].resolve(newResult);
-  await second;
-  // doSearch catches failures: checking metadata/loading alone can pass even if rendering data failed.
-  assert.equal(view.searchError, '');
-  assert.equal(view.moreError, '');
-  assert.deepEqual(view.allSections, newResult.sections);
-  assert.deepEqual(view.allVideoSource.getAll().map(v => [v.bvid, v.aid]), [['BVnew', 2]]);
-  assert.equal(view.videoTotal, 2);
-  assert.equal(view.allPage, 2);
-  assert.equal(view.hasMoreResults, true);
-  assert.equal(view.loading, false);
-  assert.equal(view.loadingMore, false);
-  assert.equal(view.searchInflight, false);
+  const oldResult=response('BVold',1,10),newResult=response('BVnew',2,2);
+  const search=new SearchResultsController(),query=new SearchQuery();
+  const first=search.submit('old',query),second=search.submit('new',query);
+  assert.deepEqual(pending.map(x=>[x.keyword,x.page]),[['old',1],['new',1]]);
+  pending[0].resolve(oldResult);await first;
+  assert.deepEqual(search.view.sections,[]);assert.equal(search.store.allVideos.totalCount(),0);
+  assert.equal(search.view.totals[SearchCategory.Video],-1);assert.equal(search.view.loading,true);
+  assert.equal(search.view.keyword,'new');
+  await search.loadMore();assert.equal(pending.length,2,'initial request cannot be overtaken by pagination');
+  pending[1].resolve(newResult);await second;
+  // Success must reach the rendered data sources, not merely clear activity flags.
+  assert.equal(search.view.error,'');assert.equal(search.view.moreError,'');
+  assert.deepEqual(search.view.sections,newResult.sections);
+  assert.deepEqual(search.store.allVideos.getAll().map(video=>[video.bvid,video.aid]),[['BVnew',2]]);
+  assert.equal(search.view.totals[SearchCategory.Video],2);assert.equal(search.view.hasMore,true);
+  assert.equal(search.view.loading,false);assert.equal(search.view.loadingMore,false);
+  const more=search.loadMore();await search.loadMore();
+  assert.equal(pending.length,3);assert.equal(pending[2].keyword,'new');assert.equal(pending[2].page,2);
+  pending[2].resolve(Object.assign(new SearchAllResult(),{sections:[],totals:new Map()}));await more;
+  assert.equal(search.view.loadingMore,false);assert.equal(search.view.hasMore,false);
+  assert.equal(search.store.allVideos.totalCount(),1);
 });
 
 test('History API: network/auth/malformed responses differ from a successful empty list', async () => {
@@ -1430,14 +1326,16 @@ test('WebProxy: ArkWeb receives a normalized proxy rule only when the launch par
 });
 
 test('YouTube: the player document survives the initial about:blank navigation', () => {
-  // 回归背景：ArkWeb 会先提交 Web 组件的初始 about:blank，并把 onControllerAttached 里
-  // 已经开始的 loadData 文档 abort 掉（实测日志 ERR_ABORTED url:data:text/***）。
-  // 去重标记若不在 onPageEnd 分支里复位，重试分支就是空操作，播放器会永远停在 about:blank。
-  const source=fs.readFileSync(path.join(root,'pages/YouTubeDetail.ets'),'utf8').replace(/\r\n/g,'\n');
-  assert.match(source,
-    /if \(event\.url === 'about:blank' && !this\.initialPageLoaded\) \{[\s\S]{0,200}this\.playerLoaded = false;[\s\S]{0,120}this\.loadPlayer\(\);/);
+  const {createArktsLoader}=require('./arkts-module.cjs');const documents=[];
+  const load=createArktsLoader({mocks:{
+    '@kit.ArkWeb':{webview:{WebviewController:class {loadData(html){documents.push(html);}}}},
+    'common/YouTubePlayerHtml':{youtubePlayerHtml:id=>'html:'+id,YOUTUBE_PLAYER_ORIGIN:'https://player'},
+  },globals:{setTimeout:()=>1,clearTimeout(){}}});
+  const {YouTubeWebPlayback}=load('components/youtube/YouTubeWebPlayback');
+  const player=new YouTubeWebPlayback(()=>{},()=>{},()=>false);
+  player.activate('video');player.attach();player.pageEnded('about:blank');player.pageEnded('about:blank');
+  assert.deepEqual(documents,['html:video','html:video']);
 });
-
 
 test('emote render sources never start a second network load while disk download is pending', () => {
   const disk = new Map();
@@ -1447,7 +1345,7 @@ test('emote render sources never start a second network load while disk download
   for (const [file, start, end, method] of [
     ['components/reply/ReplyEmotePanel', '  private imageSrc(', '  private contentHeight(', 'imageSrc'],
     ['components/reply/ReplyRichText', '  private emoteSrc(', '  private plainColor(', 'emoteSrc'],
-    ['views/DynamicView', '  private emoteSrc(', '  private toast(', 'emoteSrc']
+    ['components/dynamic/DynCard', '  private emoteSrc(', '  private toast(', 'emoteSrc']
   ]) {
     const Harness = environment(mocks).methodHarness(file, start, end,
       "import { EmoteImageCache } from 'common/EmoteImageCache';");
@@ -1540,49 +1438,37 @@ test('emote disk cache survives a fresh service instance and deduplicates simult
 });
 
 test('automatic audio alignment preserves video buffer and cancels stale pause completion', async () => {
-  const env = environment();
-  const Harness = env.methodHarness('components/player/PlayerView',
-    '  private gateAudioStart(', '  async changeQuality(');
-  const Policy = env.methodHarness('components/player/PlayerView',
-    '  private canStartPlayback():', '  private setBackgroundPlayback(');
-  const view = new Harness();
-  view.canStartPlayback = Policy.prototype.canStartPlayback;
-  let videoSeeks = 0, audioSeeks = 0, plays = 0;
+  const f = playbackFixture(); const {video, audio} = await f.boot(); f.playing();
+  const view = f.session.audioSync;
   const pause = deferred();
-  view.player = {currentTime: 5000, seek: () => videoSeeks++};
-  view.audioPlayer = {currentTime: 4500, state: 'playing', setVolume() {},
-    pause: () => pause.promise, seek: () => audioSeeks++, play: () => plays++};
-  Object.assign(view, {playing: true, prepared: true, audioPrepared: true, audioGateTimer: -1,
-    pendingAudioPause: null, seekLocked: false, backgroundAudioOnly: false, restoreUserVolume() {}, resetAudioSyncRate() {},
-    handleAudioPlayerError() { assert.fail('unexpected audio error'); }});
+  video.currentTime = 5000; audio.currentTime = 4500; audio.state = 'playing'; audio.pause = () => pause.promise;
+  const plays = f.calls(audio, 'play').length;
   view.gateAudioStart();
   view.tryStartGatedAudio();
   view.cancelAudioGate(); // user seeks or switches source before pause resolves
   pause.resolve();
   await tick();
-  assert.equal(audioSeeks, 0);
-  view.audioPlayer.state = 'paused';
+  assert.equal(f.calls(audio, 'seek').length, 0);
+  audio.state = 'paused';
   view.gateAudioStart();
   view.tryStartGatedAudio();
   await tick();
-  assert.equal(audioSeeks, 1);
-  assert.equal(videoSeeks, 0, 'background synchronization must not seek video');
-  view.finishGatedAudioStart(view.audioPlayer);
-  assert.equal(plays, 1);
+  assert.equal(f.calls(audio, 'seek').length, 1);
+  assert.equal(f.calls(video, 'seek').length, 0, 'background synchronization must not seek video');
+  view.finishGatedAudioStart(audio);
+  assert.equal(f.calls(audio, 'play').length, plays + 1);
   assert.equal(view.audioGateTimer, -1);
+  f.session.deactivate();
 });
 
-test('temporary speed changes write each player once without restoring an intermediate rate', () => {
-  const Harness = environment().methodHarness('components/player/PlayerView',
-    '  private applyTemporarySpeed(', '  private beginHoldSpeed(', 'const DEBUG = false;');
-  const h = new Harness();
-  const videoRates = [], audioRates = [];
-  Object.assign(h, {prepared: true, audioPrepared: true, audioSyncRate: 0.97,
-    player: {setPlaybackRate: rate => videoRates.push(rate)},
-    audioPlayer: {setPlaybackRate: rate => audioRates.push(rate)}, dmEngine: {setPlaybackRate() {}}});
+test('temporary speed changes write each player once without restoring an intermediate rate', async () => {
+  const f = playbackFixture(); const {video, audio} = await f.boot(); f.prepared();
+  const h = f.session.audioSync; h.audioSyncRate = 0.97;
+  video.calls.length = audio.calls.length = 0;
   h.applyTemporarySpeed(2);
   h.applyTemporarySpeed(1);
-  assert.deepEqual(videoRates, [2, 1]);
-  assert.deepEqual(audioRates, [2, 1]);
-  assert.ok(h.speedTransitionUntilMs > Date.now());
+  assert.deepEqual(f.calls(video, 'rate').map(call => call[1]), [2, 1]);
+  assert.deepEqual(f.calls(audio, 'rate').map(call => call[1]), [2, 1]);
+  assert.ok(h.speedTransitionUntilMs > f.globals.Date.now());
+  f.session.deactivate();
 });

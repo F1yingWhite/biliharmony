@@ -1,18 +1,17 @@
 import { inputMethod } from '@kit.IMEKit';
 import { curves } from '@kit.ArkUI';
-import { YouTubeApi, YouTubeSearchFilter, YouTubeSearchFilterGroup, YouTubeSearchPage,
+import { YouTubeApi, YouTubeSearchFilter, YouTubeSearchFilterGroup,
   YouTubeVideo } from '../api/YouTubeApi';
 import { AppNavStack, NAV_YOUTUBE_DETAIL, NAV_YOUTUBE_SAVED } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
-import { RequestEpoch } from '../common/RequestEpoch';
 import { PlatformStore } from '../common/PlatformStore';
 import { AppTheme } from '../common/AppTheme';
 import { Haptic } from '../common/Haptic';
 import { MotionTokens } from '../common/MotionTokens';
 import { LayoutTokens } from '../common/LayoutTokens';
-import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
+import { YouTubeSearchController, YouTubeSearchState } from '../components/youtube/YouTubeSearchController';
+import { YouTubeDiscoveryController, YouTubeDiscoveryState } from '../components/youtube/YouTubeDiscoveryController';
 import { BasicDataSource } from '../common/BasicDataSource';
-import { YouTubeSearchHistoryStore } from '../common/YouTubeSearchHistoryStore';
 
 /**
  * YouTube 平台外壳：与哔哩哔哩同级，而不是底部 Dock 的第 4 个 Tab。
@@ -39,117 +38,47 @@ export struct YouTubeView {
   @StorageProp('headerFade') fade: number = 0;
   @State tab: number = 0;
   @State query: string = '';
-  @State searched: string = '';
-  @State loading: boolean = false;
-  @State error: string = '';
-  /** 下一页 token；空串表示没有更多（列表底部如实收尾，不假装还有）。 */
-  @State continuation: string = '';
-  @State loadingMore: boolean = false;
-  /** 翻页失败只在底部提示，已加载的结果保持不动。 */
-  @State moreError: string = '';
-  /**
-   * 结果列表数据源：LazyForEach 懒加载，翻页 append 只通知新增行、刷新 reset，
-   * 不再整组替换数组触发全列表 diff（同首页/搜索页的虚拟化做法）。
-   */
-  private videosSource: BasicDataSource<YouTubeVideo> = new BasicDataSource<YouTubeVideo>();
-  /** 行数镜像：BasicDataSource 不是响应式对象，四态切换由这个计数驱动（同 HomeView）。 */
-  @State resultCount: number = 0;
-  /**
-   * 缩略图 URL → 本地文件 URI；ArkUI Image() 不读应用代理，只能走应用自己的下载管线。
-   * 只在行构建/重绑时读取（cachedThumbnail 同款的只读内存约定），更新一律走数据源
-   * 单行通知，所以这里不再需要 @State，避免一张图就绪触发整个结果区重建。
-   */
-  private thumbLocal: Map<string, string> = new Map<string, string>();
+  @State search: YouTubeSearchState = new YouTubeSearchState();
+  @State discovery: YouTubeDiscoveryState = new YouTubeDiscoveryState();
+  private searchCtl: YouTubeSearchController = new YouTubeSearchController(
+    (state: YouTubeSearchState): void => { this.search = state; });
+  private discoveryCtl: YouTubeDiscoveryController = new YouTubeDiscoveryController(
+    (state: YouTubeDiscoveryState): void => { this.discovery = state; });
+  private videosSource: BasicDataSource<YouTubeVideo> = this.searchCtl.source;
   @State accountSheet: boolean = false;
   /** 本地稍后观看数量：由 YouTubeWatchLaterStore 广播，返回本页时不会读到旧值。 */
   @StorageProp('youtubeWatchLaterCount') savedCount: number = 0;
   @StorageProp('youtubeHistoryCount') historyCount: number = 0;
-  /** 输入联想（防抖后取回）与本地搜索历史；两者都与哔哩哔哩搜索页对等。 */
-  @State suggestions: Array<string> = [];
-  @State history: Array<string> = [];
-  /** 搜索筛选：定义来自结果页，选中后原样回传 params 重新搜索。 */
-  @State filterGroups: Array<YouTubeSearchFilterGroup> = [];
-  @State activeFilterLabel: string = '';
-  @State activeFilterParams: string = '';
   @State filterSheet: boolean = false;
   /** 双列/多列与左右内缩都随屏宽变化，与哔哩哔哩首页同一套 LayoutTokens 断点。 */
   @State viewportWidth: number = 360;
   /** Dock 激活色与弹跳比例：与主框架 FloatingTabs 取同一来源。 */
   @StorageProp('accentColor') accent: string = '#FB7299';
   @State tabScale: Array<number> = [1, 1, 1];
-  private request: RequestEpoch = new RequestEpoch();
-  private suggestEpoch: RequestEpoch = new RequestEpoch();
-  private suggestTimer: number = -1;
   private scroller: Scroller = new Scroller();
 
   aboutToAppear(): void {
-    YouTubeSearchHistoryStore.ensureLoaded().then((items: Array<string>) => {
-      this.history = items;
-    }).catch(() => {
-      // 历史读不出来不影响搜索本身。
-    });
+    this.searchCtl.activate();
+    this.discoveryCtl.activate();
   }
 
   aboutToDisappear(): void {
-    if (this.suggestTimer >= 0) clearTimeout(this.suggestTimer);
-    this.suggestTimer = -1;
-    this.suggestEpoch.invalidate();
-    this.request.invalidate();
+    this.searchCtl.dispose();
+    this.discoveryCtl.dispose();
   }
 
-  /**
-   * 输入联想：防抖 250ms 后请求，与哔哩哔哩搜索同一手感。
-   * 每次输入都换一个代际号，回来晚了的旧建议不会覆盖新输入的结果。
-   */
-  private scheduleSuggest(value: string): void {
-    if (this.suggestTimer >= 0) clearTimeout(this.suggestTimer);
-    this.suggestTimer = -1;
-    const term: string = value.trim();
-    if (term.length === 0) {
-      this.suggestEpoch.invalidate();
-      this.suggestions = [];
-      return;
-    }
-    const request: number = this.suggestEpoch.next();
-    this.suggestTimer = setTimeout(() => {
-      this.suggestTimer = -1;
-      YouTubeApi.suggest(term).then((items: Array<string>) => {
-        if (!this.suggestEpoch.isCurrent(request)) return;
-        // 点建议会程序化改写输入框文本，平台随后仍会回调一次 onChange；
-        // 对「正在展示结果的同一个词」不再弹联想，列表才不会点完立刻又冒出来。
-        this.suggestions = term === this.searched ? [] : items;
-      }).catch(() => {
-        if (this.suggestEpoch.isCurrent(request)) this.suggestions = [];
-      });
-    }, 250);
-  }
-
-  private clearSuggestions(): void {
-    if (this.suggestTimer >= 0) clearTimeout(this.suggestTimer);
-    this.suggestTimer = -1;
-    this.suggestEpoch.invalidate();
-    this.suggestions = [];
-  }
-
-  /** 清空输入即回到首页态：结果与游标一起复位，历史 chips 重新可见。 */
+  private scheduleSuggest(value: string): void { this.discoveryCtl.suggest(value); }
+  private clearSuggestions(): void { this.discoveryCtl.clearSuggestions(); }
   private resetResults(): void {
-    if (this.searched.length === 0 && this.resultCount === 0) return;
-    this.request.next();
-    this.searched = '';
-    this.videosSource.clear();
-    this.resultCount = 0;
-    this.continuation = '';
-    this.error = '';
-    this.moreError = '';
-    this.loading = false;
-    this.loadingMore = false;
-    this.thumbLocal = new Map<string, string>();
+    this.searchCtl.clear();
+    this.discoveryCtl.submit('', false);
   }
 
   /** 平台切换：先让在途请求失效，再广播，避免旧结果写进新平台状态。 */
   private backToBili(): void {
     Haptic.light();
-    this.request.invalidate();
+    this.searchCtl.dispose();
+    this.discoveryCtl.dispose();
     PlatformStore.switchTo(PlatformStore.BILI);
   }
 
@@ -172,140 +101,31 @@ export struct YouTubeView {
       return;
     }
     // 只有真正发起的搜索词才进历史：粘链接直接进详情不算搜索。
-    this.history = YouTubeSearchHistoryStore.add(query);
+    this.discoveryCtl.submit(query);
     this.runSearch(query);
   }
 
-  /** 换关键词时清掉旧筛选；同一关键词下换筛选则保留（由 applyFilter 传入 params）。 */
-  private runSearch(query: string, filterParams: string = ''): void {
-    if (query !== this.searched) {
-      this.activeFilterLabel = '';
-      this.activeFilterParams = '';
-      this.filterGroups = [];
-    }
-    const token: number = this.request.next();
-    this.loading = true;
-    this.error = '';
-    this.moreError = '';
-    this.searched = query;
-    this.activeFilterParams = filterParams;
-    this.videosSource.clear();
-    this.resultCount = 0;
-    this.continuation = '';
-    this.thumbLocal = new Map<string, string>();
+  private runSearch(query: string, filterParams: string = '', filterLabel: string = ''): void {
+    this.discoveryCtl.submit(query, false);
     this.scroller.scrollTo({ xOffset: 0, yOffset: 0 });
-    YouTubeApi.search(query, filterParams).then((page: YouTubeSearchPage) => {
-      if (!this.request.isCurrent(token)) return;
-      // 先 reset 再预取：同一同步块内完成，首帧行构建时 thumbLocal 已填好磁盘命中项。
-      this.videosSource.reset(page.videos);
-      this.resultCount = page.videos.length;
-      this.continuation = page.continuation;
-      if (page.filters.length > 0) this.filterGroups = page.filters;
-      this.primeThumbnails(page.videos);
-    }).catch((e: Object) => {
-      if (!this.request.isCurrent(token)) return;
-      this.error = (e as Error).message || '搜索失败，请重试';
-    }).finally(() => {
-      if (this.request.isCurrent(token)) this.loading = false;
-    });
+    this.searchCtl.search(query, filterParams, filterLabel);
   }
 
-  /** 应用某个筛选项：同一个关键词重新搜一次，保留筛选标签以便取消。 */
   private applyFilter(filter: YouTubeSearchFilter): void {
     Haptic.light();
     this.filterSheet = false;
-    this.activeFilterLabel = filter.label;
-    this.runSearch(this.searched, filter.params);
+    this.runSearch(this.search.searched, filter.params, filter.label);
   }
 
   private clearFilter(): void {
     Haptic.light();
-    this.activeFilterLabel = '';
-    if (this.searched.length > 0) this.runSearch(this.searched, '');
+    if (this.search.searched.length > 0) this.runSearch(this.search.searched);
   }
 
-  /** 跨页去重：同一视频可能同时出现在两页，重复 id 会让列表键冲突。 */
-  private appendVideos(incoming: Array<YouTubeVideo>): void {
-    const seen: Set<string> = new Set<string>();
-    const all: Array<YouTubeVideo> = this.videosSource.getAll();
-    for (const video of all) {
-      seen.add(video.id);
-    }
-    const fresh: Array<YouTubeVideo> = [];
-    for (const video of incoming) {
-      if (seen.has(video.id)) continue;
-      seen.add(video.id);
-      fresh.push(video);
-    }
-    // 翻页只把新增行 append 进数据源：LazyForEach 逐行收 onDataAdd，已加载的卡片不重建。
-    this.videosSource.append(fresh);
-    this.resultCount = this.videosSource.totalCount();
-  }
+  private loadMore(): void { this.searchCtl.loadMore(); }
 
-  /** 触底加载下一页；失败保留已有结果，只在底部显示错误与重试。 */
-  private loadMore(): void {
-    if (this.loading || this.loadingMore || this.moreError.length > 0) return;
-    if (this.continuation.length === 0) return;
-    const request: number = this.request.next();
-    const token: string = this.continuation;
-    this.loadingMore = true;
-    YouTubeApi.searchMore(token).then((page: YouTubeSearchPage) => {
-      if (!this.request.isCurrent(request)) return;
-      this.appendVideos(page.videos);
-      this.continuation = page.continuation;
-    }).catch((e: Object) => {
-      if (!this.request.isCurrent(request)) return;
-      this.moreError = (e as Error).message || '加载更多失败，请重试';
-    }).finally(() => {
-      if (this.request.isCurrent(request)) this.loadingMore = false;
-    });
-  }
-
-  /**
-   * 缩略图两段式：先认缓存记录命中（cachedThumbnail 只读内存，零同步 IO），行构建时
-   * 直接用本地文件（本地解码很快，不需要再看一次淡入）；未命中（含冷启动磁盘待恢复）
-   * 的走应用 HTTP 栈的异步管线——已有文件只做异步校验后直接复用，缺文件才真正下载。
-   * 这里只负责把缓存填进 thumbLocal、把缺的送去下载；就绪后的显示刷新由
-   * downloadThumbnail 的数据源单行通知驱动，不再整体替换任何状态触发全列表 diff。
-   * 这样在只能靠代理出网的环境里卡片不会整片空白，命中后也不再重复请求 CDN。
-   */
-  private primeThumbnails(list: Array<YouTubeVideo>): void {
-    const pending: Array<string> = [];
-    for (const video of list) {
-      const url: string = video.thumbnail;
-      if (url.length === 0) continue;
-      const cached: string = RemoteAssetCache.cachedThumbnail(url);
-      if (cached !== url) this.thumbLocal.set(url, cached);
-      else if (!pending.includes(url)) pending.push(url);
-    }
-    for (const url of pending) this.downloadThumbnail(url);
-  }
-
-  private downloadThumbnail(url: string): void {
-    RemoteAssetCache.ensureThumbnail(url).then((local: string) => {
-      if (local === url || this.thumbLocal.get(url) === local) return;
-      // 结果已被换掉（新搜索／已离开）时不再写回，避免旧列表的图混进新列表。
-      const all: Array<YouTubeVideo> = this.videosSource.getAll();
-      let index: number = -1;
-      for (let i: number = 0; i < all.length; i++) {
-        if (all[i].thumbnail === url) {
-          index = i;
-          break;
-        }
-      }
-      if (index < 0) return;
-      this.thumbLocal.set(url, local);
-      // 单行通知：只有这一行的封面源变了，LazyForEach 只重绑该行（原先是全列表 diff）。
-      this.videosSource.updateItem(index, all[index]);
-    }).catch(() => {
-      // 下载失败保持远端 URL，交给 Image 组件自己的加载与占位逻辑。
-    });
-  }
-
-  /** 卡片封面：优先本地缓存文件，未命中时回落到远端 URL（只读内存记录，构建期零 IO）。 */
   private thumbnailOf(video: YouTubeVideo): string {
-    const local: string | undefined = this.thumbLocal.get(video.thumbnail);
-    return local !== undefined && local.length > 0 ? local : video.thumbnail;
+    return this.searchCtl.thumbnails.resolve(video.thumbnail);
   }
 
   /** 分类 chip：填入关键词并切到搜索 Tab 展示结果。 */
@@ -464,9 +284,9 @@ export struct YouTubeView {
    */
   @Builder
   Suggestions() {
-    if (this.suggestions.length > 0) {
+    if (this.discovery.suggestions.length > 0) {
       Column() {
-        ForEach(this.suggestions, (word: string, index: number) => {
+        ForEach(this.discovery.suggestions, (word: string, index: number) => {
           Row({ space: 8 }) {
             Image($r('app.media.ic_search'))
               .width(14).height(14).renderMode(ImageRenderMode.Template)
@@ -482,7 +302,7 @@ export struct YouTubeView {
             this.query = word;
             this.submitSearch();
           })
-          if (index < this.suggestions.length - 1) {
+          if (index < this.discovery.suggestions.length - 1) {
             Divider().strokeWidth(0.5).margin({ left: 34 })
               .color(this.isDark ? '#1FFFFFFF' : '#0F000000')
           }
@@ -496,7 +316,7 @@ export struct YouTubeView {
   /** 搜索历史：规格与哔哩哔哩搜索页 chips 一致（含单条删除与清空）。 */
   @Builder
   HistoryChips() {
-    if (this.history.length > 0) {
+    if (this.discovery.history.length > 0) {
       Column({ space: 8 }) {
         Row() {
           Text('搜索历史').fontSize(15).fontWeight(FontWeight.Bold)
@@ -504,12 +324,11 @@ export struct YouTubeView {
           Blank()
           Text('清空').fontSize(12).fontColor('#9499A0')
             .onClick(() => {
-              YouTubeSearchHistoryStore.clear();
-              this.history = [];
+              this.discoveryCtl.clearHistory();
             })
         }.width('100%')
         Flex({ wrap: FlexWrap.Wrap }) {
-          ForEach(this.history, (word: string) => {
+          ForEach(this.discovery.history, (word: string) => {
             Row({ space: 5 }) {
               Text(word)
                 .fontSize(12).maxLines(1)
@@ -523,7 +342,7 @@ export struct YouTubeView {
               Image($r('app.media.ic_close'))
                 .width(10).height(10).fillColor('#9499A0')
                 .onClick(() => {
-                  this.history = YouTubeSearchHistoryStore.remove(word);
+                  this.discoveryCtl.removeHistory(word);
                 })
             }
             .padding({ left: 10, right: 8, top: 6, bottom: 6 })
@@ -557,8 +376,8 @@ export struct YouTubeView {
             .onClick(() => this.searchCategory(name))
         }, (name: string) => name)
       }.width('100%')
-      if (this.resultCount > 0 && this.searched.length > 0) {
-        Text('「' + this.searched + '」的结果').fontSize(13).width('100%')
+      if (this.search.count > 0 && this.search.searched.length > 0) {
+        Text('「' + this.search.searched + '」的结果').fontSize(13).width('100%')
           .fontColor(this.isDark ? '#C8C8CC' : '#5A5F66')
       }
       this.ResultArea()
@@ -577,20 +396,19 @@ export struct YouTubeView {
   @Builder
   ResultFooter() {
     Row({ space: 8 }) {
-      if (this.loadingMore) {
+      if (this.search.loadingMore) {
         LoadingProgress().width(20).height(20).color(AppTheme.DANGER)
         Text('正在加载更多…').fontSize(12).fontColor(this.isDark ? '#D0D0D0' : '#676B72')
-      } else if (this.moreError.length > 0) {
-        Text(this.moreError).fontSize(12).maxLines(1)
+      } else if (this.search.moreError.length > 0) {
+        Text(this.search.moreError).fontSize(12).maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
           .fontColor(this.isDark ? '#FFAAAA' : '#B3261E')
         Text('重试').fontSize(12).fontColor(AppTheme.DANGER)
           .padding({ left: 12, right: 12, top: 6, bottom: 6 })
           .onClick(() => {
-            this.moreError = '';
-            this.loadMore();
+            this.searchCtl.loadMore(true);
           })
-      } else if (this.continuation.length === 0) {
+      } else if (this.search.continuation.length === 0) {
         Text('—— 到底啦 ——').fontSize(12).fontColor('#9499A0')
       }
     }
@@ -606,14 +424,14 @@ export struct YouTubeView {
     Row({ space: 8 }) {
       Text('筛选')
         .fontSize(12)
-        .fontColor(this.activeFilterLabel.length > 0 ? AppTheme.DANGER : (this.isDark ? '#E6E6E6' : '#454A50'))
+        .fontColor(this.search.filterLabel.length > 0 ? AppTheme.DANGER : (this.isDark ? '#E6E6E6' : '#454A50'))
         .height(30).padding({ left: 14, right: 14 })
         .borderRadius(15)
         .backgroundColor(this.isDark ? '#2B2D34' : '#EDEFF2')
         .onClick(() => { this.filterSheet = true; })
-      if (this.activeFilterLabel.length > 0) {
+      if (this.search.filterLabel.length > 0) {
         Row({ space: 5 }) {
-          Text(this.activeFilterLabel).fontSize(12).fontColor(AppTheme.DANGER).maxLines(1)
+          Text(this.search.filterLabel).fontSize(12).fontColor(AppTheme.DANGER).maxLines(1)
           Image($r('app.media.ic_close')).width(10).height(10).fillColor(AppTheme.DANGER)
         }
         .height(30).padding({ left: 12, right: 10 })
@@ -634,7 +452,7 @@ export struct YouTubeView {
       Column({ space: 14 }) {
         Text('搜索过滤条件').fontSize(17).fontWeight(FontWeight.Bold).width('100%')
           .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-        ForEach(this.filterGroups, (group: YouTubeSearchFilterGroup) => {
+        ForEach(this.search.filterGroups, (group: YouTubeSearchFilterGroup) => {
           Column({ space: 8 }) {
             Text(group.title).fontSize(13).fontWeight(FontWeight.Medium).width('100%')
               .fontColor(this.isDark ? '#C8C8CC' : '#5A5F66')
@@ -642,12 +460,12 @@ export struct YouTubeView {
               ForEach(group.filters, (filter: YouTubeSearchFilter) => {
                 Text(filter.label)
                   .fontSize(13)
-                  .fontColor(filter.params === this.activeFilterParams ?
+                  .fontColor(filter.params === this.search.filterParams ?
                     '#FFFFFF' : (this.isDark ? '#E6E6E6' : '#18191C'))
                   .padding({ left: 14, right: 14, top: 8, bottom: 8 })
                   .borderRadius(17)
                   .margin({ right: 8, bottom: 8 })
-                  .backgroundColor(filter.params === this.activeFilterParams ? AppTheme.DANGER :
+                  .backgroundColor(filter.params === this.search.filterParams ? AppTheme.DANGER :
                     (this.isDark ? '#2B2D34' : '#F0F1F3'))
                   .onClick(() => this.applyFilter(filter))
               }, (filter: YouTubeSearchFilter) => filter.params)
@@ -664,20 +482,22 @@ export struct YouTubeView {
   @Builder
   ResultArea() {
     // 筛选条放在四态之外：结果为空时也必须能取消筛选，否则用户会被自己筛进去出不来。
-    if (this.filterGroups.length > 0 && !this.loading) this.FilterBar()
-    if (this.loading) {
+    if (this.search.filterGroups.length > 0 && !this.search.loading) this.FilterBar()
+    if (this.search.loading) {
       Column({ space: 12 }) {
         LoadingProgress().width(36).height(36).color(AppTheme.DANGER)
         Text('正在搜索 YouTube…').fontColor(this.isDark ? '#AAAAAA' : '#666666')
       }.layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
-    } else if (this.error.length > 0) {
+    } else if (this.search.error.length > 0) {
       Column({ space: 16 }) {
-        Text(this.error).fontSize(15).fontColor(this.isDark ? '#CCCCCC' : '#666666').textAlign(TextAlign.Center)
+        Text(this.search.error).fontSize(15).fontColor(this.isDark ? '#CCCCCC' : '#666666').textAlign(TextAlign.Center)
         Button('重试').onClick(() => {
-          if (this.searched.length > 0) this.runSearch(this.searched);
+          if (this.search.searched.length > 0) {
+            this.runSearch(this.search.searched, this.search.filterParams, this.search.filterLabel);
+          }
         })
       }.layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
-    } else if (this.resultCount > 0) {
+    } else if (this.search.count > 0) {
       Column() {
         // 双列网格：与哔哩哔哩首页一致的 lanes 瀑布流布局与列间距。
         // LazyForEach 直接挂在滚动容器下：视口 + cachedCount 之外的行不创建，翻页/封面
@@ -712,9 +532,9 @@ export struct YouTubeView {
       .width('100%').layoutWeight(1)
     } else {
       Column({ space: 12 }) {
-        Text(this.searched.length > 0 ? '没有找到相关视频' : '探索 YouTube')
+        Text(this.search.searched.length > 0 ? '没有找到相关视频' : '探索 YouTube')
           .fontSize(20).fontWeight(FontWeight.Medium).fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-        Text(this.searched.length > 0 ? '换个关键词再试试' :
+        Text(this.search.searched.length > 0 ? '换个关键词再试试' :
           '搜索感兴趣的内容，或粘贴视频链接开始观看')
           .fontSize(14).fontColor('#888888').textAlign(TextAlign.Center)
       }.layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
@@ -727,7 +547,7 @@ export struct YouTubeView {
       this.SearchField('search')
       this.Suggestions()
       // 输入为空（首页态）时给历史；一有输入就交给联想与结果。
-      if (this.query.trim().length === 0 && this.suggestions.length === 0) {
+      if (this.query.trim().length === 0 && this.discovery.suggestions.length === 0) {
         this.HistoryChips()
       }
       this.ResultArea()

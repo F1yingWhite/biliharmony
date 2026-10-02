@@ -7,264 +7,120 @@ import { Immersive } from '../common/Immersive';
 import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   ImageViewerParam, ImageViewerSrcRect, NAV_IMAGE_VIEWER, NAV_LOGIN, NAV_VIDEO_DETAIL,
   VideoDetailParam, setHeroBgSnapshot } from '../common/AppRouter';
-import { BiliApi, ActionResult } from '../api/BiliApi';
-import { MessageSessionItem, MessageSessionPageData, PrivateMessageItem, PrivateMessagePageData } from '../model/Models';
+import { MessageSessionItem, PrivateMessageItem } from '../model/Models';
 import { UserStore } from '../services/auth/UserStore';
-import { AuthSession } from '../services/auth/AuthSession';
 import { MsgUnreadStore } from '../services/message/MsgUnreadStore';
 import { colorWithAlpha, formatRelativeTime } from '../common/Utils';
 import { LoadingView } from '../components/LoadingView';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { MsgNotifyList } from '../components/MsgNotifyList';
 import { PageHeader } from '../components/PageHeader';
-import { BasicDataSource } from '../common/BasicDataSource';
-import { MessageApi } from '../api/MessageApi';
 import { biliImageOriginal, biliImageThumbnail } from '../common/ImageUrl';
-import { compareMessageCursor } from '../common/MessageCursor';
+
+import { SessionListController } from '../components/message/SessionListController';
+import { PrivateChatSession } from '../components/message/PrivateChatSession';
+import { SessionListState, PrivateChatState, SessionActionSnapshot, ChatActionSnapshot,
+  ChatScrollRequest } from '../components/message/MessageState';
+import { privateMessageIdentity, sessionRowIdentity } from '../components/message/MessageIdentity';
 
 @Component
 export struct MessagesPage {
   @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
-  @State current: MessageSessionItem = new MessageSessionItem();
-  /** 聊天记录数据源：老消息 prepend、新消息 append 均增量通知 LazyForEach，不整表重建。 */
-  private messagesSource: BasicDataSource<PrivateMessageItem> = new BasicDataSource<PrivateMessageItem>();
-  @State sessionLoading: boolean = false;
-  @State messageLoading: boolean = false;
-  @State sessionError: string = '';
-  @State messageError: string = '';
-  @State hasMore: boolean = true;
-  @State sessionHasMore: boolean = true;
-  @State sessionCount: number = 0;
-  @State minSeqno: number = 0;
-  private minSeqnoText: string = '';
-  @State draft: string = '';
-  @State sending: boolean = false;
-  @State readAllLoading: boolean = false;
+  @State sessions: SessionListState = new SessionListState();
+  @State chat: PrivateChatState = new PrivateChatState();
+  private listController: SessionListController = new SessionListController(
+    (state: SessionListState) => this.sessions = state,
+    (message: string) => this.showToast(message),
+    (talkerId: number, cursor: string) => this.chatController.confirmRead(talkerId, cursor));
+  private chatController: PrivateChatSession = new PrivateChatSession(
+    (state: PrivateChatState) => this.chat = state,
+    (message: string) => this.showToast(message),
+    (request: ChatScrollRequest) => this.scheduleMessageScroll(request),
+    (talkerId: number, cursor: string) => this.listController.acknowledge(talkerId, cursor));
   @State viewportWidth: number = 400;
   private messageScroller: Scroller = new Scroller();
   private firstVisibleMessage: number = 0;
-  private pendingScrollIndex: number | null = null;
   private scrollTimer: number = -1;
-  /** 顶部分类 Tab：0 私信 1 回复 2 @我 3 赞 4 系统 */
+  private active: boolean = false;
   @State activeTab: number = 0;
-  @StorageProp('messageThreadOpen') threadOpen: boolean = false;
+  @StorageProp('messageThreadOpen') @Watch('onThreadOpenChanged') threadOpen: boolean = false;
+  @StorageProp('loginVersion') @Watch('onLoginChanged') loginVersion: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
-  private sessionsSource: BasicDataSource<MessageSessionItem> = new BasicDataSource<MessageSessionItem>();
   private tabs: Array<string> = ['私信', '回复', '@我', '赞', '系统'];
-  /** 通知列表惰性挂载：首次切到对应 Tab 才创建，避免一进页面就并发五个请求。 */
   @State tabMounted: Array<boolean> = [true, false, false, false, false];
-  /** 会话请求代际：切换会话后丢弃旧会话返回的数据。 */
-  private messageGeneration: number = 0;
-  /** 本页面已确认的最大序号，防止晚到的会话列表响应恢复旧未读数。 */
-  private confirmedReadSeqnos: Map<number, string> = new Map<number, string>();
-  private readAuthSession: number = AuthSession.version;
 
   aboutToAppear(): void {
-    AppStorage.setOrCreate<boolean>('messageThreadOpen', false);
+    this.active = true;
+    this.activateAccount();
+  }
+
+  private activateAccount(): void {
+    this.closeThread();
+    this.listController.activate();
     if (!UserStore.isLogin) {
       AppNavStack.replacePathByName(NAV_LOGIN, null);
       return;
     }
-    this.loadSessions(true).catch(() => {
-    });
+    this.listController.load(true).catch(() => {});
   }
 
-  async loadSessions(reset: boolean): Promise<void> {
-    const authSession: number = this.ensureReadSession();
-    if (this.sessionLoading || (!reset && !this.sessionHasMore)) return;
-    this.sessionLoading = true;
-    try {
-      const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
-      const beginTs: number = reset || all.length === 0 ? 0 : all[all.length - 1].sessionTs;
-      const data: MessageSessionPageData = await MessageApi.getMessageSessions(beginTs);
-      if (authSession !== AuthSession.version) return;
-      if (data.error.length > 0) {
-        // 失败不清空已有列表；首次加载失败时由 LoadingView 展示原因与重试。
-        if (reset) this.sessionError = data.error;
-        return;
-      }
-      this.sessionError = '';
-      const sessions: Array<MessageSessionItem> = this.applyConfirmedReads(data.sessions);
-      if (reset) {
-        this.sessionsSource.reset(sessions);
-      } else {
-        this.sessionsSource.append(this.dedupSessions(sessions));
-      }
-      // BasicDataSource 只会刷新已挂载的 LazyForEach；首屏列表尚未挂载时，
-      // 必须用 @State 切换“加载态 / 列表”外层分支。
-      this.sessionCount = this.sessionsSource.totalCount();
-      this.sessionHasMore = data.hasMore;
-    } finally {
-      if (authSession === AuthSession.version) this.sessionLoading = false;
-    }
+  private onLoginChanged(): void {
+    if (!this.active) return;
+    this.activeTab = 0;
+    this.tabMounted = [true, false, false, false, false];
+    this.activateAccount();
   }
 
-  /** 分页去重：B 站会话接口按 session_ts 翻页，边界处可能重复返回同一会话。 */
-  private dedupSessions(incoming: Array<MessageSessionItem>): Array<MessageSessionItem> {
-    const seen: Set<number> = new Set<number>();
-    const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
-    for (let i: number = 0; i < all.length; i++) {
-      seen.add(all[i].talkerId);
-    }
-    const out: Array<MessageSessionItem> = [];
-    for (let i: number = 0; i < incoming.length; i++) {
-      if (!seen.has(incoming[i].talkerId)) {
-        seen.add(incoming[i].talkerId);
-        out.push(incoming[i]);
-      }
-    }
-    return out;
+  private onThreadOpenChanged(): void {
+    // 系统返回键由 Index 关闭 storage；同样要使进行中的聊天请求失效。
+    if (!this.threadOpen && this.chat.open) this.closeThread();
   }
 
   async openSession(item: MessageSessionItem): Promise<void> {
-    this.messageGeneration++;
-    this.current = item;
-    this.draft = '';
-    this.pendingScrollIndex = null;
+    this.cancelMessageScroll();
+    this.firstVisibleMessage = 0;
     AppStorage.setOrCreate<boolean>('messageThreadOpen', true);
-    this.messagesSource.clear();
-    this.messageError = '';
-    this.minSeqno = 0;
-    this.minSeqnoText = '';
-    this.hasMore = true;
-    await this.loadMessages(true);
+    await this.chatController.open(item);
+    if (!this.chat.open) AppStorage.setOrCreate<boolean>('messageThreadOpen', false);
   }
 
-  async loadMessages(reset: boolean): Promise<void> {
-    const authSession: number = this.ensureReadSession();
-    if (this.current.talkerId === 0 || (!reset && (this.messageLoading || !this.hasMore))) return;
-    const generation: number = this.messageGeneration;
-    this.messageLoading = true;
-    const talkerId: number = this.current.talkerId;
-    const sessionSeqno: string = this.current.maxSeqno;
-    try {
-      const beginSeqno: number | string = reset ? 0 : (this.minSeqnoText.length > 0 ? this.minSeqnoText : this.minSeqno);
-      const data: PrivateMessagePageData = await MessageApi.getPrivateMessages(talkerId, beginSeqno);
-      if (authSession !== AuthSession.version || generation !== this.messageGeneration || this.current.talkerId !== talkerId) return;
-      if (data.error.length > 0) {
-        this.messageError = data.error;
-        return;
-      }
-      this.messageError = '';
-      const previousCount: number = this.messagesSource.totalCount();
-      const firstVisible: number = this.firstVisibleMessage;
-      if (reset) {
-        this.messagesSource.reset(data.messages);
-      } else {
-        // 向前翻页：增量插到头部，不整表 reset，避免已渲染消息重建导致滚动位置丢失。
-        this.messagesSource.prepend(this.freshOlderMessages(data.messages));
-      }
-      // 首次进入看最新消息；向前翻页保留原来的阅读位置。
-      this.pendingScrollIndex = reset ? -1 : firstVisible + this.messagesSource.totalCount() - previousCount;
-      this.scheduleMessageScroll();
-      this.minSeqno = data.minSeqno > 0 ? data.minSeqno : this.minSeqno;
-      if (/^\d+$/.test(data.minSeqnoText)) this.minSeqnoText = data.minSeqnoText;
-      this.hasMore = data.hasMore;
-      if (reset) {
-        let ackSeqno: string = data.messages.length === 0 ? sessionSeqno : '';
-        for (let i: number = 0; i < data.messages.length; i++) {
-          const seqno: string = data.messages[i].seqnoText;
-          if (/^\d+$/.test(seqno) && (ackSeqno.length === 0 || compareMessageCursor(seqno, ackSeqno) > 0)) {
-            ackSeqno = seqno;
-          }
-        }
-        // 空历史仍可按会话游标确认；有记录只确认已展示的最大精确序号。
-        this.acknowledgeSession(talkerId, ackSeqno, authSession).catch(() => {});
-      }
-    } catch (e) {
-      if (authSession === AuthSession.version && generation === this.messageGeneration) this.messageError = '消息加载失败，请重试';
-    } finally {
-      if (authSession === AuthSession.version && generation === this.messageGeneration) this.messageLoading = false;
-    }
-  }
-
-  /** 向前翻页去重：跳过本地已有 seqno（分页边界可能重复返回），只把新消息增量 prepend。 */
-  private messageIdentity(item: PrivateMessageItem): string {
-    return item.seqnoText.length > 0 ? item.seqnoText : 'local-' + String(item.seqno);
-  }
-
-  private freshOlderMessages(older: Array<PrivateMessageItem>): Array<PrivateMessageItem> {
-    const seen: Set<string> = new Set<string>();
-    const all: Array<PrivateMessageItem> = this.messagesSource.getAll();
-    for (let i: number = 0; i < all.length; i++) {
-      seen.add(this.messageIdentity(all[i]));
-    }
-    const out: Array<PrivateMessageItem> = [];
-    for (let i: number = 0; i < older.length; i++) {
-      const identity: string = this.messageIdentity(older[i]);
-      if (!seen.has(identity)) {
-        seen.add(identity);
-        out.push(older[i]);
-      }
-    }
-    return out;
-  }
-
-  async send(): Promise<void> {
-    const content: string = this.draft.trim();
-    const user = UserStore.current;
-    const talkerId: number = this.current.talkerId;
-    const generation: number = this.messageGeneration;
-    if (content.length === 0 || user === null || talkerId === 0 || this.sending) return;
-    this.sending = true;
-    try {
-      const result: ActionResult = await MessageApi.sendPrivateMessage(user.mid, talkerId, content);
-      if (generation !== this.messageGeneration || this.current.talkerId !== talkerId) return;
-      if (!result.ok) {
-        this.getUIContext().getPromptAction().showToast({ message: result.message });
-        return;
-      }
-      const local: PrivateMessageItem = new PrivateMessageItem();
-      local.senderId = user.mid;
-      local.receiverId = talkerId;
-      local.text = content;
-      local.timestamp = Math.floor(Date.now() / 1000);
-      local.seqno = Date.now();
-      // 服务端确认成功后追加到尾部（现状即非乐观发送），数据源增量通知尾部插入。
-      this.messagesSource.append([local]);
-      this.pendingScrollIndex = -1;
-      this.scheduleMessageScroll();
-      if (this.draft.trim() === content) this.draft = '';
-    } catch (e) {
-      if (generation === this.messageGeneration && this.current.talkerId === talkerId) {
-        this.getUIContext().getPromptAction().showToast({ message: '发送失败，请检查网络' });
-      }
-    } finally {
-      this.sending = false;
-    }
+  private closeThread(): void {
+    this.cancelMessageScroll();
+    this.chatController.close();
+    AppStorage.setOrCreate<boolean>('messageThreadOpen', false);
   }
 
   goBack(): void {
-    if (this.threadOpen) {
-      this.messageGeneration++;
-      this.messageLoading = false;
-      AppStorage.setOrCreate<boolean>('messageThreadOpen', false);
-    } else {
-      AppNavStack.pop();
-    }
+    if (this.threadOpen) this.closeThread();
+    else AppNavStack.pop();
   }
 
   aboutToDisappear(): void {
-    this.messageGeneration++;
-    if (this.scrollTimer >= 0) clearTimeout(this.scrollTimer);
-    // 离开消息中心回到首页时重新拉一次未读数，让头栏角标与服务端已读状态对齐。
-    MsgUnreadStore.refresh().catch(() => {
-    });
+    this.active = false;
+    this.closeThread();
+    this.listController.dispose();
+    MsgUnreadStore.refresh().catch(() => {});
   }
 
-  private scheduleMessageScroll(): void {
-    const index: number | null = this.pendingScrollIndex;
-    if (index === null || !this.threadOpen) return;
-    this.pendingScrollIndex = null;
-    const generation: number = this.messageGeneration;
+  private cancelMessageScroll(): void {
     if (this.scrollTimer >= 0) clearTimeout(this.scrollTimer);
+    this.scrollTimer = -1;
+  }
+
+  private scheduleMessageScroll(request: ChatScrollRequest): void {
+    const index: number = request.latest ? -1 : this.firstVisibleMessage + request.added;
+    this.cancelMessageScroll();
     this.scrollTimer = setTimeout(() => {
       this.scrollTimer = -1;
-      if (!this.threadOpen || generation !== this.messageGeneration) return;
-      if (index < 0) this.messageScroller.scrollToIndex(this.messagesSource.totalCount(), false, ScrollAlign.END);
+      if (!this.threadOpen || !this.chatController.isCurrent(request.session)) return;
+      if (index < 0) this.messageScroller.scrollToIndex(this.chatController.source.totalCount(), false, ScrollAlign.END);
       else this.messageScroller.scrollToIndex(index, false, ScrollAlign.START);
     }, 120);
+  }
+
+  private showToast(message: string): void {
+    if (this.active) this.getUIContext().getPromptAction().showToast({ message: message });
   }
 
   private bubbleWidth(): number {
@@ -273,8 +129,8 @@ export struct MessagesPage {
 
   @Builder
   SessionAvatar() {
-    if (this.current.talkerId > 0 && this.current.avatar.length > 0) {
-      Image(this.current.avatar).width(30).height(30).borderRadius(15).objectFit(ImageFit.Cover)
+    if (this.chat.current.talkerId > 0 && this.chat.current.avatar.length > 0) {
+      Image(this.chat.current.avatar).width(30).height(30).borderRadius(15).objectFit(ImageFit.Cover)
     }
   }
 
@@ -328,172 +184,53 @@ export struct MessagesPage {
     )
   }
 
-  /** 长按会话弹出操作菜单：置顶切换 + 删除。 */
   private promptSessionActions(item: MessageSessionItem): void {
-    const isDark: boolean = this.isDark;
+    const action: SessionActionSnapshot | null = this.listController.captureAction(item);
+    if (action === null) return;
     try {
       this.getUIContext().getPromptAction().showActionMenu({
-        title: item.name.length > 0 ? item.name : '会话操作',
+        title: action.item.name.length > 0 ? action.item.name : '会话操作',
         buttons: [
-          { text: item.pinned ? '取消置顶' : '置顶', color: isDark ? '#E6E6E6' : '#18191C' },
+          { text: action.item.pinned ? '取消置顶' : '置顶', color: this.isDark ? '#E6E6E6' : '#18191C' },
           { text: '删除会话', color: AppTheme.DANGER },
         ],
       }).then((result) => {
+        if (!this.listController.actionCurrent(action)) return;
         const index: number = Number(result.index);
-        if (index === 0) this.togglePinSession(item);
-        else if (index === 1) this.confirmRemoveSession(item);
-      });
-    } catch (e) {
-      // 弹窗失败忽略。
+        if (index === 0) this.listController.togglePin(action).catch(() => {});
+        else if (index === 1) this.showRemoveDialog(action);
+      }).catch(() => {});
+    } catch (error) {
+      // 原生菜单不可用时保留会话。
     }
   }
 
-  /** 置顶/取消置顶会话：成功后更新本地 pinned 标记并重排（置顶在前）。 */
-  private togglePinSession(item: MessageSessionItem): void {
-    if (item.talkerId <= 0) {
-      this.getUIContext().getPromptAction().showToast({ message: '该会话不支持置顶' });
-      return;
-    }
-    MessageApi.pinSession(item.talkerId, !item.pinned)
-      .then((r: ActionResult) => {
-        this.getUIContext().getPromptAction().showToast({ message: r.message });
-        if (!r.ok) return;
-        const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
-        for (let i: number = 0; i < all.length; i++) {
-          all[i].pinned = all[i].talkerId === item.talkerId ? !item.pinned : false;
-        }
-        all.sort((a: MessageSessionItem, b: MessageSessionItem): number => {
-          if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-          return b.sessionTs - a.sessionTs;
-        });
-        this.sessionsSource.reset(all);
-      })
-      .catch(() => {
-        this.getUIContext().getPromptAction().showToast({ message: '网络异常，操作失败' });
-      });
-  }
-
-  /** 长按删除私信会话：确认后调服务端删除，成功后本地移除该会话行。 */
   private confirmRemoveSession(item: MessageSessionItem): void {
-    if (item.talkerId <= 0) {
-      this.getUIContext().getPromptAction().showToast({ message: '该会话不支持删除' });
-      return;
-    }
+    const action: SessionActionSnapshot | null = this.listController.captureAction(item);
+    if (action !== null) this.showRemoveDialog(action);
+  }
+
+  private showRemoveDialog(action: SessionActionSnapshot): void {
+    if (!this.listController.actionCurrent(action)) return;
     try {
       this.getUIContext().getPromptAction().showDialog({
         title: '删除会话',
         message: '删除后聊天记录不再显示（对方记录不受影响）。确定删除吗？',
-        buttons: [
-          { text: '取消', color: '#9499A0' },
-          { text: '删除', color: AppTheme.DANGER },
-        ],
-      }).then((dialogResult) => {
-        if (Number(dialogResult.index) !== 1) return;
-        MessageApi.removeSession(item.talkerId)
-          .then((r: ActionResult) => {
-            if (r.ok) {
-              this.sessionsSource.reset(
-                this.sessionsSource.getAll().filter((x: MessageSessionItem) => x.talkerId !== item.talkerId));
-              this.sessionCount = this.sessionsSource.totalCount();
-              this.getUIContext().getPromptAction().showToast({ message: '会话已删除' });
-            } else {
-              this.getUIContext().getPromptAction().showToast({ message: r.message });
-            }
-          })
-          .catch(() => {
-            this.getUIContext().getPromptAction().showToast({ message: '删除失败，请稍后重试' });
-          });
-      });
-    } catch (e) {
-      // 弹窗失败不阻塞。
+        buttons: [{ text: '取消', color: '#9499A0' }, { text: '删除', color: AppTheme.DANGER }],
+      }).then((result) => {
+        if (Number(result.index) === 1) this.listController.remove(action).catch(() => {});
+      }).catch(() => {});
+    } catch (error) {
+      // 未确认的操作不会提交。
     }
   }
 
-  private ensureReadSession(): number {
-    const authSession: number = AuthSession.version;
-    if (this.readAuthSession !== authSession) {
-      this.confirmedReadSeqnos.clear();
-      this.readAuthSession = authSession;
-      this.sessionLoading = false;
-      this.messageLoading = false;
-    }
-    return authSession;
-  }
-
-  private applyConfirmedReads(sessions: Array<MessageSessionItem>): Array<MessageSessionItem> {
-    return sessions.map((item: MessageSessionItem): MessageSessionItem => {
-      const confirmed: string | undefined = this.confirmedReadSeqnos.get(item.talkerId);
-      if (confirmed === undefined || !/^\d+$/.test(item.maxSeqno) ||
-        compareMessageCursor(item.maxSeqno, confirmed) > 0 || item.unread === 0) return item;
-      const updated: MessageSessionItem = item.clone();
-      updated.unread = 0;
-      return updated;
-    });
-  }
-
-  private async acknowledgeSession(talkerId: number, ackSeqno: string, authSession: number): Promise<boolean> {
-    if (authSession !== AuthSession.version || !/^\d+$/.test(ackSeqno)) return false;
-    const result: ActionResult = await MessageApi.markPrivateMessagesRead(talkerId, ackSeqno);
-    if (authSession !== AuthSession.version) return false;
-    if (result.ok) this.clearSessionUnread(talkerId, ackSeqno, authSession);
-    return result.ok;
-  }
-
-  private clearSessionUnread(talkerId: number, ackSeqno: string, authSession: number): void {
-    if (authSession !== AuthSession.version || !/^\d+$/.test(ackSeqno)) return;
-    this.ensureReadSession();
-    const previous: string | undefined = this.confirmedReadSeqnos.get(talkerId);
-    const confirmed: string = previous !== undefined && compareMessageCursor(previous, ackSeqno) > 0 ? previous : ackSeqno;
-    this.confirmedReadSeqnos.set(talkerId, confirmed);
-    const all: Array<MessageSessionItem> = this.sessionsSource.getAll();
-    for (let i: number = 0; i < all.length; i++) {
-      if (all[i].talkerId !== talkerId || all[i].unread === 0 || !/^\d+$/.test(all[i].maxSeqno) ||
-        compareMessageCursor(all[i].maxSeqno, confirmed) > 0) continue;
-      const updated: MessageSessionItem = all[i].clone();
-      updated.unread = 0;
-      all[i] = updated;
-      this.sessionsSource.updateItem(i, updated);
-    }
-    if (this.current.talkerId === talkerId && /^\d+$/.test(this.current.maxSeqno) &&
-      compareMessageCursor(this.current.maxSeqno, confirmed) <= 0) {
-      const updated: MessageSessionItem = this.current.clone();
-      updated.unread = 0;
-      this.current = updated;
-    }
+  private messageIdentity(item: PrivateMessageItem): string {
+    return privateMessageIdentity(item);
   }
 
   private sessionRowKey(item: MessageSessionItem): string {
-    const fields: Array<string> = [String(item.talkerId), String(item.unread), item.maxSeqno, item.name,
-      item.avatar, item.preview, String(item.timestamp), String(item.pinned)];
-    return JSON.stringify(fields);
-  }
-
-  private async markAllRead(): Promise<void> {
-    const authSession: number = this.ensureReadSession();
-    if (this.readAllLoading) return;
-    this.readAllLoading = true;
-    let failed: number = 0;
-    try {
-      const notifyResult: ActionResult = await MessageApi.markAllNotificationsRead();
-      if (authSession !== AuthSession.version) return;
-      if (notifyResult.ok) MsgUnreadStore.clearAll();
-      else failed++;
-
-      const sessions: Array<MessageSessionItem> = this.sessionsSource.getAll().slice();
-      for (let i: number = 0; i < sessions.length; i++) {
-        if (sessions[i].unread <= 0) continue;
-        const ok: boolean = await this.acknowledgeSession(sessions[i].talkerId, sessions[i].maxSeqno, authSession);
-        if (authSession !== AuthSession.version) return;
-        if (!ok) failed++;
-      }
-      this.getUIContext().getPromptAction().showToast({
-        message: failed === 0 ? '已标记全部已读' : '部分消息标记失败，请稍后重试',
-      });
-    } catch (e) {
-      this.getUIContext().getPromptAction().showToast({ message: '标记已读失败，请稍后重试' });
-    } finally {
-      this.readAllLoading = false;
-    }
+    return sessionRowIdentity(item);
   }
 
   private richMediaId(item: PrivateMessageItem): string {
@@ -640,7 +377,7 @@ export struct MessagesPage {
   @Builder
   MessageAvatar(mine: boolean) {
     Image(mine ? (UserStore.current?.face || $r('app.media.placeholder_avatar_noface')) :
-      (this.current.avatar || $r('app.media.placeholder_avatar_noface')))
+      (this.chat.current.avatar || $r('app.media.placeholder_avatar_noface')))
       .width(34).height(34).borderRadius(17).objectFit(ImageFit.Cover)
   }
 
@@ -683,19 +420,19 @@ export struct MessagesPage {
   @Builder
   Composer() {
     Row({ space: 8 }) {
-      TextInput({ placeholder: '发一条友善的私信', text: this.draft })
+      TextInput({ placeholder: '发一条友善的私信', text: this.chat.draft })
         .height(38).layoutWeight(1).fontSize(14)
         .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
         .placeholderColor('#9499A0')
         .backgroundColor(this.isDark ? '#292A2E' : '#F2F4F6')
         .borderRadius(19).padding({ left: 14, right: 14 })
-        .onChange((value: string) => this.draft = value)
-        .onSubmit(() => this.send())
-      Button(this.sending ? '发送中' : '发送')
+        .onChange((value: string) => this.chatController.setDraft(value))
+        .onSubmit(() => this.chatController.send())
+      Button(this.chat.sending ? '发送中' : '发送')
         .height(36).fontSize(13).fontColor('#FFFFFF')
         .backgroundColor(this.accent).borderRadius(18)
-        .enabled(!this.sending && this.draft.trim().length > 0)
-        .onClick(() => this.send())
+        .enabled(!this.chat.sending && this.chat.draft.trim().length > 0)
+        .onClick(() => this.chatController.send())
     }
     .width('100%')
     .padding({ left: 10, right: 10, top: 8, bottom: 8 })
@@ -735,24 +472,30 @@ export struct MessagesPage {
 
   @Builder
   SessionListContent() {
-    if (this.sessionCount === 0) {
-      LoadingView({ skeleton: 'sessions', loading: this.sessionLoading, empty: !this.sessionLoading && this.sessionError.length === 0,
-        emptyText: '暂无私信会话', errorText: this.sessionError,
-        onRetry: () => this.loadSessions(true).catch(() => {
+    if (this.sessions.count === 0) {
+      LoadingView({ skeleton: 'sessions', loading: this.sessions.loading, empty: !this.sessions.loading && this.sessions.error.length === 0,
+        emptyText: '暂无私信会话', errorText: this.sessions.error,
+        onRetry: () => this.listController.load(true).catch(() => {
         }) })
     } else {
       List() {
-        LazyForEach(this.sessionsSource, (item: MessageSessionItem) => {
+        LazyForEach(this.listController.source, (item: MessageSessionItem) => {
           ListItem() { this.SessionRow(item) }
         }, (item: MessageSessionItem) => this.sessionRowKey(item))
         ListItem() {
-          LoadMoreFooter({
-            loading: this.sessionLoading,
-            hasMore: this.sessionHasMore,
-            moreText: '',
-            endText: '',
-            fixedHeight: this.sessionLoading ? 48 : 1,
-          })
+          if (this.sessions.error.length > 0) {
+            Text(this.sessions.error + ' · 点此重试')
+              .fontSize(12).fontColor(this.accent).width('100%').textAlign(TextAlign.Center).padding(12)
+              .onClick(() => this.listController.retry())
+          } else {
+            LoadMoreFooter({
+              loading: this.sessions.loading,
+              hasMore: this.sessions.hasMore,
+              moreText: '',
+              endText: '',
+              fixedHeight: this.sessions.loading ? 48 : 1,
+            })
+          }
         }
       }
       .layoutWeight(1)
@@ -760,8 +503,7 @@ export struct MessagesPage {
       .scrollBar(BarState.Off)
       .cachedCount(5)
       .onReachEnd(() => {
-        this.loadSessions(false).catch(() => {
-        });
+        if (this.sessions.error.length === 0) this.listController.load(false).catch(() => {});
       })
     }
   }
@@ -815,12 +557,12 @@ export struct MessagesPage {
   /** 消息首页头栏「全部已读」：服务端确认通知分类和当前已加载的私信会话。 */
   @Builder
   ReadAllButton() {
-    Text(this.readAllLoading ? '处理中…' : '全部已读')
+    Text(this.sessions.readAllLoading ? '处理中…' : '全部已读')
       .fontSize(12)
-      .fontColor(this.readAllLoading ? '#73767A' : '#B0B3B8')
+      .fontColor(this.sessions.readAllLoading ? '#73767A' : '#B0B3B8')
       .padding({ left: 18, right: 2, top: 8, bottom: 8 })
       .onClick(() => {
-        this.markAllRead().catch(() => {
+        this.listController.markAllRead().catch(() => {
         });
       })
   }
@@ -835,16 +577,14 @@ export struct MessagesPage {
       .priorityGesture(TapGesture().onAction(() => this.reportCurrentUser()))
   }
 
-  /** 举报当前私信对象：原因选择 → 提交。 */
+  /** 原生对话框只收集原因；目标与账号在打开时固定。 */
   private reportCurrentUser(): void {
-    if (this.current.talkerId <= 0) {
-      this.getUIContext().getPromptAction().showToast({ message: '会话信息不完整' });
-      return;
-    }
+    const action: ChatActionSnapshot | null = this.chatController.captureAction();
+    if (action === null) return;
     try {
       this.getUIContext().getPromptAction().showDialog({
         title: '举报用户',
-        message: '举报 ' + this.current.name + ' 后由 B 站人工审核，请如实选择原因。',
+        message: '举报 ' + action.name + ' 后由 B 站人工审核，请如实选择原因。',
         buttons: [
           { text: '取消', color: '#9499A0' },
           { text: '垃圾广告', color: '#18191C' },
@@ -852,21 +592,15 @@ export struct MessagesPage {
           { text: '骚扰', color: '#18191C' },
           { text: '其他', color: '#18191C' },
         ],
-      }).then((dialogResult) => {
-        const pick: number = Number(dialogResult.index);
+      }).then((result) => {
+        const pick: number = Number(result.index);
         const reasons: Array<Array<string>> = [['', ''], ['6', '垃圾广告'], ['8', '人身攻击'], ['7', '骚扰'], ['9', '其他']];
-        if (pick <= 0 || pick >= reasons.length) return;
-        MessageApi.reportImMessage(this.current.talkerId,
-          Number(reasons[pick][0]), reasons[pick][1])
-          .then((r: ActionResult) => {
-            this.getUIContext().getPromptAction().showToast({ message: r.ok ? '已提交举报，感谢反馈' : r.message });
-          })
-          .catch(() => {
-            this.getUIContext().getPromptAction().showToast({ message: '举报失败，请稍后重试' });
-          });
-      });
-    } catch (e) {
-      // 弹窗失败不阻塞。
+        if (pick > 0 && pick < reasons.length) {
+          this.chatController.report(action, Number(reasons[pick][0]), reasons[pick][1]).catch(() => {});
+        }
+      }).catch(() => {});
+    } catch (error) {
+      // 未确认的举报不会提交。
     }
   }
 
@@ -874,7 +608,7 @@ export struct MessagesPage {
   MessageThreadPage() {
     Column() {
       PageHeader({
-        title: this.current.name,
+        title: this.chat.current.name,
         headerHeight: 50,
         padLeft: 4,
         backWidth: 40,
@@ -889,18 +623,18 @@ export struct MessagesPage {
       })
       List({ scroller: this.messageScroller }) {
         ListItem() {
-          Text(this.messageLoading ? '加载中…' : (this.messageError.length > 0 ? this.messageError + ' · 点此重试' :
-            (this.hasMore ? '加载更早消息' : '没有更早消息了')))
-            .fontSize(11).fontColor(this.messageError.length > 0 || this.hasMore ? this.accent : '#9499A0')
+          Text(this.chat.loading ? '加载中…' : (this.chat.error.length > 0 ? this.chat.error + ' · 点此重试' :
+            (this.chat.hasMore ? '加载更早消息' : '没有更早消息了')))
+            .fontSize(11).fontColor(this.chat.error.length > 0 || this.chat.hasMore ? this.accent : '#9499A0')
             .width('100%').textAlign(TextAlign.Center).padding(12)
             .onClick(() => {
-              if (!this.messageLoading && (this.messageError.length > 0 || this.hasMore)) {
-                this.loadMessages(this.messagesSource.totalCount() === 0).catch(() => {
+              if (!this.chat.loading && (this.chat.error.length > 0 || this.chat.hasMore)) {
+                this.chatController.load(this.chatController.source.totalCount() === 0).catch(() => {
                 });
               }
             })
         }
-        LazyForEach(this.messagesSource, (item: PrivateMessageItem) => {
+        LazyForEach(this.chatController.source, (item: PrivateMessageItem) => {
           ListItem() { this.MessageBubble(item) }
         }, (item: PrivateMessageItem) => this.messageIdentity(item))
       }

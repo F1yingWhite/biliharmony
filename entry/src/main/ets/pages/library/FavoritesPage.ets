@@ -1,482 +1,98 @@
-/** 登录用户的收藏夹。 */
+/** 收藏库页面只组合列表、导航与系统确认框；请求/编辑事务由收藏领域控制器持有。 */
 import { AppTheme } from '../../common/AppTheme';
 import { Immersive } from '../../common/Immersive';
 import { AppNavStack, NAV_VIDEO_DETAIL, NAV_FAV_SORT, FavSortParam, VideoDetailParam } from '../../common/AppRouter';
-import { BiliApi, ActionResult } from '../../api/BiliApi';
-import { FavoriteFolderItem, FavoriteVideoPageData, HistoryPageData, HistoryVideoItem, VideoItem, WatchLaterItem } from '../../model/Models';
-import { UserStore } from '../../services/auth/UserStore';
-import { formatCount, formatDuration, formatRelativeTime } from '../../common/Utils';
+import { FavoriteFolderItem } from '../../model/library/LibraryModels';
+import { VideoItem } from '../../model/video/VideoModels';
+import { formatCount } from '../../common/Utils';
 import { biliImageThumbnail } from '../../common/ImageUrl';
 import { LoadingView } from '../../components/LoadingView';
 import { LoadMoreFooter } from '../../components/LoadMoreFooter';
 import { PageHeader } from '../../components/PageHeader';
 import { VideoRowCard } from '../../components/video/VideoRowCard';
-import { BasicDataSource } from '../../common/BasicDataSource';
-import { FavoriteApi } from '../../api/FavoriteApi';
-import { HistoryApi } from '../../api/HistoryApi';
+import { FavoriteLibraryController } from '../../components/favorites/FavoriteLibraryController';
+import { FavoriteLibraryView, copyFavoriteFolder } from '../../components/favorites/FavoriteLibraryState';
+import { FavoriteSessionToken } from '../../components/favorites/FavoriteLibrarySession';
+import { FavoriteSelection } from '../../components/favorites/FavoriteVideoEditor';
+import { FavoriteFolderDialog } from '../../components/favorites/FavoriteFolderDialog';
+import { FavoriteMoveSheet } from '../../components/favorites/FavoriteMoveSheet';
 
 @Component
 export struct FavoritesPage {
-  @State selected: FavoriteFolderItem = new FavoriteFolderItem();
-  @State category: number = 0; // 0 收藏夹 / 1 收藏集
-  @State folderPage: number = 0;
-  @State collectionPage: number = 0;
-  @State videoPage: number = 0;
-  @State folderHasMore: boolean = true;
-  @State hasMore: boolean = true;
-  @State loading: boolean = false;
-  @State videoLoading: boolean = false;
-  @State folderError: string = '';
-  @State collectionError: string = '';
-  @State videoError: string = '';
-  @State collectionHasMore: boolean = true;
-  @State collectionLoading: boolean = false;
-  // ===== 收藏夹管理状态 =====
-  @State editing: boolean = false;                 // 夹内视频编辑模式（多选 + 排序）
-  @State checkedAids: Array<number> = [];          // 编辑模式勾选的视频 aid
-  @State orderDirty: boolean = false;              // 排序是否有改动，退出编辑时提交
-  @State folderDialogVisible: boolean = false;     // 新建/重命名弹窗
-  @State folderDialogIsEdit: boolean = false;
-  @State folderDialogInput: string = '';
-  @State moveSheetVisible: boolean = false;        // 移动到目标收藏夹选择弹层
-  @State moveTargets: Array<FavoriteFolderItem> = [];
-  @State actionBusy: boolean = false;
+  @State state: FavoriteLibraryView = new FavoriteLibraryView();
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
-  private foldersSource: BasicDataSource<FavoriteFolderItem> = new BasicDataSource<FavoriteFolderItem>();
-  private collectionsSource: BasicDataSource<FavoriteFolderItem> = new BasicDataSource<FavoriteFolderItem>();
-  private videosSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
-  /** 收藏夹视频请求代际：切换/返回后，旧文件夹响应不得写入当前列表。 */
-  private videoRequestGeneration: number = 0;
-  private moveRequestGeneration: number = 0;
-  /** 重命名目标收藏夹（保留 intro/公开状态，避免重命名时被重置） */
-  private dialogFolder: FavoriteFolderItem = new FavoriteFolderItem();
+  @StorageProp('loginVersion') @Watch('onLoginChanged') loginVersion: number = 0;
+  private library: FavoriteLibraryController = new FavoriteLibraryController();
 
   aboutToAppear(): void {
-    this.initFavorites().catch(() => {
-    });
+    this.library.onChange = (view: FavoriteLibraryView): void => { this.state = view; };
+    this.library.onToast = (message: string): void => this.toast(message);
+    this.initFavorites().catch(() => {});
   }
 
-  async initFavorites(): Promise<void> {
-    await UserStore.ensureLoaded();
-    this.loadFolders(true).catch(() => {
-    });
-    this.loadCollections(true).catch(() => {
-    });
-  }
+  aboutToDisappear(): void { this.library.dispose(); }
 
-  async loadCollections(reset: boolean): Promise<void> {
-    if (this.collectionLoading || (!reset && !this.collectionHasMore)) return;
-    const user = UserStore.current;
-    if (user === null) return;
-    this.collectionLoading = true;
-    this.collectionError = '';
-    try {
-      const page: number = reset ? 1 : this.collectionPage + 1;
-      const data = await FavoriteApi.getCollectedFolders(user.mid, page);
-      if (reset) {
-        this.collectionsSource.reset(data.folders);
-      } else {
-        this.collectionsSource.append(data.folders);
-      }
-      this.collectionPage = page;
-      this.collectionHasMore = data.hasMore;
-    } catch (e) {
-      this.collectionError = '加载失败，请检查网络后重试';
-    } finally {
-      this.collectionLoading = false;
-    }
-  }
+  private onLoginChanged(): void { this.library.accountChanged().catch(() => {}); }
 
-  async loadFolders(reset: boolean): Promise<void> {
-    if (this.loading || (!reset && !this.folderHasMore)) return;
-    const user = UserStore.current;
-    if (user === null) return;
-    this.loading = true;
-    this.folderError = '';
-    try {
-      const page: number = reset ? 1 : this.folderPage + 1;
-      const data = await FavoriteApi.getFavoriteFolders(user.mid, page);
-      if (reset) {
-        this.foldersSource.reset(data.folders);
-      } else {
-        this.foldersSource.append(data.folders);
-      }
-      this.folderPage = page;
-      this.folderHasMore = data.hasMore;
-    } catch (e) {
-      this.folderError = '加载失败，请检查网络后重试';
-    } finally {
-      this.loading = false;
-    }
-  }
+  async initFavorites(): Promise<void> { await this.library.activate(); }
+  async loadFolders(reset: boolean): Promise<void> { await this.library.folders.load(reset); }
+  async loadCollections(reset: boolean): Promise<void> { await this.library.collections.load(reset); }
+  async loadVideos(reset: boolean): Promise<void> { await this.library.videos.load(reset); }
+  async openFolder(folder: FavoriteFolderItem): Promise<void> { await this.library.openFolder(folder); }
 
-  async openFolder(folder: FavoriteFolderItem): Promise<void> {
-    if (this.category === 1 && folder.type === 0) folder.type = 21;
-    this.videoRequestGeneration++;
-    this.selected = folder;
-    this.videosSource.clear();
-    this.videoPage = 0;
-    this.hasMore = true;
-    await this.loadVideos(true);
-  }
+  goBack(): void { if (!this.library.back()) AppNavStack.pop(); }
 
-  async loadVideos(reset: boolean): Promise<void> {
-    if (this.editing && this.orderDirty) return;
-    if (this.selected.id === 0 || (!reset && (this.videoLoading || !this.hasMore))) return;
-    const generation: number = this.videoRequestGeneration;
-    const folderId: number = this.selected.id;
-    const folderType: number = this.selected.type;
-    this.videoLoading = true;
-    this.videoError = '';
-    try {
-      const page: number = reset ? 1 : this.videoPage + 1;
-      const data: FavoriteVideoPageData = folderType === 21 ?
-        await FavoriteApi.getCollectionVideos(folderId, page) : await FavoriteApi.getFavoriteVideos(folderId, page);
-      if (generation !== this.videoRequestGeneration || this.selected.id !== folderId) return;
-      if (reset) {
-        this.videosSource.reset(data.videos);
-      } else {
-        this.videosSource.append(data.videos);
-      }
-      this.videoPage = page;
-      this.hasMore = data.hasMore;
-    } catch (e) {
-      if (generation !== this.videoRequestGeneration) return;
-      this.videoError = '加载失败，请检查网络后重试';
-    } finally {
-      if (generation === this.videoRequestGeneration) this.videoLoading = false;
-    }
-  }
-
-  goBack(): void {
-    if (this.actionBusy) return;
-    if (this.editing) {
-      this.toggleEdit();
-      return;
-    }
-    if (this.selected.id > 0) {
-      this.videoRequestGeneration++;
-      this.videoLoading = false;
-      this.selected = new FavoriteFolderItem();
-      this.videosSource.clear();
-    } else {
-      AppNavStack.pop();
-    }
-  }
-
-  /** 统一 toast：用 UIContext 版 PromptAction，避开全局 promptAction 的废弃告警。 */
   private toast(message: string): void {
-    try {
-      this.getUIContext().getPromptAction().showToast({ message: message });
-    } catch (e) {
-      // toast 失败不影响业务流程
-    }
+    try { this.getUIContext().getPromptAction().showToast({ message: message }); } catch (error) {}
   }
 
-  // ===== 收藏夹管理：新建 / 重命名 / 删除 =====
   private showFolderActions(folder: FavoriteFolderItem): void {
+    const session: FavoriteSessionToken | null = this.library.session.capture();
+    if (session === null) return;
+    const target: FavoriteFolderItem = copyFavoriteFolder(folder);
     try {
       this.getUIContext().getPromptAction().showActionMenu({
-        title: folder.title,
+        title: target.title,
         buttons: [
           { text: '重命名', color: this.isDark ? '#E6E6E6' : '#18191C' },
           { text: '删除收藏夹', color: AppTheme.DANGER },
         ],
       }).then((result) => {
-        if (result.index === 0) {
-          this.openFolderDialog(true, folder);
-        } else if (result.index === 1) {
-          this.confirmDeleteFolder(folder);
-        }
-      });
-    } catch (e) {
-      // 弹窗失败不阻塞页面
-    }
-  }
-
-  private openFolderDialog(isEdit: boolean, folder?: FavoriteFolderItem): void {
-    this.folderDialogIsEdit = isEdit;
-    if (isEdit && folder !== undefined) {
-      this.dialogFolder = folder;
-      this.folderDialogInput = folder.title;
-    } else {
-      this.dialogFolder = new FavoriteFolderItem();
-      this.folderDialogInput = '';
-    }
-    this.folderDialogVisible = true;
-  }
-
-  private async submitFolderDialog(): Promise<void> {
-    const title: string = this.folderDialogInput.trim();
-    if (title.length === 0) {
-      this.toast('收藏夹名称不能为空');
-      return;
-    }
-    if (this.actionBusy) return;
-    this.actionBusy = true;
-    try {
-      const result: ActionResult = this.folderDialogIsEdit ?
-        await FavoriteApi.editFavoriteFolder(this.dialogFolder.id, title, this.dialogFolder.isPublic, this.dialogFolder.intro) :
-        await FavoriteApi.addFavoriteFolder(title);
-      this.toast(result.ok ? (this.folderDialogIsEdit ? '已重命名' : '已创建') : result.message);
-      if (result.ok) {
-        this.folderDialogVisible = false;
-        this.loadFolders(true).catch(() => {
-        });
-      }
-    } catch (e) {
-      this.toast('网络异常，请稍后重试');
-    } finally {
-      this.actionBusy = false;
-    }
+        if (!this.library.session.current(session)) return;
+        if (result.index === 0) this.library.folderEditor.open(true, target);
+        else if (result.index === 1) this.confirmDeleteFolder(target);
+      }).catch(() => {});
+    } catch (error) {}
   }
 
   private confirmDeleteFolder(folder: FavoriteFolderItem): void {
+    const session: FavoriteSessionToken | null = this.library.session.capture();
+    if (session === null) return;
+    const target: FavoriteFolderItem = copyFavoriteFolder(folder);
     try {
       this.getUIContext().getPromptAction().showDialog({
-        title: '删除收藏夹「' + folder.title + '」',
+        title: '删除收藏夹「' + target.title + '」',
         message: '夹内视频不会被删除，但收藏夹本身不可恢复。确定删除吗？',
-        buttons: [
-          { text: '取消', color: '#9499A0' },
-          { text: '删除', color: AppTheme.DANGER },
-        ],
-      }).then((dialogResult) => {
-        if (dialogResult.index === 1) {
-          this.deleteFolder(folder).catch(() => {
-          });
-        }
-      });
-    } catch (e) {
-      // 弹窗失败不阻塞页面
-    }
-  }
-
-  private async deleteFolder(folder: FavoriteFolderItem): Promise<void> {
-    if (this.actionBusy) return;
-    this.actionBusy = true;
-    try {
-      const result: ActionResult = await FavoriteApi.delFavoriteFolder([folder.id]);
-      this.toast(result.ok ? '已删除' : result.message);
-      if (result.ok) {
-        this.loadFolders(true).catch(() => {
-        });
-      }
-    } catch (e) {
-      this.toast('网络异常，请稍后重试');
-    } finally {
-      this.actionBusy = false;
-    }
-  }
-
-  // ===== 夹内视频编辑模式：多选删除 / 批量移动 / 排序 =====
-  private toggleEdit(): void {
-    if (this.actionBusy) return;
-    this.moveRequestGeneration++;
-    if (this.editing && this.orderDirty) {
-      // 退出编辑时提交排序（本地顺序已改，服务端同步）。
-      this.saveVideoOrder().catch(() => {
-      });
-      return;
-    }
-    this.editing = !this.editing;
-    this.checkedAids = [];
-    this.orderDirty = false;
-  }
-
-  /** 编辑模式下上下调整视频顺序（只移动位置，不落库；退出时统一提交）。 */
-  private moveVideo(index: number, delta: number): void {
-    if (this.actionBusy) return;
-    const all: Array<VideoItem> = this.videosSource.getAll();
-    const target: number = index + delta;
-    if (target < 0 || target >= all.length) return;
-    const next: Array<VideoItem> = all.slice();
-    const item: VideoItem = next.splice(index, 1)[0];
-    next.splice(target, 0, item);
-    this.videosSource.reset(next);
-    this.orderDirty = true;
-    this.drawVideos();
-  }
-
-  private drawVideos(): void {
-    // reset 已广播变更：无需显式重绘；保留为空方法避免退化路径误用。
-  }
-
-  /** 提交收藏夹内视频排序：按当前列表顺序传 aid。 */
-  private async saveVideoOrder(): Promise<void> {
-    if (this.selected.id <= 0 || this.actionBusy) return;
-    const folderId: number = this.selected.id;
-    const generation: number = this.videoRequestGeneration;
-    const aids: Array<number> = this.videosSource.getAll().map((v: VideoItem) => v.aid);
-    this.actionBusy = true;
-    try {
-      if (aids.length >= 2) {
-        const result: ActionResult = await FavoriteApi.sortFavoriteVideos(folderId, aids);
-        if (generation !== this.videoRequestGeneration || this.selected.id !== folderId) return;
-        if (!result.ok) {
-          this.toast(result.message);
-          return;
-        }
-        this.toast('视频排序已保存');
-      }
-      this.editing = false;
-      this.checkedAids = [];
-      this.orderDirty = false;
-    } catch (e) {
-      if (generation === this.videoRequestGeneration && this.selected.id === folderId) {
-        this.toast('排序保存失败，请重试');
-      }
-    } finally {
-      this.actionBusy = false;
-    }
-  }
-
-  private isChecked(aid: number): boolean {
-    return this.checkedAids.indexOf(aid) >= 0;
-  }
-
-  private toggleChecked(aid: number, index: number): void {
-    if (this.actionBusy) return;
-    if (this.isChecked(aid)) {
-      this.checkedAids = this.checkedAids.filter((id: number) => id !== aid);
-    } else {
-      this.checkedAids = this.checkedAids.concat([aid]);
-    }
-    // @State 数组重赋值驱动底部操作条刷新；行本身通过 notifyItemChanged 重绑。
-    this.videosSource.notifyItemChanged(index);
+        buttons: [{ text: '取消', color: '#9499A0' }, { text: '删除', color: AppTheme.DANGER }],
+      }).then((result) => {
+        if (result.index === 1 && this.library.session.current(session)) this.library.folderEditor.delete(target).catch(() => {});
+      }).catch(() => {});
+    } catch (error) {}
   }
 
   private confirmDeleteChecked(): void {
-    if (this.checkedAids.length === 0) {
-      this.toast('请先选择视频');
-      return;
-    }
+    const selection: FavoriteSelection | null = this.library.editor.selection();
+    if (selection === null || selection.aids.length === 0) { this.toast('请先选择视频'); return; }
     try {
       this.getUIContext().getPromptAction().showDialog({
         title: '移除收藏',
-        message: '将 ' + String(this.checkedAids.length) + ' 个视频从本收藏夹移除（不会取消其他收藏夹的收藏）。',
-        buttons: [
-          { text: '取消', color: '#9499A0' },
-          { text: '移除', color: AppTheme.DANGER },
-        ],
-      }).then((dialogResult) => {
-        if (dialogResult.index === 1) {
-          this.deleteChecked().catch(() => {
-          });
-        }
-      });
-    } catch (e) {
-      // 弹窗失败不阻塞页面
-    }
-  }
-
-  private async deleteChecked(): Promise<void> {
-    if (this.actionBusy) return;
-    this.actionBusy = true;
-    try {
-      const result: ActionResult = await FavoriteApi.delFavoriteResources(this.selected.id, this.checkedAids);
-      this.toast(result.ok ? '已移除' : result.message);
-      if (result.ok) this.removeCheckedLocally();
-    } catch (e) {
-      this.toast('网络异常，请稍后重试');
-    } finally {
-      this.actionBusy = false;
-    }
-  }
-
-  private async openMoveSheet(): Promise<void> {
-    if (!this.editing || this.selected.id <= 0 || this.actionBusy) return;
-    if (this.checkedAids.length === 0) {
-      this.toast('请先选择视频');
-      return;
-    }
-    const user = UserStore.current;
-    if (user === null) return;
-    const generation: number = this.videoRequestGeneration;
-    const folderId: number = this.selected.id;
-    const moveRequest: number = ++this.moveRequestGeneration;
-    try {
-      const all: Array<FavoriteFolderItem> = await FavoriteApi.getAllFavoriteFolders(user.mid);
-      // 用户可能在请求期间退出编辑或切换收藏夹，旧响应不能重新打开移动弹层。
-      if (moveRequest !== this.moveRequestGeneration || generation !== this.videoRequestGeneration ||
-        this.selected.id !== folderId || !this.editing || this.checkedAids.length === 0) return;
-      this.moveTargets = all.filter((f: FavoriteFolderItem) => f.id !== folderId);
-      if (this.moveTargets.length === 0) {
-        this.toast('没有其他收藏夹可移动');
-        return;
-      }
-      this.moveSheetVisible = true;
-    } catch (e) {
-      if (moveRequest === this.moveRequestGeneration && generation === this.videoRequestGeneration &&
-        this.selected.id === folderId && this.editing && this.checkedAids.length > 0) {
-        this.toast('收藏夹列表加载失败，请稍后重试');
-      }
-    }
-  }
-
-  private async moveCheckedTo(target: FavoriteFolderItem): Promise<void> {
-    this.moveSheetVisible = false;
-    if (this.actionBusy) return;
-    this.actionBusy = true;
-    try {
-      const result: ActionResult = await FavoriteApi.moveFavoriteResources(this.selected.id, target.id, this.checkedAids);
-      this.toast(result.ok ? '已移动到「' + target.title + '」' : result.message);
-      if (result.ok) {
-        this.removeCheckedLocally();
-        this.editing = false;
-      }
-    } catch (e) {
-      this.toast('网络异常，请稍后重试');
-    } finally {
-      this.actionBusy = false;
-    }
-  }
-
-  /** 删除/移动成功后本地移除勾选项，避免整页重拉闪烁。 */
-  private removeCheckedLocally(): void {
-    this.videosSource.reset(this.videosSource.getAll().filter((v: VideoItem) => this.checkedAids.indexOf(v.aid) < 0));
-    this.checkedAids = [];
-  }
-
-  /** 当前列表的分页加载入口（footer 点击与触底共用） */
-  private loadMore(): void {
-    if (this.selected.id > 0) {
-      this.loadVideos(false).catch(() => {
-      });
-    } else if (this.category === 1) {
-      this.loadCollections(false).catch(() => {
-      });
-    } else {
-      this.loadFolders(false).catch(() => {
-      });
-    }
-  }
-
-  /** 收藏集 Tab 有自己的加载/到底状态，footer 需要按当前列表切换。 */
-  private currentEmpty(): boolean {
-    if (this.selected.id > 0) return this.videosSource.isEmpty();
-    return this.category === 1 ? this.collectionsSource.isEmpty() : this.foldersSource.isEmpty();
-  }
-
-  private currentError(): string {
-    if (this.selected.id > 0) return this.videoError;
-    return this.category === 1 ? this.collectionError : this.folderError;
-  }
-
-  private retryCurrent(): void {
-    if (this.selected.id > 0) this.loadVideos(this.currentEmpty());
-    else if (this.category === 1) this.loadCollections(this.currentEmpty());
-    else this.loadFolders(this.currentEmpty());
-  }
-
-  private footerLoading(): boolean {
-    if (this.selected.id > 0) return this.videoLoading;
-    return this.category === 1 ? this.collectionLoading : this.loading;
-  }
-
-  private footerHasMore(): boolean {
-    if (this.selected.id > 0) return this.hasMore;
-    return this.category === 1 ? this.collectionHasMore : this.folderHasMore;
+        message: '将 ' + selection.aids.length + ' 个视频从本收藏夹移除（不会取消其他收藏夹的收藏）。',
+        buttons: [{ text: '取消', color: '#9499A0' }, { text: '移除', color: AppTheme.DANGER }],
+      }).then((result) => {
+        if (result.index === 1 && this.library.editor.isCurrent(selection)) this.library.editor.deleteChecked(selection).catch(() => {});
+      }).catch(() => {});
+    } catch (error) {}
   }
 
   @Builder
@@ -511,7 +127,7 @@ export struct FavoritesPage {
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
       // 自建收藏夹（收藏夹 Tab）提供管理入口；收藏集不管理
-      if (this.category === 0 && this.selected.id === 0) {
+      if (this.state.category === 0 && this.state.selected.id === 0) {
         Image($r('app.media.ic_more'))
           .width(20)
           .height(20)
@@ -530,25 +146,25 @@ export struct FavoritesPage {
   @Builder
   FavHeaderActions() {
     // 收藏夹根列表提供「排序」入口；进入夹内则提供编辑
-    if (this.selected.id === 0 && this.category === 0 && this.foldersSource.totalCount() > 1) {
+    if (this.state.selected.id === 0 && this.state.category === 0 && this.library.folders.source.totalCount() > 1) {
       Text('排序')
         .fontSize(14)
         .fontColor(this.accent)
         .padding({ left: 12, right: 2, top: 6, bottom: 6 })
         .onClick(() => this.openFolderSort())
-    } else if (this.selected.id > 0 && this.selected.type !== 21) {
-      Text(this.editing ? '完成' : '编辑')
+    } else if (this.state.selected.id > 0 && this.state.selected.type !== 21) {
+      Text(this.state.edit.editing ? '完成' : '编辑')
         .fontSize(14)
         .fontColor(this.accent)
         .padding({ left: 12, right: 2, top: 6, bottom: 6 })
-        .onClick(() => this.toggleEdit())
+        .onClick(() => this.library.editor.toggleEdit())
     }
   }
 
   /** 打开收藏夹排序页（仅传自建收藏夹，默认收藏夹固定首位不参与）。 */
   private openFolderSort(): void {
     const sortable: Array<FavoriteFolderItem> =
-      this.foldersSource.getAll().filter((f: FavoriteFolderItem) => f.type !== 0);
+      this.library.folders.source.getAll().filter((f: FavoriteFolderItem) => f.type !== 0);
     if (sortable.length < 2) {
       this.toast('至少两个自建收藏夹才能排序');
       return;
@@ -575,179 +191,63 @@ export struct FavoritesPage {
     .height(26)
   }
 
-  /** 新建/重命名收藏夹弹窗（居中卡片 + 遮罩，点遮罩关闭）。 */
-  @Builder
-  FolderDialogOverlay() {
-    Column() {
-      Column({ space: 16 }) {
-        Text(this.folderDialogIsEdit ? '重命名收藏夹' : '新建收藏夹')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-        TextInput({ placeholder: '收藏夹名称', text: this.folderDialogInput })
-          .fontSize(14)
-          .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-          .placeholderColor('#9499A0')
-          .backgroundColor(this.isDark ? '#3A3D44' : '#F0F1F3')
-          .maxLength(20)
-          .onChange((value: string) => {
-            this.folderDialogInput = value;
-          })
-        Row({ space: 12 }) {
-          Text('取消')
-            .layoutWeight(1)
-            .height(40)
-            .textAlign(TextAlign.Center)
-            .fontSize(14)
-            .fontColor('#9499A0')
-            .backgroundColor(this.isDark ? '#3A3D44' : '#F0F1F3')
-            .borderRadius(20)
-            .onClick(() => {
-              this.folderDialogVisible = false;
-            })
-          Text('确定')
-            .layoutWeight(1)
-            .height(40)
-            .textAlign(TextAlign.Center)
-            .fontSize(14)
-            .fontColor('#FFFFFF')
-            .backgroundColor(this.accent)
-            .borderRadius(20)
-            .onClick(() => {
-              this.submitFolderDialog().catch(() => {
-              });
-            })
-        }
-        .width('100%')
-      }
-      .width('78%')
-      .padding(18)
-      .borderRadius(14)
-      .backgroundColor(this.isDark ? '#2A2C31' : '#FFFFFF')
-      .onClick(() => {
-        // 吞掉卡片区域点击，避免触发遮罩关闭
-      })
-    }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
-    .backgroundColor('#66000000')
-    .onClick(() => {
-      this.folderDialogVisible = false;
-    })
-  }
-
-  /** 移动到目标收藏夹的底部选择弹层。 */
-  @Builder
-  MoveSheetOverlay() {
-    Column() {
-      Blank()
-        .layoutWeight(1)
-        .width('100%')
-        .onClick(() => {
-          this.moveSheetVisible = false;
-        })
-      Column() {
-        Text('移动到…')
-          .fontSize(15)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-          .padding({ top: 14, bottom: 8 })
-        List() {
-          ForEach(this.moveTargets, (folder: FavoriteFolderItem) => {
-            ListItem() {
-              Row() {
-                Text(folder.title)
-                  .fontSize(14)
-                  .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-                  .layoutWeight(1)
-                  .maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-                Text(formatCount(folder.count) + ' 个内容')
-                  .fontSize(12)
-                  .fontColor('#9499A0')
-              }
-              .width('100%')
-              .height(46)
-              .padding({ left: 18, right: 18 })
-              .onClick(() => {
-                this.moveCheckedTo(folder).catch(() => {
-                });
-              })
-            }
-          }, (folder: FavoriteFolderItem) => String(folder.id))
-        }
-        .width('100%')
-        .constraintSize({ maxHeight: 320 })
-        .scrollBar(BarState.Off)
-      }
-      .width('100%')
-      .padding({ bottom: Immersive.bottomInset() + 8 })
-      .backgroundColor(this.isDark ? '#2A2C31' : '#FFFFFF')
-      .borderRadius({ topLeft: 16, topRight: 16 })
-    }
-    .width('100%')
-    .height('100%')
-    .backgroundColor('#66000000')
-  }
-
   build() {
     Stack() {
       Column() {
         PageHeader({
-          title: this.selected.id > 0 ? this.selected.title : '我的收藏',
+          title: this.state.selected.id > 0 ? this.state.selected.title : '我的收藏',
           onBack: () => this.goBack(),
           trailing: (): void => {
             this.FavHeaderActions()
           },
         })
-        if (this.selected.id === 0) {
+        if (this.state.selected.id === 0) {
           Row() {
             Text('收藏夹')
               .layoutWeight(1).height(42).textAlign(TextAlign.Center).fontSize(14)
-              .fontWeight(this.category === 0 ? FontWeight.Bold : FontWeight.Normal)
-              .fontColor(this.category === 0 ? this.accent : '#9499A0')
-              .onClick(() => this.category = 0)
+              .fontWeight(this.state.category === 0 ? FontWeight.Bold : FontWeight.Normal)
+              .fontColor(this.state.category === 0 ? this.accent : '#9499A0')
+              .onClick(() => this.library.setCategory(0))
             Text('收藏集')
               .layoutWeight(1).height(42).textAlign(TextAlign.Center).fontSize(14)
-              .fontWeight(this.category === 1 ? FontWeight.Bold : FontWeight.Normal)
-              .fontColor(this.category === 1 ? this.accent : '#9499A0')
-              .onClick(() => this.category = 1)
+              .fontWeight(this.state.category === 1 ? FontWeight.Bold : FontWeight.Normal)
+              .fontColor(this.state.category === 1 ? this.accent : '#9499A0')
+              .onClick(() => this.library.setCategory(1))
             // 收藏夹 Tab 顶部提供新建入口
-            if (this.category === 0) {
+            if (this.state.category === 0) {
               Text('＋新建')
                 .fontSize(13)
                 .fontColor(this.accent)
                 .padding({ left: 10, right: 14, top: 6, bottom: 6 })
-                .onClick(() => this.openFolderDialog(false))
+                .onClick(() => this.library.folderEditor.open(false))
             }
           }
           .width('100%')
           .border({ width: { bottom: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
         }
-        if (this.currentEmpty()) {
-          LoadingView({ skeleton: 'list', loading: this.footerLoading(),
-            empty: !this.footerLoading() && this.currentError().length === 0,
-            emptyText: this.selected.id > 0 ? '收藏夹里还没有视频' : (this.category === 1 ? '暂无收藏集' : '暂无收藏夹'),
-            errorText: this.currentError(), onRetry: () => this.retryCurrent() })
+        if (this.state.current.count === 0) {
+          LoadingView({ skeleton: 'list', loading: this.state.current.loading,
+            empty: !this.state.current.loading && this.state.current.error.length === 0,
+            emptyText: this.state.selected.id > 0 ? '收藏夹里还没有视频' : (this.state.category === 1 ? '暂无收藏集' : '暂无收藏夹'),
+            errorText: this.state.current.error, onRetry: () => this.library.retry() })
         } else {
           List() {
-            if (this.selected.id === 0) {
-              if (this.category === 0) {
-                LazyForEach(this.foldersSource, (item: FavoriteFolderItem) => {
+            if (this.state.selected.id === 0) {
+              if (this.state.category === 0) {
+                LazyForEach(this.library.folders.source, (item: FavoriteFolderItem) => {
                   ListItem() { this.FolderRow(item) }
                 }, (item: FavoriteFolderItem) => String(item.id))
               } else {
-                LazyForEach(this.collectionsSource, (item: FavoriteFolderItem) => {
+                LazyForEach(this.library.collections.source, (item: FavoriteFolderItem) => {
                   ListItem() { this.FolderRow(item) }
                 }, (item: FavoriteFolderItem) => 'collection-' + String(item.id))
               }
             } else {
-              LazyForEach(this.videosSource, (item: VideoItem, index: number) => {
+              LazyForEach(this.library.videos.source, (item: VideoItem, index: number) => {
                 ListItem() {
                   Row({ space: 4 }) {
-                    if (this.editing) {
-                      this.CheckCircle(this.isChecked(item.aid))
+                    if (this.state.edit.editing) {
+                      this.CheckCircle(this.library.editor.isChecked(item.aid))
                     }
                     VideoRowCard({
                       cover: item.cover,
@@ -757,8 +257,8 @@ export struct FavoritesPage {
                       contentSpace: 7,
                       titleDarkColor: '#FFFFFF',
                       onTap: () => {
-                        if (this.editing) {
-                          this.toggleChecked(item.aid, index);
+                        if (this.state.edit.editing) {
+                          this.library.editor.toggleChecked(item.aid, index);
                           return;
                         }
                         const param: VideoDetailParam = { bvid: item.bvid, aid: item.aid, title: item.title };
@@ -766,16 +266,16 @@ export struct FavoritesPage {
                       },
                     })
                       .layoutWeight(1)
-                    if (this.editing) {
+                    if (this.state.edit.editing) {
                       Column({ space: 2 }) {
                         Text('↑')
                           .fontSize(14).fontColor(index === 0 ? '#B4B6BA' : this.accent)
                           .padding({ left: 8, right: 8, top: 3, bottom: 3 })
-                          .onClick(() => this.moveVideo(index, -1))
+                          .onClick(() => this.library.editor.moveVideo(index, -1))
                         Text('↓')
-                          .fontSize(14).fontColor(index === this.videosSource.totalCount() - 1 ? '#B4B6BA' : this.accent)
+                          .fontSize(14).fontColor(index === this.library.videos.source.totalCount() - 1 ? '#B4B6BA' : this.accent)
                           .padding({ left: 8, right: 8, top: 3, bottom: 3 })
-                          .onClick(() => this.moveVideo(index, 1))
+                          .onClick(() => this.library.editor.moveVideo(index, 1))
                       }
                       .width(34)
                       .alignItems(HorizontalAlign.Center)
@@ -787,15 +287,15 @@ export struct FavoritesPage {
             }
             ListItem() {
               LoadMoreFooter({
-                loading: this.footerLoading(),
-                hasMore: this.currentError().length > 0 || this.footerHasMore(),
-                moreText: this.currentError().length > 0 ? '加载失败 · 点击重试' : '继续加载',
-                endText: this.selected.id === 0 && this.category === 1 ? '—— 收藏集到底啦 ——' : '—— 到底啦 ——',
+                loading: this.state.current.loading,
+                hasMore: this.state.current.error.length > 0 || this.state.current.hasMore,
+                moreText: this.state.current.error.length > 0 ? '加载失败 · 点击重试' : '继续加载',
+                endText: this.state.selected.id === 0 && this.state.category === 1 ? '—— 收藏集到底啦 ——' : '—— 到底啦 ——',
                 loadingText: '加载中…',
                 accentLoadingText: true,
                 padTop: 18,
                 padBottom: 18,
-                onLoadMore: () => this.currentError().length > 0 ? this.retryCurrent() : this.loadMore(),
+                onLoadMore: () => this.state.current.error.length > 0 ? this.library.retry() : this.library.loadMore(),
               })
             }
           }
@@ -803,26 +303,26 @@ export struct FavoritesPage {
           .padding({ left: 12, right: 12 })
           .cachedCount(5)
           .scrollBar(BarState.Off)
-          .onReachEnd(() => { if (this.currentError().length === 0) this.loadMore(); })
+          .onReachEnd(() => { if (this.state.current.error.length === 0) this.library.loadMore(); })
         }
         // 编辑模式底部操作条：多选删除/移动 + 排序提示
-        if (this.editing && this.selected.id > 0) {
+        if (this.state.edit.editing && this.state.selected.id > 0) {
           Row({ space: 12 }) {
-            Text(this.checkedAids.length > 0 ? '已选 ' + String(this.checkedAids.length) + ' 项' : '↑↓ 调整顺序')
+            Text(this.state.edit.checkedAids.length > 0 ? '已选 ' + String(this.state.edit.checkedAids.length) + ' 项' : '↑↓ 调整顺序')
               .fontSize(13)
               .fontColor('#9499A0')
               .layoutWeight(1)
             Text('移动到…')
               .fontSize(14)
-              .fontColor(this.checkedAids.length > 0 ? this.accent : '#B4B6BA')
+              .fontColor(this.state.edit.checkedAids.length > 0 ? this.accent : '#B4B6BA')
               .padding({ left: 10, right: 10, top: 8, bottom: 8 })
               .onClick(() => {
-                this.openMoveSheet().catch(() => {
+                this.library.editor.openMoveSheet().catch(() => {
                 });
               })
             Text('删除')
               .fontSize(14)
-              .fontColor(this.checkedAids.length > 0 ? AppTheme.DANGER : '#B4B6BA')
+              .fontColor(this.state.edit.checkedAids.length > 0 ? AppTheme.DANGER : '#B4B6BA')
               .padding({ left: 10, right: 10, top: 8, bottom: 8 })
               .onClick(() => this.confirmDeleteChecked())
           }
@@ -835,11 +335,20 @@ export struct FavoritesPage {
       .height('100%')
       .padding({ top: Immersive.statusBarHeight() })
 
-      if (this.folderDialogVisible) {
-        this.FolderDialogOverlay()
+      if (this.state.dialog.visible) {
+        FavoriteFolderDialog({
+          view: this.state.dialog,
+          onInput: (value: string): void => this.library.folderEditor.setInput(value),
+          onSubmit: (): void => { this.library.folderEditor.submit().catch(() => {}); },
+          onClose: (): void => this.library.folderEditor.close(),
+        })
       }
-      if (this.moveSheetVisible) {
-        this.MoveSheetOverlay()
+      if (this.state.edit.moveVisible) {
+        FavoriteMoveSheet({
+          targets: this.state.edit.moveTargets,
+          onSelect: (folder: FavoriteFolderItem): void => { this.library.editor.moveCheckedTo(folder).catch(() => {}); },
+          onClose: (): void => this.library.editor.closeMoveSheet(),
+        })
       }
     }
     .width('100%')

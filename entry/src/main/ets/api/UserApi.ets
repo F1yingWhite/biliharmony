@@ -9,7 +9,7 @@ import { Api, Constants } from '../common/Constants';
 import { asObject, asArray, asNumber, asString, str, toHttps } from '../common/Utils';
 import { RelationUserItem, RelationUserPageData, SpaceArcData, UserInfo, UserSpaceHeaderItem, UserSpaceInfo,
   UserStat, VideoItem, FollowTagItem } from '../model/Models';
-import { ActionResult, getData, postVideoAction, webGet, webGetSigned, webGetWithPriority,
+import { ActionResult, failureText, getData, postVideoAction, webGet, webGetSigned, webGetWithPriority,
   webPost } from './internal/ApiCommon';
 
 class SpaceDecorationInfo {
@@ -188,12 +188,16 @@ export class UserApi {
     const result: SpaceArcData = new SpaceArcData();
     const data: Record<string, Object> | null = getData(resp);
     if (data === null) {
-      return result;
+      throw new Error(failureText(resp, '投稿加载失败，请稍后重试'));
     }
     const page: Record<string, Object> = asObject(data['page']);
-    result.total = asNumber(page['count'], 0);
     const list: Record<string, Object> = asObject(data['list']);
-    const vlist: Array<Object> = asArray(list['vlist']);
+    const total: number = asNumber(page['count'], Number.NaN);
+    if (!Number.isFinite(total) || total < 0 || !Array.isArray(list['vlist'])) {
+      throw new Error('投稿响应格式异常，请稍后重试');
+    }
+    result.total = total;
+    const vlist: Array<Object> = list['vlist'] as Array<Object>;
     for (let i: number = 0; i < vlist.length; i++) {
       result.videos.push(VideoItem.fromSpaceItem(vlist[i]));
     }
@@ -273,11 +277,17 @@ export class UserApi {
   }
 
   static async getFollowTags(): Promise<Array<FollowTagItem>> {
-    const data: Record<string, Object> | null = getData(
-      await webGet(Api.followTags, undefined, 'https://space.bilibili.com/'));
+    const resp: HttpResponse = await webGet(Api.followTags, undefined, 'https://space.bilibili.com/');
+    const json: Record<string, Object> = resp.json();
+    if (!resp.ok || asNumber(json['code'], -1) !== 0) {
+      throw new Error(failureText(resp, '分组列表加载失败，请稍后重试'));
+    }
+    // /relation/tags 直接返回 data 数组；同时保留旧嵌套 data.data 形态。
+    const data: Object = json['data'];
+    const rawTags: Object = Array.isArray(data) ? data : asObject(data)['data'];
+    if (!Array.isArray(rawTags)) throw new Error('分组列表响应格式异常，请稍后重试');
     const result: Array<FollowTagItem> = [];
-    if (data === null) return result;
-    const tags: Array<Object> = asArray(data['data']);
+    const tags: Array<Object> = rawTags as Array<Object>;
     for (let i: number = 0; i < tags.length; i++) {
       const raw: Record<string, Object> = asObject(tags[i]);
       const tag: FollowTagItem = new FollowTagItem();

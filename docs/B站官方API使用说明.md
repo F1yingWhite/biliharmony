@@ -8,7 +8,7 @@
 
 | 组件                         | 路径                        | 职责                                           |
 | ---------------------------- | --------------------------- | ---------------------------------------------- |
-| `common/HttpClient.ets`      | `@ohos.net.http` 封装       | GET/POST、Cookie 罐、CSRF 注入、统一错误码处理 |
+| `services/network/HttpClient.ets`      | `@ohos.net.http` 封装       | GET/POST、Cookie 罐、CSRF 注入、统一错误码处理 |
 | `common/Constants.ets`       | 域名 / UA / appKey / 请求头 | 见下表头部分                                   |
 | `common/WbiSign.ets`         | WBI 签名                    | 需要 wbi 的端点自动附加 `w_rid` / `wts`        |
 | `common/AppSign.ets`         | App 端签名                  | app 端接口的 `appkey` / `sign` 参数            |
@@ -170,6 +170,17 @@ commentBaseUrl https://comment.bilibili.com  // 弹幕 xml
 - `loginByPassword` → `/x/passport-login/oauth2/login`
 - `sendSmsCode` / `loginBySms` → `/x/passport-login/sms/*`
 - `CookiePair` / `TVCodeResult` … 结果模型
+
+### 11. VideoReportApi（视频举报）
+
+| 函数 | 端点 | 说明 |
+| --- | --- | --- |
+| `reasons(aid)` | GET `/x/web-interface/appeal/v2/tags?from=web&aid=…&version=v1` | 展开官方分组，保留服务端 tid；普通举报与需跳转的专门申诉类型分开处理 |
+| `submit` | POST `/x/web-interface/appeal/v2/submit` | 登录和 CSRF；提交当前视频、所选普通类型及详细描述，不将专门申诉类型交给此流程 |
+
+入口为播放器更多菜单、首页及视频详情的推荐卡片菜单。权益申诉等类型进入官方表单，不自动填充举报描述或替用户提交。
+
+2026-10-02 对照[官方举报页](https://www.bilibili.com/appeal/?avid=170001)及其[前端脚本](https://s1.hdslb.com/bfs/static/2233-monorepo/appeal-h5/static/js/index.6cc55336.js)：普通举报表单将详细描述设为必填，确认动作拒绝空描述。这里只确认官方 Web/H5 前端行为，未测试服务端是否接受空 `desc`，也不推断原生 App 的要求。本轮模拟器只打开分类和取消表单，未发送真实举报。
 
 ## 四、签名与登录态要点
 

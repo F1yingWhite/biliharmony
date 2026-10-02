@@ -1,12 +1,10 @@
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { LoadingView } from '../components/LoadingView';
-import { BasicDataSource } from '../common/BasicDataSource';
 /** 动态详情：首屏复用 feed 对象，随后从 detail 接口补齐正文、表情和评论 subject。 */
 import { AppNavStack, DynamicDetailParam, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   HERO_NAV_TRANSITION_FINISH_REQUEST_KEY, ImageViewerSrcRect, NAV_LOGIN } from '../common/AppRouter';
 import { MotionTokens } from '../common/MotionTokens';
 import { DynamicItem, ReplyItem } from '../model/Models';
-import { ActionResult, BiliApi } from '../api/BiliApi';
 import { Immersive } from '../common/Immersive';
 import { PageHeader } from '../components/PageHeader';
 import { DynCard } from '../views/DynamicView';
@@ -18,14 +16,15 @@ import { ReplyCard } from '../components/reply/ReplyCard';
 import { ReplyComposer } from '../components/reply/ReplyComposer';
 import { ReplyThreadPanel } from '../components/reply/ReplyThreadPanel';
 import { RepliesController } from '../components/reply/RepliesController';
+import { MainRepliesState, ReplySubject, ThreadRepliesState } from '../components/reply/ReplyState';
+import { ReplyShareController } from '../components/reply/ReplyShareController';
 import { ReplyShareCard } from '../components/reply/ReplyShareCard';
 import { ReplySortChips } from '../components/reply/ReplySortChips';
 import { LayoutTokens } from '../common/LayoutTokens';
-import { CommentApi } from '../api/CommentApi';
-import { DynamicApi } from '../api/DynamicApi';
+import { ReplySubmissionController, ReplySubmissionSnapshot } from '../components/reply/ReplySubmissionController';
+import { DynamicDetailController, DynamicDetailStatus } from '../components/dynamic/DynamicDetailController';
 import { EmoteResolver } from '../common/EmoteResolver';
 import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
-import { asNumber, asObject } from '../common/Utils';
 
 class DynamicHeroFrameCallback extends FrameCallback {
   private task: () => void;
@@ -47,7 +46,6 @@ export struct DynamicDetailPage {
   @State loading: boolean = false;
   @State loadFailed: boolean = false;
   /** 评论懒加载数据源（无限翻页必须虚拟化；主列表统一从这里读写）。 */
-  private replySource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();
   /** 评论行数（数据源为普通属性，空态/加载态分支需要响应式计数）。 */
   @State repliesCount: number = 0;
   @State repliesLoading: boolean = false;
@@ -58,6 +56,29 @@ export struct DynamicDetailPage {
   @State replyVersion: number = 0;
   @State replyDraft: string = '';
   @State replySending: boolean = false;
+  private replySubmit: ReplySubmissionController = new ReplySubmissionController({
+    isAlive: () => !this.destroyed,
+    getTarget: () => ({ oid: this.item.commentId, type: this.item.commentType, root: 0, parent: 0, scope: 'main', active: true }),
+    getDraft: () => this.replyDraft,
+    setSending: (sending: boolean) => this.replySending = sending,
+    toast: (message: string) => this.toast(message),
+    onSuccess: (_snapshot: ReplySubmissionSnapshot, _reply: ReplyItem | null, clearDraft: boolean) => {
+      if (clearDraft) this.replyDraft = '';
+      this.replies.resetMainPaging();
+      this.replies.load(true).catch(() => {});
+    },
+  });
+  private threadSubmit: ReplySubmissionController = new ReplySubmissionController({
+    isAlive: () => !this.destroyed,
+    getTarget: () => ({ oid: this.item.commentId, type: this.item.commentType, root: this.threadRoot.rpid,
+      parent: this.threadTargetRpid, scope: 'thread', active: this.threadOpen }),
+    getDraft: () => this.threadDraft,
+    setSending: (sending: boolean) => this.threadSending = sending,
+    toast: (message: string) => this.toast(message),
+    onSuccess: (_snapshot: ReplySubmissionSnapshot, reply: ReplyItem | null, clearDraft: boolean) => {
+      this.applySentThreadReply(reply, clearDraft);
+    },
+  });
   @State threadOpen: boolean = false;
   @State threadRoot: ReplyItem = new ReplyItem();
   @State threadReplies: Array<ReplyItem> = [];
@@ -85,6 +106,7 @@ export struct DynamicDetailPage {
   private screenWidthVp: number = 0;
   private screenHeightVp: number = 0;
   @StorageProp('dynamicDetailCloseRequest') @Watch('onCloseRequested') closeRequest: number = 0;
+  @StorageProp('loginVersion') @Watch('onLoginVersionChanged') loginVersion: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   private destroyed: boolean = false;
@@ -93,92 +115,59 @@ export struct DynamicDetailPage {
   private focusPerformed: boolean = false;
   private commentsOffset: number = 0;
   /**
-   * 评论编排控制器：游标/请求代际/分享卡临时状态都在控制器，@State 经下方闭包读写。
-   * clearOnSort=false：切排序保留现有楼层直到新首屏返回，避免清空长列表使滚动位置和排序按钮跳动。
+   * 评论编排控制器：列表与线程发布展示快照，分享导出独立拥有资源与取消会话。
    */
   private replies: RepliesController = new RepliesController({
-    isDestroyed: (): boolean => this.destroyed,
-    toast: (message: string): void => this.toast(message),
-    getUIContext: (): UIContext => this.getUIContext(),
-    resolveOid: (): number => this.item.commentId,
-    resolveType: (): number => this.item.commentType,
-    canLoadReplies: (): boolean => this.item.commentId > 0 && this.item.commentType > 0,
-    getMainSource: (): BasicDataSource<ReplyItem> => this.replySource,
-    getSortMode: (): number => this.replySortMode,
-    setSortMode: (value: number): void => {
-      this.replySortMode = value;
+    isDestroyed: () => this.destroyed,
+    getSubject: (): ReplySubject => ({ oid: this.item.commentId, type: this.item.commentType }),
+    publishMain: (state: MainRepliesState) => {
+      this.replySortMode = state.sort;
+      this.repliesLoading = state.loading;
+      this.repliesCount = state.count;
+      this.repliesHasMore = state.hasMore;
+      this.replyVersion = state.version;
+      this.repliesFailed = state.failed;
+      this.repliesMoreFailed = state.moreFailed;
     },
-    getRepliesLoading: (): boolean => this.repliesLoading,
-    setRepliesLoading: (value: boolean): void => {
-      this.repliesLoading = value;
+    publishThread: (state: ThreadRepliesState) => {
+      this.threadRoot = state.root;
+      this.threadReplies = state.replies;
+      this.threadLoading = state.loading;
+      this.threadHasMore = state.hasMore;
+      this.replyVersion = state.version;
     },
-    getRepliesHasMore: (): boolean => this.repliesHasMore,
-    setRepliesHasMore: (value: boolean): void => {
-      this.repliesHasMore = value;
+    onThreadError: () => this.toast('回复加载失败，请稍后重试'),
+    afterMainLoaded: () => {
+      if (this.param.focusComments !== true || this.focusPerformed) return;
+      this.focusPerformed = true;
+      const dynId: string = this.item.dynId;
+      setTimeout(() => {
+        if (!this.destroyed && this.item.dynId === dynId) this.scroller.scrollTo({ xOffset: 0,
+          yOffset: this.commentsOffset, animation: !MotionTokens.isReduced() });
+      }, 80);
     },
-    getRepliesCount: (): number => this.repliesCount,
-    setRepliesCount: (value: number): void => {
-      this.repliesCount = value;
-    },
-    clearRepliesError: (reset: boolean): void => {
-      this.repliesMoreFailed = false;
-      if (reset) this.repliesFailed = false;
-    },
-    showRepliesError: (_reset: boolean, _cursor: string, _startedAt: number, _error: Object): void => {
-      if (this.repliesCount === 0) this.repliesFailed = true;
-      else this.repliesMoreFailed = true;
-    },
-    applyRepliesReset: (incoming: Array<ReplyItem>): void => {
-      this.replySource.reset(incoming);
-    },
-    applyRepliesAppend: (incoming: Array<ReplyItem>): void => {
-      this.replySource.append(incoming);
-    },
-    afterRepliesLoaded: async (_reset: boolean): Promise<void> => {
-      if (this.param.focusComments === true && !this.focusPerformed) {
-        this.focusPerformed = true;
-        setTimeout(() => {
-          if (!this.destroyed) this.scroller.scrollTo({ xOffset: 0, yOffset: this.commentsOffset,
-            animation: !MotionTokens.isReduced() });
-        }, 80);
-      }
-    },
-    getThreadRoot: (): ReplyItem => this.threadRoot,
-    setThreadRoot: (root: ReplyItem): void => {
-      this.threadRoot = root;
-    },
-    getThreadReplies: (): Array<ReplyItem> => this.threadReplies,
-    setThreadReplies: (list: Array<ReplyItem>): void => {
-      this.threadReplies = list;
-    },
-    getThreadLoading: (): boolean => this.threadLoading,
-    setThreadLoading: (value: boolean): void => {
-      this.threadLoading = value;
-    },
-    getThreadHasMore: (): boolean => this.threadHasMore,
-    setThreadHasMore: (value: boolean): void => {
-      this.threadHasMore = value;
-    },
-    isThreadStale: (root: number, _oid: number): boolean => !this.threadOpen || this.threadRoot.rpid !== root,
-    mergeThreadReplies: (current: Array<ReplyItem>, incoming: Array<ReplyItem>, reset: boolean): Array<ReplyItem> =>
-      reset ? (incoming.length > 0 ? incoming : current) : current.concat(incoming),
-    onThreadError: (_reset: boolean, _startedAt: number, _error: Object): void => {
-      if (!this.destroyed) this.toast('回复加载失败，请稍后重试');
-    },
-    bumpVersion: (): void => {
-      this.replyVersion++;
-    },
-    getVersion: (): number => this.replyVersion,
+  }, { clearOnSort: false, video: false }, new ReplyShareController({
+    isDestroyed: () => this.destroyed,
+    getSubject: (): ReplySubject => ({ oid: this.item.commentId, type: this.item.commentType }),
+    toast: (message: string) => this.toast(message),
+    getUIContext: () => this.getUIContext(),
     buildShareLink: (item: ReplyItem): string =>
       'https://t.bilibili.com/' + this.item.dynId + '#reply' + String(item.rpid),
-    renderShareCard: (): void => {
-      this.ReplyShareCardBuilder();
-    },
+    renderShareCard: (): void => this.ReplyShareCardBuilder(),
     ensureShareContext: (_context: common.UIAbilityContext | undefined): boolean => true,
-    onShareFailed: (_item: ReplyItem, _link: string, _error: Object): void => {
+    onShareFailed: (item: ReplyItem, link: string, error: Object) => {
       this.toast('分享图片生成失败，请稍后重试');
     },
-  }, false);
+  }));
+
+  private detailLoader: DynamicDetailController = new DynamicDetailController({
+    isAlive: () => !this.destroyed,
+    publish: (status: DynamicDetailStatus) => {
+      this.loading = status.loading;
+      this.loadFailed = status.failed;
+    },
+    onLoaded: (item: DynamicItem) => this.applyLoadedDynamic(item),
+  });
 
   private toast(message: string): void {
     safeToast(this.getUIContext(), message);
@@ -313,11 +302,15 @@ export struct DynamicDetailPage {
   aboutToAppear(): void {
     EmoteResolver.ensureLoaded();
     this.destroyed = false;
+    this.replyLikeBusy = new Set<number>();
+    this.replySubmit.reset();
+    this.threadSubmit.reset();
     this.closing = false;
     this.entryFromRect = false;
     this.contentOpacity = 1;
     this.heroVisible = false;
     this.item = this.param.item as DynamicItem;
+    this.focusPerformed = false;
     this.prepareEntrance();
     this.triggerEntrance();
     if (this.item.commentId > 0 && this.item.commentType > 0) {
@@ -329,36 +322,45 @@ export struct DynamicDetailPage {
   }
 
   aboutToDisappear(): void {
+    this.replySubmit.dispose();
+    this.threadSubmit.dispose();
     this.replies.dispose();
     this.destroyed = true;
-    this.replies.releaseShareCard();
+    this.detailLoader.dispose();
   }
 
   private async loadDetail(): Promise<void> {
-    if (this.item.dynId.length === 0 || this.loading) return;
-    this.loading = true;
-    this.loadFailed = false;
-    try {
-      const detail: DynamicItem | null = await DynamicApi.getDynamicDetail(this.item.dynId);
-      if (!this.destroyed && detail !== null) {
-        this.item = detail;
-        if (this.repliesCount === 0 && !this.repliesLoading) await this.replies.load(true);
-      }
-      if (!this.destroyed && detail === null) this.loadFailed = true;
-    } catch (e) {
-      if (!this.destroyed) this.loadFailed = true;
-    } finally {
-      if (!this.destroyed) this.loading = false;
+    await this.detailLoader.load(this.item.dynId);
+  }
+
+  private applyLoadedDynamic(item: DynamicItem): void {
+    const subjectChanged: boolean = this.item.commentId !== item.commentId || this.item.commentType !== item.commentType;
+    if (subjectChanged) {
+      this.replySubmit.reset();
+      this.closeReplyThread();
+      this.replies.dispose();
+      this.replies.clearMainReplies();
     }
+    this.item = item;
+    // detail 可能修正 feed 提供的评论 subject，不能继续展示旧 subject 的楼层。
+    if (subjectChanged || (this.repliesCount === 0 && !this.repliesLoading)) {
+      this.replies.load(true).catch(() => {});
+    }
+  }
+
+  onLoginVersionChanged(): void {
+    if (this.destroyed) return;
+    this.replyLikeBusy = new Set<number>();
+    this.replySubmit.reset();
+    this.closeReplyThread();
+    this.replies.dispose();
+    this.replies.load(true).catch(() => {});
+    this.loadDetail().catch(() => {});
   }
 
   /** 删除评论成功后的本地移除：数据源重建 + 计数同步。 */
   private removeReply(rpid: number): void {
-    const kept: Array<ReplyItem> = this.replySource.getAll().filter((x: ReplyItem) => x.rpid !== rpid);
-    if (kept.length !== this.replySource.totalCount()) {
-      this.replySource.reset(kept);
-      this.repliesCount = kept.length;
-    }
+    this.replies.removeMain(rpid);
   }
 
   private ensureReplyLogin(isLike: boolean): boolean {
@@ -369,10 +371,11 @@ export struct DynamicDetailPage {
   }
 
   private replyReactionHooks(isLike: boolean): ReplyReactionHooks {
+    const current: () => boolean = this.replies.captureGuard();
     return {
       ensureLogin: () => this.ensureReplyLogin(isLike),
       toast: (message: string) => this.toast(message),
-      isDestroyed: () => this.destroyed,
+      isDestroyed: () => !current(),
       resolveOid: (item: ReplyItem) => item.oid > 0 ? item.oid : this.item.commentId,
       resolveType: (item: ReplyItem) => item.type > 0 ? item.type : this.item.commentType,
       clearDislikeOnLike: false,
@@ -392,13 +395,15 @@ export struct DynamicDetailPage {
   }
 
   private closeReplyThread(): void {
+    this.threadSubmit.reset();
     this.replies.cancelThread();
     this.threadOpen = false;
   }
 
   private openReplyThread(root: ReplyItem): void {
+    this.threadSubmit.reset();
     let latest: ReplyItem = root;
-    const current: Array<ReplyItem> = this.replySource.getAll();
+    const current: Array<ReplyItem> = this.replies.source.getAll();
     for (let i: number = 0; i < current.length; i++) {
       if (current[i].rpid === root.rpid) {
         latest = current[i];
@@ -414,65 +419,21 @@ export struct DynamicDetailPage {
     });
   }
 
-  private sentThreadReply(result: ActionResult, message: string, parent: number): ReplyItem | null {
-    const returned: ReplyItem = ReplyItem.from(asObject(result.data['reply']));
-    const rpid: number = returned.rpid > 0 ? returned.rpid :
-      asNumber(result.data['rpid'], asNumber(result.data['rpid_str'], 0));
-    if (rpid <= 0) return null;
-    const reply: ReplyItem = returned.rpid > 0 ? returned : new ReplyItem();
-    const user = UserStore.current;
-    reply.rpid = rpid;
-    reply.oid = this.item.commentId;
-    reply.type = this.item.commentType;
-    reply.rootRpid = this.threadRoot.rpid;
-    reply.parentRpid = parent;
-    reply.dialogRpid = asNumber(result.data['dialog'], reply.dialogRpid);
-    if (reply.mid <= 0 && user !== null) reply.mid = user.mid;
-    if (reply.uname.length === 0) reply.uname = user !== null && user.uname.length > 0 ? user.uname : '我';
-    if (reply.avatar.length === 0 && user !== null) reply.avatar = user.face;
-    if (reply.level <= 0 && user !== null) reply.level = user.level;
-    if (reply.content.length === 0) reply.content = message;
-    if (reply.ctime <= 0) reply.ctime = Math.floor(Date.now() / 1000);
-    return reply;
+  private applySentThreadReply(sent: ReplyItem | null, clearDraft: boolean): void {
+    if (clearDraft) {
+      this.threadDraft = '';
+      this.threadTargetRpid = this.threadRoot.rpid;
+      this.threadTargetName = this.threadRoot.uname;
+    }
+    if (sent === null) {
+      this.replies.loadThread(true).catch(() => {});
+      return;
+    }
+    this.replies.addSentThread(sent);
   }
 
   private async sendThreadReply(): Promise<void> {
-    const message: string = this.threadDraft.trim();
-    if (message.length === 0 || this.threadSending || !UserStore.isLogin) return;
-    this.threadSending = true;
-    try {
-      const parent: number = this.threadTargetRpid > 0 ? this.threadTargetRpid : this.threadRoot.rpid;
-      const result: ActionResult = await CommentApi.addReply(this.item.commentId, this.item.commentType, message,
-        this.threadRoot.rpid, parent);
-      if (this.destroyed) return;
-      if (!result.ok) {
-        this.toast(result.message);
-        return;
-      }
-      this.threadDraft = '';
-      const sent: ReplyItem | null = this.sentThreadReply(result, message, parent);
-      if (sent !== null) {
-        this.threadReplies = [sent].concat(this.threadReplies.filter((item: ReplyItem) => item.rpid !== sent.rpid));
-        const root: ReplyItem = this.threadRoot.clone();
-        root.count++;
-        root.replies = [sent].concat(root.replies.filter((item: ReplyItem) => item.rpid !== sent.rpid));
-        this.threadRoot = root;
-        const current: Array<ReplyItem> = this.replySource.getAll();
-        for (let i: number = 0; i < current.length; i++) {
-          if (current[i].rpid === root.rpid) {
-            this.replySource.updateItem(i, root);
-            break;
-          }
-        }
-        this.threadTargetRpid = root.rpid;
-        this.threadTargetName = root.uname;
-        this.toast('回复成功');
-      } else {
-        await this.replies.loadThread(true);
-      }
-    } finally {
-      if (!this.destroyed) this.threadSending = false;
-    }
+    await this.threadSubmit.send();
   }
 
   private navigateFromThread(action: () => void): void {
@@ -486,11 +447,11 @@ export struct DynamicDetailPage {
   @Builder
   ReplyShareCardBuilder() {
     ReplyShareCard({
-      item: this.replies.shareItem(),
+      item: this.replies.sharing.shareItem(),
       upMid: this.item.mid,
-      qr: this.replies.shareQr(),
-      page: this.replies.sharePage(),
-      linkLabel: this.replies.shareLink(),
+      qr: this.replies.sharing.shareQr(),
+      page: this.replies.sharing.sharePage(),
+      linkLabel: this.replies.sharing.shareLink(),
       sourceCover: this.item.cover,
       sourceTitle: this.item.title.length > 0 ? this.item.title : this.item.content,
       sourceUpName: this.item.uname,
@@ -517,18 +478,22 @@ export struct DynamicDetailPage {
       }),
       onDislike: (item: ReplyItem) => this.dislikeReply(item).catch(() => {
       }),
-      onShare: (item: ReplyItem) => this.replies.share(item),
+      onShare: (item: ReplyItem) => this.replies.sharing.share(item).catch(() => {}),
       onSelectReply: (item: ReplyItem) => {
+        this.threadSubmit.reset();
         this.threadTargetRpid = item.rpid;
         this.threadTargetName = item.uname;
         this.threadFocusTick++;
       },
       onDeleted: (item: ReplyItem) => {
-        this.threadReplies = this.threadReplies.filter((x: ReplyItem) => x.rpid !== item.rpid);
+        this.replies.removeThread(item.rpid);
       },
       onLoadMore: () => this.replies.loadThread(false).catch(() => {
       }),
-      onDraftChange: (value: string) => this.threadDraft = value,
+      onDraftChange: (value: string) => {
+        this.threadSubmit.draftChanged();
+        this.threadDraft = value;
+      },
       onSend: () => this.sendThreadReply().catch(() => {
       }),
       onNavigate: (action: () => void) => this.navigateFromThread(action),
@@ -536,30 +501,13 @@ export struct DynamicDetailPage {
   }
 
   private async sendReply(): Promise<void> {
-    const message: string = this.replyDraft.trim();
-    if (message.length === 0 || this.replySending) return;
+    if (this.replyDraft.trim().length === 0 || this.replySending) return;
     if (!UserStore.isLogin) {
       this.toast('请先登录后再评论');
       AppNavStack.pushPathByName(NAV_LOGIN, null);
       return;
     }
-    this.replySending = true;
-    try {
-      const result: ActionResult = await CommentApi.addReply(this.item.commentId, this.item.commentType, message);
-      if (this.destroyed) return;
-      if (!result.ok) {
-        this.toast(result.message);
-        return;
-      }
-      this.replyDraft = '';
-      this.toast('评论成功');
-      this.replies.resetMainPaging();
-      await this.replies.load(true);
-    } catch (e) {
-      if (!this.destroyed) this.toast('网络异常，发送失败');
-    } finally {
-      if (!this.destroyed) this.replySending = false;
-    }
+    await this.replySubmit.send();
   }
 
   build() {
@@ -625,7 +573,7 @@ export struct DynamicDetailPage {
           .width('100%')
         }
         if (this.repliesCount > 0) {
-          LazyForEach(this.replySource, (reply: ReplyItem) => {
+          LazyForEach(this.replies.source, (reply: ReplyItem) => {
             ListItem() {
               ReplyCard({
                 item: reply,
@@ -636,7 +584,7 @@ export struct DynamicDetailPage {
                 }),
                 onDislike: (item: ReplyItem) => this.dislikeReply(item).catch(() => {
                 }),
-                onShare: (item: ReplyItem) => this.replies.share(item),
+                onShare: (item: ReplyItem) => this.replies.sharing.share(item).catch(() => {}),
                 onOpenThread: (item: ReplyItem) => this.openReplyThread(item),
                 // 主评论列表："回复"按钮 = 打开该评论的楼中楼面板（与 B 站一致）
                 onSelectReply: (item: ReplyItem) => this.openReplyThread(item),
@@ -675,6 +623,7 @@ export struct DynamicDetailPage {
         sending: this.replySending,
         showEmoteButton: false,
         onChange: (value: string) => {
+          this.replySubmit.draftChanged();
           this.replyDraft = value;
         },
         onSend: () => this.sendReply(),

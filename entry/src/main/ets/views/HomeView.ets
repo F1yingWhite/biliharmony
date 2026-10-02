@@ -1,10 +1,9 @@
 import { MotionTokens } from '../common/MotionTokens';
-import { RequestEpoch } from '../common/RequestEpoch';
 /**
  * 首页视图：推荐（app 端接口）+ 热门，双列瀑布流、下拉刷新、触底加载
  */
+import { HomeFeedController, HomeFeedPhase, HomeFeedSnapshot, homeFeedPhase } from '../components/home/HomeFeedController';
 import { VideoItem } from '../model/Models';
-import { BiliApi } from '../api/BiliApi';
 import { VideoCard } from '../components/video/VideoCard';
 import { VideoReportDialog } from '../components/VideoReportDialog';
 import { LoadingView } from '../components/LoadingView';
@@ -19,12 +18,8 @@ import { LiveRoomCard } from '../components/live/LiveRoomCard';
 import { NavEntryRow } from '../components/NavEntryRow';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { AppNavStack, NAV_RANK, NAV_ZONE, NAV_BANGUMI_INDEX, NAV_LIVE_ZONE } from '../common/AppRouter';
-import { UserApi } from '../api/UserApi';
-import { FeedApi } from '../api/FeedApi';
-import { LiveApi } from '../api/LiveApi';
 import { Haptic } from '../common/Haptic';
 import { Handedness } from '../common/Handedness';
-import { LocalVideoFilter } from '../common/LocalVideoFilter';
 import { HeaderBackdrop } from '../components/GlassHeaderBar';
 
 /** 频道保持可见，搜索收起时上移；单独订阅滚动值，避免重建信息流。 */
@@ -75,11 +70,8 @@ export struct HomeView {
   @State refreshingChannels: Array<boolean> = [false, false, false];
   @State viewportWidth: number = 360;
   @State loadingChannels: Array<boolean> = [false, false, false];
-  private channelOperations: Array<number> = [0, 0, 0];
-  private retryResetChannels: Array<boolean> = [false, false, false];
+  @State channelPhases: Array<HomeFeedPhase> = [HomeFeedPhase.LOADING, HomeFeedPhase.LOADING, HomeFeedPhase.LOADING];
   // 每频道独立的分页游标 / 错误文案 / 到底标记，互不串台
-  @State hotPage: number = 1;
-  @State livePage: number = 1;
   @State recError: string = '';
   @State hotError: string = '';
   @State liveError: string = '';
@@ -101,78 +93,42 @@ export struct HomeView {
   private recScroller: Scroller = new Scroller();
   private hotScroller: Scroller = new Scroller();
   private liveScroller: Scroller = new Scroller();
-  private recSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
-  private hotSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
-  private liveSource: BasicDataSource<LiveRoomItem> = new BasicDataSource<LiveRoomItem>();
-  // 同频道防止重复翻页；刷新优先，并通过 epoch 丢弃被覆盖的请求。
-  private recFetching: boolean = false;
-  private recEpoch: RequestEpoch = new RequestEpoch();
-  private hotFetching: boolean = false;
-  private hotEpoch: RequestEpoch = new RequestEpoch();
-  private liveFetching: boolean = false;
-  private liveEpoch: RequestEpoch = new RequestEpoch();
+  private feed: HomeFeedController = new HomeFeedController((snapshot: HomeFeedSnapshot): void => {
+    this.recCount = snapshot.channels[0].count;
+    this.hotCount = snapshot.channels[1].count;
+    this.liveCount = snapshot.channels[2].count;
+    this.recError = snapshot.channels[0].error;
+    this.hotError = snapshot.channels[1].error;
+    this.liveError = snapshot.channels[2].error;
+    this.recHasMore = snapshot.channels[0].hasMore;
+    this.hotHasMore = snapshot.channels[1].hasMore;
+    this.liveHasMore = snapshot.channels[2].hasMore;
+    this.refreshingChannels = snapshot.channels.map((state): boolean => state.refreshing);
+    this.loadingChannels = snapshot.channels.map((state): boolean => state.loading);
+    this.channelPhases = snapshot.channels.map((state): HomeFeedPhase => homeFeedPhase(state));
+    this.followedLiveRefresh = snapshot.followedLiveRefresh;
+  });
+  private recSource: BasicDataSource<VideoItem> = this.feed.recommend;
+  private hotSource: BasicDataSource<VideoItem> = this.feed.hot;
+  private liveSource: BasicDataSource<LiveRoomItem> = this.feed.live;
   private readonly refreshTriggerOffset: number = 56;
   // 竖向行距与双列横向槽距共用（用户反馈 12 偏松，收紧到 8）。
   private readonly homeGap: number = 8;
   private videoReportDialog: CustomDialogController | null = null;
 
   async aboutToAppear(): Promise<void> {
-    // 切到首页 Tab 时强制回到顶部状态，避免残留 fade 导致搜索栏和搜索球同时出现。
     AppTheme.resetHeaderFade();
-    // 首屏必须等登录 Cookie 从 Preferences 恢复，否则会先缓存一页游客公共推荐。
-    try {
-      await UserStore.ensureLoaded();
-      await this.loadRecommend(true);
-    } catch (e) {
-      if (this.recSource.isEmpty()) this.recError = '推荐加载失败，请检查网络后重试';
-    }
+    await this.feed.activate(this.tab);
   }
 
   aboutToDisappear(): void {
-    this.recEpoch.invalidate();
+    this.feed.dispose();
     this.videoReportDialog?.close();
     this.videoReportDialog = null;
-    this.hotEpoch.invalidate();
-    this.liveEpoch.invalidate();
-    this.recFetching = false;
-    this.hotFetching = false;
-    this.liveFetching = false;
-    for (let i: number = 0; i < this.channelOperations.length; i++) this.channelOperations[i]++;
-    this.refreshingChannels = [false, false, false];
-    this.loadingChannels = [false, false, false];
   }
 
-  async onLoginChanged(): Promise<void> {
-    this.recEpoch.invalidate();
-    this.recFetching = false;
-    this.recSource.clear();
-    this.recCount = 0;
-    // 换账号后曝光窗口不再适用：新账号的推荐是另一套候选。
-    this.clearSeenWindow();
-    FeedApi.resetRecommendSession();
-    try {
-      await UserStore.ensureLoaded();
-      UserApi.loadFeedFollowStates(this.hotSource.getAll()).catch(() => {});
-      await this.loadRecommend(true);
-    } catch (e) {
-      if (this.recSource.isEmpty()) this.recError = '推荐加载失败，请检查网络后重试';
-    }
-  }
-
-  /** 推荐源切换（Web / App 推流）：清列表并重开会话立即生效。 */
-  private async onRecommendModeChanged(): Promise<void> {
-    this.recEpoch.invalidate();
-    this.recFetching = false;
-    this.recSource.clear();
-    this.recCount = 0;
-    this.clearSeenWindow();
-    FeedApi.resetRecommendSession();
-    try {
-      await this.loadRecommend(true);
-    } catch (e) {
-      if (this.recSource.isEmpty()) this.recError = '推荐加载失败，请检查网络后重试';
-    }
-  }
+  async onLoginChanged(): Promise<void> { await this.feed.accountChanged(this.tab); }
+  private async onRecommendModeChanged(): Promise<void> { await this.feed.recommendModeChanged(); }
 
   /** 首页推荐和热门卡片共用视频举报表单。 */
   private reportCard(item: VideoItem): void {
@@ -195,17 +151,7 @@ export struct HomeView {
 
   /** 本地隐藏：从当前列表移除并写入持久化「不想看」，后续 feed 分页与相关推荐不再出现该稿。 */
   private dislikeLocal(item: VideoItem, feedTab: number): void {
-    const source: BasicDataSource<VideoItem> = feedTab === 0 ? this.recSource : this.hotSource;
-    const key: number = item.aid;
-    if (key <= 0) return;
-    for (let index: number = source.totalCount() - 1; index >= 0; index--) {
-      if (source.getData(index).aid === key) source.removeAt(index);
-    }
-    if (feedTab === 0) this.recCount = source.totalCount();
-    else this.hotCount = source.totalCount();
-    LocalVideoFilter.hide(key).catch(() => {
-      // 持久化失败时保留会话级隐藏效果，不打断用户。
-    });
+    if (!this.feed.hide(item, feedTab)) return;
     try {
       this.getUIContext().getPromptAction().showToast({ message: '已隐藏该视频，将不再出现在首页与相关推荐' });
     } catch (e) {
@@ -213,206 +159,9 @@ export struct HomeView {
     }
   }
 
-  /** 追加前按 key 去重：B 站推荐/热门可能返回已在列表中的视频，避免 LazyForEach 重复 key。 */
-  private dedupVideos(source: BasicDataSource<VideoItem>, incoming: Array<VideoItem>, reset: boolean = false): Array<VideoItem> {
-    // 本地「不想看」持久化黑名单先过滤（直播卡片 aid=0 不受影响）。
-    const filtered: Array<VideoItem> = LocalVideoFilter.filterVideos(incoming);
-    const seen: Set<string> = new Set<string>();
-    const base: Array<VideoItem> = reset ? [] : source.getAll();
-    for (let i: number = 0; i < base.length; i++) {
-      seen.add(base[i].aid > 0 ? 'a' + String(base[i].aid) : base[i].bvid);
-    }
-    const out: Array<VideoItem> = [];
-    for (let i: number = 0; i < filtered.length; i++) {
-      const key: string = filtered[i].aid > 0 ? 'a' + String(filtered[i].aid) : filtered[i].bvid;
-      if (!seen.has(key)) {
-        seen.add(key);
-        out.push(filtered[i]);
-      }
-    }
-    return out;
-  }
-
-  // ===== 近期曝光窗口：跨刷新记忆最近看过的推荐，服务端重复下发时本地兜底过滤 =====
-  private readonly seenWindow: Array<string> = [];
-  private readonly seenSet: Set<string> = new Set<string>();
-  private readonly seenWindowMax: number = 400;
-
-  private videoKeyOf(item: VideoItem): string {
-    return item.aid > 0 ? 'a' + String(item.aid) : item.bvid;
-  }
-
-  /** 过滤掉近期曝光窗口内的视频（不清窗口，仅读取）。 */
-  private filterSeen(incoming: Array<VideoItem>): Array<VideoItem> {
-    const out: Array<VideoItem> = [];
-    for (let i: number = 0; i < incoming.length; i++) {
-      if (!this.seenSet.has(this.videoKeyOf(incoming[i]))) {
-        out.push(incoming[i]);
-      }
-    }
-    return out;
-  }
-
-  private rememberSeen(items: Array<VideoItem>): void {
-    for (let i: number = 0; i < items.length; i++) {
-      const key: string = this.videoKeyOf(items[i]);
-      if (!this.seenSet.has(key)) {
-        this.seenSet.add(key);
-        this.seenWindow.push(key);
-      }
-    }
-    while (this.seenWindow.length > this.seenWindowMax) {
-      const oldest: string | undefined = this.seenWindow.shift();
-      if (oldest !== undefined) this.seenSet.delete(oldest);
-    }
-  }
-
-  private clearSeenWindow(): void {
-    this.seenWindow.length = 0;
-    this.seenSet.clear();
-  }
-
-  private dedupLive(source: BasicDataSource<LiveRoomItem>, incoming: Array<LiveRoomItem>): Array<LiveRoomItem> {
-    const seen: Set<number> = new Set<number>();
-    const base: Array<LiveRoomItem> = source.getAll();
-    for (let i: number = 0; i < base.length; i++) {
-      seen.add(base[i].roomId);
-    }
-    const out: Array<LiveRoomItem> = [];
-    for (let i: number = 0; i < incoming.length; i++) {
-      if (!seen.has(incoming[i].roomId)) {
-        seen.add(incoming[i].roomId);
-        out.push(incoming[i]);
-      }
-    }
-    return out;
-  }
-
-  async loadRecommend(reset: boolean): Promise<void> {
-    if (!reset && this.recFetching) return;
-    const epoch: number = this.recEpoch.next();
-    this.recFetching = true;
-    this.recHasMore = true;
-    this.recError = '';
-    try {
-      // 推荐不是有限列表。空响应也可能来自网络失败、过滤或服务端暂时没有候选。
-      // 每轮最多尝试三批，既能跳过重复页，也不会在异常时无限请求。
-      for (let attempt: number = 0; attempt < 3; attempt++) {
-        // reset 只作用于第一帧（开新会话）；重试翻页沿用同一会话继续向后要。
-        const list: Array<VideoItem> = await FeedApi.getRecommend(reset && attempt === 0);
-        if (!this.recEpoch.isCurrent(epoch)) return;
-        const unseen: Array<VideoItem> = this.filterSeen(list);
-        const fresh: Array<VideoItem> = this.dedupVideos(this.recSource, unseen, reset);
-        if (fresh.length === 0) continue;
-        UserApi.loadFeedFollowStates(fresh).catch(() => {});
-        if (reset) this.recSource.reset(fresh);
-        else this.recSource.append(fresh);
-        this.recCount = this.recSource.totalCount();
-        return;
-      }
-      this.recError = this.recSource.isEmpty() ? '暂时没有获取到推荐，请重试' : '暂时没有新推荐，点击重试';
-    } catch (e) {
-      if (!this.recEpoch.isCurrent(epoch)) return;
-      this.recError = '推荐加载失败，请检查网络后重试';
-    } finally {
-      if (this.recEpoch.isCurrent(epoch)) this.recFetching = false;
-    }
-  }
-
-  async loadHot(reset: boolean): Promise<void> {
-    if (!reset && (this.hotFetching || !this.hotHasMore)) {
-      return;
-    }
-    this.hotFetching = true;
-    const epoch: number = this.hotEpoch.next();
-    try {
-      this.hotError = '';
-      const pn: number = reset ? 1 : this.hotPage;
-      const list: Array<VideoItem> = await FeedApi.getHot(pn, 20);
-      if (!this.hotEpoch.isCurrent(epoch)) return;
-      if (list.length === 0) {
-        this.hotHasMore = false;
-        if (reset) {
-          this.hotSource.clear();
-          this.hotCount = 0;
-        }
-        if (this.hotSource.isEmpty()) {
-          this.hotError = '暂时没有热门内容，请稍后重试';
-          this.retryResetChannels[1] = true;
-        }
-        return;
-      }
-      this.hotPage = pn + 1;
-      this.hotHasMore = list.length >= 20;
-      if (reset) {
-        this.hotSource.reset(this.dedupVideos(this.hotSource, list, true));
-      } else {
-        this.hotSource.append(this.dedupVideos(this.hotSource, list));
-      }
-      this.hotCount = this.hotSource.totalCount();
-      UserApi.loadFeedFollowStates(list).catch(() => {});
-    } catch (e) {
-      if (this.hotEpoch.isCurrent(epoch)) {
-        this.hotError = '热门加载失败，点击重试';
-        this.retryResetChannels[1] = reset;
-      }
-    } finally {
-      if (this.hotEpoch.isCurrent(epoch)) this.hotFetching = false;
-    }
-  }
-
-  async loadLive(reset: boolean): Promise<void> {
-    if (reset) this.followedLiveRefresh++;
-    if (!reset && (this.liveFetching || !this.liveHasMore)) {
-      return;
-    }
-    this.liveFetching = true;
-    const epoch: number = this.liveEpoch.next();
-    try {
-      this.liveError = '';
-      const page: number = reset ? 1 : this.livePage;
-      const list: Array<LiveRoomItem> = await LiveApi.getLiveRooms(page, 20);
-      if (!this.liveEpoch.isCurrent(epoch)) return;
-      if (list.length === 0) {
-        this.liveHasMore = false;
-        if (reset) {
-          this.liveSource.clear();
-          this.liveCount = 0;
-        }
-        if (this.liveSource.isEmpty()) {
-          this.liveError = '暂时没有直播内容，请稍后重试';
-          this.retryResetChannels[2] = true;
-        }
-        return;
-      }
-      this.livePage = page + 1;
-      this.liveHasMore = list.length >= 20;
-      if (reset) {
-        this.liveSource.reset(list);
-      } else {
-        this.liveSource.append(this.dedupLive(this.liveSource, list));
-      }
-      this.liveCount = this.liveSource.totalCount();
-    } catch (e) {
-      if (this.liveEpoch.isCurrent(epoch)) {
-        this.liveError = '直播列表加载失败，点击重试';
-        this.retryResetChannels[2] = reset;
-      }
-    } finally {
-      if (this.liveEpoch.isCurrent(epoch)) this.liveFetching = false;
-    }
-  }
-
-  /** 按频道分发加载：三个频道的刷新/触底入口统一走这里。 */
-  private loadChannel(feedTab: number, reset: boolean): Promise<void> {
-    if (feedTab === 0) {
-      return this.loadRecommend(reset);
-    }
-    if (feedTab === 1) {
-      return this.loadHot(reset);
-    }
-    return this.loadLive(reset);
-  }
+  async loadRecommend(reset: boolean): Promise<void> { await this.feed.load(0, reset); }
+  async loadHot(reset: boolean): Promise<void> { await this.feed.load(1, reset); }
+  async loadLive(reset: boolean): Promise<void> { await this.feed.load(2, reset); }
 
   private channelError(feedTab: number): string {
     return feedTab === 0 ? this.recError : (feedTab === 1 ? this.hotError : this.liveError);
@@ -426,40 +175,9 @@ export struct HomeView {
     return feedTab === 0 ? this.recCount === 0 : (feedTab === 1 ? this.hotCount === 0 : this.liveCount === 0);
   }
 
-  onRefresh(feedTab: number): void {
-    const operation: number = ++this.channelOperations[feedTab];
-    this.refreshingChannels[feedTab] = true;
-    this.loadingChannels[feedTab] = false;
-    this.loadChannel(feedTab, true)
-      .catch(() => {
-      })
-      .finally(() => {
-        if (this.channelOperations[feedTab] === operation) this.refreshingChannels[feedTab] = false;
-      });
-  }
-
-  onReachEnd(feedTab: number): void {
-    if (this.loadingChannels[feedTab] || this.refreshingChannels[feedTab] ||
-      this.channelError(feedTab).length > 0) {
-      return;
-    }
-    const operation: number = ++this.channelOperations[feedTab];
-    this.loadingChannels[feedTab] = true;
-    this.loadChannel(feedTab, false)
-      .catch(() => {
-      })
-      .finally(() => {
-        if (this.channelOperations[feedTab] === operation) this.loadingChannels[feedTab] = false;
-      });
-  }
-
-  private retryMore(feedTab: number): void {
-    if (feedTab === 0) this.recError = '';
-    else if (feedTab === 1) this.hotError = '';
-    else this.liveError = '';
-    if (this.retryResetChannels[feedTab]) this.onRefresh(feedTab);
-    else this.onReachEnd(feedTab);
-  }
+  onRefresh(feedTab: number): void { this.feed.load(feedTab, true); }
+  onReachEnd(feedTab: number): void { this.feed.load(feedTab, false); }
+  private retryMore(feedTab: number): void { this.feed.retry(feedTab); }
 
   @Builder
   SubTabItem(label: string, index: number) {
@@ -590,24 +308,18 @@ export struct HomeView {
   LiveFooter() {
     Column() {
       if (this.liveCount === 0) {
-        LoadingView({ skeleton: 'grid',
-          loading: this.liveError.length === 0 &&
-            (this.liveHasMore || this.loadingChannels[2] || this.refreshingChannels[2]),
-          empty: this.liveError.length === 0 && !this.liveHasMore &&
-            !this.loadingChannels[2] && !this.refreshingChannels[2],
-          emptyText: '暂时没有直播内容',
-          errorText: this.liveError,
-          onRetry: () => this.onRefresh(2) })
+        this.EmptyFeed(2)
+      } else {
+        LoadMoreFooter({
+          loading: this.loadingChannels[2],
+          hasMore: this.liveHasMore || this.liveError.length > 0,
+          moreText: this.liveError,
+          endText: '—— 到底啦 ——',
+          loadingText: '加载中…',
+          fixedHeight: this.loadingChannels[2] || !this.liveHasMore || this.liveError.length > 0 ? 48 : 1,
+          onLoadMore: () => this.retryMore(2),
+        })
       }
-      LoadMoreFooter({
-        loading: this.loadingChannels[2],
-        hasMore: this.liveHasMore || this.liveError.length > 0,
-        moreText: this.liveError,
-        endText: '—— 到底啦 ——',
-        loadingText: '加载中…',
-        fixedHeight: this.loadingChannels[2] || !this.liveHasMore || this.liveError.length > 0 ? 48 : 1,
-        onLoadMore: () => this.retryMore(2),
-      })
     }.width('100%')
   }
 
@@ -671,7 +383,7 @@ export struct HomeView {
           // 与双列横向槽宽（lanes gutter）保持一致。
           .margin({ bottom: this.homeGap })
           .onVisibleAreaChange([0.5], (visible: boolean, ratio: number) => {
-            if (feedTab === 0 && this.tab === 0 && visible && ratio >= 0.5) this.rememberSeen([item]);
+            if (feedTab === 0 && this.tab === 0 && visible && ratio >= 0.5) this.feed.exposure.remember([item]);
           })
         }, (item: VideoItem) => (item.aid > 0 ? String(item.aid) : item.bvid) + '_' + feedTab)
       }
@@ -744,9 +456,27 @@ export struct HomeView {
   }
 
   @Builder
+  EmptyFeed(feedTab: number) {
+    Column() {
+      LoadingView({ skeleton: 'grid',
+        loading: this.channelPhases[feedTab] === HomeFeedPhase.LOADING,
+        empty: this.channelPhases[feedTab] === HomeFeedPhase.EMPTY,
+        emptyText: feedTab === 2 ? '暂时没有直播内容' : '暂时没有可展示的视频',
+        errorText: this.channelError(feedTab),
+        onRetry: () => this.retryMore(feedTab) })
+      if (this.channelPhases[feedTab] === HomeFeedPhase.EMPTY) {
+        Button(this.channelHasMore(feedTab) ? '继续加载' : '重新加载')
+          .height(40).fontSize(13).fontColor(this.accent)
+          .backgroundColor(this.isDark ? '#252A34' : '#EEF0F5').borderRadius(20)
+          .padding({ left: 24, right: 24 })
+          .onClick(() => { this.feed.retryEmpty(feedTab); })
+      }
+    }.width('100%')
+  }
+
+  @Builder
   FeedPage(feedTab: number) {
-    if (feedTab === 2 && this.liveCount === 0 && this.liveError.length === 0 &&
-      (this.liveHasMore || this.loadingChannels[2] || this.refreshingChannels[2])) {
+    if (this.channelPhases[feedTab] === HomeFeedPhase.LOADING) {
       LoadingView({ loading: true, skeleton: 'grid' })
         .height('100%')
         .padding({ top: this.statusBarInset + 98 })
@@ -756,25 +486,12 @@ export struct HomeView {
       }
       .refreshOffset(this.refreshTriggerOffset)
       .onRefreshing(() => this.onRefresh(2))
-    } else if (this.channelError(feedTab).length > 0 && this.channelEmpty(feedTab)) {
-      LoadingView({ skeleton: 'grid',
-        loading: false,
-        empty: false,
-        errorText: this.channelError(feedTab),
-        onRetry: () => {
-          this.loadChannel(feedTab, true).catch(() => {
-          });
-        },
-      })
-      .margin({ top: 110 })
     } else if (this.channelEmpty(feedTab)) {
-      LoadingView({ skeleton: 'grid', loading: true })
-        .height('100%')
+      Column() { this.EmptyFeed(feedTab) }
         .padding({ top: this.statusBarInset + 98 })
     } else {
       Refresh({ refreshing: this.refreshingChannels[feedTab], builder: this.RefreshHeader() }) {
-        if (feedTab === 2) this.LiveFeedList()
-        else this.VideoFeedList(feedTab)
+        this.VideoFeedList(feedTab)
       }
       .refreshOffset(this.refreshTriggerOffset)
       .pullDownRatio(undefined)

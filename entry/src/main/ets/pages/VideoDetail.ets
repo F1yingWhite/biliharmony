@@ -10,7 +10,6 @@ import { LocalVideoFilter } from '../common/LocalVideoFilter';
  * 收藏夹选择由 VideoFavoritePicker 发布快照，页面保留布局、导航和状态发布。
  */
 import { PlaybackSelection } from '../services/media/PlaybackSourceCoordinator';
-import { RequestEpoch } from '../common/RequestEpoch';
 import { display, UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
@@ -22,22 +21,24 @@ import { Haptic } from '../common/Haptic';
 import { AppNavStack, HERO_BG_SNAPSHOT_KEY, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
   HERO_NAV_TRANSITION_FINISH_REQUEST_KEY, ImageViewerSrcRect, NAV_LOGIN, NAV_VIDEO_DETAIL, NAV_USER_SPACE,
   VideoDetailParam, UserSpaceParam, releasePixelMap, NAV_SEARCH } from '../common/AppRouter';
-import { VideoDetail, VideoItem, ReplyItem, PlayUrlInfo, VideoPage, VideoQualityOption, VideoRelationState,
-  BiliEmote, BiliEmotePackage, UserStat, SpaceArcData, SubtitleTrack, UgcSeasonEpisode } from '../model/Models';
+import { VideoDetail, VideoItem, ReplyItem, PlayUrlInfo, VideoPage, VideoQualityOption,
+  BiliEmote, BiliEmotePackage, SubtitleTrack, UgcSeasonEpisode } from '../model/Models';
 import { ActionResult, BiliApi, VideoTagInfo } from '../api/BiliApi';
 import { PlayerView } from '../components/player/PlayerView';
 import { AppTheme } from '../common/AppTheme';
 import { PlayerDanmakuEngine } from '../components/player/PlayerDanmakuEngine';
 import { LoadingView } from '../components/LoadingView';
-import { ImageColor, ImagePalette } from '../common/ImageColor';
 import { UserStore } from '../services/auth/UserStore';
-import { asNumber, asObject, colorWithAlpha, formatCount, formatDate } from '../common/Utils';
+import { colorWithAlpha, formatCount, formatDate } from '../common/Utils';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
 import { ReplyEmotePanel } from '../components/reply/ReplyEmotePanel';
 import { ReplyThreadPanel } from '../components/reply/ReplyThreadPanel';
 import { RepliesController } from '../components/reply/RepliesController';
+import { MainRepliesState, ReplySubject, ThreadRepliesState, mergeUniqueReplies } from '../components/reply/ReplyState';
+import { ReplyShareController } from '../components/reply/ReplyShareController';
+import { ReplySubmissionController, ReplySubmissionSnapshot } from '../components/reply/ReplySubmissionController';
 import { RelatedVideoRow } from '../components/video/VideoRelatedRow';
 import { VideoReplyTab } from '../components/video/VideoReplyTab';
 import { CoinSheetView } from '../components/video/CoinSheetView';
@@ -45,8 +46,6 @@ import { FavPickSheetView } from '../components/video/FavPickSheetView';
 import { VideoActionItem } from '../components/video/VideoActionItem';
 import { ReplyShareCard } from '../components/reply/ReplyShareCard';
 import { safeToast } from '../common/Toast';
-import { CommentApi } from '../api/CommentApi';
-import { UserApi } from '../api/UserApi';
 import { CommentLog } from '../common/CommentLog';
 import { VideoDetailGeometry } from '../common/VideoDetailGeometry';
 import { biliImageThumbnail } from '../common/ImageUrl';
@@ -54,6 +53,8 @@ import { VideoIntroSection } from '../components/video/VideoIntroSection';
 import { VideoHeroTransitionController } from '../components/video/VideoHeroTransitionController';
 import { VideoActionController } from '../components/video/VideoActionController';
 import { VideoPlaybackController } from '../components/video/VideoPlaybackController';
+import { VideoDetailController, VideoDetailMetadata, VideoDetailStatus } from '../components/video/VideoDetailController';
+import { VideoAccountController, VideoAccountRelation, VideoEmoteStatus, VideoFollowStatus } from '../components/video/VideoAccountController';
 import { RelatedVideoStatus, VideoRecommendations } from '../components/video/VideoRecommendations';
 import { VideoFavoritePicker, VideoFavoritePickerState } from '../components/video/VideoFavoritePicker';
 
@@ -112,7 +113,6 @@ export struct VideoDetailPage {
   @State replyLoading: boolean = false;
   @State replyLoadError: string = '';
   @State replyItemCount: number = 0;
-  @State replyPrefetchCount: number = 0;
   // 回复详情是视频页内的二级导航状态；放入 AppStorage 供 NavDestination
   // 的系统返回/侧滑回调优先关闭，避免直接把整个视频页弹出。
   @StorageLink('videoReplyThreadOpen') replyThreadOpen: boolean = false;
@@ -122,7 +122,6 @@ export struct VideoDetailPage {
   @State replyThreadRoot: ReplyItem = new ReplyItem();
   @State threadHasMore: boolean = true;
   @State threadLoading: boolean = false;
-  @State threadPrefetchCount: number = 0;
   /** 当前输入栏回复所属的根评论；为 0 时发布一级评论。与详情面板是否打开相互独立。 */
   @State replyTargetRootRpid: number = 0;
   @State replyTargetRpid: number = 0;
@@ -132,6 +131,17 @@ export struct VideoDetailPage {
   @State threadReplyFocusTick: number = 0;
   @State replyDraft: string = '';
   @State replySending: boolean = false;
+  private replySubmit: ReplySubmissionController = new ReplySubmissionController({
+    isAlive: () => !this.destroyed,
+    getTarget: () => ({ oid: this.detail.aid, type: 1, root: this.replyTargetRootRpid,
+      parent: this.replyTargetRpid, scope: this.replyThreadOpen ? 'thread' : 'main', active: true }),
+    getDraft: () => this.replyDraft,
+    setSending: (sending: boolean) => this.replySending = sending,
+    toast: (message: string) => this.toast(message),
+    onSuccess: (snapshot: ReplySubmissionSnapshot, reply: ReplyItem | null, clearDraft: boolean) => {
+      this.applySubmittedReply(snapshot, reply, clearDraft);
+    },
+  });
   @State replyLikeVersion: number = 0;
   @State replyViewOffsetY: number = 0;
   @State replyViewOpacity: number = 1;
@@ -382,7 +392,45 @@ export struct VideoDetailPage {
     },
     toast: (message: string): void => this.toast(message),
   });
-  private initialRequest: RequestEpoch = new RequestEpoch();
+  private detailLoader: VideoDetailController = new VideoDetailController({
+    isAlive: () => !this.destroyed,
+    waitEntrance: () => this.hero.waitEntranceGate(),
+    publishStatus: (state: VideoDetailStatus) => {
+      this.loading = state.loading;
+      this.errorText = state.error;
+    },
+    publishMetadata: (state: VideoDetailMetadata) => {
+      this.upFollowerCount = state.followers;
+      this.upVideoCount = state.videos;
+      this.videoTags = state.tags;
+      this.pageTint = state.tint;
+    },
+    onLoaded: (detail: VideoDetail) => this.applyLoadedVideo(detail),
+  });
+  private accountContext: VideoAccountController = new VideoAccountController({
+    isAlive: () => !this.destroyed,
+    getRevision: () => ({ like: this.likeActionVersion, coin: this.coinActionVersion,
+      favorite: this.favoriteActionVersion, follow: this.followActionVersion }),
+    publishRelation: (state: VideoAccountRelation) => {
+      // 控制器只发布已验证归属的读取结果；按钮版本仍由本地互动的写入推进。
+      if (state.revision.like === this.likeActionVersion) {
+        this.liked = state.value.liked;
+        this.disliked = state.value.disliked;
+      }
+      if (state.revision.coin === this.coinActionVersion) this.coinCountByMe = state.value.coin;
+      if (state.revision.favorite === this.favoriteActionVersion) this.favorited = state.value.favorite;
+    },
+    publishFollow: (state: VideoFollowStatus) => {
+      if (state.revision !== this.followActionVersion) return;
+      if (state.following !== null) this.following = state.following;
+      this.followLoading = state.loading;
+    },
+    publishEmotes: (state: VideoEmoteStatus) => {
+      this.emotePackages = state.packages;
+      this.emoteLoading = state.loading;
+      if (this.emotePackageIndex >= state.packages.length) this.emotePackageIndex = 0;
+    },
+  });
   private destroyed: boolean = false;
   private timers: Set<number> = new Set<number>();
   private replyLikeBusy: Set<number> = new Set<number>();
@@ -390,6 +438,7 @@ export struct VideoDetailPage {
   private likeActionVersion: number = 0;
   private coinActionVersion: number = 0;
   private favoriteActionVersion: number = 0;
+  private followActionVersion: number = 0;
   /** 互动动作控制器：乐观更新与失败回滚都在这里；@State 仍在本页，经下方闭包读写。 */
   private actions: VideoActionController = new VideoActionController({
     isDestroyed: (): boolean => this.destroyed,
@@ -413,10 +462,12 @@ export struct VideoDetailPage {
     getUpMid: (): number => this.detail.upMid,
     getLiked: (): boolean => this.liked,
     setLiked: (value: boolean): void => {
+      this.likeActionVersion++;
       this.liked = value;
     },
     getDisliked: (): boolean => this.disliked,
     setDisliked: (value: boolean): void => {
+      this.likeActionVersion++;
       this.disliked = value;
     },
     getLikeCount: (): number => this.likeCount,
@@ -425,6 +476,7 @@ export struct VideoDetailPage {
     },
     getCoinCountByMe: (): number => this.coinCountByMe,
     setCoinCountByMe: (value: number): void => {
+      this.coinActionVersion++;
       this.coinCountByMe = value;
     },
     getCoinCount: (): number => this.coinCount,
@@ -438,6 +490,7 @@ export struct VideoDetailPage {
     },
     getFavorited: (): boolean => this.favorited,
     setFavorited: (value: boolean): void => {
+      this.favoriteActionVersion++;
       this.favorited = value;
     },
     getFavoriteCount: (): number => this.favoriteCount,
@@ -446,6 +499,7 @@ export struct VideoDetailPage {
     },
     getFollowing: (): boolean => this.following,
     setFollowing: (value: boolean): void => {
+      this.followActionVersion++;
       this.following = value;
     },
     getFollowLoading: (): boolean => this.followLoading,
@@ -467,8 +521,6 @@ export struct VideoDetailPage {
   private dmEngineRef: PlayerDanmakuEngine | null = null;
   // playerCollapse 的精确手势累计值；视觉态仅过滤不足半个 vp 的亚像素抖动。
   private playerCollapseRaw: number = 0;
-  private replySource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();  /** 已发布但评论列表接口尚未索引到的本地楼层；刷新/切排序时仍保留。 */
-  private localSentReplies: Array<ReplyItem> = [];
   private recommendations: VideoRecommendations = new VideoRecommendations(
     (): boolean => this.destroyed, (): VideoDetail => this.detail,
     (status: RelatedVideoStatus): void => {
@@ -483,179 +535,44 @@ export struct VideoDetailPage {
   private mainReplyComposerFocused: boolean = false;
   private threadReplyComposerFocused: boolean = false;
   /**
-   * 评论编排控制器（与动态/番剧详情共享）：游标/请求代际/分享卡临时状态在控制器，
-   * @State 经下方闭包读写。视频页差异经可选钩子注入：首屏清洗 + localSentReplies 合并、
-   * 去重追加、加载/排序/楼中楼日志、首屏与楼中楼的自动续取。clearOnSort=true：切排序清列表。
+   * 评论编排控制器：列表与线程发布展示快照，分享导出独立拥有资源与取消会话。
    */
   private replies: RepliesController = new RepliesController({
-    isDestroyed: (): boolean => this.destroyed,
-    toast: (message: string): void => this.toast(message),
-    getUIContext: (): UIContext => this.getUIContext(),
-    resolveOid: (): number => this.detail.aid,
-    resolveType: (): number => 1,
-    canLoadReplies: (): boolean => true,
-    getMainSource: (): BasicDataSource<ReplyItem> => this.replySource,
-    getSortMode: (): number => this.replySortMode,
-    setSortMode: (value: number): void => {
-      this.replySortMode = value;
+    isDestroyed: () => this.destroyed,
+    getSubject: (): ReplySubject => ({ oid: this.detail.aid, type: 1 }),
+    publishMain: (state: MainRepliesState) => {
+      this.replySortMode = state.sort;
+      this.replyLoading = state.loading;
+      this.replyItemCount = state.count;
+      this.replyHasMore = state.hasMore;
+      this.replyLikeVersion = state.version;
+      this.replyLoadError = state.error;
     },
-    getRepliesLoading: (): boolean => this.replyLoading,
-    setRepliesLoading: (value: boolean): void => {
-      this.replyLoading = value;
+    publishThread: (state: ThreadRepliesState) => {
+      this.replyThreadRoot = state.root;
+      this.threadAllReplies = state.replies;
+      this.threadLoading = state.loading;
+      this.threadHasMore = state.hasMore;
+      this.replyLikeVersion = state.version;
     },
-    getRepliesHasMore: (): boolean => this.replyHasMore,
-    setRepliesHasMore: (value: boolean): void => {
-      this.replyHasMore = value;
+    onSortApplied: () => {
+      this.hideReplyThread();
     },
-    getRepliesCount: (): number => this.replyItemCount,
-    setRepliesCount: (value: number): void => {
-      this.replyItemCount = value;
-    },
-    clearRepliesError: (_reset: boolean): void => {
-      this.replyLoadError = '';
-    },
-    showRepliesError: (reset: boolean, cursor: string, startedAt: number, error: Object): void => {
-      // 保留已加载内容，首屏与分页都展示可重试的错误。
-      this.replyLoadError = '评论加载失败，请检查网络后重试';
-      CommentLog.error('ui.replies.error', 'aid=' + String(this.detail.aid) + ' reset=' + String(reset) +
-        ' cursorLen=' + String(cursor.length) + ' ms=' + String(CommentLog.elapsed(startedAt)) +
-        ' error=' + CommentLog.errorText(error));
-    },
-    applyRepliesReset: (incoming: Array<ReplyItem>): void => {
-      const sanitized: Array<ReplyItem> = this.sanitizeReplies(incoming);
-      const serverIds: Set<number> = new Set<number>();
-      for (let i: number = 0; i < sanitized.length; i++) serverIds.add(sanitized[i].rpid);
-      // 一旦服务端返回该楼层就移除本地快照，改用字段更完整的服务端对象；尚未索引到的
-      // 继续置顶保留，避免发送后切排序或在途刷新把它“吞掉”。
-      this.localSentReplies = this.localSentReplies.filter((item: ReplyItem) => !serverIds.has(item.rpid));
-      this.replySource.reset(this.mergeUniqueReplies(this.localSentReplies, sanitized));
-    },
-    applyRepliesAppend: (incoming: Array<ReplyItem>): void => {
-      this.appendUniqueReplies(this.replySource, incoming);
-    },
-    onRepliesSkip: (reset: boolean, loading: boolean, _hasMore: boolean): void => {
-      if (!reset && loading) {
-        CommentLog.warn('ui.replies.skip', 'reason=loading aid=' + String(this.detail.aid) +
-          ' reset=' + String(reset));
-      }
-    },
-    onRepliesStart: (reset: boolean, cursor: string, before: number): void => {
-      if (reset) this.replyPrefetchCount = 0;
-      CommentLog.info('ui.replies.start', 'aid=' + String(this.detail.aid) + ' reset=' + String(reset) +
-        ' mode=' + String(this.replySortMode) + ' cursorLen=' + String(cursor.length) +
-        ' before=' + String(before));
-    },
-    onRepliesDropped: (rows: number): void => {
-      CommentLog.warn('ui.replies.drop', 'reason=destroyed aid=' + String(this.detail.aid) +
-        ' rows=' + String(rows));
-    },
-    onRepliesDone: (reset: boolean, incoming: number, before: number, cursor: string, hasMore: boolean,
-      startedAt: number): void => {
-      CommentLog.info('ui.replies.done', 'aid=' + String(this.detail.aid) + ' reset=' + String(reset) +
-        ' incoming=' + String(incoming) + ' before=' + String(before) + ' total=' +
-        String(this.replySource.totalCount()) + ' cursorLen=' + String(cursor.length) +
-        ' hasMore=' + String(hasMore) + ' ms=' + String(CommentLog.elapsed(startedAt)));
-    },
-    afterRepliesLoaded: async (_reset: boolean): Promise<void> => {
-      // 某些视频首页只返回置顶/精选的少量评论，自动继续取页直到首屏够用。
-      if (this.replyHasMore && this.replySource.totalCount() < 20 && this.replyPrefetchCount < 5) {
-        this.replyPrefetchCount++;
-        CommentLog.info('ui.replies.prefetch', 'aid=' + String(this.detail.aid) + ' attempt=' +
-          String(this.replyPrefetchCount) + ' total=' + String(this.replySource.totalCount()) +
-          ' cursorLen=' + String(this.replies.getReplyCursor().length));
-        await this.replies.load(false);
-      }
-    },
-    onSortSkip: (current: number, requested: number): void => {
-      CommentLog.warn('ui.replies.sort.skip', 'current=' + String(current) + ' requested=' +
-        String(requested) + ' loading=' + String(this.replyLoading));
-    },
-    onSortChange: (from: number, to: number): void => {
-      CommentLog.info('ui.replies.sort', 'aid=' + String(this.detail.aid) + ' from=' +
-        String(from) + ' to=' + String(to));
-    },
-    onSortApplied: (): void => {
-      this.replyThreadOpen = false;
-    },
-    getThreadRoot: (): ReplyItem => this.replyThreadRoot,
-    setThreadRoot: (root: ReplyItem): void => {
-      this.replyThreadRoot = root;
-    },
-    getThreadReplies: (): Array<ReplyItem> => this.threadAllReplies,
-    setThreadReplies: (list: Array<ReplyItem>): void => {
-      this.threadAllReplies = list;
-    },
-    getThreadLoading: (): boolean => this.threadLoading,
-    setThreadLoading: (value: boolean): void => {
-      this.threadLoading = value;
-    },
-    getThreadHasMore: (): boolean => this.threadHasMore,
-    setThreadHasMore: (value: boolean): void => {
-      this.threadHasMore = value;
-    },
-    isThreadStale: (root: number, oid: number): boolean =>
-      this.replyThreadRoot.rpid !== root || this.detail.aid !== oid,
-    // 保留 item.replies 里的预览回复：接口偶尔返回空列表时，楼中楼不会变成“有数字但没内容”。
-    mergeThreadReplies: (current: Array<ReplyItem>, incoming: Array<ReplyItem>,
-      _reset: boolean): Array<ReplyItem> => this.mergeUniqueReplies(current, incoming),
-    onThreadError: (reset: boolean, startedAt: number, error: Object): void => {
-      // 回复加载失败保持现有内容，threadLoading 复位后可点击继续加载重试。
-      CommentLog.error('ui.thread.error', 'root=' + String(this.replyThreadRoot.rpid) + ' reset=' +
-        String(reset) + ' ms=' + String(CommentLog.elapsed(startedAt)) + ' error=' +
-        CommentLog.errorText(error));
-    },
-    onThreadSkip: (reset: boolean): void => {
-      if ((!reset && this.threadLoading) || (!reset && !this.threadHasMore)) {
-        CommentLog.warn('ui.thread.skip', 'root=' + String(this.replyThreadRoot.rpid) + ' reset=' +
-          String(reset) + ' loading=' + String(this.threadLoading) + ' hasMore=' + String(this.threadHasMore));
-      }
-    },
-    onThreadStart: (reset: boolean, _root: number, _oid: number, cursor: string, before: number): void => {
-      CommentLog.info('ui.thread.start', 'aid=' + String(this.detail.aid) + ' root=' +
-        String(this.replyThreadRoot.rpid) + ' reset=' + String(reset) + ' cursorLen=' +
-        String(cursor.length) + ' before=' + String(before));
-    },
-    onThreadDone: (reset: boolean, incoming: number, before: number, cursor: string, hasMore: boolean,
-      startedAt: number): void => {
-      CommentLog.info('ui.thread.done', 'root=' + String(this.replyThreadRoot.rpid) + ' reset=' +
-        String(reset) + ' incoming=' + String(incoming) + ' before=' + String(before) +
-        ' total=' + String(this.threadAllReplies.length) + ' cursorLen=' + String(cursor.length) +
-        ' hasMore=' + String(hasMore) + ' ms=' + String(CommentLog.elapsed(startedAt)));
-    },
-    afterThreadLoaded: async (allowPrefetch: boolean): Promise<void> => {
-      const target: number = Math.min(20, Math.max(1, this.replyThreadRoot.count));
-      if (allowPrefetch && this.threadHasMore && this.threadAllReplies.length < target &&
-        this.threadPrefetchCount < 5) {
-        this.threadPrefetchCount++;
-        CommentLog.info('ui.thread.prefetch', 'root=' + String(this.replyThreadRoot.rpid) + ' attempt=' +
-          String(this.threadPrefetchCount) + ' total=' + String(this.threadAllReplies.length) +
-          ' target=' + String(target));
-        await this.replies.loadThread(false);
-      }
-    },
-    bumpVersion: (): void => {
-      this.replyLikeVersion++;
-    },
-    getVersion: (): number => this.replyLikeVersion,
-    onAfterMutate: (rpid: number, mainChanged: boolean, threadChanged: boolean, rootChanged: boolean,
-      found: boolean): void => {
-      CommentLog.info('ui.reply.mutate', 'rpid=' + String(rpid) + ' main=' + String(mainChanged) +
-        ' thread=' + String(threadChanged) + ' root=' + String(rootChanged) +
-        ' found=' + String(found) + ' version=' + String(this.replyLikeVersion));
-    },
+  }, { clearOnSort: true, video: true }, new ReplyShareController({
+    isDestroyed: () => this.destroyed,
+    getSubject: (): ReplySubject => ({ oid: this.detail.aid, type: 1 }),
+    toast: (message: string) => this.toast(message),
+    getUIContext: () => this.getUIContext(),
     buildShareLink: (item: ReplyItem): string =>
       'https://www.bilibili.com/video/' + this.detail.bvid + '#reply' + String(item.rpid),
-    renderShareCard: (): void => {
-      this.ReplyShareCardBuilder();
-    },
+    renderShareCard: (): void => this.ReplyShareCardBuilder(),
     ensureShareContext: (_context: common.UIAbilityContext | undefined): boolean => true,
-    onShareFailed: (item: ReplyItem, link: string, error: Object): void => {
+    onShareFailed: (item: ReplyItem, link: string, error: Object) => {
       CommentLog.error('share.reply.error', 'rpid=' + String(item.rpid) + ' error=' + CommentLog.errorText(error));
-      // 分享面板不可用/截图失败时兜底为复制链接，保证"转发"始终有结果。
       this.copyTextToClipboard(link);
       this.toast('分享面板暂不可用，已复制评论链接');
     },
-  }, true);
+  }));
 
   onReplyThreadCloseRequested(): void {
     this.closeReplyThread();
@@ -675,6 +592,7 @@ export struct VideoDetailPage {
     else this.mainReplyComposerFocused = focused;
     // 系统键盘自行消费返回键时会触发 blur；空草稿同时退出定向回复态。
     if (!focused && !this.emotePanelOpen && this.replyDraft.trim().length === 0) {
+      this.replySubmit.reset();
       if (this.replyThreadOpen) {
         this.replyTargetRootRpid = this.replyThreadRoot.rpid;
         this.replyTargetRpid = this.replyThreadRoot.rpid;
@@ -701,6 +619,7 @@ export struct VideoDetailPage {
     this.mainReplyComposerFocused = false;
     this.threadReplyComposerFocused = false;
     if (this.replyDraft.trim().length === 0) {
+      this.replySubmit.reset();
       if (this.replyThreadOpen) {
         this.replyTargetRootRpid = this.replyThreadRoot.rpid;
         this.replyTargetRpid = this.replyThreadRoot.rpid;
@@ -715,6 +634,7 @@ export struct VideoDetailPage {
   }
 
   closeReplyThread(): void {
+    this.replySubmit.reset();
     this.replies.cancelThread();
     if (!this.replyThreadOpen) return;
     CommentLog.info('ui.thread.close', 'aid=' + String(this.detail.aid) + ' root=' +
@@ -738,27 +658,15 @@ export struct VideoDetailPage {
     });
   }
 
+  private hideReplyThread(): void {
+    if (this.replyThreadOpen) this.replySubmit.reset();
+    this.replies.cancelThread();
+    this.replyThreadOpen = false;
+  }
+
   /** 楼中楼里删掉一条子回复：连同其子孙一起从页面回复源集合移除（面板内视图树由组件自维护）。 */
   private threadRemoveReply(target: ReplyItem): void {
-    const before: number = this.threadAllReplies.length;
-    const blocked: Set<number> = new Set<number>();
-    blocked.add(target.rpid);
-    // 收集 target 的直接子回复（rootRpid=target.rpid）及更外层子孙，用深度优先收集。
-    let changed: boolean = true;
-    const all: Array<ReplyItem> = this.threadAllReplies;
-    while (changed) {
-      changed = false;
-      for (let i: number = 0; i < all.length; i++) {
-        if (!blocked.has(all[i].rpid) && blocked.has(all[i].rootRpid)) {
-          blocked.add(all[i].rpid);
-          changed = true;
-        }
-      }
-    }
-    this.threadAllReplies = all.filter((x: ReplyItem) => !blocked.has(x.rpid));
-    CommentLog.info('ui.thread.remove', 'root=' + String(this.replyThreadRoot.rpid) + ' target=' +
-      String(target.rpid) + ' removed=' + String(before - this.threadAllReplies.length) +
-      ' remaining=' + String(this.threadAllReplies.length));
+    this.replies.removeThread(target.rpid, true);
   }
 
   private refreshScreenSize(): void {
@@ -1007,6 +915,8 @@ export struct VideoDetailPage {
 
   aboutToAppear(): void {
     this.destroyed = false;
+    this.replyLikeBusy = new Set<number>();
+    this.replySubmit.reset();
     // NavDestination 返回时组件实例会复用；离场前的全屏状态不能污染竖屏布局。
     this.playerFullscreen = false;
     this.playerFullscreenExitVisual = false;
@@ -1015,10 +925,6 @@ export struct VideoDetailPage {
     this.pendingVideoNavigation = null;
     this.pendingVideoReplace = false;
     // 上次离页时未完成的请求会因 destroyed 跳过 finally 写状态；返回页面时统一解锁。
-    this.replyLoading = false;
-    this.replyLoadError = '';
-    this.replyItemCount = this.replySource.totalCount();
-    this.threadLoading = false;
     this.replySending = false;
     this.emoteLoading = false;
     this.actionBusy = false;
@@ -1089,6 +995,8 @@ export struct VideoDetailPage {
   }
 
   aboutToDisappear(): void {
+    this.actions.dispose();
+    this.replySubmit.dispose();
     this.videoReportDialog?.close();
     this.videoReportDialog = null;
     this.hero.openEntranceGate();
@@ -1097,11 +1005,11 @@ export struct VideoDetailPage {
     this.playback.invalidate();
     this.recommendations.dispose();
     this.favoritePicker.dispose();
-    this.initialRequest.invalidate();
+    this.detailLoader.dispose();
+    this.accountContext.dispose();
     this.playback.reportHeartbeat(this.videoProgressSeconds, this.playerPlaying, true);
     releasePixelMap(this.wholeCardSnapshot);
     this.wholeCardSnapshot = null;
-    this.replies.releaseShareCard();
     this.timers.forEach((id: number) => {
       clearTimeout(id);
     });
@@ -1147,24 +1055,6 @@ export struct VideoDetailPage {
     if (needsExpand !== this.descNeedsExpand) this.descNeedsExpand = needsExpand;
   }
 
-  private loadUpStats(mid: number): void {
-    if (mid <= 0) {
-      this.upFollowerCount = 0;
-      this.upVideoCount = 0;
-      return;
-    }
-    UserApi.getUserStat(mid).then((stat: UserStat) => {
-      if (!this.destroyed && this.detail.upMid === mid) this.upFollowerCount = stat.follower;
-    }).catch(() => {
-      // 粉丝统计失败时保留占位，不伪造为 0。
-    });
-    UserApi.getUserSpaceArcs(mid, 1, 'pubdate').then((data: SpaceArcData) => {
-      if (!this.destroyed && this.detail.upMid === mid) this.upVideoCount = data.total;
-    }).catch(() => {
-      // 投稿统计失败时保留占位，用户仍可正常进入 UP 空间。
-    });
-  }
-
   private upStatsText(): string {
     const followers: string = this.upFollowerCount >= 0 ? formatCount(this.upFollowerCount) : '--';
     const videos: string = this.upVideoCount >= 0 ? formatCount(this.upVideoCount) : '--';
@@ -1190,95 +1080,29 @@ export struct VideoDetailPage {
   }
 
   async init(): Promise<void> {
-    const request: number = this.initialRequest.next();
+    this.actions.reset();
     this.playback.invalidate();
     this.pageSwitchingCid = 0;
-    this.loading = true;
-    this.errorText = '';
     this.playbackAddressFailed = false;
     this.descExpanded = false;
     this.descNeedsExpand = false;
     this.recommendations.reset();
-    this.upFollowerCount = -1;
-    this.upVideoCount = -1;
-    try {
-      const detail: VideoDetail | null = await BiliApi.getVideoDetail(this.aid, this.bvid, this.param.epId ?? 0);
-      // 请求已经跑完，但入场动画可能还在飞：等飞完再落状态，避免整页骨架在动画中重排。
-      await this.hero.waitEntranceGate();
-      if (this.destroyed || !this.initialRequest.isCurrent(request)) return;
-      if (detail === null) {
-        this.errorText = '视频不存在或已失效';
-        return;
-      }
-      this.detail = detail;
-      this.likeCount = detail.like;
-      this.coinCount = detail.coin;
-      this.favoriteCount = detail.favorite;
-      this.recommendations.setEpisodes(detail);
-      this.ugcCount = this.ugcSource.totalCount();
-      this.loadUpStats(detail.upMid);
-
-      // 封面取色仅用于本页播放区氛围光，不改全局主题色（主题色由用户自选）
-      ImageColor.extract(detail.cover).then((palette: ImagePalette) => {
-        if (!this.destroyed && this.initialRequest.isCurrent(request)) this.pageTint = palette.dominant;
-      }).catch(() => {
-        // 取色失败仅影响氛围光，保留默认主题色。
-      });
-
-      // 并行加载相关 / 评论；播放地址单独走续播定位逻辑。
-      this.playback.loadInitial(detail);
-      this.recommendations.loadInitial(detail.aid, detail.bvid).catch(() => {
-        // 方法内部已经维护错误态；这里仅防止未处理的异步异常。
-      });
-      this.replies.load(true);
-      if (UserStore.isLogin) {
-        const likeVersion: number = this.likeActionVersion;
-        const coinVersion: number = this.coinActionVersion;
-        const favoriteVersion: number = this.favoriteActionVersion;
-        BiliApi.getVideoTags(detail.aid, detail.bvid).then((tags: Array<VideoTagInfo>) => {
-          if (this.destroyed || this.detail.aid !== detail.aid) return;
-          this.videoTags = tags;
-        }).catch(() => {
-        });
-        BiliApi.getVideoRelation(detail.aid, detail.bvid).then((relation: VideoRelationState | null) => {
-          if (relation !== null && !this.destroyed && this.initialRequest.isCurrent(request)) {
-            // 用户可能在关系请求返回前已经操作过；旧响应不能覆盖较新的本地成功状态。
-            if (likeVersion === this.likeActionVersion) {
-              this.liked = relation.liked;
-              this.disliked = relation.disliked;
-            }
-            if (coinVersion === this.coinActionVersion) this.coinCountByMe = relation.coin;
-            if (favoriteVersion === this.favoriteActionVersion) this.favorited = relation.favorite;
-          }
-        }).catch(() => {
-          // 互动状态拉取失败保持默认的未点赞/未投币/未收藏。
-        });
-        this.loadFollowState();
-        this.loadEmotes();
-      }
-    } catch (e) {
-      if (!this.destroyed && this.initialRequest.isCurrent(request)) this.errorText = '加载失败，请检查网络后重试';
-    } finally {
-      if (!this.destroyed && this.initialRequest.isCurrent(request)) this.loading = false;
-    }
+    this.accountContext.reset();
+    await this.detailLoader.load({ aid: this.aid, bvid: this.bvid, epId: this.param.epId ?? 0 });
   }
 
-  async loadEmotes(): Promise<void> {
-    if (this.emoteLoading || this.emotePackages.length > 0 || !UserStore.isLogin) return;
-    this.emoteLoading = true;
-    try {
-      let packages: Array<BiliEmotePackage> = await CommentApi.getUserEmotes('reply');
-      // 'reply' 为空时回退 'dynamic'（与 EmoteResolver.ensureLoaded 的回退一致），
-      // 部分账号默认包只在某一 business 下下发。
-      if (packages.length === 0) packages = await CommentApi.getUserEmotes('dynamic');
-      if (this.destroyed) return;
-      this.emotePackages = packages;
-      if (this.emotePackageIndex >= this.emotePackages.length) this.emotePackageIndex = 0;
-    } catch (e) {
-      // 表情加载失败不影响评论主流程，面板显示空态。
-    } finally {
-      if (!this.destroyed) this.emoteLoading = false;
-    }
+  /** 页面只衔接独立领域：基础资料提交后启动播放、推荐、评论及账号上下文。 */
+  private applyLoadedVideo(detail: VideoDetail): void {
+    this.detail = detail;
+    this.likeCount = detail.like;
+    this.coinCount = detail.coin;
+    this.favoriteCount = detail.favorite;
+    this.recommendations.setEpisodes(detail);
+    this.ugcCount = this.ugcSource.totalCount();
+    this.playback.loadInitial(detail).catch(() => {});
+    this.recommendations.loadInitial(detail.aid, detail.bvid).catch(() => {});
+    this.replies.load(true).catch(() => {});
+    this.accountContext.activate(detail);
   }
 
   openEmotePanel(): void {
@@ -1288,7 +1112,7 @@ export struct VideoDetailPage {
     // @State 在当前事件完成后才刷新，直接使用 opening，避免这里读到切换前的旧值。
     this.syncReplyComposerActive(opening);
     if (opening) {
-      this.loadEmotes();
+      this.accountContext.loadEmotes().catch(() => {});
       try {
         inputMethod.getController().hideTextInput().catch(() => {});
       } catch (e) {
@@ -1316,31 +1140,22 @@ export struct VideoDetailPage {
   }
 
   insertEmote(item: BiliEmote): void {
+    this.replySubmit.draftChanged();
     this.replyDraft += item.text;
   }
 
   onLoginVersionChanged(): void {
-    this.loadFollowState();
-  }
-
-  async loadFollowState(): Promise<void> {
-    if (!UserStore.isLogin || this.detail.upMid <= 0) {
-      this.following = false;
-      this.followLoading = false;
-      return;
-    }
-    this.followLoading = true;
-    try {
-      const attribute: number | null = await UserApi.getRelation(this.detail.upMid);
-      if (this.destroyed) return;
-      if (attribute !== null) {
-        // 2 为已关注，6 为互相关注；128 是拉黑，不能误显示为已关注。
-        this.following = attribute === 2 || attribute === 6;
-      }
-    } catch (e) {
-      // 关注状态拉取失败保持现状，不阻塞页面其他功能。
-    } finally {
-      if (!this.destroyed) this.followLoading = false;
+    if (this.destroyed) return;
+    this.replyLikeBusy = new Set<number>();
+    this.actions.reset();
+    this.replySubmit.reset();
+    this.replies.dispose();
+    this.hideReplyThread();
+    // 初次详情仍在等待时重发，使旧账号响应失效；已展示的视频只刷新账号资料。
+    if (this.loading) this.init().catch(() => {});
+    else {
+      this.accountContext.refresh();
+      this.replies.load(true).catch(() => {});
     }
   }
 
@@ -1487,88 +1302,6 @@ export struct VideoDetailPage {
     }
   }
 
-  mergeUniqueReplies(base: Array<ReplyItem>, incoming: Array<ReplyItem>): Array<ReplyItem> {
-    const indexes: Map<number, number> = new Map<number, number>();
-    const result: Array<ReplyItem> = [];
-    for (let i: number = 0; i < base.length; i++) {
-      indexes.set(base[i].rpid, result.length);
-      result.push(base[i]);
-    }
-    for (let i: number = 0; i < incoming.length; i++) {
-      const oldIndex: number | undefined = indexes.get(incoming[i].rpid);
-      if (oldIndex === undefined) {
-        indexes.set(incoming[i].rpid, result.length);
-        result.push(incoming[i]);
-      } else {
-        // 主评论预览只携带精简回复；完整 reply/reply 响应到达后必须替换旧对象，
-        // 否则头像挂件、评论装扮、dialog/parent 等字段会永久停留在预览版本。
-        result[oldIndex] = incoming[i];
-      }
-    }
-    return result;
-  }
-
-  /** 首屏重置路径同样要清洗：置顶与普通评论重叠、rpid 缺失的脏项会造成 LazyForEach
-   *  重复 key（随机空行/错行/残留空白格）；无正文且无图的条目直接剔除（空评论卡）。 */
-  private sanitizeReplies(list: Array<ReplyItem>): Array<ReplyItem> {
-    const seen: Set<number> = new Set<number>();
-    const result: Array<ReplyItem> = [];
-    let invalid: number = 0;
-    let duplicate: number = 0;
-    let empty: number = 0;
-    for (let i: number = 0; i < list.length; i++) {
-      const item: ReplyItem = list[i];
-      if (item.rpid <= 0) {
-        invalid++;
-        continue;
-      }
-      if (seen.has(item.rpid)) {
-        duplicate++;
-        continue;
-      }
-      seen.add(item.rpid);
-      if (item.content.trim().length === 0 && item.pictures.length === 0) {
-        empty++;
-        continue;
-      }
-      result.push(item);
-    }
-    const event: string = invalid > 0 || duplicate > 0 || empty > 0 ? 'ui.replies.sanitize.drop' :
-      'ui.replies.sanitize';
-    const details: string = 'incoming=' + String(list.length) + ' kept=' + String(result.length) +
-      ' invalid=' + String(invalid) + ' duplicate=' + String(duplicate) + ' empty=' + String(empty);
-    if (invalid > 0 || duplicate > 0 || empty > 0) CommentLog.warn(event, details);
-    else CommentLog.info(event, details);
-    return result;
-  }
-
-  /** 分页追加时按 rpid 去重，只把新楼层推进数据源。 */
-  private appendUniqueReplies(source: BasicDataSource<ReplyItem>, incoming: Array<ReplyItem>): void {
-    const existing: Set<number> = new Set<number>();
-    const all: Array<ReplyItem> = source.getAll();
-    for (let i: number = 0; i < all.length; i++) {
-      existing.add(all[i].rpid);
-    }
-    const fresh: Array<ReplyItem> = [];
-    let duplicate: number = 0;
-    let invalid: number = 0;
-    for (let i: number = 0; i < incoming.length; i++) {
-      if (incoming[i].rpid <= 0) {
-        invalid++;
-      }
-      if (!existing.has(incoming[i].rpid)) {
-        existing.add(incoming[i].rpid);
-        fresh.push(incoming[i]);
-      } else {
-        duplicate++;
-      }
-    }
-    source.append(fresh);
-    CommentLog.info('ui.replies.append', 'incoming=' + String(incoming.length) + ' added=' +
-      String(fresh.length) + ' duplicate=' + String(duplicate) + ' invalid=' + String(invalid) +
-      ' total=' + String(source.totalCount()));
-  }
-
   async openReplyThread(item: ReplyItem): Promise<void> {
     if (this.replyThreadAnimating) {
       CommentLog.warn('ui.thread.open.skip', 'reason=animating requestedRoot=' + String(item.rpid));
@@ -1579,9 +1312,9 @@ export struct VideoDetailPage {
     CommentLog.info('ui.thread.open', 'aid=' + String(this.detail.aid) + ' root=' + String(root.rpid) +
       ' declared=' + String(root.count) + ' preview=' + String(root.replies.length) +
       ' liked=' + String(root.liked));
+    this.replySubmit.reset();
     this.replyThreadAnimating = true;
-    this.replies.beginThread(root, this.mergeUniqueReplies([], root.replies));
-    this.threadPrefetchCount = 0;
+    this.replies.beginThread(root, mergeUniqueReplies([], root.replies));
     this.replyTargetRootRpid = root.rpid;
     this.replyTargetRpid = root.rpid;
     this.replyTargetName = root.uname;
@@ -1604,9 +1337,10 @@ export struct VideoDetailPage {
 
   /** 主评论操作栏的“回复”只选中目标并聚焦底部输入栏，不打开楼中楼详情。 */
   private selectReplyForComposer(item: ReplyItem): void {
+    this.replySubmit.reset();
     const latest: ReplyItem | null = this.findReplyItem(item.rpid);
     const root: ReplyItem = latest !== null ? latest : item;
-    this.replyThreadRoot = root;
+    this.replies.updateThreadRoot(root);
     this.replyTargetRootRpid = root.rpid;
     this.replyTargetRpid = root.rpid;
     this.replyTargetName = root.uname;
@@ -1649,12 +1383,13 @@ export struct VideoDetailPage {
       onClose: () => this.closeReplyThread(),
       onLike: (item: ReplyItem) => this.actionReplyLike(item),
       onDislike: (item: ReplyItem) => this.actionReplyDislike(item),
-      onShare: (item: ReplyItem) => this.replies.share(item),
+      onShare: (item: ReplyItem) => this.replies.sharing.share(item).catch(() => {}),
       focusTick: this.threadReplyFocusTick,
       focusId: 'video_thread_reply_composer_editor',
       onSelectReply: (item: ReplyItem) => {
         CommentLog.info('ui.thread.select', 'root=' + String(this.replyThreadRoot.rpid) +
           ' target=' + String(item.rpid));
+        this.replySubmit.reset();
         this.replyTargetRpid = item.rpid;
         this.replyTargetName = item.uname;
         this.threadReplyFocusTick++;
@@ -1666,7 +1401,10 @@ export struct VideoDetailPage {
         this.replies.loadThread(false).catch(() => {
         });
       },
-      onDraftChange: (value: string) => this.replyDraft = value,
+      onDraftChange: (value: string) => {
+        this.replySubmit.draftChanged();
+        this.replyDraft = value;
+      },
       onSend: () => this.sendReply(),
       onToggleEmote: () => this.openEmotePanel(),
       onRequestKeyboard: () => this.requestReplyKeyboard(),
@@ -1678,156 +1416,74 @@ export struct VideoDetailPage {
     })
   }
 
-  /** 用发布接口返回的 rpid 构造当前账号的新楼层，绕过评论索引的可见性延迟。 */
-  private sentReplyItem(result: ActionResult, content: string, root: number, parent: number): ReplyItem | null {
-    const returned: ReplyItem = ReplyItem.from(asObject(result.data['reply']));
-    const rpid: number = returned.rpid > 0 ? returned.rpid :
-      asNumber(result.data['rpid'], asNumber(result.data['rpid_str'], 0));
-    if (rpid <= 0) {
-      CommentLog.warn('ui.send.local.skip', 'reason=no-rpid root=' + String(root) +
-        ' parent=' + String(parent));
-      return null;
-    }
-    const item: ReplyItem = returned.rpid > 0 ? returned : new ReplyItem();
-    const user = UserStore.current;
-    item.rpid = rpid;
-    item.oid = this.detail.aid;
-    item.type = 1;
-    item.rootRpid = root;
-    item.parentRpid = parent;
-    item.dialogRpid = asNumber(result.data['dialog'], item.dialogRpid);
-    if (item.mid <= 0 && user !== null) item.mid = user.mid;
-    if (item.uname.length === 0) item.uname = user !== null && user.uname.length > 0 ? user.uname : '我';
-    if (item.avatar.length === 0 && user !== null) item.avatar = user.face;
-    if (item.level <= 0 && user !== null) item.level = user.level;
-    if (item.content.length === 0) item.content = content;
-    if (item.ctime <= 0) item.ctime = Math.floor(Date.now() / 1000);
-    // 发布响应通常只返回楼层 id，不返回 content.emote；从已加载的表情包补齐渲染信息。
+  /** 发布响应可能不带表情字典，补齐本页已经加载的渲染资源。 */
+  private decorateSentReply(item: ReplyItem): void {
     for (let i: number = 0; i < this.emotePackages.length; i++) {
       const emotes: Array<BiliEmote> = this.emotePackages[i].emotes;
       for (let j: number = 0; j < emotes.length; j++) {
-        if (emotes[j].text.length > 0 && item.content.indexOf(emotes[j].text) >= 0) item.emotes.push(emotes[j]);
+        const emote: BiliEmote = emotes[j];
+        if (emote.text.length > 0 && item.content.indexOf(emote.text) >= 0 &&
+          !item.emotes.some((existing: BiliEmote) => existing.text === emote.text)) item.emotes.push(emote);
       }
     }
-    return item;
   }
 
   /** 楼中楼新增子回复后，同步主列表中的回复数与预览，避免关掉面板又看到旧状态。 */
   private insertSentThreadReply(item: ReplyItem): void {
-    this.threadAllReplies = [item].concat(this.threadAllReplies.filter((reply: ReplyItem) => reply.rpid !== item.rpid));
-    const nextRoot: ReplyItem = this.replyThreadRoot.clone();
-    nextRoot.count++;
-    nextRoot.replies = [item].concat(nextRoot.replies.filter((reply: ReplyItem) => reply.rpid !== item.rpid));
-    this.replyThreadRoot = nextRoot;
-    const all: Array<ReplyItem> = this.replySource.getAll();
-    for (let i: number = 0; i < all.length; i++) {
-      if (all[i].rpid !== nextRoot.rpid) continue;
-      this.replySource.updateItem(i, nextRoot);
-      break;
-    }
+    this.replies.addSentThread(item);
   }
 
-  /** 不进入详情也能即时把新回复写回主评论的计数与预览。 */
   private insertSentInlineReply(item: ReplyItem, rootRpid: number): void {
-    const all: Array<ReplyItem> = this.replySource.getAll();
-    for (let i: number = 0; i < all.length; i++) {
-      if (all[i].rpid !== rootRpid) continue;
-      const root: ReplyItem = all[i].clone();
-      root.count++;
-      root.replies = [item].concat(root.replies.filter((reply: ReplyItem) => reply.rpid !== item.rpid));
-      this.replySource.updateItem(i, root);
-      this.replyThreadRoot = root;
-      return;
-    }
+    this.replies.addSentInline(item, rootRpid);
   }
 
   async sendReply(): Promise<void> {
-    const content: string = this.replyDraft.trim();
-    if (content.length === 0 || this.replySending) {
-      CommentLog.warn('ui.send.skip', 'empty=' + String(content.length === 0) +
-        ' sending=' + String(this.replySending));
-      return;
-    }
-    if (!this.ensureLogin()) {
-      CommentLog.warn('ui.send.skip', 'reason=login messageLen=' + String(content.length));
-      return;
-    }
-    this.replySending = true;
-    const startedAt: number = Date.now();
-    try {
-      const root: number = this.replyTargetRootRpid > 0 ? this.replyTargetRootRpid : 0;
-      const parent: number = root > 0 ?
-        (this.replyTargetRpid > 0 ? this.replyTargetRpid : root) : 0;
-      CommentLog.info('ui.send.start', 'aid=' + String(this.detail.aid) + ' root=' + String(root) +
-        ' parent=' + String(parent) + ' messageLen=' + String(content.length));
-      const result: ActionResult = await CommentApi.addReply(this.detail.aid, 1, content, root, parent);
-      if (this.destroyed) {
-        CommentLog.warn('ui.send.drop', 'reason=destroyed root=' + String(root) + ' parent=' + String(parent));
-        return;
-      }
-      if (!result.ok) {
-        CommentLog.warn('ui.send.failed', 'root=' + String(root) + ' parent=' + String(parent) +
-          ' code=' + String(result.code) + ' ms=' + String(CommentLog.elapsed(startedAt)));
-        this.toast(result.message);
-        return;
-      }
-      CommentLog.info('ui.send.done', 'root=' + String(root) + ' parent=' + String(parent) +
-        ' ms=' + String(CommentLog.elapsed(startedAt)));
-      const sent: ReplyItem | null = this.sentReplyItem(result, content, root, parent);
-      this.replyDraft = '';
-      this.toast(root > 0 ? '回复成功' : '评论成功');
-      if (root > 0 && this.replyThreadOpen) {
+    if (this.replyDraft.trim().length === 0 || this.replySending || !this.ensureLogin()) return;
+    await this.replySubmit.send();
+  }
+
+  private applySubmittedReply(snapshot: ReplySubmissionSnapshot, sent: ReplyItem | null, clearDraft: boolean): void {
+    if (clearDraft) this.replyDraft = '';
+    if (sent !== null) this.decorateSentReply(sent);
+    if (snapshot.root > 0 && snapshot.scope === 'thread') {
+      if (clearDraft) {
         this.replyTargetRpid = this.replyThreadRoot.rpid;
         this.replyTargetName = this.replyThreadRoot.uname;
-        if (sent !== null) {
-          this.insertSentThreadReply(sent);
-          this.detail.reply++;
-          CommentLog.info('ui.send.local.thread', 'rpid=' + String(sent.rpid) + ' root=' + String(root) +
-            ' total=' + String(this.threadAllReplies.length));
-        } else {
-          // 极少数兼容接口不返回 rpid，才退回服务端刷新路径。
-          this.threadAllReplies = [];
-          this.replies.resetThreadPaging();
-          await this.replies.loadThread(true);
-        }
-      } else if (root > 0) {
-        if (sent !== null) {
-          this.insertSentInlineReply(sent, root);
-          this.detail.reply++;
-          CommentLog.info('ui.send.local.inline', 'rpid=' + String(sent.rpid) + ' root=' + String(root));
-        } else {
-          this.replies.resetMainPaging();
-          await this.replies.load(true);
-        }
+      }
+      if (sent !== null) {
+        this.insertSentThreadReply(sent);
+        this.detail.reply++;
+      } else {
+        this.replies.thread.clearReplies();
+        this.replies.resetThreadPaging();
+        this.replies.loadThread(true).catch(() => {});
+      }
+    } else if (snapshot.root > 0) {
+      if (clearDraft) {
         this.replyTargetRootRpid = 0;
         this.replyTargetRpid = 0;
         this.replyTargetName = '';
-      } else {
-        if (sent !== null) {
-          this.localSentReplies = [sent].concat(this.localSentReplies.filter((item: ReplyItem) =>
-            item.rpid !== sent.rpid));
-          this.replySource.prepend([sent]);
-          this.replyItemCount = this.replySource.totalCount();
-          this.detail.reply++;
-          this.scheduleTimeout(() => {
-            try {
-              this.replyScroller.scrollToIndex(0, true, ScrollAlign.START);
-            } catch (e) {
-            }
-          }, 16);
-          CommentLog.info('ui.send.local.root', 'rpid=' + String(sent.rpid) + ' total=' +
-            String(this.replySource.totalCount()));
-        } else {
-          this.replies.resetMainPaging();
-          await this.replies.load(true);
-        }
       }
-    } catch (e) {
-      CommentLog.error('ui.send.error', 'aid=' + String(this.detail.aid) + ' ms=' +
-        String(CommentLog.elapsed(startedAt)) + ' error=' + CommentLog.errorText(e as Object));
-      if (!this.destroyed) this.toast('网络异常，发送失败');
-    } finally {
-      if (!this.destroyed) this.replySending = false;
+      if (sent !== null) {
+        this.insertSentInlineReply(sent, snapshot.root);
+        this.detail.reply++;
+      } else {
+        this.replies.resetMainPaging();
+        this.replies.load(true).catch(() => {});
+      }
+    } else if (sent !== null) {
+      this.replies.addSentMain(sent);
+      this.detail.reply++;
+      this.scheduleTimeout(() => {
+        if (this.detail.aid !== snapshot.oid || this.replyThreadOpen) return;
+        try {
+          this.replyScroller.scrollToIndex(0, true, ScrollAlign.START);
+        } catch (e) {
+        }
+      }, 16);
+    } else {
+      this.replies.resetMainPaging();
+      this.replies.load(true).catch(() => {});
     }
   }
 
@@ -1882,7 +1538,7 @@ export struct VideoDetailPage {
    * 用于点赞/点踩前读取当前状态，避免“先空 mutate 再真实 mutate”导致 UI 闪烁两次。
    */
   private findReplyItem(rpid: number): ReplyItem | null {
-    const list: Array<ReplyItem> = this.replySource.getAll();
+    const list: Array<ReplyItem> = this.replies.source.getAll();
     for (let i: number = 0; i < list.length; i++) {
       if (list[i].rpid === rpid) return list[i];
     }
@@ -1908,6 +1564,7 @@ export struct VideoDetailPage {
   }
 
   private replyReactionHooks(isLike: boolean): ReplyReactionHooks {
+    const current: () => boolean = this.replies.captureGuard();
     return {
       ensureLogin: () => {
         if (UserStore.isLogin) return true;
@@ -1916,7 +1573,7 @@ export struct VideoDetailPage {
         return false;
       },
       toast: (message: string) => this.toast(message),
-      isDestroyed: () => this.destroyed,
+      isDestroyed: () => !current(),
       resolveOid: (it: ReplyItem) => it.oid > 0 ? it.oid : this.detail.aid,
       resolveType: (it: ReplyItem) => it.type > 0 ? it.type : 1,
       clearDislikeOnLike: true,
@@ -1938,11 +1595,11 @@ export struct VideoDetailPage {
   @Builder
   ReplyShareCardBuilder() {
     ReplyShareCard({
-      item: this.replies.shareItem(),
+      item: this.replies.sharing.shareItem(),
       upMid: this.detail.upMid,
-      qr: this.replies.shareQr(),
-      page: this.replies.sharePage(),
-      linkLabel: this.replies.shareLink(),
+      qr: this.replies.sharing.shareQr(),
+      page: this.replies.sharing.sharePage(),
+      linkLabel: this.replies.sharing.shareLink(),
       sourceCover: this.detail.cover,
       sourceTitle: this.detail.title,
       sourceUpName: this.detail.upName,
@@ -2106,7 +1763,7 @@ export struct VideoDetailPage {
     .justifyContent(FlexAlign.Center)
     .onClick(() => {
       this.tabsController.changeIndex(index);
-      if (index === 0) this.replyThreadOpen = false;
+      if (index === 0) this.hideReplyThread();
     })
   }
 
@@ -2198,7 +1855,7 @@ export struct VideoDetailPage {
           emoteLoading: this.emoteLoading,
           emotePanelHeight: this.emoteKeyboardHeight(),
           screenWidth: this.screenWidthVp,
-          source: this.replySource,
+          source: this.replies.source,
           scroller: this.replyScroller,
           onSortChange: (mode: number) => {
             this.replies.changeReplySort(mode);
@@ -2208,16 +1865,15 @@ export struct VideoDetailPage {
           },
           onLike: (item: ReplyItem) => this.actionReplyLike(item),
           onDislike: (item: ReplyItem) => this.actionReplyDislike(item),
-          onShare: (item: ReplyItem) => this.replies.share(item),
+          onShare: (item: ReplyItem) => this.replies.sharing.share(item).catch(() => {}),
           onSelectReply: (item: ReplyItem) => this.selectReplyForComposer(item),
           onOpenThread: (item: ReplyItem) => this.openReplyThread(item),
           onDeleted: (item: ReplyItem) => {
-            this.localSentReplies = this.localSentReplies.filter((x: ReplyItem) => x.rpid !== item.rpid);
-            this.replySource.reset(this.replySource.getAll().filter((x: ReplyItem) => x.rpid !== item.rpid));
-            this.replyItemCount = this.replySource.totalCount();
+            this.replies.removeMain(item.rpid);
             this.detail.reply = Math.max(0, this.detail.reply - 1);
           },
           onDraftChange: (value: string) => {
+            this.replySubmit.draftChanged();
             this.replyDraft = value;
           },
           onSend: () => this.sendReply(),
@@ -2248,12 +1904,12 @@ export struct VideoDetailPage {
     .onAnimationStart((index: number, targetIndex: number, extraInfo: TabsAnimationEvent) => {
       // 只更新标签视觉状态；不能在这里改 Tabs 绑定 index，否则会中途强制跳页。
       this.visualTab = targetIndex;
-      if (targetIndex === 0) this.replyThreadOpen = false;
+      if (targetIndex === 0) this.hideReplyThread();
     })
     .onChange((index: number) => {
       this.tab = index;
       this.visualTab = index;
-      if (index === 0) this.replyThreadOpen = false;
+      if (index === 0) this.hideReplyThread();
     })
     .divider({ strokeWidth: 0 })
     .borderRadius({ topLeft: 16, topRight: 16 })

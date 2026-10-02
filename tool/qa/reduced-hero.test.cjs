@@ -209,7 +209,9 @@ test('reduced dynamic detail bypasses both directions, leaves content visible an
   const fields = section(source, 'export struct DynamicDetailPage {', '  /**\n   * 评论编排控制器')
     .replace('export struct DynamicDetailPage {', '');
   const frame = section(source, 'class DynamicHeroFrameCallback', '@Component');
-  const Harness = env.harness('pages/DynamicDetail', [['  private targetCardRect():', '  aboutToAppear():']], frame, fields);
+  // This fixture exercises only Hero navigation; submission behavior has its own complete-module tests.
+  const Harness = env.harness('pages/DynamicDetail', [['  private targetCardRect():', '  aboutToAppear():']],
+    frame + '\nclass ReplySubmissionController { reset() {} dispose() {} }', fields);
   const page = new Harness(); page.getUIContext = () => env.ui;
   page.param = { srcRect: { x: 10, y: 20, w: 100, h: 60 } };
   page.prepareEntrance(); page.triggerEntrance(); page.goBack(); page.goBack();

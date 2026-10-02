@@ -195,10 +195,10 @@ else { List }
 1. `methodHarness(file, start, end)` 靠**源码字符串精确匹配**抽取生产方法，锚点一变就断：`private` 被去掉、参数补了类型注解（`DynTypeChip(label, type)` → `DynTypeChip(label: string, type: string)`）、注释文案改名，都会让 `indexOf` 返回 -1；
 2. **最隐蔽的一层**：仓库 `.ets` 是 **CRLF 检出**（`core.autocrlf`），而锚点多行字面量按 `\n` 书写。于是即使文本内容一字不差，跨行锚点照样匹配失败。
 
-**正确写法**：
+**仍需切片的 UI 适配用例**：
 
 - `readSource` 一律把源码**归一为 LF** 再切片：`.replace(/\r\n/g, '\n')`，让锚点只依赖内容、不依赖检出时的行尾；
-- 锚点**集中成常量**（`lifecycle.test.cjs` 的 `ANCHOR`），不得内联在用例里；
+- 重复使用的锚点应集中维护，选取唯一的方法签名或紧邻成员边界；不要依赖会变化的整段注释；
 - 断言**带锚点内容**，失败时直接指出漂的是哪一个，而不是一句裸断言。
 
 ```js
@@ -208,11 +208,11 @@ assert.ok(finish > begin, `锚点未命中 end（${file}.ets）：${JSON.stringi
 
 **规则**：改动被 `methodHarness` 切片的方法签名或紧邻注释时，**必须在同一个提交里同步锚点并重跑该测试文件**。锚点漂移会伪装成功能回归，反过来也会让真实回归被误判为"夹具又断了"而放过。
 
-**遗留风险（待迁移）**：`lifecycle.test.cjs` 有 33 处 `methodHarness` 调用，其中约 20 处仍是**内联硬编码锚点**（已迁入 `ANCHOR` 的只是少数）。单行锚点抗漂移稍好（例如 `'  async loadReplies('` 恰因去掉 `private` 而侥幸存活），但同样是静默失效点。**`ANCHOR` 常量尚未覆盖全部调用点，新增/修改用例时不要再写内联锚点。**
+**当前边界**：播放器会话、搜索、评论分页、收藏库和消息等领域已改为直接执行完整生产模块；原先服务于评论与动态切片的 `ANCHOR` 常量随迁移删除。`lifecycle.test.cjs` 等文件仍有 UI 生命周期适配及尚未迁移页面的 `methodHarness` 调用，签名变更仍需核对这些调用处的锚点，不能将所有夹具失败都归因于业务回归。
 
-**更彻底的解法（未做）**：把并发决策逻辑抽成不依赖页面类的纯模块（工程已有先例：评论改动已抽到 `common/ReplyMutation.ets`），让测试直接调用模块 API、不再切片页面源码。这是根治方向，比继续维护锚点更划算。
+**新增领域用例**：优先用 `tool/qa/arkts-module.cjs` 的 `createArktsLoader` 加载完整生产模块，各夹具拥有独立模块缓存，只替换网络、存储、系统资源与时间等边界。用可控异步响应验证状态、代际和资源所有权，避免复制一份业务实现作为测试对象。ArkUI DSL 合法性由完整 `CompileArkTS` 构建验证，原生播放与界面行为仍需设备验收。
 
-**案例**：`tool/qa/lifecycle.test.cjs`（`ANCHOR` 常量）、`regression.test.cjs` / `danmaku.test.cjs` / `parity.test.cjs` 的 `readSource`。
+**案例**：完整模块夹具见 `tool/qa/reply-state.test.cjs`、`player-session-fixture.cjs`；剩余切片的行尾归一与锚点检查见 `lifecycle.test.cjs`、`regression.test.cjs`、`danmaku.test.cjs`、`parity.test.cjs`。
 
 ---
 

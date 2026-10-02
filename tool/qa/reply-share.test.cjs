@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { createArktsLoader } = require('./arkts-module.cjs');
 const ts = require(process.env.ARKTS_TEST_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript');
 const root = path.resolve(__dirname, '../../entry/src/main/ets');
@@ -296,10 +297,6 @@ test('startup cleanup removes abandoned old sessions and preserves recent previe
 test('production share flow renders every planned page and sends the exact comment link to QR generation', async () => {
   const env = environment();
   const layout = env.load('components/reply/ReplyShareLayout');
-  const source = read('components/reply/RepliesController');
-  const start = source.indexOf('  share(item: ReplyItem): void {');
-  const end = source.indexOf('  /** 打开楼中楼', start);
-  assert.ok(start >= 0 && end > start);
   const captured = [], names = [], codes = [], previews = [], snapshots = [], boundRequests = [];
   let view;
   const globals = {
@@ -315,21 +312,29 @@ test('production share flow renders every planned page and sends the exact comme
     showReplyShareImages: async (_context, files) => previews.push(files.slice()),
     removeReplyShareImages() {},
   };
-  const { Harness } = env.compile('let replyShareSequence = 0; export class Harness {\n' + source.slice(start, end) + '\n}',
-    'components/reply/RepliesController', globals);
+  const load = createArktsLoader({mocks: {
+    'common/CommentLog': {CommentLog: {info() {}, warn() {}}},
+    'components/reply/ReplyShareLayout': layout,
+    'components/reply/ReplyShareCard': {makeReplyQr: globals.makeReplyQr,
+      getReplyShareBounds: globals.getReplyShareBounds, makeReplyShareSnapshot: globals.makeReplyShareSnapshot},
+    'components/reply/ReplyShareExport': {saveReplyShareImage: globals.saveReplyShareImage,
+      showReplyShareImages: globals.showReplyShareImages, removeReplyShareImages: globals.removeReplyShareImages},
+    'common/EmoteImageCache': {EmoteImageCache: globals.EmoteImageCache}
+  }});
+  const { ReplyShareController } = load('components/reply/ReplyShareController');
   const link = 'https://www.bilibili.com/video/BV1ynhB6wEm6#reply318666621664';
   const ui = { getHostContext: () => ({ cacheDir: '/cache' }), px2vp: value => value,
     getMeasureUtils: () => ({ measureTextSize: ({ textContent, fontSize }) => ({ width: measure(textContent, parseFloat(fontSize)) }) }) };
-  view = Object.assign(new Harness(), { shareCardBusy: false, shareCardQr: null, access: {
+  view = new ReplyShareController({
     toast() {}, buildShareLink: () => link, getUIContext: () => ui, ensureShareContext: () => true,
+    getSubject: () => ({oid: 1, type: 1}),
     isDestroyed: () => false, onShareFailed: (_item, _link, error) => { throw error; },
     renderShareCard: () => captured.push({ page: view.sharePage(), link: view.shareLink(), qr: view.shareQr() }),
-  }});
-  const reply = item('完整文本'.repeat(700) + '【末尾】',
-    Array.from({ length: 9 }, (_, index) => 'file://picture-' + index + '.png'));
-  view.share(reply);
-  for (let i = 0; i < 30 && view.shareCardBusy; i++) await tick();
-  assert.equal(view.shareCardBusy, false);
+  });
+  const reply = Object.assign(new (load('model/Models').ReplyItem)(), item('完整文本'.repeat(700) + '【末尾】',
+    Array.from({ length: 9 }, (_, index) => 'file://picture-' + index + '.png')));
+  await view.share(reply);
+  assert.equal(view.busy, false);
   assert.ok(captured.length > 1);
   assert.deepEqual(boundRequests, [ui]);
   assert.deepEqual(codes, [link]);
@@ -344,8 +349,7 @@ test('production share flow renders every planned page and sends the exact comme
     'every native snapshot receives the page dimensions chosen for this window');
   assert.equal(previews[0].length, captured.length);
   const firstNames = names.slice();
-  view.share(reply);
-  for (let i = 0; i < 30 && view.shareCardBusy; i++) await tick();
+  await view.share(reply);
   assert.equal(new Set(names).size, names.length, 'repeated sharing must not reuse files pending old cleanup');
   assert.equal(names.length, firstNames.length * 2);
 });

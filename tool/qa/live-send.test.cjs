@@ -4,27 +4,34 @@ const fs = require('node:fs');
 const path = require('node:path');
 const ts = require(process.env.ARKTS_TEST_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript');
 const ROOT = process.env.ARKTS_TEST_SOURCE_ROOT || path.resolve(__dirname, '../../entry/src/main/ets');
-const ANCHORS = [['  aboutToAppear():', '  async loadRoom():'], ['  async sendDanmaku(', '  appendMessage(']];
-function deferred() {let resolve, reject; const promise = new Promise((yes, no) => {resolve = yes; reject = no;}); return {promise, resolve, reject};}
+const ANCHORS = [['  aboutToAppear():', '  async loadRoom():'], ['  async sendDanmaku(', '  /** 列表贴底']];
+const { createArktsLoader, deferred } = require('./arkts-module.cjs');
 function fixture() {
   const source = fs.readFileSync(path.join(ROOT, 'pages/LiveRoom.ets'), 'utf8').replace(/\r\n/g, '\n');
   const methods = ANCHORS.map(([a, b]) => {const begin = source.indexOf(a), end = source.indexOf(b, begin); assert.ok(begin >= 0 && end > begin); return source.slice(begin, end);}).join('\n');
   const code = ts.transpileModule('class Harness {\n' + methods + '\n}; return Harness;', {compilerOptions: {target: ts.ScriptTarget.ES2020}}).outputText;
-  const calls = [], notices = [], messages = [], appended = []; let scrolls = 0;
+  const calls = [], notices = [], messages = []; let scrolls = 0;
   const user = {current: {uname: 'viewer'}};
-  const Harness = new Function('LiveApi', 'LiveChatMessage', 'UserStore', 'Immersive', code)(
+  const load=createArktsLoader();
+  const {LiveChatBuffer}=load('components/live/LiveChatBuffer');
+  const {LiveChatMessage}=load('model/LiveModels');
+  const {AuthSession}=load('services/auth/AuthSession');
+  const Harness = new Function('LiveApi', 'LiveChatMessage', 'UserStore', 'Immersive', 'AuthSession', code)(
     {sendLiveDanmaku: (...args) => {const pending = deferred(); calls.push({args, ...pending}); return pending.promise;}},
-    class {constructor() {this.emotes = []; }}, user, {setKeepScreenOn() {}});
+    LiveChatMessage, user, {setKeepScreenOn() {}}, AuthSession);
   const page = new Harness();
   Object.assign(page, {draft: 'original', sending: false, destroyed: false, lifecycleGeneration: 0, sendRequestId: 0,
-    param: {roomId: 1}, roomInfo: {}, client: {close() {}}, flushTimer: -1, historyPollTimer: -1,
-    pendingMsgs: [], knownMessageIds: new Set(), emotePanelOpen: true,
-    liveFeed: {currentMessages: () => messages, publishMessages: value => {messages.splice(0, messages.length, ...value);}},
-    appendChatMessages: batch => appended.push(...batch), scrollChatToEnd: () => {scrolls++;},
+    param: {roomId: 1}, roomInfo: {}, emotePanelOpen: true,
+    scrollChatToEnd: () => {scrolls++;},
     getUIContext: () => ({getPromptAction: () => ({showToast: ({message}) => notices.push(message)})}),
     ensureLogin: () => true, loadRoom: async () => {}, loadEmoticons: async () => {}});
+  const chat=new LiveChatBuffer({resetMessages(){},publishMessages:value=>{
+    messages.splice(0,messages.length,...value);
+  },publishSuperChats(){}},()=>page.scrollChatToEnd(),()=>{});
+  Object.assign(page,{chat,emoteRequestId:0,
+    session:{activate(){chat.activate(()=>!page.destroyed);},dispose(){chat.dispose();}}});
   page.aboutToAppear();
-  return {page, calls, notices, messages, appended, scrolls: () => scrolls};
+  return {page, calls, notices, messages, get appended(){return chat.source.getAll();}, AuthSession, scrolls: () => scrolls};
 }
 test('live send: normal success publishes once, clears submitted draft and releases lock', async () => {
   const f = fixture(); const p = f.page.sendDanmaku(); await f.page.sendDanmaku();
@@ -91,4 +98,22 @@ test('live send: old completion after a newer success leaves subsequent draft an
   f.page.draft = 'new submission'; const next = f.page.sendDanmaku(); f.calls[1].resolve({ok: true}); await next;
   f.page.draft = 'third draft'; f.calls[0].resolve({ok: true}); await old;
   assert.equal(f.messages.length, 1); assert.equal(f.messages[0].text, 'new submission'); assert.equal(f.page.draft, 'third draft'); assert.equal(f.notices.length, 1);
+});
+
+for (const result of ['success', 'failure', 'rejection']) test(`live send: account invalidation rejects old ${result} before the page watcher runs`, async () => {
+  const f = fixture(); const pending = f.page.sendDanmaku(); f.AuthSession.advance();
+  if (result === 'rejection') f.calls[0].reject(Error('offline'));
+  else f.calls[0].resolve({ok: result === 'success', message: 'denied'});
+  await pending;
+  assert.deepEqual(f.messages, []); assert.deepEqual(f.notices, []);
+  assert.equal(f.page.draft, 'original'); assert.equal(f.page.sending, false);
+});
+
+test('live send: account watcher starts a new session and the old result cannot release its send lock', async () => {
+  const f = fixture(); const old = f.page.sendDanmaku();
+  f.AuthSession.advance(); f.page.onAccountChanged(); f.page.draft = 'new account';
+  const next = f.page.sendDanmaku(); f.calls[0].resolve({ok: true}); await old;
+  assert.deepEqual(f.messages, []); assert.equal(f.page.sending, true);
+  f.calls[1].resolve({ok: true}); await next;
+  assert.equal(f.messages[0].text, 'new account'); assert.equal(f.page.sending, false);
 });

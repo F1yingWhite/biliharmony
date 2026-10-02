@@ -96,6 +96,9 @@ jobs:
         run: |
           node --test --test-timeout=10000 tool/qa/*.test.cjs
 
+      - name: Test player UI selectors without a device
+        run: python3 tool/qa/player_layout_test.py
+
       - name: Build unsigned release HAP
         run: hvigorw clean assembleHap --mode module -p product=default -p buildMode=release
 

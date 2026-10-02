@@ -1,4 +1,3 @@
-import { BasicDataSource } from '../common/BasicDataSource';
 /**
  * 番剧/影视（PGC）详情页：封面氛围头部（海报 + 评分 + 追番）+ 选集 + 简介 + 评论。
  * 入口：动态流 PGC 卡片。评论区复用动态详情的组装方式（type=1，oid 为当前集 aid）。
@@ -8,9 +7,7 @@ import { UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { AppNavStack, BangumiDetailParam, NAV_BANGUMI_DETAIL, NAV_LOGIN, NAV_VIDEO_DETAIL, VideoDetailParam } from '../common/AppRouter';
 import { BangumiEpisode, BangumiSeason, ReplyItem } from '../model/Models';
-import { ActionResult } from '../api/BiliApi';
 import { biliImageThumbnail } from '../common/ImageUrl';
-import { BangumiApi } from '../api/BangumiApi';
 import { Immersive } from '../common/Immersive';
 import { LoadingView } from '../components/LoadingView';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
@@ -19,16 +16,19 @@ import { ReplyCard } from '../components/reply/ReplyCard';
 import { ReplyComposer } from '../components/reply/ReplyComposer';
 import { ReplyThreadPanel } from '../components/reply/ReplyThreadPanel';
 import { RepliesController } from '../components/reply/RepliesController';
+import { MainRepliesState, ReplySubject, ThreadRepliesState } from '../components/reply/ReplyState';
+import { ReplyShareController } from '../components/reply/ReplyShareController';
 import { ReplyShareCard } from '../components/reply/ReplyShareCard';
 import { ReplySortChips } from '../components/reply/ReplySortChips';
 import { UserStore } from '../services/auth/UserStore';
 import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
-import { asNumber, asObject, colorWithAlpha, formatCount } from '../common/Utils';
+import { colorWithAlpha, formatCount } from '../common/Utils';
 import { LayoutTokens } from '../common/LayoutTokens';
-import { CommentApi } from '../api/CommentApi';
+import { ReplySubmissionController, ReplySubmissionSnapshot } from '../components/reply/ReplySubmissionController';
 import { BangumiEpisodeCatalog } from '../components/bangumi/BangumiEpisodeCatalog';
 import { BangumiEpisodeSection } from '../components/bangumi/BangumiEpisodeSection';
 import { BangumiFollowController, BangumiFollowState } from '../components/bangumi/BangumiFollowController';
+import { BangumiDetailController, BangumiDetailStatus } from '../components/bangumi/BangumiDetailController';
 
 @Component
 export struct BangumiDetailPage {
@@ -42,7 +42,6 @@ export struct BangumiDetailPage {
   @State viewportWidth: number = 360;
   // ===== 评论（挂在当前集 aid 上，type=1） =====
   /** 评论懒加载数据源（无限翻页必须虚拟化；主列表统一从这里读写）。 */
-  private replySource: BasicDataSource<ReplyItem> = new BasicDataSource<ReplyItem>();
   /** 评论行数（数据源为普通属性，空态/加载态分支需要响应式计数）。 */
   @State repliesCount: number = 0;
   @State repliesLoading: boolean = false;
@@ -53,6 +52,29 @@ export struct BangumiDetailPage {
   @State replyVersion: number = 0;
   @State replyDraft: string = '';
   @State replySending: boolean = false;
+  private replySubmit: ReplySubmissionController = new ReplySubmissionController({
+    isAlive: () => !this.destroyed,
+    getTarget: () => ({ oid: this.replyOid(), type: 1, root: 0, parent: 0, scope: 'main', active: true }),
+    getDraft: () => this.replyDraft,
+    setSending: (sending: boolean) => this.replySending = sending,
+    toast: (message: string) => this.toast(message),
+    onSuccess: (_snapshot: ReplySubmissionSnapshot, _reply: ReplyItem | null, clearDraft: boolean) => {
+      if (clearDraft) this.replyDraft = '';
+      this.replies.resetMainPaging();
+      this.replies.load(true).catch(() => {});
+    },
+  });
+  private threadSubmit: ReplySubmissionController = new ReplySubmissionController({
+    isAlive: () => !this.destroyed,
+    getTarget: () => ({ oid: this.replyOid(), type: 1, root: this.threadRoot.rpid,
+      parent: this.threadTargetRpid, scope: 'thread', active: this.threadOpen }),
+    getDraft: () => this.threadDraft,
+    setSending: (sending: boolean) => this.threadSending = sending,
+    toast: (message: string) => this.toast(message),
+    onSuccess: (_snapshot: ReplySubmissionSnapshot, reply: ReplyItem | null, clearDraft: boolean) => {
+      this.applySentThreadReply(reply, clearDraft);
+    },
+  });
   // ===== 回复详情（Sheet） =====
   @State threadOpen: boolean = false;
   @State threadRoot: ReplyItem = new ReplyItem();
@@ -64,6 +86,7 @@ export struct BangumiDetailPage {
   @State threadTargetRpid: number = 0;
   @State threadTargetName: string = '';
   @State threadFocusTick: number = 0;
+  @StorageProp('loginVersion') @Watch('onLoginVersionChanged') loginVersion: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   private destroyed: boolean = false;
@@ -83,102 +106,72 @@ export struct BangumiDetailPage {
     closeStatusPanel: (): void => { this.showStatusPanel = false; },
   });
   /**
-   * 评论编排控制器：游标/请求代际/分享卡临时状态都在控制器，@State 经下方闭包读写。
-   * clearOnSort=true：切换评论排序时清空列表与游标，重新拉第一页。
+   * 评论编排控制器：列表与线程发布展示快照，分享导出独立拥有资源与取消会话。
    */
   private replies: RepliesController = new RepliesController({
-    isDestroyed: (): boolean => this.destroyed,
-    toast: (message: string): void => this.toast(message),
-    getUIContext: (): UIContext => this.getUIContext(),
-    resolveOid: (): number => this.replyOid(),
-    resolveType: (): number => 1,
-    canLoadReplies: (): boolean => true,
-    getMainSource: (): BasicDataSource<ReplyItem> => this.replySource,
-    getSortMode: (): number => this.replySortMode,
-    setSortMode: (value: number): void => {
-      this.replySortMode = value;
+    isDestroyed: () => this.destroyed,
+    getSubject: (): ReplySubject => ({ oid: this.replyOid(), type: 1 }),
+    publishMain: (state: MainRepliesState) => {
+      this.replySortMode = state.sort;
+      this.repliesLoading = state.loading;
+      this.repliesCount = state.count;
+      this.repliesHasMore = state.hasMore;
+      this.replyVersion = state.version;
+      this.repliesFailed = state.failed;
+      this.repliesMoreFailed = state.moreFailed;
     },
-    getRepliesLoading: (): boolean => this.repliesLoading,
-    setRepliesLoading: (value: boolean): void => {
-      this.repliesLoading = value;
+    publishThread: (state: ThreadRepliesState) => {
+      this.threadRoot = state.root;
+      this.threadReplies = state.replies;
+      this.threadLoading = state.loading;
+      this.threadHasMore = state.hasMore;
+      this.replyVersion = state.version;
     },
-    getRepliesHasMore: (): boolean => this.repliesHasMore,
-    setRepliesHasMore: (value: boolean): void => {
-      this.repliesHasMore = value;
-    },
-    getRepliesCount: (): number => this.repliesCount,
-    setRepliesCount: (value: number): void => {
-      this.repliesCount = value;
-    },
-    clearRepliesError: (reset: boolean): void => {
-      this.repliesMoreFailed = false;
-      if (reset) this.repliesFailed = false;
-    },
-    showRepliesError: (_reset: boolean, _cursor: string, _startedAt: number, _error: Object): void => {
-      if (this.repliesCount === 0) this.repliesFailed = true;
-      else this.repliesMoreFailed = true;
-    },
-    applyRepliesReset: (incoming: Array<ReplyItem>): void => {
-      this.replySource.reset(incoming);
-    },
-    applyRepliesAppend: (incoming: Array<ReplyItem>): void => {
-      this.replySource.append(incoming);
-    },
-    getThreadRoot: (): ReplyItem => this.threadRoot,
-    setThreadRoot: (root: ReplyItem): void => {
-      this.threadRoot = root;
-    },
-    getThreadReplies: (): Array<ReplyItem> => this.threadReplies,
-    setThreadReplies: (list: Array<ReplyItem>): void => {
-      this.threadReplies = list;
-    },
-    getThreadLoading: (): boolean => this.threadLoading,
-    setThreadLoading: (value: boolean): void => {
-      this.threadLoading = value;
-    },
-    getThreadHasMore: (): boolean => this.threadHasMore,
-    setThreadHasMore: (value: boolean): void => {
-      this.threadHasMore = value;
-    },
-    isThreadStale: (root: number, _oid: number): boolean => !this.threadOpen || this.threadRoot.rpid !== root,
-    mergeThreadReplies: (current: Array<ReplyItem>, incoming: Array<ReplyItem>, reset: boolean): Array<ReplyItem> =>
-      reset ? (incoming.length > 0 ? incoming : current) : current.concat(incoming),
-    onThreadError: (_reset: boolean, _startedAt: number, _error: Object): void => {
-      if (!this.destroyed) this.toast('回复加载失败，请稍后重试');
-    },
-    bumpVersion: (): void => {
-      this.replyVersion++;
-    },
-    getVersion: (): number => this.replyVersion,
+    onThreadError: () => this.toast('回复加载失败，请稍后重试'),
+  }, { clearOnSort: true, video: false }, new ReplyShareController({
+    isDestroyed: () => this.destroyed,
+    getSubject: (): ReplySubject => ({ oid: this.replyOid(), type: 1 }),
+    toast: (message: string) => this.toast(message),
+    getUIContext: () => this.getUIContext(),
     buildShareLink: (item: ReplyItem): string =>
       'https://www.bilibili.com/bangumi/play/ep' + String(this.currentEpId) + '#reply' + String(item.rpid),
-    renderShareCard: (): void => {
-      this.ReplyShareCardBuilder();
-    },
-    // 番剧分享卡需要 hostContext 展示系统分享面板；拿不到时按失败提示收场。
-    ensureShareContext: (context: common.UIAbilityContext | undefined): boolean => {
-      if (context === undefined) {
-        this.toast('分享图片生成失败，请稍后重试');
-        return false;
-      }
-      return true;
-    },
-    onShareFailed: (_item: ReplyItem, _link: string, _error: Object): void => {
+    renderShareCard: (): void => this.ReplyShareCardBuilder(),
+    ensureShareContext: (_context: common.UIAbilityContext | undefined): boolean => true,
+    onShareFailed: (item: ReplyItem, link: string, error: Object) => {
       this.toast('分享图片生成失败，请稍后重试');
     },
-  }, true);
+  }));
+
+  private detailLoader: BangumiDetailController = new BangumiDetailController({
+    isAlive: () => !this.destroyed,
+    publish: (status: BangumiDetailStatus) => {
+      this.loading = status.loading;
+      this.errorText = status.error;
+    },
+    onLoaded: (season: BangumiSeason, preferredEpId: number) => {
+      this.season = season;
+      this.follow.initialize(season);
+      this.currentEpId = BangumiEpisodeCatalog.pick(season, preferredEpId);
+      this.replies.load(true).catch(() => {});
+    },
+  });
 
   aboutToAppear(): void {
     this.destroyed = false;
+    this.replyLikeBusy = new Set<number>();
+    this.replySubmit.reset();
+    this.threadSubmit.reset();
     this.init().catch(() => {
     });
   }
 
   aboutToDisappear(): void {
+    this.replySubmit.dispose();
+    this.threadSubmit.dispose();
     this.replies.dispose();
     this.destroyed = true;
     this.follow.dispose();
-    this.replies.releaseShareCard();
+    this.detailLoader.dispose();
   }
 
   /** 统一 toast：用 UIContext 版 PromptAction，避开全局 promptAction 的废弃告警。 */
@@ -191,26 +184,23 @@ export struct BangumiDetailPage {
   }
 
   private async init(): Promise<void> {
-    this.loading = true;
-    this.errorText = '';
-    try {
-      const season: BangumiSeason | null = await BangumiApi.getSeason(this.param.seasonId, this.param.epId);
-      if (this.destroyed) return;
-      if (season === null) {
-        this.errorText = '详情加载失败，请检查网络后重试';
-        return;
-      }
-      this.season = season;
-      this.follow.initialize(season);
-      // 定位当前集：优先入口参数 epId，否则第一集；评论区挂在当前集 aid 上。
-      this.currentEpId = BangumiEpisodeCatalog.pick(season, this.param.epId);
-      this.replies.load(true).catch(() => {
-      });
-    } catch (e) {
-      if (!this.destroyed) this.errorText = '详情加载失败，请检查网络后重试';
-    } finally {
-      if (!this.destroyed) this.loading = false;
-    }
+    this.follow.dispose();
+    await this.detailLoader.load(this.param.seasonId, this.param.epId);
+  }
+
+  onLoginVersionChanged(): void {
+    if (this.destroyed) return;
+    this.replyLikeBusy = new Set<number>();
+    this.replySubmit.reset();
+    this.closeReplyThread();
+    this.replies.dispose();
+    this.follow.dispose();
+    const state: BangumiFollowState = new BangumiFollowState();
+    state.favorites = this.season.favorites;
+    this.followState = state;
+    this.showStatusPanel = false;
+    // 刷新账号追番状态时保留当前选集；旧账号详情不能再次 initialize 追番控制器。
+    this.detailLoader.load(this.param.seasonId, this.currentEpId || this.param.epId).catch(() => {});
   }
 
   /** 评论 oid：当前集 aid；无剧集或未上线时为 0，评论区与输入框整体隐藏。 */
@@ -227,6 +217,8 @@ export struct BangumiDetailPage {
     }
     // 切换当前集：高亮与评论区跟随，播放页返回后仍指向最近观看的一集。
     if (ep.epId !== this.currentEpId) {
+      this.replySubmit.reset();
+      this.closeReplyThread();
       this.currentEpId = ep.epId;
       this.replies.clearMainReplies();
       this.replies.load(true).catch(() => {
@@ -250,6 +242,7 @@ export struct BangumiDetailPage {
   }
 
   private replyReactionHooks(): ReplyReactionHooks {
+    const current: () => boolean = this.replies.captureGuard();
     return {
       ensureLogin: () => {
         if (UserStore.isLogin) return true;
@@ -258,7 +251,7 @@ export struct BangumiDetailPage {
         return false;
       },
       toast: (message: string) => this.toast(message),
-      isDestroyed: () => this.destroyed,
+      isDestroyed: () => !current(),
       resolveOid: () => this.replyOid(),
       resolveType: () => 1,
       clearDislikeOnLike: false,
@@ -266,13 +259,15 @@ export struct BangumiDetailPage {
   }
 
   private closeReplyThread(): void {
+    this.threadSubmit.reset();
     this.replies.cancelThread();
     this.threadOpen = false;
   }
 
   private openReplyThread(root: ReplyItem): void {
+    this.threadSubmit.reset();
     let latest: ReplyItem = root;
-    const current: Array<ReplyItem> = this.replySource.getAll();
+    const current: Array<ReplyItem> = this.replies.source.getAll();
     for (let i: number = 0; i < current.length; i++) {
       if (current[i].rpid === root.rpid) {
         latest = current[i];
@@ -288,74 +283,26 @@ export struct BangumiDetailPage {
     });
   }
 
-  private sentThreadReply(result: ActionResult, message: string, parent: number): ReplyItem | null {
-    const returned: ReplyItem = ReplyItem.from(asObject(result.data['reply']));
-    const rpid: number = returned.rpid > 0 ? returned.rpid :
-      asNumber(result.data['rpid'], asNumber(result.data['rpid_str'], 0));
-    if (rpid <= 0) return null;
-    const reply: ReplyItem = returned.rpid > 0 ? returned : new ReplyItem();
-    const user = UserStore.current;
-    reply.rpid = rpid;
-    reply.oid = this.replyOid();
-    reply.type = 1;
-    reply.rootRpid = this.threadRoot.rpid;
-    reply.parentRpid = parent;
-    reply.dialogRpid = asNumber(result.data['dialog'], reply.dialogRpid);
-    if (reply.mid <= 0 && user !== null) reply.mid = user.mid;
-    if (reply.uname.length === 0) reply.uname = user !== null && user.uname.length > 0 ? user.uname : '我';
-    if (reply.avatar.length === 0 && user !== null) reply.avatar = user.face;
-    if (reply.level <= 0 && user !== null) reply.level = user.level;
-    if (reply.content.length === 0) reply.content = message;
-    if (reply.ctime <= 0) reply.ctime = Math.floor(Date.now() / 1000);
-    return reply;
+  private applySentThreadReply(sent: ReplyItem | null, clearDraft: boolean): void {
+    if (clearDraft) {
+      this.threadDraft = '';
+      this.threadTargetRpid = this.threadRoot.rpid;
+      this.threadTargetName = this.threadRoot.uname;
+    }
+    if (sent === null) {
+      this.replies.loadThread(true).catch(() => {});
+      return;
+    }
+    this.replies.addSentThread(sent);
   }
 
   private async sendThreadReply(): Promise<void> {
-    const message: string = this.threadDraft.trim();
-    if (message.length === 0 || this.threadSending || !UserStore.isLogin) return;
-    this.threadSending = true;
-    try {
-      const parent: number = this.threadTargetRpid > 0 ? this.threadTargetRpid : this.threadRoot.rpid;
-      const result: ActionResult = await CommentApi.addReply(this.replyOid(), 1, message,
-        this.threadRoot.rpid, parent);
-      if (this.destroyed) return;
-      if (!result.ok) {
-        this.toast(result.message);
-        return;
-      }
-      this.threadDraft = '';
-      const sent: ReplyItem | null = this.sentThreadReply(result, message, parent);
-      if (sent !== null) {
-        this.threadReplies = [sent].concat(this.threadReplies.filter((item: ReplyItem) => item.rpid !== sent.rpid));
-        const root: ReplyItem = this.threadRoot.clone();
-        root.count++;
-        root.replies = [sent].concat(root.replies.filter((item: ReplyItem) => item.rpid !== sent.rpid));
-        this.threadRoot = root;
-        const current: Array<ReplyItem> = this.replySource.getAll();
-        for (let i: number = 0; i < current.length; i++) {
-          if (current[i].rpid === root.rpid) {
-            this.replySource.updateItem(i, root);
-            break;
-          }
-        }
-        this.threadTargetRpid = root.rpid;
-        this.threadTargetName = root.uname;
-        this.toast('回复成功');
-      } else {
-        await this.replies.loadThread(true);
-      }
-    } finally {
-      if (!this.destroyed) this.threadSending = false;
-    }
+    await this.threadSubmit.send();
   }
 
   /** 删除评论成功后的本地移除：数据源重建 + 计数同步。 */
   private removeReply(rpid: number): void {
-    const kept: Array<ReplyItem> = this.replySource.getAll().filter((x: ReplyItem) => x.rpid !== rpid);
-    if (kept.length !== this.replySource.totalCount()) {
-      this.replySource.reset(kept);
-      this.repliesCount = kept.length;
-    }
+    this.replies.removeMain(rpid);
   }
 
   private navigateFromThread(action: () => void): void {
@@ -369,11 +316,11 @@ export struct BangumiDetailPage {
   @Builder
   ReplyShareCardBuilder() {
     ReplyShareCard({
-      item: this.replies.shareItem(),
+      item: this.replies.sharing.shareItem(),
       upMid: 0,
-      qr: this.replies.shareQr(),
-      page: this.replies.sharePage(),
-      linkLabel: this.replies.shareLink(),
+      qr: this.replies.sharing.shareQr(),
+      page: this.replies.sharing.sharePage(),
+      linkLabel: this.replies.sharing.shareLink(),
       sourceCover: this.season.poster.length > 0 ? this.season.poster : this.season.cover,
       sourceTitle: this.season.title,
       sourceUpName: '',
@@ -400,18 +347,22 @@ export struct BangumiDetailPage {
       }),
       onDislike: (item: ReplyItem) => this.dislikeReply(item).catch(() => {
       }),
-      onShare: (item: ReplyItem) => this.replies.share(item),
+      onShare: (item: ReplyItem) => this.replies.sharing.share(item).catch(() => {}),
       onSelectReply: (item: ReplyItem) => {
+        this.threadSubmit.reset();
         this.threadTargetRpid = item.rpid;
         this.threadTargetName = item.uname;
         this.threadFocusTick++;
       },
       onDeleted: (item: ReplyItem) => {
-        this.threadReplies = this.threadReplies.filter((x: ReplyItem) => x.rpid !== item.rpid);
+        this.replies.removeThread(item.rpid);
       },
       onLoadMore: () => this.replies.loadThread(false).catch(() => {
       }),
-      onDraftChange: (value: string) => this.threadDraft = value,
+      onDraftChange: (value: string) => {
+        this.threadSubmit.draftChanged();
+        this.threadDraft = value;
+      },
       onSend: () => this.sendThreadReply().catch(() => {
       }),
       onNavigate: (action: () => void) => this.navigateFromThread(action),
@@ -419,31 +370,13 @@ export struct BangumiDetailPage {
   }
 
   private async sendReply(): Promise<void> {
-    const message: string = this.replyDraft.trim();
-    const oid: number = this.replyOid();
-    if (message.length === 0 || this.replySending || oid <= 0) return;
+    if (this.replyDraft.trim().length === 0 || this.replySending) return;
     if (!UserStore.isLogin) {
       this.toast('请先登录后再评论');
       AppNavStack.pushPathByName(NAV_LOGIN, null);
       return;
     }
-    this.replySending = true;
-    try {
-      const result: ActionResult = await CommentApi.addReply(oid, 1, message);
-      if (this.destroyed) return;
-      if (!result.ok) {
-        this.toast(result.message);
-        return;
-      }
-      this.replyDraft = '';
-      this.toast('评论成功');
-      this.replies.resetMainPaging();
-      await this.replies.load(true);
-    } catch (e) {
-      if (!this.destroyed) this.toast('网络异常，发送失败');
-    } finally {
-      if (!this.destroyed) this.replySending = false;
-    }
+    await this.replySubmit.send();
   }
 
   private introMeta(): string {
@@ -797,7 +730,7 @@ export struct BangumiDetailPage {
             .width('100%')
           }
           if (this.replyOid() > 0 && this.repliesCount > 0) {
-            LazyForEach(this.replySource, (reply: ReplyItem) => {
+            LazyForEach(this.replies.source, (reply: ReplyItem) => {
               ListItem() {
                 ReplyCard({
                   item: reply,
@@ -808,7 +741,7 @@ export struct BangumiDetailPage {
                   }),
                   onDislike: (item: ReplyItem) => this.dislikeReply(item).catch(() => {
                   }),
-                  onShare: (item: ReplyItem) => this.replies.share(item),
+                  onShare: (item: ReplyItem) => this.replies.sharing.share(item).catch(() => {}),
                   onOpenThread: (item: ReplyItem) => this.openReplyThread(item),
                   // 主评论列表："回复"按钮 = 打开该评论的楼中楼面板（与 B 站一致）
                   onSelectReply: (item: ReplyItem) => this.openReplyThread(item),
@@ -847,6 +780,7 @@ export struct BangumiDetailPage {
             sending: this.replySending,
             showEmoteButton: false,
             onChange: (value: string) => {
+              this.replySubmit.draftChanged();
               this.replyDraft = value;
             },
             onSend: () => this.sendReply(),

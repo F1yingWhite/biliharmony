@@ -1,349 +1,204 @@
-// Execute production category/loading methods with controlled API promises.
-// Node 20 compatible: ArkTS types are removed by the same TypeScript compiler as other QA suites.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
+const { environment, deferred, tick, read } = require('./dynamic-test-env.cjs');
 const ts = require(process.env.ARKTS_TEST_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript');
-const root = path.resolve(__dirname, '../../entry/src/main/ets');
-const sourceOverride = process.env.ARKTS_TEST_SOURCE_ROOT;
-function read(name) {
-  const relative = name + '.ets';
-  const override = sourceOverride && path.join(sourceOverride, relative);
-  return fs.readFileSync(override && fs.existsSync(override) ? override : path.join(root, relative), 'utf8')
-    .replace(/\r\n/g, '\n');
-}
-function compile(source, globals = {}) {
-  const module = { exports: {} };
-  const code = ts.transpileModule(source, {
-    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
-  }).outputText;
-  new Function('module', 'exports', ...Object.keys(globals), code)(module, module.exports, ...Object.values(globals));
-  return module.exports;
-}
-const { BasicDataSource } = compile(read('common/BasicDataSource'));
-const { RequestEpoch } = compile(read('common/RequestEpoch'));
-const source = read('views/DynamicView');
-function method(start, end) {
-  const from = source.indexOf(start);
-  const to = source.indexOf(end, from + start.length);
-  assert.ok(from >= 0 && to > from, 'Production method anchors must match: ' + start);
-  return source.slice(from, to);
-}
-const methods = [
-  method('  async loadFeed(reset: boolean): Promise<void> {', '  private recoverFeed(): void {'),
-  method('  private changeDynType(type: string): void {', '  @Builder\n  DynTypeChip('),
-  method('  private onRefresh(): void {', '  @Builder\n  DynRefreshHeader()'),
-].join('\n');
-const RefreshStatus = { Inactive: 0, Refresh: 3 };
-function fixture(initialItems = [{ dynId: 'all-original' }]) {
-  const requests = [];
-  const DynamicApi = { getDynamicFeed(offset, type) {
-    let resolve, reject;
-    const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; });
-    requests.push({ offset, type, resolve, reject });
-    return promise;
-  }};
-  const { Harness } = compile('export class Harness {\n' + methods + '\n}', { DynamicApi, RefreshStatus, BasicDataSource });
-  const dynSource = new BasicDataSource();
-  dynSource.reset(initialItems);
-  const view = Object.assign(new Harness(), {
-    feedEpoch: new RequestEpoch(), dynType: 'all', dynTab: 0, hostMid: 0,
-    dynTypes: ['all', 'video', 'pgc', 'article'], loading: false, login: true, feedLoaded: initialItems.length > 0,
-    feedLoading: false, feedMoreFailed: false, feedNeedsLogin: false,
-    feedRetryReset: false, errorText: '', dynHasMore: true, dynOffset: 'all-next',
-    dynSource, dynCount: initialItems.length, refreshing: false,
-    refreshStatus: RefreshStatus.Inactive, refreshOperation: 0,
-    typeItems: new Map(), typeOffset: new Map(), typeHasMore: new Map(),
-    typeSources: new Map(), typeStates: new Map(),
-  });
-  return { view, requests };
-}
-const tick = () => new Promise(resolve => setImmediate(resolve));
 const page = (id, offset, hasMore = true) => ({ items: [{ dynId: id }], offset, hasMore });
-function cacheVideo(view) {
-  view.typeItems.set('video', [{ dynId: 'video-cached' }]);
-  view.typeOffset.set('video', 'video-next');
-  view.typeHasMore.set('video', true);
+function fixture() {
+  const requests = [], published = [];
+  let hostMid = 0;
+  const request = args => { const next = deferred(); requests.push({ ...next, ...args }); return next.promise; };
+  const env = environment({ 'api/DynamicApi': { DynamicApi: {
+    getDynamicFeed: (offset, type) => request({ offset, type }),
+    getUserDynamicFeed: (mid, offset) => request({ mid, offset }),
+  } } });
+  const { DynamicFeedController } = env.load('components/dynamic/DynamicFeedController');
+  const feed = new DynamicFeedController(() => hostMid, states => published.push(states));
+  return { feed, requests, published, session: env.load('services/auth/AuthSession').AuthSession,
+    setHost: value => { hostMid = value; } };
 }
-function visibleState(view) {
-  return { type: view.dynType, items: view.dynSource.getAll(), count: view.dynCount,
-    offset: view.dynOffset, hasMore: view.dynHasMore };
+async function seed(f, type, id, hasMore = true) {
+  const pending = f.feed.activeType === type ? f.feed.load(true) : f.feed.select(type);
+  f.requests.at(-1).resolve(page(id, type + '-next', hasMore)); await pending;
 }
+const ids = source => source.getAll().map(item => item.dynId);
 
-test('returning to a cached category rejects the previous category response and cursor', async () => {
-  const { view, requests } = fixture();
-  view.changeDynType('video');
-  view.changeDynType('all');
-  assert.equal(requests.length, 1, 'cached return should not need another request');
-  requests[0].resolve(page('video-late', 'video-offset', false));
-  await tick();
-  assert.deepEqual(visibleState(view), { type: 'all', items: [{ dynId: 'all-original' }],
-    count: 1, offset: 'all-next', hasMore: true });
-  assert.equal(view.feedLoading, false);
+test('cached return rejects the previous category response and cursor', async () => {
+  const f = fixture(); await seed(f, 'all', 'all-original');
+  const video = f.feed.select('video'); await f.feed.select('all');
+  f.requests.at(-1).resolve(page('video-late', 'wrong', false)); await video;
+  assert.deepEqual(ids(f.feed.source('all')), ['all-original']);
+  assert.equal(f.feed.state().offset, 'all-next'); assert.equal(f.feed.state().hasMore, true);
+  assert.equal(f.feed.state().loading, false); assert.equal(f.requests.length, 2);
 });
 
-// Evaluate the bindings used by the actual ArkUI builder. The list boundary only substitutes
-// native LazyForEach subscription; category selection, request completion and data notifications
-// all execute production code and the production BasicDataSource.
-const dynBody = method('  DynBody(tabIdx: number) {', '  /** 发布动态（纯文字 / 图文）底部面板');
-const sourceBinding = /LazyForEach\((.+?), \(item: DynamicItem\)/.exec(dynBody);
-assert.ok(sourceBinding, 'Find the actual LazyForEach data source argument');
-const { renderedSource } = compile('export function renderedSource(tabIdx: number) { return ' + sourceBinding[1] + '; }');
-const emptyBinding = /LoadingView\((\{ skeleton: 'social',\n[\s\S]*?\n      \})\)/.exec(dynBody);
-assert.ok(emptyBinding, 'Find the actual empty-page component parameters');
-const { renderedEmptyState } = compile('export function renderedEmptyState(tabIdx: number) { return ' + emptyBinding[1] + '; }');
-const initialLoadingBinding = /\n    if \((.+)\) \{/.exec(dynBody);
-assert.ok(initialLoadingBinding);
-const { renderedInitialLoading } = compile('export function renderedInitialLoading(tabIdx: number) { return ' + initialLoadingBinding[1] + '; }');
-function bindingCallback(name) {
-  const start = dynBody.indexOf('.' + name + '(') + name.length + 2;
-  assert.ok(start > name.length + 1);
-  let depth = 1, end = start;
-  for (; end < dynBody.length && depth > 0; end++) {
-    if (dynBody[end] === '(') depth++;
-    if (dynBody[end] === ')') depth--;
+test('mounted tabs own stable independent sources through selection and pagination', async () => {
+  const f = fixture(), all = f.feed.source('all'), video = f.feed.source('video');
+  let notices = 0;
+  all.registerDataChangeListener({ onDataReloaded: () => notices++, onDataAdd: () => notices++ });
+  await seed(f, 'all', 'a'); const count = notices;
+  assert.deepEqual(ids(video), []); assert.equal(f.feed.state('video').loading, true);
+  await seed(f, 'video', 'v');
+  const pending = f.feed.load(false); f.requests.at(-1).resolve(page('v2', 'video-2', false)); await pending;
+  assert.equal(f.feed.source('video'), video); assert.equal(f.feed.source('all'), all);
+  assert.deepEqual(ids(video), ['v', 'v2']); assert.deepEqual(ids(all), ['a']); assert.equal(notices, count);
+});
+
+test('initial errors and cached empty results remain local to each category', async () => {
+  const f = fixture(), failed = f.feed.load(true); f.requests[0].reject(Error('all-only')); await failed;
+  assert.equal(f.feed.state().errorText, 'all-only'); assert.equal(f.feed.state().loading, false);
+  assert.equal(f.feed.state('video').errorText, ''); assert.equal(f.feed.state('video').loading, true);
+  await seed(f, 'all', 'a');
+  const empty = f.feed.select('video');
+  f.requests.at(-1).resolve({ items: [], offset: '', hasMore: false }); await empty;
+  await f.feed.select('all'); await f.feed.select('video');
+  assert.equal(f.requests.length, 3); assert.equal(f.feed.state().loaded, true);
+  assert.equal(f.feed.state().loading, false); assert.equal(f.feed.state().count, 0);
+  assert.equal(f.feed.state().hasMore, false);
+});
+
+test('late continuation cannot append into a cached destination or hide its load', async () => {
+  const f = fixture(); await seed(f, 'video', 'v'); await seed(f, 'all', 'a');
+  const old = f.feed.load(false), oldRequest = f.requests.at(-1);
+  await f.feed.select('video'); const current = f.feed.load(false), next = f.requests.at(-1);
+  oldRequest.resolve(page('old', 'wrong', false)); await old;
+  assert.equal(f.feed.state().loading, true); assert.deepEqual(ids(f.feed.source('video')), ['v']);
+  next.resolve(page('v2', 'next')); await current;
+  assert.deepEqual(ids(f.feed.source('video')), ['v', 'v2']); assert.deepEqual(ids(f.feed.source('all')), ['a']);
+});
+
+test('uncached selection and superseded failures retain only the latest error and loading', async () => {
+  const f = fixture(), video = f.feed.select('video'), pgc = f.feed.select('pgc');
+  f.requests[0].reject(Error('登录已失效，请重新登录后查看动态')); await video;
+  assert.equal(f.feed.state().loading, true); assert.equal(f.feed.state().needsLogin, false);
+  f.requests[1].reject(Error('pgc offline')); await pgc;
+  assert.equal(f.feed.activeType, 'pgc'); assert.equal(f.feed.state().errorText, 'pgc offline');
+  assert.equal(f.feed.state().loading, false);
+});
+
+test('failed continuation retains cards and cursor and retries the same page', async () => {
+  const f = fixture(); await seed(f, 'all', 'a');
+  const failed = f.feed.load(false); f.requests.at(-1).reject(Error('offline')); await failed;
+  assert.equal(f.feed.state().moreFailed, true); assert.equal(f.feed.state().retryReset, false);
+  assert.equal(f.feed.state().offset, 'all-next'); assert.deepEqual(ids(f.feed.source('all')), ['a']);
+  const retry = f.feed.load(false); assert.equal(f.requests.at(-1).offset, 'all-next');
+  f.requests.at(-1).resolve(page('b', 'end', false)); await retry;
+  assert.equal(f.feed.state().moreFailed, false); assert.deepEqual(ids(f.feed.source('all')), ['a', 'b']);
+});
+
+test('cached refresh failure retains reset retry mode and expired-login state', async () => {
+  const f = fixture(); await seed(f, 'video', 'v'); const failed = f.feed.load(true);
+  f.requests.at(-1).reject(Error('登录已失效，请重新登录后查看动态')); await failed;
+  await seed(f, 'all', 'a'); await f.feed.select('video'); const state = f.feed.state();
+  assert.equal(state.needsLogin, true); assert.equal(state.moreFailed, true); assert.equal(state.retryReset, true);
+  assert.deepEqual(ids(f.feed.source('video')), ['v']);
+});
+
+test('reset clears mounted sources while retaining their identity and rejects old results', async () => {
+  const f = fixture(); await seed(f, 'video', 'v'); await seed(f, 'all', 'a');
+  const all = f.feed.source('all'), video = f.feed.source('video'), old = f.feed.load(false);
+  f.feed.reset(); f.requests.at(-1).resolve(page('old-account', 'wrong')); await old;
+  assert.equal(f.feed.source('all'), all); assert.equal(f.feed.source('video'), video);
+  assert.deepEqual(ids(all), []); assert.deepEqual(ids(video), []);
+  assert.equal(f.feed.state().offset, ''); assert.equal(f.feed.state().loaded, false);
+});
+
+test('page removal cancels pending work without notifying a destroyed subscriber', async () => {
+  const f = fixture(); await seed(f, 'all', 'a'); const pending = f.feed.load(false);
+  const before = f.published.length; f.feed.cancel();
+  f.requests.at(-1).resolve(page('late', 'wrong')); await pending;
+  assert.equal(f.published.length, before); assert.deepEqual(ids(f.feed.source('all')), ['a']);
+  const retry = f.feed.load(false); f.requests.at(-1).resolve(page('new', 'next')); await retry;
+  assert.deepEqual(ids(f.feed.source('all')), ['a', 'new']);
+});
+
+test('account changes before UI broadcast and host changes both reject stale responses', async () => {
+  for (const change of ['session', 'host']) {
+    const f = fixture(), old = f.feed.load(true);
+    if (change === 'session') f.session.advance(); else f.setHost(42);
+    f.requests[0].resolve(page('stale', 'wrong')); await old;
+    assert.deepEqual(ids(f.feed.source('all')), []);
+    const retry = f.feed.load(true); assert.equal(f.requests.length, 2);
+    f.requests[1].resolve(page('fresh', 'right')); await retry;
+    assert.deepEqual(ids(f.feed.source('all')), ['fresh']);
   }
-  const { callback } = compile('export function callback(tabIdx: number) { return ' + dynBody.slice(start, end - 1) + '; }');
-  return callback;
-}
-function mountTab(view, index) {
-  const source = renderedSource.call(view, index);
-  const result = { source, ids: source.getAll().map(item => item.dynId), notifications: 0 };
-  const changed = () => { result.ids = source.getAll().map(item => item.dynId); result.notifications++; };
-  source.registerDataChangeListener({ onDataReloaded: changed, onDataAdd: changed, onDataChange: changed, onDataDelete: changed });
-  return result;
-}
-
-test('swiping into an unvisited dynamic tab never renders the selected category cards', () => {
-  const { view } = fixture();
-  const current = mountTab(view, 0), incoming = mountTab(view, 1);
-  assert.deepEqual(current.ids, ['all-original']);
-  assert.deepEqual(incoming.ids, [], 'the video page must not show the all-category feed before onChange');
-  assert.notEqual(current.source, incoming.source);
 });
 
-test('two mounted dynamic tabs retain independent lists through selection and pagination', async () => {
-  const { view, requests } = fixture();
-  cacheVideo(view);
-  const all = mountTab(view, 0), video = mountTab(view, 1);
-  assert.deepEqual(video.ids, ['video-cached']);
-  view.changeDynType('video');
-  assert.equal(renderedSource.call(view, 1), video.source, 'a mounted tab keeps its data source identity');
-  assert.deepEqual(all.ids, ['all-original']);
-  const request = view.loadFeed(false);
-  requests[0].resolve(page('video-next-page', 'video-offset-2', false));
-  await request;
-  assert.deepEqual(video.ids, ['video-cached', 'video-next-page']);
-  assert.deepEqual(all.ids, ['all-original']);
-  assert.equal(all.notifications, 0, 'another category must not notify this mounted LazyForEach');
+test('public user feed passes host id and guards duplicate and end-of-list requests', async () => {
+  const f = fixture(); f.setHost(123); const first = f.feed.load(false); await f.feed.load(false);
+  assert.equal(f.requests.length, 1); assert.equal(f.requests[0].mid, 123);
+  f.requests[0].resolve(page('user', 'end', false)); await first; await f.feed.load(false);
+  assert.equal(f.requests.length, 1);
 });
 
-test('hidden dynamic tab reach-end and refresh callbacks cannot change the selected category', async () => {
-  const { view, requests } = fixture();
-  bindingCallback('onReachEnd').call(view, 1)();
-  bindingCallback('onRefreshing').call(view, 1)();
-  assert.equal(requests.length, 0, 'callbacks from a cached adjacent page must not request the active feed');
-  assert.equal(view.refreshing, false);
-  bindingCallback('onReachEnd').call(view, 0)();
-  assert.equal(requests.length, 1);
-  requests[0].resolve(page('all-next-page', 'all-next-2'));
-  await tick();
-  assert.equal(view.dynCount, 2);
+test('late likes update every cached copy without rebinding mounted rows', async () => {
+  const f = fixture(); await seed(f, 'all', 'same'); await seed(f, 'video', 'same');
+  f.feed.updateLike('same', true, 4);
+  for (const type of ['all', 'video']) {
+    assert.equal(f.feed.source(type).getData(0).liked, true); assert.equal(f.feed.source(type).getData(0).like, 4);
+  }
 });
 
-test('an unvisited adjacent page renders its own skeleton rather than the active category error', async () => {
-  const { view, requests } = fixture([]);
-  const request = view.loadFeed(true);
-  requests[0].reject(new Error('all-only error'));
-  await request;
-  assert.equal(renderedEmptyState.call(view, 0).errorText, 'all-only error');
-  const incoming = renderedEmptyState.call(view, 1);
-  assert.equal(incoming.loading, true);
-  assert.equal(incoming.errorText, '');
-  assert.equal(incoming.empty, false);
-});
-
-test('initialization loading does not replace an already cached adjacent list with a skeleton', () => {
-  const { view } = fixture();
-  cacheVideo(view);
-  view.loading = true;
-  assert.equal(renderedInitialLoading.call(view, 1), false);
-  assert.deepEqual(renderedSource.call(view, 1).getAll(), [{ dynId: 'video-cached' }]);
-  assert.equal(renderedInitialLoading.call(view, 2), true, 'an unseen empty category still has an initial placeholder');
-});
-
-test('a successfully empty category remains empty while swiping and is cached on return', async () => {
-  const { view, requests } = fixture();
-  view.changeDynType('video');
-  requests[0].resolve({ items: [], offset: '', hasMore: false });
-  await tick();
-  view.changeDynType('all');
-  assert.deepEqual(renderedSource.call(view, 1).getAll(), []);
-  const empty = renderedEmptyState.call(view, 1);
-  assert.equal(empty.loading, false);
-  assert.equal(empty.empty, true);
-  view.changeDynType('video');
-  assert.equal(requests.length, 1, 'successful empty pages are real cached results');
-  assert.equal(view.dynCount, 0);
-  assert.equal(view.dynHasMore, false);
-});
-
-test('late likes update their originating cached category after selection changes', () => {
-  const { view } = fixture([{ dynId: 'all-original', liked: false, like: 3 }]);
-  const { Like } = compile('export class Like {\n' +
-    method('  private handleLikeResult(', '  /** 并行拉取关注 UP 主') + '\n}');
-  view.handleLikeResult = Like.prototype.handleLikeResult;
-  const origin = mountTab(view, 0);
-  cacheVideo(view);
-  view.changeDynType('video');
-  view.handleLikeResult('all-original', true, 4);
-  assert.equal(origin.source.getData(0).liked, true);
-  assert.equal(origin.source.getData(0).like, 4);
-  assert.deepEqual(view.dynSource.getAll(), [{ dynId: 'video-cached' }]);
-});
-
-function navigationFixture(reduced) {
-  const navigations = [], flags = [], snapshots = [];
-  let layoutReads = 0;
-  const code = method('  private openDetail(', '  private openItemDetail(') +
-    method('  private openVideo(', '  @Builder\n  ForwardedCard(');
-  const { Card } = compile('export class Card {\n' + code + '\n}', {
-    MotionTokens: { isReduced: () => reduced },
-    AppNavStack: { pushPathByName: (...args) => navigations.push(args) },
-    AppStorage: { setOrCreate: (...args) => flags.push(args) },
-    NAV_VIDEO_DETAIL: 'video', NAV_DYNAMIC_DETAIL: 'dynamic', NAV_IMAGE_VIEWER: 'images',
-    HERO_NAV_TRANSITION_ACTIVE_KEY: 'heroActive', HERO_NAV_TRANSITION_DURATION_KEY: 'heroDuration',
-    biliImageThumbnail: (url, width) => url + '@' + width,
-    setHeroBgSnapshot: value => snapshots.push(value), Curve: { EaseInOut: 'curve' },
-  });
-  const item = { dynId: 'source-dynamic', bvid: 'BV-source', aid: 123, title: 'source title', cover: 'cover.jpg',
-    images: Array.from({ length: 11 }, (_, index) => 'original-' + index + '.jpg') };
-  const view = Object.assign(new Card(), { item, detailMode: false, sharedImageTransition: false,
-    cardId: () => 'card', videoCardId: () => 'video-card', videoCoverId: () => 'video-cover',
-    imgId: (_id, index) => 'img-' + index, imgTransitionId: (_id, index) => 'transition-' + index,
-    getUIContext: () => {
-      layoutReads++;
-      return { px2vp: value => value,
-        getComponentUtils: () => ({ getRectangleById: () => ({ size: { width: 100, height: 80 }, windowOffset: { x: 1, y: 2 } }) }),
-        getComponentSnapshot: () => ({ getSync: () => ({ snapshot: true }) }),
-        animateTo: (_options, callback) => callback(),
-      };
-    },
-  });
-  return { view, item, navigations, flags, snapshots, layoutReads: () => layoutReads };
+function viewHarness(f) {
+  const source = read('views/DynamicView');
+  const method = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+  const methods = method('  private onRefresh()', '  @Builder\n  DynRefreshHeader()') +
+    method('  private changeDynType(', '  @Builder\n  DynTypeChip(');
+  const module = { exports: {} };
+  new Function('module', 'exports', 'RefreshStatus', ts.transpileModule('export class View {' + methods + '}',
+    { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS } }).outputText)(
+      module, module.exports, { Inactive: 0 });
+  const view = Object.assign(new module.exports.View(), { feed: f.feed, feedStates: f.feed.snapshots(),
+    dynTypes: f.feed.types, dynType: 'all', refreshOperation: 0, refreshing: false,
+    loadFeed: reset => f.feed.load(reset) });
+  return { view, source };
 }
 
-test('reduced motion dynamic video, detail and images preserve content while bypassing hero preparation', () => {
-  const f = navigationFixture(true);
-  f.view.openVideo(f.item);
-  f.view.openDetail(true);
-  f.view.openItemImage(f.item, 10);
-  assert.deepEqual(f.navigations.map(call => [call[0], call[2]]), [['video', false], ['dynamic', false], ['images', false]]);
-  assert.equal(f.navigations[0][1].bvid, f.item.bvid);
-  assert.equal(f.navigations[0][1].aid, 123);
-  assert.equal(f.navigations[0][1].title, 'source title');
-  assert.equal(f.navigations[0][1].cover, 'cover.jpg@480');
-  assert.equal(f.navigations[1][1].item, f.item);
-  assert.equal(f.navigations[1][1].focusComments, true);
-  assert.deepEqual(f.navigations[2][1], { images: f.item.images, initialIndex: 10 });
-  assert.equal(f.layoutReads(), 0, 'reduced motion must not measure or snapshot a hero source');
-  assert.deepEqual(f.snapshots, []);
-  assert.deepEqual(f.flags, [], 'plain navigation must not activate hero input locking');
+test('old category refresh cannot hide the new refresh indicator', async () => {
+  const f = fixture(); await seed(f, 'video', 'v'); await seed(f, 'all', 'a'); const { view } = viewHarness(f);
+  view.onRefresh(); const old = f.requests.at(-1); view.changeDynType('video'); view.onRefresh();
+  old.resolve(page('old', 'wrong')); await tick(); assert.equal(view.refreshing, true);
+  f.requests.at(-1).resolve(page('new', 'right')); await tick(); assert.equal(view.refreshing, false);
 });
 
-test('normal motion dynamic video still captures and supplies its source rectangle', () => {
-  const f = navigationFixture(false);
-  f.view.openVideo(f.item);
-  assert.equal(f.navigations[0][0], 'video');
-  assert.deepEqual(f.navigations[0][1].cardRect, { x: 1, y: 2, w: 100, h: 80 });
-  assert.deepEqual(f.snapshots, [{ snapshot: true }]);
-  assert.ok(f.layoutReads() > 0);
-  assert.ok(f.flags.some(([key, value]) => key === 'heroActive' && value === true));
+test('page binds stable per-tab sources and ignores hidden-tab events', async () => {
+  const f = fixture(); await seed(f, 'all', 'a'); const { view, source } = viewHarness(f);
+  assert.match(source, /LazyForEach\(this\.pageSource\(tabIdx\)/);
+  assert.match(source, /if \(this\.isActivePage\(tabIdx\) && !this\.pageState\(tabIdx\)\.moreFailed\) this\.loadFeed\(false\)/);
+  assert.match(source, /onRefreshing\(\(\) => \{ if \(this\.isActivePage\(tabIdx\)\) this\.onRefresh\(\)/);
+  assert.equal(view.isActivePage(1), false); assert.notEqual(view.pageSource(0), view.pageSource(1));
+  assert.equal(view.pageState(1).loading, true); assert.equal(view.pageState(0).count, 1);
 });
 
-test('a late pagination response cannot append into a cached destination category', async () => {
-  const { view, requests } = fixture();
-  cacheVideo(view);
-  const old = view.loadFeed(false);
-  assert.equal(requests[0].offset, 'all-next');
-  view.changeDynType('video');
-  requests[0].resolve(page('all-late-page', 'all-offset-2', false));
-  await old;
-  assert.deepEqual(visibleState(view), { type: 'video', items: [{ dynId: 'video-cached' }],
-    count: 1, offset: 'video-next', hasMore: true });
-  assert.equal(view.feedLoading, false);
+function lifecycleHarness(f, user) {
+  const source = read('views/DynamicView');
+  const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+  const methods = section('  aboutToAppear()', '  /** 惯用手切换') +
+    section('  async init()', '  private onRefresh()');
+  const module = { exports: {} };
+  new Function('module', 'exports', 'UserStore', 'RefreshStatus', 'EmoteResolver', 'AppTheme', 'Handedness',
+    ts.transpileModule('export class View {' + methods + '}', { compilerOptions: {
+      target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS,
+    } }).outputText)(module, module.exports, user, { Inactive: 0 }, { ensureLoaded() {} },
+      { resetHeaderFade() {} }, { LEFT: 'left' });
+  return Object.assign(new module.exports.View(), { feed: f.feed, active: true, lifecycle: 0,
+    initializing: false, initPending: false, loading: true, login: false, hostMid: 0, embedded: false,
+    refreshOperation: 0, refreshing: true, follow: { cancel() {}, load() {} },
+    composer: { detach() {}, reset() {} } });
+}
+
+test('a destroyed page ignores delayed account initialization and cannot start a feed request', async () => {
+  const f = fixture(), loaded = deferred(), user = { isLogin: false, ensureLoaded: () => loaded.promise };
+  const view = lifecycleHarness(f, user), pending = view.init(); view.aboutToDisappear();
+  user.isLogin = true; loaded.resolve(); await pending;
+  assert.equal(f.requests.length, 0); assert.equal(view.login, false); assert.equal(view.refreshing, false);
 });
 
-test('cached switches clear loading and error states and allow pagination immediately', async () => {
-  const { view, requests } = fixture();
-  cacheVideo(view);
-  Object.assign(view, { feedLoading: true, feedMoreFailed: true, feedNeedsLogin: true,
-    feedRetryReset: true, errorText: 'old category error', refreshing: true,
-    refreshStatus: RefreshStatus.Refresh });
-  view.changeDynType('video');
-  assert.deepEqual({ loading: view.feedLoading, moreFailed: view.feedMoreFailed,
-    needsLogin: view.feedNeedsLogin, retryReset: view.feedRetryReset,
-    error: view.errorText, refreshing: view.refreshing, status: view.refreshStatus },
-  { loading: false, moreFailed: false, needsLogin: false, retryReset: false,
-    error: '', refreshing: false, status: RefreshStatus.Inactive });
-  const current = view.loadFeed(false);
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].offset, 'video-next');
-  requests[0].resolve(page('video-next-page', 'video-offset-2'));
-  await current;
-  assert.equal(view.dynCount, 2);
-});
-
-test('a stale pagination rejection cannot publish errors or finish a new category request', async () => {
-  const { view, requests } = fixture();
-  cacheVideo(view);
-  const old = view.loadFeed(false);
-  view.changeDynType('video');
-  const current = view.loadFeed(false);
-  requests[0].reject(new Error('登录已失效，请重新登录后查看动态'));
-  await old;
-  assert.equal(view.feedLoading, true);
-  assert.equal(view.feedNeedsLogin, false);
-  assert.equal(view.feedMoreFailed, false);
-  assert.equal(view.errorText, '');
-  assert.equal(requests.length, 2);
-  requests[1].resolve(page('video-next-page', 'video-offset-2'));
-  await current;
-  assert.equal(view.feedLoading, false);
-  assert.equal(view.dynOffset, 'video-offset-2');
-});
-
-test('uncached switches preserve the latest request loading and error state', async () => {
-  const { view, requests } = fixture();
-  view.changeDynType('video');
-  view.changeDynType('pgc');
-  requests[0].resolve(page('video-late', 'video-offset'));
-  await tick();
-  assert.equal(view.feedLoading, true);
-  assert.equal(view.dynCount, 0);
-  requests[1].reject(new Error('pgc network failure'));
-  await tick();
-  assert.equal(view.dynType, 'pgc');
-  assert.equal(view.feedLoading, false);
-  assert.equal(view.errorText, 'pgc network failure');
-});
-
-test('an old category refresh completion cannot hide a newer refresh indicator', async () => {
-  const { view, requests } = fixture();
-  cacheVideo(view);
-  view.onRefresh();
-  view.changeDynType('video');
-  view.onRefresh();
-  requests[0].resolve(page('all-refresh-late', 'all-new'));
-  await tick();
-  assert.equal(view.refreshing, true);
-  assert.equal(view.feedLoading, true);
-  requests[1].resolve(page('video-refreshed', 'video-new'));
-  await tick();
-  assert.equal(view.refreshing, false);
-  assert.equal(view.feedLoading, false);
-  assert.deepEqual(visibleState(view), { type: 'video', items: [{ dynId: 'video-refreshed' }],
-    count: 1, offset: 'video-new', hasMore: true });
+test('reappearing during old initialization queues exactly one current lifecycle load', async () => {
+  const f = fixture(), loaded = deferred(), user = { isLogin: false, ensureLoaded: () => loaded.promise };
+  const view = lifecycleHarness(f, user), pending = view.init(); view.aboutToDisappear(); view.aboutToAppear();
+  user.isLogin = true; loaded.resolve(); await pending; await tick();
+  assert.equal(f.requests.length, 1); assert.equal(view.loading, true);
+  f.requests[0].resolve(page('fresh', 'next')); await tick();
+  assert.equal(view.loading, false); assert.equal(view.login, true);
 });

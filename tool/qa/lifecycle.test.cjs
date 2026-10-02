@@ -22,37 +22,7 @@ function readSource(filename) {
 const ts = require(process.env.ARKTS_TEST_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript');
 
-// ---------------------------------------------------------------------------
-// 生产方法切片锚点（methodHarness 的 start/end）
-//
-// 这些字符串必须逐字存在于入口源码中，一旦重构改动签名或注释就会匹配失败，
-// 报成 `assert.ok(begin >= 0 && finish > begin)`——看起来像功能回归，实际是夹具失效。
-// 历史上已因此整批静默失效过（`private` 被去掉、注释改名、参数补类型注解）。
-//
-// 因此：锚点集中在此处，不得内联在用例里；改动锚点指向的方法签名/注释时，
-// 必须同步更新这里，并在同一个提交里跑一遍 lifecycle.test.cjs。
-//
-// 选取原则：start 用方法签名行（含缩进），end 用下一个成员的签名或注释首行——
-// 必须唯一、且不会在方法体内提前出现，否则切片会截断。
-// ---------------------------------------------------------------------------
-const ANCHOR = {
-  /** DynamicView：动态分类切换后必须让在途 feed 失效。 */
-  dynChangeTypeStart: '  private changeDynType(type: string): void {',
-  dynChipStart: '  @Builder\n  DynTypeChip(label: string, type: string) {',
-  dynLoadFeedStart: '  async loadFeed(reset: boolean): Promise<void> {',
-  /** 关注 UP 横滑栏拉取，紧跟在 loadFeed 之后的成员。 */
-  dynLoadFeedEnd: '  /** 并行拉取',
-  // 三页评论编排已收敛到 components/reply/RepliesController（原 VideoDetail/DynamicDetail/
-  // BangumiDetail 内联的 loadReplies/changeReplySort/loadThreadReplies/mutateReplyItem）。
-  /** 主评论分页加载，紧随其后的排序切换成员。 */
-  repliesLoadStart: '  async load(reset: boolean): Promise<void> {',
-  repliesChangeSortStart: '  changeReplySort(mode: number): void {',
-  /** 楼中楼分页加载，紧随其后的 mutate 成员。 */
-  repliesLoadThreadStart: '  async loadThread(reset: boolean, allowPrefetch: boolean = true): Promise<void> {',
-  repliesMutateStart: '  mutate(rpid: number, mutate: (target: ReplyItem) => void): ReplyItem | null {',
-  /** stampServerRevs 定义在 mutate 之后；加载切片要用到它，end 锚点取 share 签名。 */
-  repliesShareStart: '  share(item: ReplyItem): void {',
-};
+// 评论分页、线程会话与 rev 的回归用例迁入 reply-state.test.cjs，直接加载完整生产模块。
 
 function deferred() {
   let resolve, reject;
@@ -61,29 +31,27 @@ function deferred() {
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-function homeChannels(hot, live) {
-  const env = environment({
-    'api/FeedApi': { FeedApi: { getHot: hot } },
-    'api/LiveApi': { LiveApi: { getLiveRooms: live } },
-  });
-  const Harness = env.methodHarness('views/HomeView', '  async loadHot(', '  @Builder\n  SubTabItem(',
-    "import {FeedApi} from '../api/FeedApi'; import {LiveApi} from '../api/LiveApi'; const UserApi={loadFeedFollowStates:async()=>{}};");
-  const p = new Harness();
-  Object.assign(p, { hotFetching:false, liveFetching:false, hotEpoch:epoch(env), liveEpoch:epoch(env),
-    hotPage:3, livePage:4, hotHasMore:true, liveHasMore:true, hotError:'', liveError:'', recError:'',
-    hotSource:source(env, [{aid:1}]), liveSource:source(env, [{roomId:1}]), followedLiveRefresh:0,
-    hotCount:1, liveCount:1, refreshingChannels:[false,false,false], loadingChannels:[false,false,false],
-    channelOperations:[0,0,0], retryResetChannels:[false,false,false],
-    dedupVideos:(source, rows)=>rows, dedupLive:(source, rows)=>rows,
-  });
-  return p;
+async function homeChannels(hot, live) {
+  const {homeFeedFixture}=require('./home-feed-fixture.cjs');let priming=true;
+  const f=homeFeedFixture({hot:page=>priming?Promise.resolve(Array(20).fill({aid:1,bvid:'BV1'})):hot(page),
+    live:page=>priming?Promise.resolve(Array(20).fill({roomId:1})):live(page)});
+  await f.ctl.activate();
+  await f.ctl.load(1,true);await f.ctl.load(1,false);
+  await f.ctl.load(2,true);await f.ctl.load(2,false);await f.ctl.load(2,false);
+  priming=false;
+  return {feed:f.ctl,hotSource:f.ctl.hot,liveSource:f.ctl.live,
+    get hotPage(){return f.state(1).page;},get livePage(){return f.state(2).page;},
+    get refreshingChannels(){return f.snapshots.at(-1).channels.map(s=>s.refreshing);},
+    get loadingChannels(){return f.snapshots.at(-1).channels.map(s=>s.loading);},
+    channelHasMore:index=>f.state(index).hasMore,channelError:index=>f.state(index).error,
+    onRefresh:index=>f.ctl.load(index,true),onReachEnd:index=>f.ctl.load(index,false),retryMore:index=>f.ctl.retry(index)};
 }
 
 for (const channel of [1,2]) {
   test(`home channel ${channel}: refresh supersedes pagination and ignores its late response`, async () => {
     const old=deferred(), fresh=deferred(); const pages=[];
     const fetch=(page)=>{pages.push(page);return pages.length===1?old.promise:fresh.promise;};
-    const p=homeChannels(fetch,fetch);
+    const p=await homeChannels(fetch,fetch);
     p.onReachEnd(channel);
     p.onRefresh(channel);
     assert.deepEqual(pages,[channel===1?3:4,1]);
@@ -100,7 +68,7 @@ for (const channel of [1,2]) {
   test(`home channel ${channel}: failure preserves cursor and retry mode`, async () => {
     const pages=[]; let fail=true;
     const fetch=async(page)=>{pages.push(page);if(fail)throw new Error('offline');return [{aid:2,roomId:2}];};
-    const p=homeChannels(fetch,fetch);
+    const p=await homeChannels(fetch,fetch);
     p.onReachEnd(channel);await tick();
     assert.equal(channel===1?p.hotPage:p.livePage,channel===1?3:4);
     assert.equal(p.channelHasMore(channel),true);
@@ -117,7 +85,7 @@ for (const channel of [1,2]) {
 
 test('home refresh and paging indicators belong to their own channel and newest operation', async () => {
   const first=deferred(), second=deferred(), other=deferred();let calls=0;
-  const p=homeChannels(()=>++calls===1?first.promise:second.promise,()=>other.promise);
+  const p=await homeChannels(()=>++calls===1?first.promise:second.promise,()=>other.promise);
   p.onRefresh(1);p.onRefresh(1);p.onReachEnd(2);
   assert.deepEqual(p.refreshingChannels,[false,true,false]);
   assert.deepEqual(p.loadingChannels,[false,false,true]);
@@ -128,10 +96,9 @@ test('home refresh and paging indicators belong to their own channel and newest 
 });
 
 test('home disappearing invalidates outstanding pages and clears activity indicators', async () => {
-  const pending=deferred();const p=homeChannels(()=>pending.promise,()=>pending.promise);
+  const pending=deferred();const p=await homeChannels(()=>pending.promise,()=>pending.promise);
   const env=environment();
-  const Lifecycle=env.methodHarness('views/HomeView','  aboutToDisappear(): void {\n    this.recEpoch.invalidate();','  async onLoginChanged():');
-  p.recEpoch=epoch(env);p.recFetching=true;
+  const Lifecycle=env.methodHarness('views/HomeView','  aboutToDisappear(): void {\n    this.feed.dispose();','  async onLoginChanged():');
   let dialogClosed=false;
   p.videoReportDialog={close:()=>{dialogClosed=true;}};
   p.onRefresh(1);p.onReachEnd(2);
@@ -141,8 +108,10 @@ test('home disappearing invalidates outstanding pages and clears activity indica
   pending.resolve([{aid:99,roomId:99}]);await tick();
   assert.equal(p.hotSource.getData(0).aid,1);
   assert.equal(p.liveSource.getData(0).roomId,1);
-  assert.deepEqual(p.refreshingChannels,[false,false,false]);
-  assert.deepEqual(p.loadingChannels,[false,false,false]);
+  // Re-entry publishes cleared flags without allowing detached results to update rows.
+  const reenter=p.feed.activate();
+  assert.deepEqual(p.refreshingChannels,[false,false,false]);assert.deepEqual(p.loadingChannels,[false,false,false]);
+  await reenter;
 });
 
 function environment(mocks = {}) {
@@ -205,97 +174,17 @@ function source(env, items = []) {
   s.reset(items); return s;
 }
 
-// ---------------------------------------------------------------------------
-// RepliesController 的页面 access 装配（与各页面的注入闭包逐项对应）。
-// state 模拟留在页面的 @State 字段（断言从 state 读取，等价于改造前直接读页面字段）；
-// p 承接控制器的游标/代际等内部量与 replySource 等页面数据源。
-// ---------------------------------------------------------------------------
-
-/** DynamicDetail / BangumiDetail 共用的楼中楼合并口径：reset 整表替换 + concat 追加。 */
-function replaceOrConcatMerge(current, incoming, reset) {
-  return reset ? (incoming.length > 0 ? incoming : current) : current.concat(incoming);
-}
-
-/** 构造指定页面等价的 RepliesAccess；page ∈ 'VideoDetail' | 'DynamicDetail' | 'BangumiDetail'。 */
-function repliesAccess(page, state, p) {
-  const video = page === 'VideoDetail';
-  return {
-    isDestroyed: () => state.destroyed,
-    toast: () => {},
-    getUIContext: () => ({}),
-    resolveOid: () => (video ? state.aid : page === 'BangumiDetail' ? state.oid : state.commentId),
-    resolveType: () => (page === 'DynamicDetail' ? state.commentType : 1),
-    canLoadReplies: () => page !== 'DynamicDetail' || (state.commentId > 0 && state.commentType > 0),
-    getMainSource: () => p.replySource,
-    getSortMode: () => state.replySortMode,
-    setSortMode: value => { state.replySortMode = value; },
-    // 视频页的 loading/hasMore 字段叫 replyLoading/replyHasMore，动态/番剧叫 repliesLoading/repliesHasMore。
-    getRepliesLoading: () => (video ? state.replyLoading : state.repliesLoading),
-    setRepliesLoading: value => { if (video) state.replyLoading = value; else state.repliesLoading = value; },
-    getRepliesHasMore: () => (video ? state.replyHasMore : state.repliesHasMore),
-    setRepliesHasMore: value => { if (video) state.replyHasMore = value; else state.repliesHasMore = value; },
-    // 视频页的响应式计数叫 replyItemCount，动态/番剧叫 repliesCount。
-    getRepliesCount: () => (video ? state.replyItemCount : state.repliesCount),
-    setRepliesCount: value => { if (video) state.replyItemCount = value; else state.repliesCount = value; },
-    clearRepliesError: reset => {
-      if (video) { state.replyLoadError = ''; return; }
-      state.repliesMoreFailed = false;
-      if (reset) state.repliesFailed = false;
-    },
-    showRepliesError: () => {
-      if (video) { state.replyLoadError = '评论加载失败，请检查网络后重试'; return; }
-      if (state.repliesCount === 0) state.repliesFailed = true;
-      else state.repliesMoreFailed = true;
-    },
-    applyRepliesReset: items => {
-      if (video) { p.replySource.reset(p.mergeUniqueReplies(p.localSentReplies, p.sanitizeReplies(items))); return; }
-      p.replySource.reset(items);
-    },
-    applyRepliesAppend: items => {
-      if (video) { p.appendUniqueReplies(p.replySource, items); return; }
-      p.replySource.append(items);
-    },
-    getThreadRoot: () => state.threadRoot,
-    setThreadRoot: root => { state.threadRoot = root; },
-    getThreadReplies: () => state.threadReplies,
-    setThreadReplies: list => { state.threadReplies = list; },
-    getThreadLoading: () => state.threadLoading,
-    setThreadLoading: value => { state.threadLoading = value; },
-    getThreadHasMore: () => state.threadHasMore,
-    setThreadHasMore: value => { state.threadHasMore = value; },
-    // 动态/番剧在守卫里校验面板仍打开；视频页校验根节点与 aid 均未变。
-    isThreadStale: (root, oid) => video
-      ? state.threadRoot.rpid !== root || state.aid !== oid
-      : !state.threadOpen || state.threadRoot.rpid !== root,
-    // 视频页按 rpid 合并保留预览楼层；动态/番剧 reset 整表替换 + concat 追加。
-    mergeThreadReplies: (current, incoming, reset) => video
-      ? p.mergeUniqueReplies(current, incoming)
-      : replaceOrConcatMerge(current, incoming, reset),
-    onThreadError: () => {},
-    bumpVersion: () => { state.version = (state.version || 0) + 1; },
-    getVersion: () => state.version || 0,
-    buildShareLink: () => '',
-    renderShareCard: () => {},
-    ensureShareContext: () => true,
-    onShareFailed: () => {},
-  };
-}
 
 test('recommendation reset supersedes old pagination and preserves new loading state', async () => {
   const old = deferred(), latest = deferred(); let calls = 0;
-  const env = environment({'api/FeedApi': {FeedApi: {getRecommend: () => ++calls === 1 ? old.promise : latest.promise}}});
-  const Harness = env.methodHarness('views/HomeView', '  async loadRecommend(', '  async loadHot(',
-    "import { FeedApi } from '../api/FeedApi'; const UserApi={loadFeedFollowStates:async()=>{}};");
-  const p = new Harness();
-  Object.assign(p, {recEpoch:epoch(env), recFetching:false, recHasMore:true,
-    recSource:source(env, [{aid:1}]), recCount:1,
-    // 曝光窗口为独立行为，本用例注入恒等桩，聚焦 reset/epoch 语义。
-    filterSeen: l => l, rememberSeen: () => {}, dedupVideos: (_source, list) => list});
-  const first = p.loadRecommend(false), reset = p.loadRecommend(true);
+  const {homeFeedFixture}=require('./home-feed-fixture.cjs');let priming=true;
+  const f=homeFeedFixture({recommend:()=>priming?Promise.resolve([{aid:1}]):++calls===1?old.promise:latest.promise});
+  await f.ctl.activate();priming=false;
+  const first = f.ctl.load(0,false), reset = f.ctl.load(0,true);
   old.resolve([]); await first;
-  assert.equal(calls, 2); assert.equal(p.recFetching, true); assert.equal(p.recHasMore, true);
+  assert.equal(calls, 2); assert.equal(f.state(0).refreshing, true); assert.equal(f.state(0).hasMore, true);
   latest.resolve([{aid:2}]); await reset;
-  assert.deepEqual(p.recSource.getAll(), [{aid:2}]); assert.equal(p.recFetching,false);
+  assert.deepEqual(f.ctl.recommend.getAll(), [{aid:2}]); assert.equal(f.state(0).refreshing,false);
 });
 
 function qrHarness(api, userStore = {}) {
@@ -632,20 +521,14 @@ test('dynamic category change supersedes an inflight feed', async () => {
   const env=environment({'api/DynamicApi':{DynamicApi:{getDynamicFeed:(offset,type)=>{
     calls.push(type);return calls.length===1?old.promise:latest.promise;
   }}}});
-  const Change=env.methodHarness('views/DynamicView',ANCHOR.dynChangeTypeStart,ANCHOR.dynChipStart,
-    "import { BasicDataSource } from '../common/BasicDataSource';");
-  const Load=env.methodHarness('views/DynamicView',ANCHOR.dynLoadFeedStart,ANCHOR.dynLoadFeedEnd,
-    "import { DynamicApi } from '../api/DynamicApi';");
-  const p=new Change();p.loadFeed=Load.prototype.loadFeed;
-  Object.assign(p,{feedEpoch:epoch(env),dynType:'all',feedLoading:false,dynTab:0,hostMid:0,
-    dynHasMore:true,dynOffset:'',dynSource:source(env),dynCount:0,
-    typeItems:new Map(),typeOffset:new Map(),typeHasMore:new Map(),typeSources:new Map(),typeStates:new Map(),
-    dynTypes:['all','video','pgc','article'],feedLoaded:false});
-  const first=p.loadFeed(false);p.dynTab=1;p.changeDynType('video');
+  const {DynamicFeedController}=env.load('components/dynamic/DynamicFeedController');
+  const feed=new DynamicFeedController(()=>0,()=>{});
+  const first=feed.load(false),second=feed.select('video');
   old.resolve({items:[{dynId:'old'}],offset:'old',hasMore:false});await first;
-  assert.equal(p.dynType,'video');assert.equal(p.feedLoading,true);assert.deepEqual(calls,['all','video']);
-  latest.resolve({items:[{dynId:'new'}],offset:'new',hasMore:true});await tick();
-  assert.deepEqual(p.dynSource.getAll(),[{dynId:'new'}]);assert.equal(p.dynOffset,'new');
+  assert.equal(feed.activeType,'video');assert.equal(feed.state().loading,true);
+  assert.deepEqual(calls,['all','video']);assert.deepEqual(feed.source('video').getAll(),[]);
+  latest.resolve({items:[{dynId:'new'}],offset:'new',hasMore:true});await second;
+  assert.deepEqual(feed.source('video').getAll(),[{dynId:'new'}]);assert.equal(feed.state().offset,'new');
 });
 
 test('download removal settles task, clears listeners and never retries backup', async () => {
@@ -661,112 +544,25 @@ test('download removal settles task, clears listeners and never retries backup',
   assert.equal(VideoDownloadService.isActive(),false);assert.equal(calls,1);assert.equal(handlers.size,0);
 });
 
-for (const page of ['VideoDetail','DynamicDetail','BangumiDetail']) {
-  test(`${page} root switch ignores old replies, cursor and loading completion`, async () => {
-    const old=deferred(),latest=deferred();const calls=[];
-    const env=environment({'api/CommentApi':{CommentApi:{getReplyReplies:(oid,type,root)=>{
-      calls.push(root);return root===100?old.promise:latest.promise;
-    }}},'@kit.PerformanceAnalysisKit':{hilog:{}},'BuildProfile':{DEBUG:false}});
-    const Harness=env.methodHarness('components/reply/RepliesController',
-      ANCHOR.repliesLoadThreadStart, ANCHOR.repliesShareStart,
-      "import { CommentApi } from '../../api/CommentApi';\nimport { mutateReplyInArray, mutatedReplyClone } from '../../common/ReplyMutation';");
-    const p=new Harness();
-    p.deliveredRevCeiling=0;
-    p.replySource=source(env,[]);
-    const state={destroyed:false,threadLoading:false,threadHasMore:true,threadOpen:true,
-      threadRoot:{rpid:100,count:2},threadReplies:[],aid:1,oid:1,commentId:1,commentType:17};
-    p.threadEpoch=epoch(env);
-    p.threadCursor=''; // 控制器内部量由构造函数初始化；切片装配时手动补齐
-    if (page==='VideoDetail') p.mergeUniqueReplies=(a,b)=>a.concat(b);
-    p.access=repliesAccess(page,state,p);
-    const first=p.loadThread(true,false);
-    state.threadRoot={rpid:200,count:2};
-    const second=p.loadThread(true,false);
-    old.resolve({replies:[{rpid:101,rootRpid:100}],cursor:'old',hasMore:false});await first;
-    assert.equal(state.threadLoading,true);assert.equal(p.threadCursor,'');assert.deepEqual(calls,[100,200]);
-    latest.resolve({replies:[{rpid:201,rootRpid:200}],cursor:'new',hasMore:true});await second;
-    assert.deepEqual(state.threadReplies.map(r=>r.rootRpid),[200]);
-    assert.equal(p.threadCursor,'new');assert.equal(state.threadLoading,false);
-  });
-}
 
-for (const page of ['VideoDetail','DynamicDetail','BangumiDetail']) {
-  test(`${page} fresh server replies outrank local rev so like mirrors resync (desync regression)`, async () => {
-    // 用户报告：本地点赞后重进页面，点赞态错乱/丢失。根因：服务端解析条目 rev 恒为 0，
-    // ReplyCard 的镜像守卫（只接受 rev 严格更大的更新）会拒绝同会话内的所有服务端真值刷新。
-    // 修复后加载交付必须携带单调递增 rev：高于此前交付值与数据源现存值。
-    let serverReplies = [];
-    const env = environment({'api/CommentApi': {CommentApi: {
-      getReplies: async () => ({replies: serverReplies, cursor: '', hasMore: false}),
-      getReplyReplies: async () => ({replies: [], cursor: '', hasMore: false})}},
-      '@kit.PerformanceAnalysisKit':{hilog:{}},'BuildProfile':{DEBUG:false}});
-    const Models = env.load('model/Models');
-    // 服务端解析产物是 ReplyItem 实例（mutate 依赖其 clone 方法），不能用普通对象。
-    const makeReply = (rpid, liked, like) => {
-      const it = new Models.ReplyItem();
-      it.rpid = rpid; it.liked = liked; it.like = like; it.rev = 0;
-      return it;
-    };
-    const Harness = env.methodHarness('components/reply/RepliesController',
-      ANCHOR.repliesLoadStart, ANCHOR.repliesShareStart,
-      "import { CommentApi } from '../../api/CommentApi';\nimport { mutateReplyInArray, mutatedReplyClone } from '../../common/ReplyMutation';");
-    const p = new Harness();
-    p.deliveredRevCeiling = 0;
-    p.replyCursor = '';
-    p.repliesRetryReset = false;
-    p.repliesEpoch = epoch(env);
-    const state = {destroyed: false, aid: 42, oid: 42, commentId: 42, commentType: 17,
-      replyLoading: false, replyHasMore: true, replyItemCount: 0, replySortMode: 0, replyLoadError: '',
-      threadRoot: {rpid: 0, rev: 0}, threadReplies: []};
-    p.access = repliesAccess(page, state, p);
-    p.replySource = source(env, []);
-    p.mergeUniqueReplies = (a, b) => a.concat(b);
-    p.sanitizeReplies = items => items;
-    p.localSentReplies = [];
-    p.appendUniqueReplies = (src, items) => { for (const it of items) src.append(it); };
-    // 首屏：服务端说未点赞。
-    serverReplies = [makeReply(11, false, 5)];
-    await p.load(true);
-    let row = p.replySource.getAll()[0];
-    const revAfterLoad = row.rev;
-    assert.ok(revAfterLoad > 0, 'server items must be stamped above raw parse rev 0');
-    // 本地点赞：数据源克隆 rev+1（等价于卡片镜像推进到同一值）。
-    p.mutate(11, target => { target.liked = true; target.like = 6; });
-    row = p.replySource.getAll()[0];
-    assert.equal(row.liked, true);
-    const revAfterTap = row.rev;
-    assert.equal(revAfterTap, revAfterLoad + 1);
-    // 同会话重载：服务端真值（已点赞）以更高 rev 交付，必须能通过镜像守卫刷新卡片。
-    serverReplies = [makeReply(11, true, 6)];
-    await p.load(true);
-    row = p.replySource.getAll()[0];
-    assert.equal(row.liked, true, 'server truth must survive the reload');
-    assert.ok(row.rev > revAfterTap, 'fresh server truth must outrank the card mirror rev');
-    // 旧代快照（重载前的旧对象，rev 更低）依然必须被守卫拒绝。
-    assert.ok(revAfterTap > revAfterLoad);
-  });
-}
 
 
 test('recommendation empty batches remain retryable and duplicate batches do not stall pagination', async () => {
   const batches = [[], [], [], [{aid: 1, bvid: 'BV1'}], [{aid: 2, bvid: 'BV2'}]];
   let calls = 0;
-  const env = environment({'api/FeedApi': {FeedApi: {getRecommend: async () => { calls++; return batches.shift(); }}}});
-  const Harness = env.methodHarness('views/HomeView', '  private dedupVideos(', '  async loadHot(',
-    "import { FeedApi } from '../api/FeedApi'; const UserApi={loadFeedFollowStates:async()=>{}}; const LocalVideoFilter={filterVideos:(l)=>l};");
-  const p = new Harness();
-  Object.assign(p, {recEpoch: epoch(env), recFetching: false, recHasMore: true, recIdx: 0,
-    recError: '', recSource: source(env, [{aid: 1, bvid: 'BV1'}]), recCount: 1});
-  await p.loadRecommend(false);
+  const {homeFeedFixture}=require('./home-feed-fixture.cjs');let priming=true;
+  const f=homeFeedFixture({recommend:async()=>{if(priming)return [{aid:1,bvid:'BV1'}];calls++;return batches.shift();}});
+  await f.ctl.activate();priming=false;
+  await f.ctl.load(0,false);
   assert.equal(calls, 3);
-  assert.equal(p.recHasMore, true);
-  assert.equal(p.recCount, 1);
-  assert.ok(p.recError.length > 0);
-  await p.loadRecommend(false);
+  assert.equal(f.state(0).hasMore, true);
+  assert.equal(f.state(0).count, 1);
+  assert.ok(f.state(0).error.length > 0);
+  await f.ctl.retry(0);
   assert.equal(calls, 5);
-  assert.equal(p.recCount, 2);
-  assert.equal(p.recError, '');
-  assert.deepEqual(p.recSource.getAll().map(v => v.aid), [1, 2]);
+  assert.equal(f.state(0).count, 2);
+  assert.equal(f.state(0).error, '');
+  assert.deepEqual(f.ctl.recommend.getAll().map(v => v.aid), [1, 2]);
 });
 
 test('favorite lists: API failure must not become a successful empty list', async () => {
@@ -917,26 +713,28 @@ test('video zones: an old category response cannot replace a newer list', async 
 
 test('search pagination: a failed page keeps results; retry reaches a finite end', async () => {
   const pages = []; let failed = false;
-  const env = environment({ 'api/SearchApi': { SearchApi: { searchUsers: async (kw, page) => {
-    pages.push(page);
-    if (page === 1) return { users: [{ mid: 1 }], numResults: 2 };
-    if (!failed) { failed = true; throw new Error('offline'); }
-    return { users: [{ mid: 2 }], numResults: 2 };
-  } } } });
-  const Harness = env.methodHarness('pages/Search', '  async doSearch(', '  /** 综合搜索翻页合并',
-    "import { SearchApi } from '../api/SearchApi';");
-  const page = new Harness();
-  Object.assign(page, { keyword: 'test', resultKeyword: 'test', searchTabStates: new Map(), destroyed: false, searchInflight: false,
-    searchRequests: epoch(env), searchTab: 6, userPage: 1, userOrder: '', userType: 0,
-    userSource: source(env), hasMoreResults: true, searchError: '', moreError: '' });
-  await page.doSearch(true); assert.equal(page.hasMoreResults, true);
-  await page.doSearch(false);
-  assert.equal(page.searchError, ''); assert.equal(page.moreError, 'offline');
-  assert.equal(page.userSource.totalCount(), 1); assert.equal(page.userPage, 2);
-  await page.doSearch(false);
-  assert.deepEqual(pages, [1, 2, 2]); assert.equal(page.moreError, '');
-  assert.equal(page.userSource.totalCount(), 2); assert.equal(page.hasMoreResults, false);
-  await page.doSearch(false); assert.equal(pages.length, 3);
+  const env = environment({ 'api/SearchApi': { SearchApi: {
+    searchAll: async () => ({ sections: [], totals: new Map() }),
+    searchUsers: async (keyword, page) => {
+      pages.push(page);
+      if (page === 1) return { users: [{ mid: 1 }], numResults: 2 };
+      if (!failed) { failed = true; throw new Error('offline'); }
+      return { users: [{ mid: 2 }], numResults: 2 };
+    }
+  } } });
+  const {SearchResultsController}=env.load('components/search/SearchResultsController');
+  const {SearchQuery,SearchCategory}=env.load('components/search/SearchQuery');
+  const search=new SearchResultsController(),query=new SearchQuery();
+  await search.submit('test',query);await search.select(SearchCategory.User,query);
+  assert.equal(search.view.hasMore,true);
+  await search.loadMore();
+  assert.equal(search.view.error,'');assert.equal(search.view.moreError,'offline');
+  assert.equal(search.store.users.totalCount(),1);
+  await search.loadMore();assert.deepEqual(pages,[1,2],'automatic paging stops until an explicit retry');
+  await search.loadMore(true);
+  assert.deepEqual(pages,[1,2,2]);assert.equal(search.view.moreError,'');
+  assert.equal(search.store.users.totalCount(),2);assert.equal(search.view.hasMore,false);
+  await search.loadMore();assert.equal(pages.length,3);
 });
 
 test('search text: decodes entities once after removing highlight markup', () => {
@@ -954,37 +752,6 @@ test('live search: category and broadcaster names contain plain text, not highli
 });
 
 
-test('dynamic detail: failed continuation preserves comments and retries the same cursor', async () => {
-  const calls = [];
-  const env = environment({'api/CommentApi': {CommentApi: {getReplies: async (_id, _type, cursor) => {
-    calls.push(cursor);
-    if (calls.length === 1) throw new Error('offline');
-    return {replies: [{rpid: 2}], cursor: '3', hasMore: false};
-  }}}});
-  const Harness = env.methodHarness('components/reply/RepliesController', ANCHOR.repliesLoadStart,
-    ANCHOR.repliesChangeSortStart, "import { CommentApi } from '../../api/CommentApi';");
-  const page = new Harness();
-  const state = {destroyed: false, repliesLoading: false, repliesFailed: false, repliesMoreFailed: false,
-    repliesHasMore: true, repliesCount: 1, replySortMode: 3, commentId: 1, commentType: 11,
-    threadRoot: {rpid: 0}, threadReplies: [], threadLoading: false, threadHasMore: true, threadOpen: false};
-  page.repliesEpoch = epoch(env);
-  page.replySource = source(env, [{rpid: 1}]);
-  page.stampServerRevs = items => items;
-  page.replyCursor = '2';
-  page.access = repliesAccess('DynamicDetail', state, page);
-  await page.load(false);
-  assert.equal(state.repliesMoreFailed, true);
-  assert.equal(state.repliesFailed, false);
-  assert.equal(page.replyCursor, '2');
-  assert.deepEqual(page.replySource.getAll(), [{rpid: 1}]);
-  await page.load(false);
-  assert.deepEqual(calls, ['2', '2']);
-  assert.deepEqual(page.replySource.getAll(), [{rpid: 1}, {rpid: 2}]);
-  assert.equal(state.repliesMoreFailed, false);
-  assert.equal(state.repliesHasMore, false);
-  await page.load(false);
-  assert.equal(calls.length, 2);
-});
 
 
 test('image return: zoomed picture starts a hero from its current transform', () => {
@@ -1052,29 +819,34 @@ test('manual image hero starts from the zoomed position and keeps the source thu
 });
 
 test('live quality: failed requests preserve playback and release busy state; late failure stays silent', async () => {
-  let task = Promise.resolve(null); const notices = [];
-  const env = environment({'api/LiveApi': {LiveApi: {getLivePlayInfo: () => task}}});
-  const Harness = env.methodHarness('pages/LiveRoom', '  async changeQuality(', '  /** 同步到直播最新状态',
-    "import { LiveApi } from '../api/LiveApi';");
-  const page = new Harness(); const original = {url: 'current'};
-  Object.assign(page, {qualityLoading: false, refreshing: false, loading: false, destroyed: false,
-    lifecycleGeneration: 1, param: {roomId: 1}, playInfo: original,
-    getUIContext: () => ({getPromptAction: () => ({showToast: value => notices.push(value.message)})})});
-  await page.changeQuality(80);
-  assert.equal(page.playInfo, original);
-  assert.equal(page.qualityLoading, false);
-  assert.equal(notices.length, 1);
-  task = Promise.resolve({url: 'new'});
-  await page.changeQuality(80);
-  assert.equal(page.playInfo.url, 'new');
-  const pending = deferred(); task = pending.promise;
-  const request = page.changeQuality(80);
-  page.destroyed = true; page.lifecycleGeneration++;
-  pending.reject(new Error('offline')); await request;
-  assert.equal(notices.length, 1);
-  assert.equal(page.playInfo.url, 'new');
+  const original = {url:'current', currentQn:80};
+  let task = Promise.resolve(original); const notices = [], states = [];
+  const env = environment({
+    'api/LiveApi': {LiveApi: {getLivePlayInfo:()=>task, getLiveRoomInfo:async()=>null,
+      getLiveDanmakuHistory:async()=>[], getLiveSuperChats:async()=>[]}},
+    'common/LiveDanmakuClient': {LiveDanmakuClient:class {async connect() {} close() {}}},
+  });
+  const {LiveChatBuffer} = env.load('components/live/LiveChatBuffer');
+  const {LiveRoomSession} = env.load('components/live/LiveRoomSession');
+  const chat = new LiveChatBuffer({resetMessages(){},publishMessages(){},publishSuperChats(){}},()=>{},()=>{});
+  const session = new LiveRoomSession(chat, state=>states.push(state), message=>notices.push(message));
+  session.activate({roomId:1,uid:1,title:'room',uname:'host',face:'',cover:''});
+  try {
+    await session.load();
+    task = Promise.resolve(null);
+    await session.changeQuality(80);
+    assert.equal(states.at(-1).play, original);
+    assert.equal(states.at(-1).qualityLoading, false);
+    assert.equal(notices.length, 1);
+    task = Promise.resolve({url:'new',currentQn:80});
+    await session.changeQuality(80); assert.equal(states.at(-1).play.url,'new');
+    const pending=deferred(); task=pending.promise;
+    const request=session.changeQuality(80), count=states.length;
+    session.dispose(); pending.reject(new Error('offline')); await request;
+    assert.equal(notices.length,1); assert.equal(states.length,count);
+    assert.equal(states.at(-1).play.url,'new');
+  } finally {session.dispose();}
 });
-
 
 test('live fullscreen: re-entry cancels the old delayed portrait callback', async () => {
   const transitions = [];
@@ -1144,101 +916,11 @@ test('timeline: year boundary stays chronological and episode numbers use the pu
   assert.equal(TimeLineEpisode.from({pub_index: '第11话'}).index, '第11话');
 });
 
-function bangumiRepliesHarness(api) {
-  const env = environment({'api/CommentApi': {CommentApi: api}});
-  const Harness = env.methodHarness('components/reply/RepliesController', ANCHOR.repliesLoadStart,
-    ANCHOR.repliesMutateStart, "import { CommentApi } from '../../api/CommentApi';");
-  const p = new Harness();
-  const state = {destroyed:false, repliesLoading:false, repliesFailed:false, repliesMoreFailed:false,
-    repliesHasMore:true, repliesCount:0, replySortMode:3, oid:1,
-    threadRoot:{rpid:0}, threadReplies:[], threadLoading:false, threadHasMore:true, threadOpen:false};
-  p.repliesEpoch = epoch(env);
-  p.replySource = source(env);
-  p.stampServerRevs = items => items;
-  // 番剧切排序清空列表与游标（构造参数不在切片内，装配时补齐页面取值）。
-  p.clearOnSort = true;
-  p.access = repliesAccess('BangumiDetail', state, p);
-  return {p, state};
-}
 
-test('PGC episode and sort changes supersede pending comments without old loading writes', async () => {
-  const old=deferred(), latest=deferred(); const calls=[];
-  const {p, state}=bangumiRepliesHarness({getReplies:(oid,type,cursor,mode)=> {
-    calls.push({oid,mode}); return calls.length===1 ? old.promise : latest.promise;
-  }});
-  const first=p.load(true);
-  state.oid=2; p.changeReplySort(2);
-  assert.deepEqual(calls,[{oid:1,mode:3},{oid:2,mode:2}]);
-  old.resolve({replies:[{rpid:1}],cursor:'old',hasMore:false}); await first;
-  assert.deepEqual(p.replySource.getAll(),[]); assert.equal(state.repliesLoading,true);
-  latest.resolve({replies:[{rpid:2}],cursor:'new',hasMore:true}); await tick();
-  assert.deepEqual(p.replySource.getAll(),[{rpid:2}]); assert.equal(p.replyCursor,'new');
-  assert.equal(state.repliesLoading,false);
-});
 
-test('PGC failed pagination preserves comments and cursor for same-page retry', async () => {
-  const cursors=[];
-  const {p, state}=bangumiRepliesHarness({getReplies:async(oid,type,cursor)=> {
-    cursors.push(cursor); if(cursors.length===1) throw Error('offline');
-    return {replies:[{rpid:2}],cursor:'end',hasMore:false};
-  }});
-  p.replySource.reset([{rpid:1}]); state.repliesCount=1; p.replyCursor='next';
-  await p.load(false);
-  assert.deepEqual(p.replySource.getAll(),[{rpid:1}]); assert.equal(state.repliesMoreFailed,true);
-  assert.equal(state.repliesFailed,false); assert.equal(p.replyCursor,'next');
-  await p.load(false);
-  assert.deepEqual(cursors,['next','next']); assert.deepEqual(p.replySource.getAll(),[{rpid:1},{rpid:2}]);
-  assert.equal(state.repliesMoreFailed,false); assert.equal(state.repliesHasMore,false);
-});
 
-function videoRepliesHarness(api) {
-  const env=environment({'api/CommentApi':{CommentApi:api}});
-  const Harness=env.methodHarness('components/reply/RepliesController',ANCHOR.repliesLoadStart,
-    ANCHOR.repliesLoadThreadStart,"import { CommentApi } from '../../api/CommentApi';");
-  const p=new Harness();
-  const state={destroyed:false, replyLoading:false, replyLoadError:'', replyHasMore:true, replySortMode:3,
-    replyItemCount:1, aid:1, threadRoot:{rpid:0}, threadReplies:[], threadLoading:false,
-    threadHasMore:true, threadOpen:false};
-  p.repliesEpoch=epoch(env);
-  p.replySource=source(env,[{rpid:1}]);
-  p.replyCursor='next'; // 控制器内部量由构造函数初始化；切片装配时手动补齐
-  p.threadCursor='';
-  p.localSentReplies=[];
-  p.sanitizeReplies=items=>items;
-  p.mergeUniqueReplies=(a,b)=>a.concat(b);
-  p.appendUniqueReplies=(s,items)=>s.reset(s.getAll().concat(items));
-  // 切片不含 stampServerRevs（定义在 mutate 之后），本组断言与打桩无关，恒等桩即可。
-  p.stampServerRevs=items=>items;
-  // 视频页切排序清空列表与游标（构造参数不在切片内，装配时补齐页面取值）。
-  p.clearOnSort=true;
-  p.access=repliesAccess('VideoDetail',state,p);
-  return {p,state};
-}
 
-test('video comments: latest sort wins while an earlier page fails', async()=>{
-  const old=deferred(), latest=deferred();const modes=[];
-  const {p,state}=videoRepliesHarness({getReplies:(oid,type,cursor,mode)=>{
-    modes.push(mode);return modes.length===1?old.promise:latest.promise;
-  }});
-  const pending=p.load(false);p.changeReplySort(2);
-  old.reject(Error('offline'));await pending;
-  assert.deepEqual(modes,[3,2]);assert.equal(state.replyLoading,true);assert.equal(state.replyLoadError,'');
-  latest.resolve({replies:[{rpid:2}],cursor:'done',hasMore:false});await tick();
-  assert.deepEqual(p.replySource.getAll(),[{rpid:2}]);assert.equal(state.replyLoading,false);
-});
 
-test('video comments: pagination error retains content and retries the same cursor',async()=>{
-  const cursors=[];const {p,state}=videoRepliesHarness({getReplies:async(oid,type,cursor)=>{
-    cursors.push(cursor);if(cursors.length===1)throw Error('offline');
-    return {replies:[{rpid:2}],cursor:'done',hasMore:false};
-  }});
-  await p.load(false);
-  assert.ok(state.replyLoadError);assert.deepEqual(p.replySource.getAll(),[{rpid:1}]);
-  assert.equal(p.replyCursor,'next');assert.equal(state.replyLoading,false);
-  await p.load(false);
-  assert.deepEqual(cursors,['next','next']);assert.equal(state.replyLoadError,'');
-  assert.deepEqual(p.replySource.getAll(),[{rpid:1},{rpid:2}]);
-});
 
  test('article reader: preserves full content and escapes header text',()=>{
   const env=environment();const render=env.load('common/ArticleHtml').articleHtml;
@@ -1285,67 +967,22 @@ test('article spacing: drops styled empty paragraphs but retains text and inline
   assert.ok(html.includes('<p><img src="https://i0.hdslb.com/a.jpg"></p>'));
 });
 
-test('dynamic comments: sorting during loading drops the old response',async()=>{
-  const old=deferred(),latest=deferred();let calls=0;
-  const env=environment({'api/CommentApi':{CommentApi:{getReplies:()=>++calls===1?old.promise:latest.promise}}});
-  const Harness=env.methodHarness('components/reply/RepliesController',ANCHOR.repliesLoadStart,
-    ANCHOR.repliesMutateStart,"import { CommentApi } from '../../api/CommentApi';");
-  const p=new Harness();
-  const state={destroyed:false,repliesLoading:false,repliesFailed:false,repliesMoreFailed:false,
-    repliesHasMore:true,repliesCount:0,replySortMode:3,commentId:1,commentType:11,
-    threadRoot:{rpid:0},threadReplies:[],threadLoading:false,threadHasMore:true,threadOpen:false};
-  p.repliesEpoch=epoch(env);
-  p.replySource=source(env);
-  p.stampServerRevs=items=>items;
-  // 动态页切排序特意不清列表（构造参数不在切片内，装配时补齐页面取值）。
-  p.clearOnSort=false;
-  p.access=repliesAccess('DynamicDetail',state,p);
-  const pending=p.load(true);p.changeReplySort(2);
-  old.resolve({replies:[{rpid:1}],cursor:'old',hasMore:false});await pending;
-  assert.equal(calls,2);assert.deepEqual(p.replySource.getAll(),[]);assert.equal(state.repliesLoading,true);
-  latest.resolve({replies:[{rpid:2}],cursor:'new',hasMore:false});await tick();
-  assert.deepEqual(p.replySource.getAll(),[{rpid:2}]);assert.equal(p.replyCursor,'new');assert.equal(state.repliesLoading,false);
-});
 
-test('dynamic comments: changing sort keeps visible rows until replacement and preserves them on failure',async()=>{
-  const failed=deferred(),retry=deferred();const calls=[];
-  const env=environment({'api/CommentApi':{CommentApi:{getReplies:(id,type,cursor,mode)=>{
-    calls.push({cursor,mode});return calls.length===1?failed.promise:retry.promise;
-  }}}});
-  const Harness=env.methodHarness('components/reply/RepliesController',ANCHOR.repliesLoadStart,
-    ANCHOR.repliesMutateStart,"import { CommentApi } from '../../api/CommentApi';");
-  const p=new Harness();
-  const state={destroyed:false,repliesLoading:false,repliesFailed:false,repliesMoreFailed:false,
-    repliesHasMore:false,repliesCount:1,replySortMode:3,commentId:1,commentType:11,
-    threadRoot:{rpid:0},threadReplies:[],threadLoading:false,threadHasMore:true,threadOpen:false};
-  p.repliesEpoch=epoch(env);
-  p.replySource=source(env,[{rpid:9}]);
-  p.replyCursor='old';
-  p.stampServerRevs=items=>items;
-  // 动态页切排序特意不清列表（构造参数不在切片内，装配时补齐页面取值）。
-  p.clearOnSort=false;
-  p.access=repliesAccess('DynamicDetail',state,p);
-  p.changeReplySort(2);assert.deepEqual(p.replySource.getAll(),[{rpid:9}]);assert.equal(state.repliesLoading,true);
-  failed.reject(Error('offline'));await tick();
-  assert.deepEqual(p.replySource.getAll(),[{rpid:9}]);assert.equal(p.replyCursor,'old');
-  assert.equal(state.repliesMoreFailed,true);assert.equal(p.repliesRetryReset,true);
-  const pending=p.load(state.repliesMoreFailed&&p.repliesRetryReset);
-  retry.resolve({replies:[{rpid:10}],cursor:'new',hasMore:true});await pending;
-  assert.deepEqual(calls,[{cursor:'',mode:2},{cursor:'',mode:2}]);assert.deepEqual(p.replySource.getAll(),[{rpid:10}]);
-});
 
 test('dynamic feed: failed continuation keeps cards and offset, then retries the same page',async()=>{
-  let calls=0;const offsets=[];const env=environment({'api/DynamicApi':{DynamicApi:{getDynamicFeed:async off=>{
-    offsets.push(off);if(++calls===1)throw Error('offline');return {items:[{dynId:'2'}],offset:'end',hasMore:false};
+  let failed=false;const offsets=[];const env=environment({'api/DynamicApi':{DynamicApi:{getDynamicFeed:async off=>{
+    offsets.push(off);
+    if(off==='')return {items:[{dynId:'1'}],offset:'next',hasMore:true};
+    if(!failed){failed=true;throw Error('offline');}
+    return {items:[{dynId:'2'}],offset:'end',hasMore:false};
   }}}});
-  const Harness=env.methodHarness('views/DynamicView',ANCHOR.dynLoadFeedStart,ANCHOR.dynLoadFeedEnd,
-    "import { DynamicApi } from '../api/DynamicApi';");
-  const p=new Harness();Object.assign(p,{feedEpoch:epoch(env),feedLoading:false,dynHasMore:true,
-    dynOffset:'next',dynSource:source(env,[{dynId:'1'}]),hostMid:0,dynType:'all'});
-  await p.loadFeed(false);assert.equal(p.feedMoreFailed,true);assert.equal(p.dynOffset,'next');
-  assert.deepEqual(p.dynSource.getAll(),[{dynId:'1'}]);await p.loadFeed(false);
-  assert.deepEqual(offsets,['next','next']);assert.equal(p.feedMoreFailed,false);
-  assert.deepEqual(p.dynSource.getAll(),[{dynId:'1'},{dynId:'2'}]);
+  const {DynamicFeedController}=env.load('components/dynamic/DynamicFeedController');
+  const feed=new DynamicFeedController(()=>0,()=>{});
+  await feed.load(true);await feed.load(false);
+  assert.equal(feed.state().moreFailed,true);assert.equal(feed.state().offset,'next');
+  assert.deepEqual(feed.source('all').getAll(),[{dynId:'1'}]);await feed.load(false);
+  assert.deepEqual(offsets,['','next','next']);assert.equal(feed.state().moreFailed,false);
+  assert.deepEqual(feed.source('all').getAll(),[{dynId:'1'},{dynId:'2'}]);
 });
 
 test('dynamic API: unsuccessful response is not a successful empty feed',()=>{
@@ -1359,39 +996,41 @@ test('dynamic API: unsuccessful response is not a successful empty feed',()=>{
   assert.deepEqual(Harness.parseDynamicPage({data:{items:[],has_more:false}}).items,[]);
 });
 
-test('dynamic recovery: expired login navigates to login while pagination retains its retry mode',()=>{
-  const env=environment();const Harness=env.methodHarness('views/DynamicView','  private recoverFeed(', '  /** 并行拉取关注 UP 主',
+test('dynamic recovery: expired login navigates to login while pagination retains its retry mode',async()=>{
+  let error='登录已失效，请重新登录后查看动态';
+  const env=environment({'api/DynamicApi':{DynamicApi:{getDynamicFeed:async offset=>{
+    if(offset==='')return {items:[{dynId:'1'}],offset:'next',hasMore:true};
+    throw Error(error);
+  }}}});
+  const {DynamicFeedController}=env.load('components/dynamic/DynamicFeedController');
+  const feed=new DynamicFeedController(()=>0,()=>{});await feed.load(true);await feed.load(false);
+  const Harness=env.methodHarness('views/DynamicView','  private recoverFeed(', '  private onRefresh(',
     "const NAV_LOGIN='Login'; const AppNavStack={pushPathByName:()=>globalThis.__dynamicLoginCount++};");
-  globalThis.__dynamicLoginCount=0;const p=new Harness();const resets=[];
-  Object.assign(p,{feedNeedsLogin:true,dynCount:3,feedMoreFailed:true,feedRetryReset:false,loadFeed:r=>resets.push(r)});
-  p.recoverFeed();assert.equal(globalThis.__dynamicLoginCount,1);assert.deepEqual(resets,[]);
-  p.feedNeedsLogin=false;p.recoverFeed();assert.deepEqual(resets,[false]);
+  globalThis.__dynamicLoginCount=0;const page=new Harness(),resets=[];
+  Object.assign(page,{feed,loadFeed:reset=>resets.push(reset)});
+  page.recoverFeed();assert.equal(globalThis.__dynamicLoginCount,1);assert.deepEqual(resets,[]);
+  error='offline';await feed.load(false);page.recoverFeed();assert.deepEqual(resets,[false]);
   delete globalThis.__dynamicLoginCount;
 });
 
-
 test('feed filtering never restores a hidden item or drops the following visible item', () => {
-  const env = environment();
-  const Harness = env.methodHarness('views/HomeView', '  private dedupVideos(', '  // ===== 近期曝光窗口',
-    "const LocalVideoFilter={filterVideos:(items)=>items.filter(item=>item.aid!==2)};");
-  const p = new Harness();
+  const {homeFeedFixture}=require('./home-feed-fixture.cjs');
+  const f=homeFeedFixture({filter:items=>items.filter(item=>item.aid!==2)});
+  const {freshHomeVideos}=f.load('components/home/HomeFeedItems');
   const rows = [{aid:2,bvid:'BV2'}, {aid:3,bvid:'BV3'}, {aid:3,bvid:'BV3'}, {aid:4,bvid:'BV4'}];
-  assert.deepEqual(p.dedupVideos(source(env, [{aid:4,bvid:'BV4'}]), rows).map(v=>v.aid), [3]);
-  assert.deepEqual(p.dedupVideos(source(env, [{aid:4,bvid:'BV4'}]), rows, true).map(v=>v.aid), [3,4]);
-  assert.deepEqual(p.dedupVideos(source(env, [{aid:3,bvid:'BV3'}]), [{aid:3,bvid:''}]), [],
+  assert.deepEqual(freshHomeVideos([{aid:4,bvid:'BV4'}], rows).map(v=>v.aid), [3]);
+  assert.deepEqual(freshHomeVideos([], rows).map(v=>v.aid), [3,4]);
+  assert.deepEqual(freshHomeVideos([{aid:3,bvid:'BV3'}], [{aid:3,bvid:''}]), [],
     'App aid and Web bvid must identify the same video');
 });
 
 test('refresh skips filtered batches and replaces the old feed with the first usable batch', async () => {
   const batches = [[{aid:2,bvid:'BV2'}], [{aid:3,bvid:'BV3'},{aid:3,bvid:'BV3'}]];
-  const env = environment({'api/FeedApi': {FeedApi: {getRecommend: async () => batches.shift() || []}}});
-  const Harness = env.methodHarness('views/HomeView', '  private dedupVideos(', '  async loadHot(',
-    "import { FeedApi } from '../api/FeedApi'; const UserApi={loadFeedFollowStates:async()=>{}}; const LocalVideoFilter={filterVideos:(items)=>items.filter(item=>item.aid!==2)};");
-  const p = new Harness();
-  Object.assign(p, {recEpoch:epoch(env), recFetching:false, recSource:source(env,[{aid:1,bvid:'BV1'}]), recCount:1});
-  await p.loadRecommend(true);
-  assert.deepEqual(p.recSource.getAll().map(v=>v.aid), [3]);
-  assert.equal(p.recCount,1);
+  const {homeFeedFixture}=require('./home-feed-fixture.cjs');let priming=true;
+  const f=homeFeedFixture({recommend:async()=>priming?[{aid:1,bvid:'BV1'}]:batches.shift()||[],
+    filter:items=>items.filter(item=>item.aid!==2)});
+  await f.ctl.activate();priming=false;await f.ctl.load(0,true);
+  assert.deepEqual(f.ctl.recommend.getAll().map(v=>v.aid), [3]);assert.equal(f.state(0).count,1);
 });
 
 test('removing one feed item preserves other objects and sends only a delete notification', () => {

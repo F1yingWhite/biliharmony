@@ -2,6 +2,7 @@ import { ActionResult } from '../../api/BiliApi';
 import { BangumiApi } from '../../api/BangumiApi';
 import { RequestEpoch } from '../../common/RequestEpoch';
 import { BangumiSeason } from '../../model/Models';
+import { AuthSession } from '../../services/auth/AuthSession';
 import { BangumiEpisodeCatalog } from './BangumiEpisodeCatalog';
 
 /** 页面接收完整快照，使业务控制器的状态与 ArkUI 响应式发布解耦。 */
@@ -21,6 +22,12 @@ export interface BangumiFollowAccess {
   closeStatusPanel: () => void;
 }
 
+interface BangumiFollowSession {
+  readonly request: number;
+  readonly account: number;
+  readonly seasonId: number;
+}
+
 /** 追番与观看状态共用防重入及请求代际；异步完成不会写已离场或已换季的页面。 */
 export class BangumiFollowController {
   private readonly access: BangumiFollowAccess;
@@ -35,6 +42,7 @@ export class BangumiFollowController {
     this.epoch.invalidate();
     this.state.followed = season.followed;
     this.state.favorites = season.favorites;
+    this.state.status = 0;
     this.state.busy = false;
     this.publish();
   }
@@ -44,16 +52,18 @@ export class BangumiFollowController {
   }
 
   async toggle(): Promise<void> {
+    if (this.access.isDestroyed()) return;
     const season: BangumiSeason = this.access.getSeason();
     if (!this.access.ensureLogin('请先登录后再' + BangumiEpisodeCatalog.followLabel(season))) return;
     if (this.state.busy || season.seasonId <= 0) return;
-    const request: number = this.begin();
+    const request: BangumiFollowSession = this.begin(season.seasonId);
+    const followed: boolean = !this.state.followed;
     try {
-      const result: ActionResult = await BangumiApi.setFollowed(season.seasonId, !this.state.followed);
+      const result: ActionResult = await BangumiApi.setFollowed(request.seasonId, followed);
       if (!this.isCurrent(request)) return;
       this.access.toast(result.message);
       if (result.ok) {
-        this.state.followed = !this.state.followed;
+        this.state.followed = followed;
         this.state.favorites = Math.max(0, this.state.favorites + (this.state.followed ? 1 : -1));
       }
     } catch (e) {
@@ -65,11 +75,12 @@ export class BangumiFollowController {
 
   /** 1 想看 / 2 在看 / 4 看过。设置状态成功会自动追番。 */
   async setStatus(status: number): Promise<void> {
+    if (this.access.isDestroyed() || (status !== 1 && status !== 2 && status !== 4)) return;
     const season: BangumiSeason = this.access.getSeason();
     if (season.seasonId <= 0 || !this.access.ensureLogin('') || this.state.busy) return;
-    const request: number = this.begin();
+    const request: BangumiFollowSession = this.begin(season.seasonId);
     try {
-      const result: ActionResult = await BangumiApi.updateFollowStatus(season.seasonId, status);
+      const result: ActionResult = await BangumiApi.updateFollowStatus(request.seasonId, status);
       if (!this.isCurrent(request)) return;
       this.access.toast(result.ok ? ['想看', '在看', '', '看过'][status - 1] ?? '已更新状态' : result.message);
       if (result.ok) {
@@ -86,18 +97,20 @@ export class BangumiFollowController {
     }
   }
 
-  private begin(): number {
-    const request: number = this.epoch.next();
+  private begin(seasonId: number): BangumiFollowSession {
+    const request: BangumiFollowSession = { request: this.epoch.next(), account: AuthSession.version,
+      seasonId: seasonId };
     this.state.busy = true;
     this.publish();
     return request;
   }
 
-  private isCurrent(request: number): boolean {
-    return !this.access.isDestroyed() && this.epoch.isCurrent(request);
+  private isCurrent(request: BangumiFollowSession): boolean {
+    return !this.access.isDestroyed() && this.epoch.isCurrent(request.request) &&
+      request.account === AuthSession.version && request.seasonId === this.access.getSeason().seasonId;
   }
 
-  private finish(request: number, closePanel: boolean): void {
+  private finish(request: BangumiFollowSession, closePanel: boolean): void {
     if (!this.isCurrent(request)) return;
     this.state.busy = false;
     this.publish();

@@ -7,7 +7,7 @@ import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
 import { AppNavStack, ImageViewerParam, LiveRoomParam, NAV_IMAGE_VIEWER, NAV_LIVE_ROOM, NAV_LOGIN,
   NAV_RELATION_LIST, NAV_SEARCH, RelationListParam, UserSpaceParam } from '../common/AppRouter';
-import { VideoItem, UserSpaceHeaderItem, UserSpaceInfo, UserStat, SpaceArcData, FollowTagItem } from '../model/Models';
+import { VideoItem, UserSpaceHeaderItem, UserSpaceInfo, UserStat, FollowTagItem } from '../model/Models';
 import { ActionResult } from '../api/BiliApi';
 import { VideoCard } from '../components/video/VideoCard';
 import { safeToast } from '../common/Toast';
@@ -17,7 +17,10 @@ import { FilterChip } from '../components/FilterChip';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { colorWithAlpha, formatCount } from '../common/Utils';
 import { UserStore } from '../services/auth/UserStore';
-import { BasicDataSource } from '../common/BasicDataSource';
+import { UserSpaceFeedController, UserSpaceFeedState } from '../components/user/UserSpaceFeedController';
+import { FollowGroupController, FollowGroupState } from '../components/user/FollowGroupController';
+import { FollowGroupSheet } from '../components/user/FollowGroupSheet';
+import { AuthSession } from '../services/auth/AuthSession';
 import { DecoratedAvatar } from '../components/UserDecorations';
 import { DynamicView } from '../views/DynamicView';
 import { LayoutTokens } from '../common/LayoutTokens';
@@ -43,22 +46,11 @@ export struct UserSpacePage {
   @State statLikeNum: number = -1;
   @State loading: boolean = true;
   @State errorText: string = '';
-  // ===== 投稿 Tab =====
-  @State arcTotal: number = 0;
-  @State arcPage: number = 1;
-  @State arcOrder: string = 'pubdate';
-  @State arcLoading: boolean = true;
-  @State loadingMore: boolean = false;
+  @State feedState: UserSpaceFeedState = new UserSpaceFeedState();
   @State following: boolean = false;
   @State followLoading: boolean = false;
-  @State groupSheetOpen: boolean = false;
-  @State groupList: Array<FollowTagItem> = [];
-  @State groupLoading: boolean = false;
-  @State groupNewName: string = '';
-  @State renameTagId: number = 0;
-  @State renameDraft: string = '';
-  /** 当前 UP 勾选中的分组 id 数组（空 = 默认分组）；保存时用。 */
-  @State groupChecked: Array<number> = [];
+  @State groupState: FollowGroupState = new FollowGroupState();
+  @StorageProp('loginVersion') @Watch('onLoginChanged') loginVersion: number = 0;
   @State spaceTab: number = 0;
   @State visualSpaceTab: number = 0;
   @State headerIndex: number = 0;
@@ -73,8 +65,12 @@ export struct UserSpacePage {
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
   private tabsController: TabsController = new TabsController();
-  private videosSource: BasicDataSource<VideoItem> = new BasicDataSource<VideoItem>();
-  private arcFetching: boolean = false;
+  private feed: UserSpaceFeedController = new UserSpaceFeedController((state: UserSpaceFeedState) => {
+    this.feedState = state;
+  });
+  private groupEditor: FollowGroupController = new FollowGroupController((state: FollowGroupState) => {
+    this.groupState = state;
+  }, (message: string) => this.toast(message));
   private destroyed: boolean = false;
   private lifecycleGeneration: number = 0;
   private headerVideoGeneration: number = 0;
@@ -84,14 +80,16 @@ export struct UserSpacePage {
     this.destroyed = false;
     this.lifecycleGeneration++;
     this.followLoading = false;
-    this.arcFetching = false;
-    this.loadingMore = false;
+    this.feed.activate(this.param.mid);
+    this.groupEditor.close();
     this.init().catch(() => {
     });
   }
 
   aboutToDisappear(): void {
     this.destroyed = true;
+    this.feed.dispose();
+    this.groupEditor.dispose();
     this.lifecycleGeneration++;
     this.headerVideoGeneration++;
     this.headerVideoRevealPendingIndex = -1;
@@ -139,13 +137,14 @@ export struct UserSpacePage {
 
   async loadFollowState(): Promise<void> {
     const generation: number = this.lifecycleGeneration;
+    const account: number = AuthSession.version;
     this.followLoading = true;
     try {
       const attribute: number | null = await UserApi.getRelation(this.param.mid);
-      if (this.destroyed || generation !== this.lifecycleGeneration) return;
+      if (this.destroyed || generation !== this.lifecycleGeneration || account !== AuthSession.version) return;
       if (attribute !== null) this.following = attribute === 2 || attribute === 6;
     } finally {
-      if (!this.destroyed && generation === this.lifecycleGeneration) this.followLoading = false;
+      if (!this.destroyed && generation === this.lifecycleGeneration && account === AuthSession.version) this.followLoading = false;
     }
   }
 
@@ -168,71 +167,40 @@ export struct UserSpacePage {
     this.following = !previous;
     this.followLoading = true;
     const generation: number = this.lifecycleGeneration;
+    const account: number = AuthSession.version;
     try {
       const result: ActionResult = await UserApi.setFollowed(this.param.mid, this.following);
-      if (this.destroyed || generation !== this.lifecycleGeneration) return;
+      if (this.destroyed || generation !== this.lifecycleGeneration || account !== AuthSession.version) return;
       if (!result.ok) {
         this.following = previous;
         this.toast(result.message);
       }
     } catch (e) {
-      if (!this.destroyed && generation === this.lifecycleGeneration) {
+      if (!this.destroyed && generation === this.lifecycleGeneration && account === AuthSession.version) {
         this.following = previous;
         this.toast('关注操作失败，请检查网络');
       }
     } finally {
-      if (!this.destroyed && generation === this.lifecycleGeneration) this.followLoading = false;
+      if (!this.destroyed && generation === this.lifecycleGeneration && account === AuthSession.version) this.followLoading = false;
     }
   }
 
   async loadArcs(reset: boolean): Promise<void> {
-    if (this.arcFetching) {
-      return;
-    }
-    this.arcFetching = true;
-    const generation: number = this.lifecycleGeneration;
-    try {
-      if (reset) {
-        this.arcPage = 1;
-        this.arcLoading = true;
-      }
-      const pn: number = this.arcPage;
-      const data: SpaceArcData = await UserApi.getUserSpaceArcs(this.param.mid, pn, this.arcOrder);
-      if (this.destroyed || generation !== this.lifecycleGeneration) {
-        return;
-      }
-      if (reset) {
-        this.videosSource.reset(data.videos);
-      } else {
-        this.videosSource.append(data.videos);
-      }
-      this.arcTotal = data.total;
-      this.arcPage = pn + 1;
-    } catch (e) {
-      // 保留已加载投稿，排序或重试时可再次请求。
-    } finally {
-      if (!this.destroyed && generation === this.lifecycleGeneration) {
-        this.arcLoading = false;
-        this.arcFetching = false;
-      }
-    }
-  }
-
-  hasMoreArcs(): boolean {
-    return this.videosSource.totalCount() > 0 && this.videosSource.totalCount() < this.arcTotal;
+    await this.feed.load(reset);
   }
 
   onReachEnd(): void {
-    if (this.loadingMore || this.arcLoading || !this.hasMoreArcs()) {
-      return;
-    }
-    this.loadingMore = true;
-    this.loadArcs(false)
-      .catch(() => {
-      })
-      .finally(() => {
-        this.loadingMore = false;
-      });
+    if (this.feedState.error.length > 0) return;
+    this.feed.load(false).catch(() => {});
+  }
+
+  onLoginChanged(): void {
+    if (this.destroyed) return;
+    this.groupEditor.close();
+    this.feed.load(true).catch(() => {});
+    this.following = false;
+    this.followLoading = false;
+    if (UserStore.isLogin) this.loadFollowState().catch(() => {});
   }
 
   private openLiveRoom(): void {
@@ -714,32 +682,18 @@ export struct UserSpacePage {
     });
   }
 
-  // ===== 关注分组 =====
+  // ===== 关注分组：页面只负责确认菜单，编辑事务归控制器 =====
   private openFollowGroups(): void {
-    if (UserStore.isLogin === false) {
+    if (!UserStore.isLogin) {
       this.toast('请先登录后再使用分组功能');
       return;
     }
-    this.groupSheetOpen = true;
-    this.groupChecked = [];
-    this.groupLoading = true;
-    UserApi.getFollowTags().then((tags: Array<FollowTagItem>) => {
-      this.groupList = tags;
-      this.groupLoading = false;
-    }).catch(() => {
-      this.groupList = [];
-      this.groupLoading = false;
-    });
+    this.groupEditor.open(this.param.mid).catch(() => {});
   }
 
-  /** 重载分组列表（重命名/删除后刷新）。 */
-  private async reloadGroupList(): Promise<void> {
-    const tags: Array<FollowTagItem> = await UserApi.getFollowTags();
-    this.groupList = tags;
-  }
-
-  /** 长按分组弹出重命名/删除操作菜单。 */
   private promptGroupActions(tag: FollowTagItem): void {
+    if (this.groupState.busy) return;
+    const session: number = this.groupEditor.sessionVersion;
     try {
       this.getUIContext().getPromptAction().showActionMenu({
         title: tag.name,
@@ -748,20 +702,18 @@ export struct UserSpacePage {
           { text: '删除分组', color: AppTheme.DANGER },
         ],
       }).then((result) => {
+        if (!this.groupEditor.isSessionCurrent(session)) return;
         const index: number = Number(result.index);
-        if (index === 0) {
-          this.renameTagId = tag.tagid;
-          this.renameDraft = tag.name;
-        } else if (index === 1) {
-          this.confirmDeleteGroup(tag);
-        }
-      });
+        if (index === 0) this.groupEditor.beginRename(tag);
+        else if (index === 1) this.confirmDeleteGroup(tag);
+      }).catch(() => {});
     } catch (e) {
-      // 弹窗失败忽略。
+      // 弹窗不可用时保留当前编辑状态。
     }
   }
 
   private confirmDeleteGroup(tag: FollowTagItem): void {
+    const session: number = this.groupEditor.sessionVersion;
     try {
       this.getUIContext().getPromptAction().showActionMenu({
         title: '删除「' + tag.name + '」？组内关注将回到默认分组',
@@ -770,60 +722,12 @@ export struct UserSpacePage {
           { text: '删除', color: AppTheme.DANGER },
         ],
       }).then((result) => {
-        if (Number(result.index) !== 1) return;
-        UserApi.deleteFollowTag(tag.tagid).then((result: ActionResult) => {
-          this.toast(result.message);
-          if (result.ok) {
-            const next: Array<number> = this.groupChecked.filter((id: number) => id !== tag.tagid);
-            this.groupChecked = next;
-            this.reloadGroupList().catch(() => {
-            });
-          }
-        }).catch(() => this.toast('网络异常，操作失败'));
-      });
+        if (Number(result.index) !== 1 || !this.groupEditor.isSessionCurrent(session)) return;
+        this.groupEditor.remove(tag.tagid).catch(() => {});
+      }).catch(() => {});
     } catch (e) {
-      // 弹窗失败忽略。
+      // 弹窗不可用时保留当前编辑状态。
     }
-  }
-
-  private async submitRename(): Promise<void> {
-    const name: string = this.renameDraft.trim();
-    const tagId: number = this.renameTagId;
-    if (tagId <= 0 || name.length === 0) return;
-    const result: ActionResult = await UserApi.renameFollowTag(tagId, name);
-    this.toast(result.message);
-    if (result.ok) {
-      this.renameTagId = 0;
-      this.renameDraft = '';
-      await this.reloadGroupList().catch(() => {
-      });
-    }
-  }
-
-  private async createGroup(): Promise<void> {
-    const name: string = this.groupNewName.trim();
-    if (name.length === 0) {
-      this.toast('请输入分组名称');
-      return;
-    }
-    if (name.length > 15) {
-      this.toast('分组名称最多 15 个字');
-      return;
-    }
-    const tagid: number = await UserApi.createFollowTag(name);
-    if (tagid <= 0) {
-      this.toast('创建分组失败，请检查登录状态后重试');
-      return;
-    }
-    this.groupList = this.groupList.concat([{ tagid: tagid, name: name, count: 0 }]);
-    this.groupChecked = this.groupChecked.concat([tagid]);
-    this.groupNewName = '';
-  }
-
-  private async saveGroupChecked(): Promise<void> {
-    await UserApi.addToFollowTags(this.param.mid, this.groupChecked);
-    this.groupSheetOpen = false;
-    this.toast('分组已保存');
   }
 
   private reportUser(): void {
@@ -861,13 +765,9 @@ export struct UserSpacePage {
           ForEach(ARC_ORDERS, (opt: Record<string, string>) => {
             FilterChip({
               label: opt['label'],
-              selected: this.arcOrder === opt['value'],
+              selected: this.feedState.order === opt['value'],
               onTap: () => {
-                if (this.arcOrder !== opt['value']) {
-                  this.arcOrder = opt['value'];
-                  this.loadArcs(true).catch(() => {
-                  });
-                }
+                this.feed.changeOrder(opt['value']).catch(() => {});
               },
             })
           }, (opt: Record<string, string>) => opt['value'])
@@ -878,7 +778,7 @@ export struct UserSpacePage {
         Row({ space: 7 }) {
           Text('视频').fontSize(15).fontWeight(FontWeight.Bold)
             .fontColor(this.isDark ? '#F2F2F4' : '#18191C')
-          Text(formatCount(this.arcTotal)).fontSize(12).fontColor('#9499A0')
+          Text(formatCount(this.feedState.total)).fontSize(12).fontColor('#9499A0')
           Blank()
           Text('更多  ›').fontSize(12).fontColor('#9499A0')
         }
@@ -889,12 +789,13 @@ export struct UserSpacePage {
         })
       }
 
-      if (this.arcLoading && this.videosSource.isEmpty()) {
+      if (this.feedState.loading && this.feed.source.isEmpty()) {
         LoadingView({ loading: true, skeleton: 'grid' })
-      } else if (this.videosSource.isEmpty()) {
+      } else if (this.feed.source.isEmpty()) {
         LoadingView({
           loading: false,
-          empty: true,
+          empty: this.feedState.error.length === 0,
+          errorText: this.feedState.error,
           emptyText: '暂无投稿视频',
           onRetry: () => {
             this.loadArcs(true).catch(() => {
@@ -903,21 +804,21 @@ export struct UserSpacePage {
         })
       } else {
         List({ space: 10 }) {
-          LazyForEach(this.videosSource, (item: VideoItem) => {
+          LazyForEach(this.feed.source, (item: VideoItem) => {
             ListItem() {
               VideoCard({ video: item, compact: true, idPrefix: 'user-', wholeCardTransition: true })
             }
           }, (item: VideoItem) => item.bvid.length > 0 ? item.bvid : String(item.aid))
           ListItem() {
             LoadMoreFooter({
-              loading: this.loadingMore,
-              hasMore: this.hasMoreArcs(),
-              moreText: '加载更多',
+              loading: this.feedState.loading || this.feedState.loadingMore,
+              hasMore: this.feedState.hasMore || this.feedState.error.length > 0,
+              moreText: this.feedState.error.length > 0 ? '加载失败，点击重试' : '加载更多',
               endText: '—— 到底啦 ——',
               padTop: 8,
               padBottom: 16,
               onLoadMore: () => {
-                this.onReachEnd();
+                this.feed.retry().catch(() => {});
               },
             })
           }
@@ -952,8 +853,8 @@ export struct UserSpacePage {
           .fontSize(15)
           .fontWeight(this.visualSpaceTab === index ? FontWeight.Bold : FontWeight.Normal)
           .fontColor(this.visualSpaceTab === index ? this.accent : '#9499A0')
-        if ((index === 0 || index === 2) && this.arcTotal > 0) {
-          Text(formatCount(this.arcTotal))
+        if ((index === 0 || index === 2) && this.feedState.total > 0) {
+          Text(formatCount(this.feedState.total))
             .fontSize(11)
             .fontColor('#9499A0')
         }
@@ -1055,8 +956,20 @@ export struct UserSpacePage {
         .backgroundColor(this.isDark ? '#18191C' : '#F6F7F8')
       }
 
-      if (this.groupSheetOpen) {
-        this.GroupSheetOverlay()
+      if (this.groupState.open) {
+        FollowGroupSheet({
+          state: this.groupState,
+          onRenameDraft: (value: string) => this.groupEditor.setRenameDraft(value),
+          onNewName: (value: string) => this.groupEditor.setNewName(value),
+          onRename: () => this.groupEditor.rename().catch(() => {}),
+          onCancelRename: () => this.groupEditor.cancelRename(),
+          onToggle: (tagId: number) => this.groupEditor.toggle(tagId),
+          onTagActions: (tag: FollowTagItem) => this.promptGroupActions(tag),
+          onCreate: () => this.groupEditor.create().catch(() => {}),
+          onClose: () => this.groupEditor.close(),
+          onSave: () => this.groupEditor.save().catch(() => {}),
+          onRetryLoad: () => this.groupEditor.retryLoad().catch(() => {}),
+        })
       }
     }
     .width('100%')
@@ -1071,118 +984,4 @@ export struct UserSpacePage {
     })
   }
 
-  /** 关注分组底部面板：勾选分组（空=默认分组）+ 新建分组输入。 */
-  @Builder
-  GroupSheetOverlay() {
-    Column() {
-      Blank()
-      Column({ space: 10 }) {
-        Text('关注分组')
-          .fontSize(16).fontWeight(FontWeight.Bold)
-          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-        Text('勾选分组（取消全部 = 默认分组）。')
-          .fontSize(11).fontColor('#9499A0')
-        if (this.groupLoading) {
-          Text('加载中…').fontSize(13).fontColor('#9499A0').padding(14)
-        } else {
-          if (this.renameTagId > 0) {
-            Row({ space: 8 }) {
-              TextInput({ placeholder: '新的分组名称', text: this.renameDraft })
-                .fontSize(13)
-                .layoutWeight(1)
-                .height(34)
-                .onChange((value: string) => this.renameDraft = value)
-              Text('保存')
-                .fontSize(13).fontColor(this.accent)
-                .padding({ left: 8, right: 8, top: 6, bottom: 6 })
-                .onClick(() => this.submitRename().catch(() => {
-                }))
-              Text('取消')
-                .fontSize(13).fontColor('#9499A0')
-                .padding({ left: 8, right: 8, top: 6, bottom: 6 })
-                .onClick(() => {
-                  this.renameTagId = 0;
-                  this.renameDraft = '';
-                })
-            }
-            .width('100%')
-          }
-          List() {
-            ForEach(this.groupList, (tag: FollowTagItem) => {
-              ListItem() {
-                Row({ space: 10 }) {
-                  Text(tag.name).fontSize(14)
-                    .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-                    .layoutWeight(1).maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  Text(String(tag.count)).fontSize(11).fontColor('#9499A0')
-                  Stack({ alignContent: Alignment.Center }) {
-                    Circle()
-                      .width(18).height(18)
-                      .fill(this.groupChecked.indexOf(tag.tagid) >= 0 ? this.accent : '#00000000')
-                      .border({ width: 1.5, color: this.groupChecked.indexOf(tag.tagid) >= 0 ? this.accent : '#B4B6BA' })
-                    if (this.groupChecked.indexOf(tag.tagid) >= 0) {
-                      Text('✓').fontSize(11).fontColor('#FFFFFF')
-                    }
-                  }
-                  .width(24).height(24)
-                }
-                .width('100%').padding({ top: 8, bottom: 8 })
-                .onClick(() => this.toggleGroupChecked(tag.tagid))
-                .gesture(LongPressGesture({ repeat: false })
-                  .onAction(() => this.promptGroupActions(tag)))
-              }
-            }, (item: FollowTagItem) => String(item.tagid))
-          }
-          .width('100%')
-          .constraintSize({ maxHeight: 300 })
-          .scrollBar(BarState.Off)
-        }
-        Row({ space: 8 }) {
-          TextInput({ placeholder: '新建分组名称', text: this.groupNewName })
-            .fontSize(13)
-            .layoutWeight(1)
-            .height(34)
-            .onChange((value: string) => this.groupNewName = value)
-          Text('新建')
-            .fontSize(13).fontColor(this.accent)
-            .padding({ left: 8, right: 8, top: 6, bottom: 6 })
-            .onClick(() => {
-              this.createGroup().catch(() => {
-              });
-            })
-        }
-        .width('100%')
-        Row({ space: 10 }) {
-          Text('取消')
-            .fontSize(14).fontColor('#9499A0')
-            .layoutWeight(1).height(38).textAlign(TextAlign.Center)
-            .backgroundColor(this.isDark ? '#2A2C31' : '#F5F7F9').borderRadius(19)
-            .onClick(() => this.groupSheetOpen = false)
-          Text('保存')
-            .fontSize(14).fontColor('#FFFFFF').backgroundColor(this.accent)
-            .layoutWeight(1).height(38).textAlign(TextAlign.Center)
-            .borderRadius(19)
-            .onClick(() => {
-              this.saveGroupChecked().catch(() => {
-              });
-            })
-        }
-        .width('100%')
-      }
-      .width('100%')
-      .padding({ left: 16, right: 16, top: 16, bottom: Immersive.bottomInset() + 14 })
-      .backgroundColor(this.isDark ? '#1E2024' : '#FFFFFF')
-      .borderRadius({ topLeft: 14, topRight: 14 })
-    }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.End)
-    .backgroundColor('#66000000')
-  }
-
-  private toggleGroupChecked(tagid: number): void {
-    this.groupChecked = this.groupChecked.indexOf(tagid) >= 0 ?
-      this.groupChecked.filter((id: number) => id !== tagid) : this.groupChecked.concat([tagid]);
-  }
 }

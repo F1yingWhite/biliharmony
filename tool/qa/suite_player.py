@@ -11,10 +11,11 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from animation_probe import analyze as analyze_animation
 from performance_probe import collect as collect_performance
+import player_layout as layout
 from qa_common import (
     QA_DIR, ROOT, QaReport, all_texts, capture_transition, cold_start, connect,
     device, dump_ui, dump_until_text, ensure_qa_dir, find_nodes, first_node,
@@ -132,11 +133,23 @@ def open_dense_4k_video(query: str) -> Any:
     # 给 DASH 音视频轨和弹幕 XML/API 留出加载时间。
     time.sleep(6)
     detail = load_ui_tree(dump_ui('p00_player_ready'))
+    # QA 设备保留观看历史；上次已播完时必须显式重播，避免把暂停态的
+    # seek/画质切换误当成播放中，并在结尾用例中等待永远不会发生的 completed。
+    replay = first_node(detail, lambda n: node_text(n) == '重播')
+    if replay:
+        tap_bounds(node_bounds(replay), 1800)
+        _, detail = wait_for_ui(
+            lambda t: video_surface_ready(t) and not has_text(t, '^重播$'),
+            timeout=15, name='p00_replay_started')
     snapshot_shot('p00_player_ready')
     return detail
 
 
 def show_controls(root: Any, wait_ms: int = 350) -> Any:
+    # 播放时控件会自动隐藏；调用方的树可能来自截图/性能采样之前，
+    # 不能把旧 Slider 当成此刻仍可点击的控件。
+    root = load_ui_tree(dump_ui('p_controls_current'))
+    layout.require_player(root)
     if largest_slider(root) is not None:
         return root
     surface, _ = player_geometry(root)
@@ -153,6 +166,7 @@ def show_controls(root: Any, wait_ms: int = 350) -> Any:
     for index, (x, y) in enumerate(points):
         tap(x, y, wait_ms)
         latest = load_ui_tree(dump_ui(f'p_controls_{index}'))
+        layout.require_player(latest)
         if largest_slider(latest) is not None:
             return latest
     raise RuntimeError('连续三次点击后播放器控制条仍未显示')
@@ -167,80 +181,129 @@ def preview_texts(root: Any) -> List[str]:
     return [text for text in all_texts(root) if PREVIEW_RE.search(text)]
 
 
+def footer_icons(root: Any) -> List[Any]:
+    slider = largest_node(root, 'Slider')
+    if slider is None:
+        raise RuntimeError('播放器控制条没有进度 Slider')
+    icons = layout.footer_icons(root, slider, is_orientation(root, True))
+    if len(icons) < 2:
+        raise RuntimeError('播放器底栏缺少播放/全屏图标')
+    return icons
+
+
+def playback_sample(name: str) -> Tuple[float, float, Any]:
+    first = show_controls(load_ui_tree(dump_ui(name + '_before')))
+    before = float(node_text(largest_node(first, 'Slider')))
+    time.sleep(1.2)
+    last = show_controls(load_ui_tree(dump_ui(name + '_after')))
+    after = float(node_text(largest_node(last, 'Slider')))
+    return before, after, last
+
+
+def set_playing(playing: bool, name: str) -> Any:
+    # 在设置/动画阶段暂停，防止 3 秒控件隐藏或视频自然播完改变操作目标。
+    # 用实际进度验证状态，不依赖无障碍树未暴露的图片资源名称。
+    for attempt in range(3):
+        before, after, current = playback_sample(f'{name}_{attempt}')
+        if (after - before > 0.3) == playing:
+            return current
+        tap_bounds(node_bounds(footer_icons(current)[0]), 300)
+    before, after, current = playback_sample(name + '_confirmed')
+    if (after - before > 0.3) != playing:
+        raise RuntimeError(f'无法确认播放器{"播放" if playing else "暂停"}状态: {before} -> {after}')
+    return current
+
+
+def close_settings(root: Any, name: str) -> Any:
+    if layout.mode(root) == 'player':
+        return root  # 选择可用画质时生产回调会主动关闭面板。
+    orientation = is_orientation(root, True)
+    back = layout.panel_back(root)
+    tap_bounds(node_bounds(back), 250)
+    _, closed = wait_for_ui(
+        lambda t: layout.mode(t) == 'player' and is_orientation(t, orientation),
+        timeout=6, name=name)
+    return closed
+
+
+def open_panel(kind: str, locate: Callable[[Any], Any], name: str) -> Any:
+    for attempt in range(3):
+        current = show_controls(load_ui_tree(dump_ui(name + '_before')))
+        if not is_orientation(current, True):
+            raise RuntimeError(f'打开 {kind} 设置前不是横屏')
+        tap_bounds(node_bounds(locate(current)), 250)
+        try:
+            _, panel = wait_for_ui(lambda t: layout.mode(t) == kind, timeout=4, name=name)
+            return panel
+        except RuntimeError:
+            current = load_ui_tree(dump_ui(name + '_missed'))
+            # 仅控件自动隐藏导致点击未命中时重试；不穿过其它抽屉或对话框继续点。
+            if layout.mode(current) != 'player' or attempt == 2:
+                raise
+    raise RuntimeError(f'无法打开 {kind} 设置')
+
+
 def enter_fullscreen(root: Any) -> Any:
-    controlled = show_controls(root)
-    surface, _ = player_geometry(controlled)
-    if not surface:
-        raise RuntimeError('进入全屏前 Surface 丢失')
-    tap(surface['x2'] - 75, surface['y2'] - 75, 150)
-    _, landscape = wait_for_ui(lambda t: is_orientation(t, True), timeout=10, name='p_fullscreen')
-    time.sleep(0.8)
-    return landscape
+    # dumpLayout/file recv 与原生点击之间，3 秒自动隐藏计时仍会继续；
+    # 有限次重新获取控件后点击，并始终用实际窗口方向确认操作生效。
+    for attempt in range(3):
+        controlled = show_controls(root)
+        if is_orientation(controlled, True):
+            return controlled
+        tap_bounds(node_bounds(footer_icons(controlled)[-1]), 150)
+        try:
+            _, landscape = wait_for_ui(lambda t: is_orientation(t, True), timeout=3, name='p_fullscreen')
+            time.sleep(0.8)
+            return landscape
+        except RuntimeError:
+            if attempt == 2:
+                raise
+    raise RuntimeError('点击全屏控件后窗口始终未横屏')
 
 
 def set_highest_quality_and_density(root: Any) -> Any:
-    controlled = show_controls(root)
-    width, height = root_size(controlled)
-    # 横屏底栏顺序固定：播放、弹幕开关、弹幕设置。第三个图标位于左下约 4.5% 屏宽。
-    bottom_icons = find_nodes(controlled, lambda n: (
-        node_type(n) == 'Image' and
-        (parse_bounds(node_bounds(n)) or {}).get('y1', 0) > height * 0.75 and
-        (parse_bounds(node_bounds(n)) or {}).get('x2', width) < width * 0.35
-    ))
-    bottom_icons.sort(key=lambda n: (parse_bounds(node_bounds(n)) or {}).get('x1', 0))
-    if len(bottom_icons) >= 3:
-        tap_bounds(node_bounds(bottom_icons[2]), 500)
-    else:
-        tap(max(390, int(width * 0.14)), height - 90, 500)
-    try:
-        _, settings = wait_for_ui(lambda t: has_text(t, '弹幕设置') and has_text(t, '重叠'),
-                                  timeout=5, name='p_dense_settings')
-        dense = first_node(settings, lambda n: node_text(n) == '重叠')
-        if dense:
-            tap_bounds(node_bounds(dense), 350)
-            report.pass_('弹幕密度已切到“重叠”(30)')
-        # 点抽屉左侧遮罩关闭，不触发系统返回/退出全屏。
-        tap(max(80, width // 4), height // 2, 450)
-    except Exception as exc:
-        report.skip(f'无法自动切换高密度，保留当前设置: {exc}')
+    set_playing(False, 'p_settings_paused')
 
-    controlled = show_controls(load_ui_tree(dump_ui('p_after_dense')))
-    quality = first_node(controlled, lambda n: (
-        re.search(r'(4K|1080P|720P|自动)', node_text(n), re.I) is not None and
-        (parse_bounds(node_bounds(n)) or {}).get('y1', 0) > height * 0.65
-    ))
-    if quality:
-        previous = node_text(quality)
-        tap_bounds(node_bounds(quality), 450)
-        try:
-            _, panel = wait_for_ui(
-                lambda t: any(re.search(r'(4K|1080P60|1080P)', s, re.I) for s in all_texts(t)),
-                timeout=6, name='p_quality_panel')
-            choices = ['4K', 'HDR', '杜比', '1080P60', '1080P 高码率', '1080P']
-            chosen = None
-            for label in choices:
-                chosen = first_node(panel, lambda n, label=label: (
-                    label.lower() in node_text(n).lower() and len(node_text(n)) <= 14 and
-                    (parse_bounds(node_bounds(n)) or {}).get('x1', 0) > width * 0.6
-                ))
-                if chosen:
-                    break
-            if chosen:
-                label = node_text(chosen)
-                tap_bounds(node_bounds(chosen), 2800)
-                report.pass_(f'已选择最高可见画质: {label}')
-            else:
-                report.skip(f'画质面板无高画质选项，当前 {previous}')
-            # 若画质页仍在，点左侧遮罩关闭。
-            current = load_ui_tree(dump_ui('p_quality_after'))
-            if has_text(current, '返回') and has_text(current, '清晰度'):
-                tap(max(80, width // 4), height // 2, 400)
-                wait_for_ui(lambda t: not has_text(t, '清晰度'), timeout=5, name='p_quality_closed')
-        except Exception as exc:
-            report.skip(f'画质切换未完成，当前 {previous}: {exc}')
+    def danmaku_button(current: Any) -> Any:
+        icons = footer_icons(current)
+        if len(icons) < 4:
+            raise RuntimeError('横屏底栏缺少播放、弹幕、设置、全屏图标')
+        return icons[2]
+
+    settings = open_panel('danmaku', danmaku_button, 'p_dense_settings')
+    dense = layout.text_node(layout.settings_panel(settings), '重叠')
+    if dense is None:
+        raise RuntimeError('弹幕设置没有“重叠”密度选项')
+    tap_bounds(node_bounds(dense), 300)
+    _, settings = wait_for_ui(
+        lambda t: layout.mode(t) == 'danmaku' and has_text(layout.settings_panel(t), '尽量显示全部弹幕'),
+        timeout=5, name='p_density_confirmed')
+    report.pass_('弹幕密度已确认切到“重叠”(30)')
+    close_settings(settings, 'p_density_closed')
+
+    panel = open_panel('quality', lambda t: layout.quality_button(t, largest_node(t, 'Slider')), 'p_quality_panel')
+    options = layout.quality_options(panel)
+    choices = ['8K', '杜比视界', 'HDR', '4K', '1080P60', '1080P+', '1080P 高码率', '1080P']
+    chosen = next((option for label in choices for option in options if node_text(option) == label), None)
+    if chosen is None:
+        close_settings(panel, 'p_quality_closed')
+        report.skip('片源画质选项未提供 1080P 或以上；设置抽屉已关闭')
     else:
-        report.skip('没有识别到横屏画质按钮')
-    return load_ui_tree(dump_ui('p_dense_quality_ready'))
+        label = node_text(chosen)
+        tap_bounds(node_bounds(chosen), 250)
+        # changeQuality 成功后会关闭子页；不能用固定延时把仍在请求中的
+        # 面板当成播放器，更不能在它覆盖着底栏时点击底层同名标签。
+        _, settled = wait_for_ui(
+            lambda t: layout.mode(t) == 'player' and not has_text(t, '^切换中$'),
+            timeout=15, name='p_quality_after')
+        close_settings(settled, 'p_quality_closed')
+        controlled = show_controls(load_ui_tree(dump_ui('p_quality_selected')))
+        actual = node_text(layout.quality_button(controlled, largest_node(controlled, 'Slider')))
+        if actual != label:
+            raise RuntimeError(f'选择画质后未生效: 请求 {label}，实际 {actual}')
+        report.pass_(f'已确认最高可见画质: {actual}')
+    report.note('本专项选择的密度和手动画质会持久化；完成后按验收前记录恢复偏好。')
+    return set_playing(True, 'p_dense_playing')
 
 
 def test_initial_geometry_and_seek(tree: Any) -> None:
@@ -320,13 +383,15 @@ def test_dense_playback_performance(tree: Any, seconds: int, skip_performance: b
 
 def test_fullscreen_exit_animation(tree: Any) -> Any:
     report.begin('P3 全屏退出旋转/缩小动画与最终几何')
-    controlled = show_controls(tree)
+    controlled = set_playing(False, 'p03_pause_for_capture')
     width, height = root_size(controlled)
     if width <= height:
         report.fail(f'退出动画前不是横屏: {width}x{height}')
         return controlled
+    button = footer_icons(controlled)[-1]
+    x, y = center(parse_bounds(node_bounds(button)))
     frames = capture_transition(
-        'p03_full_exit', ('click', str(width - 70), str(height - 95)),
+        'p03_full_exit', ('click', str(x), str(y)),
         offsets_ms=(40, 100, 180, 280, 420, 650, 900),
     )
     _, portrait = wait_for_ui(lambda t: is_orientation(t, False), timeout=10, name='p03_portrait')
@@ -373,14 +438,17 @@ def has_home_dock(root: Any) -> bool:
 def test_end_back_and_replay(tree: Any) -> None:
     report.begin('P4 播放结束返回与重播')
     landscape = enter_fullscreen(tree)
-    controlled = show_controls(landscape)
+    controlled = set_playing(False, 'p04_pause_for_seek')
     slider = largest_slider(controlled)
     if not slider:
         report.fail('横屏找不到进度 Slider，无法制造播完态')
         return
     y = (slider['y1'] + slider['y2']) // 2
     span = slider['x2'] - slider['x1']
-    swipe(slider['x1'] + int(span * 0.7), y, slider['x1'] + int(span * 0.995), y, 1000, 1000)
+    # 留出最后几秒自然播放，避免滑块把 seek 量化到精确 duration 后仍停在暂停态。
+    swipe(slider['x1'] + int(span * 0.7), y, slider['x1'] + int(span * 0.96), y, 1000, 1000)
+    controlled = show_controls(load_ui_tree(dump_ui('p04_seek_ready')))
+    tap_bounds(node_bounds(footer_icons(controlled)[0]), 200)
     try:
         _, ended = wait_for_ui(lambda t: has_text(t, '重播') and is_orientation(t, True),
                                timeout=18, name='p04_ended_full')
@@ -467,7 +535,8 @@ def main() -> None:
         else:
             test_end_back_and_replay(portrait)
     except Exception as exc:
-        report.begin('P0 场景准备')
+        if not report.current:
+            report.begin('P0 场景准备')
         report.fail(str(exc))
     finally:
         output = report.export('suite_player_report.md')

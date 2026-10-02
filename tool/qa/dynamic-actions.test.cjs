@@ -2,35 +2,8 @@
 // Controlled API promises and ArkUI's prop rebinding/prompt boundary make races deterministic.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const root = path.resolve(__dirname, '../../entry/src/main/ets');
-const ts = require(process.env.ARKTS_TEST_TYPESCRIPT ||
-  '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript');
-function read(file) {
-  const override = process.env.ARKTS_TEST_SOURCE_ROOT && path.join(process.env.ARKTS_TEST_SOURCE_ROOT, file + '.ets');
-  return fs.readFileSync(override && fs.existsSync(override) ? override : path.join(root, file + '.ets'), 'utf8')
-    .replace(/\r\n/g, '\n');
-}
-function section(source, start, end) {
-  const first = source.indexOf(start), last = source.indexOf(end, first);
-  assert.ok(first >= 0 && last > first, 'production anchors: ' + start + ' -> ' + end);
-  return source.slice(first, last);
-}
-function compile(source, globals = {}) {
-  const module = { exports: {} };
-  const code = ts.transpileModule(source, { compilerOptions: {
-    target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS,
-  } }).outputText;
-  new Function('module', 'exports', ...Object.keys(globals), code)(module, module.exports, ...Object.values(globals));
-  return module.exports;
-}
+const { environment } = require('./dynamic-test-env.cjs');
 function fixture() {
-  const source = read('views/DynamicView');
-  const { AuthSession } = compile(read('services/auth/AuthSession'));
-  const { BasicDataSource } = compile(read('common/BasicDataSource'));
-  // Parsing a server response is outside this test; use the production model's actual field initializers.
-  const { DynamicItem } = compile(section(read('model/dynamic/DynamicModels'), 'export class DynamicItem {', '  static from(') + '\n}');
   const notices = [], requests = [];
   const pending = (kind, args) => {
     let resolve, reject;
@@ -38,33 +11,40 @@ function fixture() {
     requests.push({ kind, args, resolve, reject });
     return promise;
   };
-  const DynamicApi = {
-    likeDynamic: (...args) => pending('like', args), repostDynamic: (...args) => pending('forward', args),
-    getDynamicDetail() { throw Error('plain-text action fixture should not fetch rich emotes'); },
-  };
-  const prelude = section(source, 'class DynamicContentPart {', '/** 单条动态卡片');
-  const cardCode = section(source, 'export struct DynCard {', '  /** 宫格单元边长')
-    .replace('export struct DynCard', 'export class Card')
-    .replace(/@(?:State|Prop|StorageProp|Watch)\s*(?:\([^)]*\))?\s*/g, '');
-  const { Card } = compile(prelude + cardCode + '\n}', { AuthSession, DynamicItem, DynamicApi,
-    UserStore: { isLogin: true }, EmoteResolver: { ensureLoaded() {} } });
-  const { Feed } = compile('export class Feed {\n' +
-    section(source, '  private handleLikeResult(', '  /** 并行拉取') + '\n}', { BasicDataSource });
-  const item = (liked, like, dynId = 'same') => Object.assign(new DynamicItem(), { dynId, liked, like });
+  const env = environment({
+    'api/DynamicApi': { DynamicApi: {
+      likeDynamic: (...args) => pending('like', args), repostDynamic: (...args) => pending('forward', args),
+    } },
+    'services/auth/UserStore': { UserStore: { isLogin: true } },
+  });
+  const { AuthSession } = env.load('services/auth/AuthSession');
+  const { DynamicCardActions } = env.load('components/dynamic/DynamicCardActions');
+  const { DynamicFeedController } = env.load('components/dynamic/DynamicFeedController');
+  const item = (liked, like, dynId = 'same') => ({ dynId, liked, like, forward: 0 });
   function feed(liked, like) {
-    const view = new Feed(); view.dynSource = new BasicDataSource();
-    view.dynSource.reset([item(liked, like)]);
-    const cached = new BasicDataSource(); cached.reset([item(liked, like)]);
-    view.typeSources = new Map([['video', cached]]);
+    const controller = new DynamicFeedController(() => 0, () => {});
+    const dynSource = controller.source('all'), cached = controller.source('video');
+    dynSource.reset([item(liked, like)]); cached.reset([item(liked, like)]);
     const callbacks = [];
-    return { view, callbacks, cached, callback: (...args) => { callbacks.push(args); view.handleLikeResult(...args); } };
+    return { view: { dynSource }, callbacks, cached,
+      callback: (...args) => { callbacks.push(args); controller.updateLike(...args); } };
   }
-  const origin = feed(true, 20), destination = feed(false, 19), card = new Card();
-  card.getUIContext = () => ({ getPromptAction: () => ({ showToast: ({ message }) => notices.push(message) }) });
-  // Model the native @Prop copy when a LazyForEach row is mounted/rebound.
-  card.item = item(true, 20); card.onLikeResult = origin.callback; card.aboutToAppear();
+  const origin = feed(true, 20), destination = feed(false, 19);
+  const card = { item: item(true, 20), onLikeResult: origin.callback };
+  let state;
+  const actions = new DynamicCardActions(() => card.item, () => card.onLikeResult,
+    value => { state = value; }, message => notices.push(message));
+  for (const [field, key] of [['liked', 'liked'], ['likeCount', 'likeCount'],
+    ['forwardCount', 'forwardCount'], ['actionBusy', 'busy']]) {
+    Object.defineProperty(card, field, { get: () => state[key] });
+  }
+  card.toggleLike = () => actions.toggleLike();
+  card.forwardDynamic = () => actions.forwardDynamic();
+  card.onItemChanged = () => actions.sync();
+  card.aboutToDisappear = () => actions.invalidate();
+  actions.sync();
   function reuse(liked = false, like = 19, callback = destination.callback) {
-    card.aboutToReuse({ item: item(liked, like), onLikeResult: callback });
+    actions.invalidate(); card.item = item(liked, like); card.onLikeResult = callback; actions.sync();
   }
   return { card, AuthSession, origin, destination, requests, notices, reuse, item };
 }

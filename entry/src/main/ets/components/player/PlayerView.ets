@@ -1,6 +1,9 @@
+import { PlayerPlaybackSession } from './PlayerPlaybackSession';
+import { PlayerPlaybackConfig } from './PlayerPlaybackConfig';
+import { PlayerQualityPreference } from '../../common/PlayerQualityPreference';
+import { PlayerPlaybackSource, PlayerPlaybackState, PlayerPlaybackEvent, PlayerPlaybackPolicy } from './PlayerPlaybackState';
 import { MotionTokens } from '../../common/MotionTokens';
 import { VideoReportDialog } from '../VideoReportDialog';
-import { PlayerQualityPreference } from '../../common/PlayerQualityPreference';
 import { AVVolumePanel } from '@kit.AudioKit';
 import { SystemMediaVolume } from './SystemMediaVolume';
 import { PlayerChapterBar } from './PlayerChapterBar';
@@ -8,26 +11,19 @@ import { chapterTitleAt } from './PlayerChapterSupport';
 /**
  * 播放器组件：AVPlayer + XComponent 渲染 + Canvas 弹幕引擎 + 手势控制
  */
-import { RequestEpoch } from '../../common/RequestEpoch';
-import { media } from '@kit.MediaKit';
-import { PiPWindow as pictureInPicture } from '@kit.ArkUI';
+import { PlayerPictureInPicture, PlayerVideoSize } from './PlayerPictureInPicture';
+import { PlayerAuxiliaryController } from './PlayerAuxiliaryController';
+import { PlayerMediaExportController, PlayerMediaExportSnapshot, PlayerDownloadUi } from './PlayerMediaExportController';
+import { MediaExportFormat } from '../../services/media/MediaExportFormat';
 import { image } from '@kit.ImageKit';
 import { avSession } from '@kit.AVSessionKit';
 import { PlayerAvSessionHelper } from './PlayerAvSessionHelper';
 import { PlayerSubtitleController } from './PlayerSubtitleController';
-import { PlayerSeekController } from './PlayerSeekController';
-import { PlayerSpeedController } from './PlayerSpeedController';
 import { PlayerGestureController } from './PlayerGestureController';
-import { PlayerPlaybackConfig } from './PlayerPlaybackConfig';
 import { playerPanelTitle } from './PlayerSheetTheme';
 import { PlayerSideSettingsDrawer } from './PlayerSideSettingsDrawer';
 import { common } from '@kit.AbilityKit';
-import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
-import { picker } from '@kit.CoreFileKit';
-import { fileIo as fs } from '@kit.CoreFileKit';
-import { hilog } from '@kit.PerformanceAnalysisKit';
-import { util } from '@kit.ArkTS';
-import { DEBUG } from 'BuildProfile';
+import { pasteboard } from '@kit.BasicServicesKit';
 import { ActionResult, BiliApi, DanmakuItem, DmFilterRule, HotPoint, VideoChapter } from '../../api/BiliApi';
 import { SponsorBlockApi, SponsorBlockResult, SponsorBlockUserInfo } from '../../api/SponsorBlockApi';
 import { UserStore } from '../../services/auth/UserStore';
@@ -37,12 +33,11 @@ import { Immersive } from '../../common/Immersive';
 import { formatDuration, formatCount } from '../../common/Utils';
 import { PlayerSponsorController, SponsorNoticeUi } from './PlayerSponsorController';
 import { PlayerDanmakuClock } from './PlayerDanmakuClock';
-import { PlayUrlInfo, SubtitleCue, SubtitleTrack, VideoItem, VideoQualityOption } from '../../model/Models';
-import { Constants } from '../../common/Constants';
+import { SubtitleTrack, VideoItem, VideoQualityOption } from '../../model/Models';
 import { BasicDataSource } from '../../common/BasicDataSource';
 import { PlayerGestureOverlay, PlayerScrubController } from './PlayerGestureOverlay';
 import { PlayerFullscreenHeader } from './PlayerFullscreenHeader';
-import { CONTROLS_GRADIENT_COLORS, DM_SEGMENT_SECONDS } from './PlayerDanmakuSupport';
+import { CONTROLS_GRADIENT_COLORS } from './PlayerDanmakuSupport';
 import { PlayerDanmakuEngine } from './PlayerDanmakuEngine';
 import { PlayerBottomControls } from './PlayerBottomControls';
 import { PlayerGestureSurface } from './PlayerGestureSurface';
@@ -55,10 +50,7 @@ import { PlayerDanmakuAction } from './PlayerDanmakuAction';
 import { SponsorBlockCategory, SponsorBlockMode, SponsorBlockSegment, SponsorBlockStore,
   sponsorBlockSupportedActions } from '../../common/SponsorBlock';
 import { SponsorBlockNotice } from './SponsorBlockNotice';
-import { HttpClient } from '../../services/network/HttpClient';
 import { VideoDownloadService } from '../../services/media/VideoDownloadService';
-import { DownloadCenter, DOWNLOAD_KIND_AUDIO, DOWNLOAD_KIND_VIDEO } from '../../services/media/DownloadCenter';
-import { PhotoLibrarySaver } from '../../services/media/PhotoLibrarySaver';
 import { ContinueWatchingStore } from '../../common/ContinueWatchingStore';
 
 /**
@@ -167,8 +159,6 @@ export struct PlayerView {
   @State prepared: boolean = false;
   /** 首个播放帧是否已可见（playing + startRenderFrame）：之前播放区垫封面，避免空 surface 黑屏。 */
   @State firstFrameShown: boolean = false;
-  /** 官方 startRenderFrame 已到达；必须再与 playing 同时成立，才撤掉起播封面。 */
-  private firstRenderReady: boolean = false;
   @State errorText: string = '';
   @State curTime: number = 0;
   @State duration: number = 0;
@@ -259,17 +249,41 @@ export struct PlayerView {
   @StorageLink('sponsorSkipEnabled') sponsorSkipEnabled: boolean = true;
   /** 播完自动连播下一集（UGC 合集）；关闭后播完停在剧终画面，由用户手动选择。 */
   @StorageLink('autoContinuePlay') autoContinuePlay: boolean = true;
-  private player: media.AVPlayer | null = null;
-  private audioPlayer: media.AVPlayer | null = null;
-  private pendingAudioPause: Promise<void> | null = null;
-  private pendingAudioPausePlayer: media.AVPlayer | null = null;
-  private audioPrepared: boolean = false;
   private videoReportDialog: CustomDialogController | null = null;
-  private pipController: pictureInPicture.PiPController | null = null;
-  private pipActive: boolean = false;
-  private pipStarting: boolean = false;
-  private pipRestoring: boolean = false;
-  private pipGeneration: number = 0;
+  private pictureInPicture: PlayerPictureInPicture = new PlayerPictureInPicture({
+    isDestroyed: (): boolean => this.destroyed,
+    isReady: (): boolean => this.playback.ready && this.playback.hasSurface,
+    isInBackground: (): boolean => this.appInBackground,
+    isPlaying: (): boolean => this.playing,
+    getContext: (): common.UIAbilityContext => this.getUIContext().getHostContext() as common.UIAbilityContext,
+    getComponentController: (): XComponentController => this.xcController,
+    getVideoSize: (): PlayerVideoSize => ({ width: this.realVideoWidth, height: this.realVideoHeight }),
+    closePanels: (): void => this.closeSettingPanels(),
+    togglePlay: (): void => this.togglePlay(),
+    onPlaybackPolicyChanged: (): void => this.onAppBackgroundChanged(),
+    toast: (message: string): void => this.toast(message),
+  });
+  private exportMenuGeneration: number = 0;
+  private mediaExport: PlayerMediaExportController = new PlayerMediaExportController({
+    getContext: (): common.UIAbilityContext | undefined =>
+      this.getUIContext().getHostContext() as common.UIAbilityContext | undefined,
+    snapshot: (): PlayerMediaExportSnapshot => ({
+      aid: this.aid, bvid: this.bvid, cid: this.cid, epId: this.epId,
+      title: this.videoTitle, partTitle: this.videoPartTitle, cover: this.videoCover,
+      duration: this.duration, playhead: this.playheadSec, quality: this.downloadQualityValue(),
+      qualityOptions: this.downloadQualityOptions(),
+      subtitle: this.subtitleIndex >= 0 && this.subtitleIndex < this.subtitles.length ?
+        this.subtitles[this.subtitleIndex] : null,
+    }),
+    isDestroyed: (): boolean => this.destroyed,
+    closePanels: (): void => this.closeSettingPanels(),
+    toast: (message: string): void => this.toast(message),
+    publishDownload: (state: PlayerDownloadUi): void => {
+      this.downloadBusy = state.busy;
+      this.downloadProgress = state.progress;
+      if (state.quality > 0) this.downloadQuality = state.quality;
+    },
+  }, (seconds: number): Promise<image.PixelMap | null> => this.seekPreviewCtl.captureAt(seconds));
   private xcController: XComponentController = new XComponentController();
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
   private dmEngine: PlayerDanmakuEngine = new PlayerDanmakuEngine(this.ctx);
@@ -285,13 +299,6 @@ export struct PlayerView {
     },
   });
   private hideTimer: number = -1;
-  private sourceIndex: number = 0;
-  private retryingSource: boolean = false;
-  private runtimeSources: Array<string> = [];
-  private runtimeAudioSources: Array<string> = [];
-  private audioSourceIndex: number = 0;
-  private lastAudioSyncAtMs: number = -1;
-  private audioDriftSamples: number = 0;
   /** 每 15 秒同步一次系统媒体进度。 */
   private lastSystemPlaybackBucket: number = -1;
   @State sponsorSegments: Array<SponsorBlockSegment> = [];
@@ -339,9 +346,9 @@ export struct PlayerView {
     },
     onFullLabel: (label: string, color: string): void => this.onSponsorFullLabel(label, color),
     seekTo: (seconds: number, precise: boolean): void => this.seekTo(seconds, precise),
-    muteImmediately: (): void => this.muteImmediately(),
-    restoreUserVolume: (): void => this.restoreUserVolume(),
-    isFirstFrameMuteArmed: (): boolean => this.firstFrameMuteArmed,
+    muteImmediately: (): void => this.playback.mute(),
+    restoreUserVolume: (): void => this.playback.restoreVolume(),
+    isFirstFrameMuteArmed: (): boolean => this.playback.isFrameMuted,
     toast: (message: string): void => this.toast(message),
     getBvid: (): string => this.bvid,
     getCid: (): number => this.cid,
@@ -351,15 +358,8 @@ export struct PlayerView {
   private dmListSource: BasicDataSource<DanmakuItem> = new BasicDataSource<DanmakuItem>();
   private dmFilterRuleSource: BasicDataSource<DmFilterRule> = new BasicDataSource<DmFilterRule>();
   private runtimeQualityOptions: Array<VideoQualityOption> = [];
-  private resumeAfterPrepare: number = -1;
-  private shouldPlayAfterPrepare: boolean = true;
-  // seek 采用“并发请求获胜”的串行状态机，由 PlayerSeekController 管理音视频双轨 seek 合并。
-  private seekCtl: PlayerSeekController | null = null;
-  private speedCtl: PlayerSpeedController | null = null;
   private gestureCtl: PlayerGestureController | null = null;
-  private onlineRequest: number = 0;
-  private surfaceId: string = '';
-  // 组件销毁后置位：所有跨 await 的换源/重建流程在 initPlayer 前据此放弃，避免泄漏无人释放的 AVPlayer。
+  // UI 异步回调的生命周期；原生双轨生命周期由 PlayerPlaybackSession 管理。
   private destroyed: boolean = false;
   // 高精度播放头（秒）：弹幕引擎与恢复定位使用；@State curTime 只做秒级 UI 刷新。
   private playheadSec: number = 0;
@@ -376,42 +376,150 @@ export struct PlayerView {
   @State seekPreviewSpriteXLen: number = 10;
   @State seekPreviewSpriteYLen: number = 10;
   private seekPreviewCtl: PlayerSeekPreviewController = new PlayerSeekPreviewController();
-  private volumeRestoreTimer: number = -1;
-  /** 音画对齐：音频等待视频播放头推进并定位到同一时刻后再 play。 */
-  private audioStartPending: boolean = false;
-  /** 音轨首播先对齐到视频播放头；等待本次 seekDone 后才允许出声。 */
-  private audioGateSeekPending: boolean = false;
-  /** 音轨门控 seek 的目标与看门狗；回调丢失时也必须恢复声音，不能永久静音。 */
-  private audioGateSeekTargetMs: number = -1;
-  private audioGateTimer: number = -1;
-  // 起播静音至首帧：play 时双轨音量置 0，首个 timeUpdate>50ms（首帧已上屏）恢复用户音量，
-  // seek 恢复时还会校验 timeUpdate 已落到目标附近，避免旧位置回调提前放声。
-  private firstFrameMuteArmed: boolean = false;
-  private firstFrameMuteTimer: number = -1;
-  private firstFrameMuteTargetMs: number = -1;
   /** 慢 seek 时用预览帧/封面挡住 Surface，直到新位置开始推进。 */
   @State seekRecoveryCoverVisible: boolean = false;
-  private seekRecoveryActive: boolean = false;
   private fullscreenExitPending: boolean = false;
   private fullscreenExitAnimationStarted: boolean = false;
   private fullscreenExitCancel: (() => void) | null = null;
-  // AVPlayer 创建本身是异步的：代次使离页/换源前发起的 createAVPlayer 结果失效并立即释放。
-  private playerCreateGeneration: number = 0;
-  private sourceRequests: RequestEpoch = new RequestEpoch();
-  private playerCreating: boolean = false;
-  /** 后台音乐模式：视频轨暂停，独立 DASH 音轨继续播放。 */
-  private backgroundAudioOnly: boolean = false;
-  /** 从后台音乐模式回到前台时，等待双轨 seek 完成并恢复视频。 */
-  private backgroundVideoResumePending: boolean = false;
-  /** 同一次 seek 超时最多重建一次，避免故障源形成释放/重建/重新下载死循环。 */
-  private seekRecoveryAttempts: number = 0;
-  // 已加载弹幕对应的 cid，避免 aboutToAppear 与换源触发的并发/重复加载。
-  private dmLoadedCid: number = -1;
-  // 弹幕分段加载状态（0 基段号）；分段首段失败时 dmSegFallback 置位，整体回退 XML 整段接口。
-  private dmSegLoaded: Set<number> = new Set<number>();
-  private dmSegLoading: Set<number> = new Set<number>();
-  private dmSegFallback: boolean = false;
-  /** 首帧后才发的增强请求是否已发出（换源时重置，让新 cid 同样排到新首帧之后）。 */
+  private playbackSourceGeneration: number = 0;
+  private playback: PlayerPlaybackSession = new PlayerPlaybackSession({
+    policy: (): PlayerPlaybackPolicy => ({ background: this.appInBackground, allowBackground: this.backgroundPlaybackEnabled,
+      pipKeepsAlive: this.pictureInPicture.keepsPlaybackAlive(), pipVisible: this.pictureInPicture.isVisibleOrStarting(),
+      muted: this.sponsorCtl.isMuted() }),
+    state: (state: PlayerPlaybackState): void => {
+      this.playing = state.playing;
+      this.prepared = state.prepared;
+      this.firstFrameShown = state.firstFrameShown;
+      this.errorText = state.errorText;
+      this.playheadSec = state.position;
+      if (state.seekLocked || Math.floor(this.curTime) !== Math.floor(state.position)) this.curTime = state.position;
+      this.duration = state.duration;
+      this.buffering = state.buffering;
+      this.seekLocked = state.seekLocked;
+      this.seekRecoveryCoverVisible = state.seekRecoveryCoverVisible;
+      this.qualityLoading = state.qualityLoading;
+      this.activeQuality = state.activeQuality;
+      this.runtimeQualityOptions = state.qualities;
+      this.previewPlayback = state.preview;
+      this.playbackRate = state.playbackRate;
+      this.holdSpeedActive = state.holdSpeedActive;
+    },
+    event: (event: PlayerPlaybackEvent): void => this.onPlaybackEvent(event),
+    progress: (seconds: number, background: boolean): boolean => this.onPlaybackProgress(seconds, background),
+  });
+
+  private playbackSource(): PlayerPlaybackSource {
+    const source: PlayerPlaybackSource = new PlayerPlaybackSource();
+    source.aid = this.aid; source.bvid = this.bvid; source.cid = this.cid; source.epId = this.epId;
+    source.version = this.sourceVersion;
+    source.urls = this.videoUrls.length > 0 ? this.videoUrls : (this.videoUrl.length > 0 ? [this.videoUrl] : []);
+    source.audioUrls = this.audioUrls;
+    source.qualities = this.qualityOptions;
+    source.quality = this.currentQuality;
+    source.initialSeek = this.initialSeekSeconds;
+    source.preview = this.previewPlayback;
+    return source;
+  }
+
+  private onPlaybackEvent(event: PlayerPlaybackEvent): void {
+    switch (event.kind) {
+      case 'clock.start': this.dmClock.start(); break;
+      case 'clock.pause': this.dmClock.pause(); break;
+      case 'clock.stop': this.dmClock.stop(false); break;
+      case 'rate': this.dmEngine.setPlaybackRate(event.value); break;
+      case 'started':
+        this.resumeTransitionActive = false;
+        this.applyPgcSkipIntroOnce();
+        this.onPlayingChange(true);
+        this.scheduleControlsHide();
+        this.ensureAVSession();
+        this.updateAVSessionPlaybackState();
+        Immersive.setKeepScreenOn(true);
+        break;
+      case 'playing':
+        this.onPlayingChange(true);
+        this.scheduleControlsHide();
+        this.updateAVSessionPlaybackState();
+        break;
+      case 'paused':
+        this.resumeTransitionActive = false;
+        this.showControls = true;
+        if (this.hideTimer >= 0) clearTimeout(this.hideTimer);
+        this.hideTimer = -1;
+        this.onPlayingChange(false);
+        this.updateAVSessionPlaybackState();
+        Immersive.setKeepScreenOn(false);
+        break;
+      case 'firstFrame': this.onFirstFrameShown(); this.scheduleDeferredLoads(); break;
+      case 'ended':
+        if (this.playMode === 2 && event.value === 0) this.endReplay();
+        else { this.clearSeekPreviewInteraction(); this.endScreenOpen = true; this.onEnded(); }
+        break;
+      case 'seek':
+        this.resetDanmakuAt(event.value);
+        this.onProgress(event.value);
+        this.updateSubtitle(event.value);
+        this.updateAVSessionPlaybackState();
+        break;
+      case 'seek.dispatch':
+        if (this.seekPreviewSeconds < 0 || Math.abs(this.seekPreviewSeconds * 1000 - event.value) > 1500) this.seekPreviewFrame = null;
+        break;
+      case 'seek.finished': this.seekTargetCtl.show(-1); break;
+      case 'foregroundSeek': this.onProgress(event.value); this.updateAVSessionPlaybackState(); break;
+      case 'backgroundAudio': Immersive.setKeepScreenOn(false); this.updateAVSessionPlaybackState(); break;
+      case 'resume': this.resumeTransitionActive = this.compactMode && !this.fullscreen; this.onResumeRequest(); break;
+      case 'closePanels': this.closeSettingPanels(); break;
+      case 'duration': this.updateAVSessionMetadata(); break;
+      case 'size':
+        this.realVideoWidth = event.value;
+        this.realVideoHeight = event.second;
+        this.pictureInPicture.sync();
+        this.onVideoSizeChange(event.value, event.second);
+        break;
+      case 'source': this.onPlayingChange(false); break;
+      case 'fatal': this.release(); break;
+    }
+  }
+
+  private onPlaybackProgress(seconds: number, background: boolean): boolean {
+    this.playheadSec = seconds;
+    if (!background) {
+      if (this.dmEngine.lastPlayerTime > 0 &&
+        (seconds < this.dmEngine.lastPlayerTime - 0.5 || seconds > this.dmEngine.lastPlayerTime + 2.5)) this.resetDanmakuAt(seconds);
+      this.dmEngine.lastPlayerTime = seconds;
+    }
+    const bucket: number = Math.floor(seconds / 15);
+    if (bucket !== this.lastSystemPlaybackBucket && seconds > 0.05) {
+      this.lastSystemPlaybackBucket = bucket;
+      this.updateAVSessionPlaybackState();
+      if (!background) this.reportContinueWatching(seconds);
+    }
+    if (this.timerFireAt > 0 && Date.now() >= this.timerFireAt) {
+      this.timerFireAt = 0;
+      this.timerMinutes = 0;
+      this.pauseForTimer();
+    }
+    this.onProgress(seconds);
+    if (!background) {
+      this.updateSubtitle(seconds);
+      this.spawnDanmaku(seconds);
+      this.auxiliary.prefetch(seconds);
+    }
+    return this.sponsorCtl.maybeSkipSponsor(seconds);
+  }
+
+  private auxiliary: PlayerAuxiliaryController = new PlayerAuxiliaryController({
+    isDestroyed: (): boolean => this.destroyed,
+    duration: (): number => this.videoDuration > 0 ? this.videoDuration : this.duration,
+    danmaku: (items: Array<DanmakuItem>, replace: boolean): void => {
+      this.dmEngine.lastPlayerTime = this.playheadSec;
+      if (replace) this.dmEngine.setList(items);
+      else this.dmEngine.appendSorted(items);
+    },
+    heatPoints: (items: Array<HotPoint>): void => { this.hotPoints = items; },
+    chapters: (items: Array<VideoChapter>): void => { this.chapters = items; },
+    online: (value: string): void => { this.onlineTotal = value; this.onOnlineCount(value); },
+  });
   private deferredLoadsDone: boolean = false;
   private deferredLoadTimer: number = -1;
 
@@ -435,72 +543,13 @@ export struct PlayerView {
     this.dmEngine.fullscreen = false;
     Immersive.setFullscreen(false);
     this.sponsorCategories = SponsorBlockStore.categories();
-    this.downloadBusy = VideoDownloadService.isActive();
-    this.downloadProgress = VideoDownloadService.currentProgress();
+    this.mediaExport.syncDownload();
     this.restoreDanmakuSettings();
     this.onDanmakuEngineReady(this.dmEngine);
     this.showControls = false;
     this.endScreenOpen = false;
     AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
     AppStorage.setOrCreate<number>('videoFullscreenExitRequest', 0);
-    if (this.seekCtl === null) {
-      this.seekCtl = new PlayerSeekController(
-        (): media.AVPlayer | null => this.player,
-        (): media.AVPlayer | null => this.audioPlayer,
-        (): boolean => this.prepared,
-        (): boolean => this.audioPrepared,
-        (targetMs: number, resumePlaying: boolean): void => {
-          this.preparePlayersForSeek(targetMs, resumePlaying);
-          this.dmClock.stop(false);
-        },
-        (on: boolean): void => {
-          this.buffering = on;
-          if (on) this.seekRecoveryCoverVisible = true;
-        },
-        (resume: boolean, targetMs: number): void => {
-          this.seekRecoveryAttempts = 0;
-          const video: media.AVPlayer | null = this.player;
-          const resumeAllowed: boolean = resume && this.canStartPlayback();
-          if (resumeAllowed && video !== null && this.prepared) {
-            try {
-              // seek 后恢复播放同样静音等目标帧：新位置开始推进前不放声。
-              const actualTargetMs: number = video.currentTime >= 0 ? video.currentTime : targetMs;
-              this.armFirstFrameMute(actualTargetMs, 1800);
-              if (video.state !== 'playing') video.play();
-              // 两轨已经在暂停态对齐，直接成对启动；再次门控 seek 会让音频落后视频一个定位耗时。
-              const audio: media.AVPlayer | null = this.audioPlayer;
-              if (audio !== null && this.audioPrepared) audio.play();
-            } catch (e) {
-            }
-          } else {
-            this.seekRecoveryActive = false;
-            this.seekRecoveryCoverVisible = false;
-            this.restoreUserVolume();
-          }
-          // seek 完成：解锁进度回写，让 timeUpdate 接管进度显示。
-          this.seekLocked = false;
-          this.seekTargetCtl.show(-1);
-          // 播放中的 seek 要等新位置首个 timeUpdate 再撤遮罩/缓冲；暂停态可直接显示定位帧。
-          if (!resumeAllowed) this.buffering = false;
-        },
-        (video: media.AVPlayer | null, targetMs: number): void => {
-          if (video !== null) this.recoverPlayersAfterSeekStall(video, targetMs);
-        },
-        (): Promise<void> | null => this.pendingAudioPausePlayer === this.audioPlayer ? this.pendingAudioPause : null,
-      );
-    }
-
-    if (this.speedCtl === null) {
-      this.speedCtl = new PlayerSpeedController(
-        (rate: number): void => {
-          this.applyTemporarySpeed(rate);
-        },
-        (active: boolean): void => {
-          this.holdSpeedActive = active;
-        },
-      );
-    }
-    
     if (this.gestureCtl === null) {
       this.gestureCtl = new PlayerGestureController(
         (value: number): void => {
@@ -537,38 +586,21 @@ export struct PlayerView {
         },
       );
     }
-if (this.runtimeSources.length === 0) {
-      this.runtimeSources = this.videoUrls.length > 0 ? this.videoUrls : (this.videoUrl.length > 0 ? [this.videoUrl] : []);
-      this.runtimeAudioSources = this.audioUrls;
-      this.runtimeQualityOptions = this.qualityOptions;
-      this.activeQuality = this.currentQuality;
-    }
+    this.playback.activate(this.playbackSource());
     this.danmakuOn = this.externalDanmakuOn;
     this.dmEngine.enabled = this.danmakuOn;
     Immersive.setKeepScreenOn(false);
     this.ensureAVSession();
-    if (this.initialSeekSeconds > 0) {
-      this.resumeAfterPrepare = this.initialSeekSeconds;
-      this.shouldPlayAfterPrepare = true;
-      this.curTime = this.initialSeekSeconds;
-      this.playheadSec = this.initialSeekSeconds;
-    }
     this.loadDanmaku();
     // 增强请求（空降/章节/拖动预览/在看人数）延到首帧后，别和首帧抢带宽；
     // 重新出现时按旧行为重取一次，避免使用上一次会话的陈旧数据。
     this.deferredLoadsDone = false;
     this.armDeferredLoads();
     this.loadGestureLevels();
-    // 被其他 NavDestination 覆盖后 AVPlayer 已释放；返回时在原进度重建并保持暂停。
-    if (this.player === null && this.surfaceId.length > 0) {
-      this.shouldPlayAfterPrepare = false;
-      this.buffering = true;
-      this.initPlayer();
-    }
   }
 
   onQualityOptionsChanged(): void {
-    if (this.qualityOptions.length > 0) this.runtimeQualityOptions = this.qualityOptions;
+    this.playback.updateQualities(this.qualityOptions);
   }
 
   onSponsorSettingsChanged(): void {
@@ -628,7 +660,7 @@ if (this.runtimeSources.length === 0) {
   }
 
   private updateAVSessionPlaybackState(): void {
-    this.syncPictureInPicture();
+    this.pictureInPicture.sync();
     const helper: PlayerAvSessionHelper | null = this.avSessionHelper;
     if (helper === null) return;
     helper.setPlaybackState(this.avSessionPlaybackState());
@@ -655,126 +687,11 @@ if (this.runtimeSources.length === 0) {
     this.videoReportDialog.open();
   }
 
-  private async startPictureInPicture(): Promise<void> {
-    if (this.pipStarting || this.pipActive || this.destroyed) return;
-    if (!this.prepared || this.player === null || this.surfaceId.length === 0) {
-      this.toast('请等待视频加载后再开启小窗');
-      return;
-    }
-    const generation: number = ++this.pipGeneration;
-    this.pipStarting = true;
-    try {
-      if (!pictureInPicture.isPiPEnabled()) {
-        this.toast('当前设备不支持小窗播放');
-        return;
-      }
-      this.closeSettingPanels();
-      let controller: pictureInPicture.PiPController | null = this.pipController;
-      if (controller === null) {
-        controller = await pictureInPicture.create({
-          context: this.getUIContext().getHostContext() as common.UIAbilityContext,
-          componentController: this.xcController,
-          navigationId: 'bili_main_navigation',
-          templateType: pictureInPicture.PiPTemplateType.VIDEO_PLAY,
-          contentWidth: this.realVideoWidth > 0 ? this.realVideoWidth : 16,
-          contentHeight: this.realVideoHeight > 0 ? this.realVideoHeight : 9,
-        });
-        if (generation !== this.pipGeneration || this.destroyed) return;
-        this.pipController = controller;
-        controller.setAutoStartEnabled(false);
-        controller.on('stateChange', (state: pictureInPicture.PiPState): void => {
-          if (this.pipController !== controller || this.destroyed) return;
-          if (state === pictureInPicture.PiPState.ABOUT_TO_START || state === pictureInPicture.PiPState.STARTED) {
-            this.pipActive = true;
-            this.pipRestoring = false;
-            this.syncPictureInPicture();
-          } else if (state === pictureInPicture.PiPState.ABOUT_TO_RESTORE) {
-            this.pipRestoring = true;
-          } else if (state === pictureInPicture.PiPState.STOPPED || state === pictureInPicture.PiPState.ERROR) {
-            this.pipActive = false;
-            this.pipStarting = false;
-            if (!this.appInBackground) this.pipRestoring = false;
-            if (!this.pipRestoring) this.onAppBackgroundChanged();
-          }
-        });
-        controller.on('controlEvent', (event: pictureInPicture.ControlEventParam): void => {
-          if (this.pipController !== controller || this.destroyed) return;
-          if (event.controlType === pictureInPicture.PiPControlType.VIDEO_PLAY_PAUSE && event.status !== undefined) {
-            const play: boolean = event.status === pictureInPicture.PiPControlStatus.PLAY;
-            if (play !== this.playing) this.togglePlay();
-            this.syncPictureInPicture();
-          }
-        });
-      }
-      await controller.startPiP();
-      if (generation !== this.pipGeneration || this.destroyed) {
-        // release 可能先于 startPiP 完成；完成后再次停止，避免孤立系统窗口。
-        await controller.stopPiP().catch(() => {});
-        return;
-      }
-      this.syncPictureInPicture();
-    } catch (e) {
-      if (generation === this.pipGeneration && !this.destroyed) {
-        this.pipActive = false;
-        this.toast('小窗启动失败，请检查系统画中画权限后重试');
-      }
-    } finally {
-      if (generation === this.pipGeneration) {
-        this.pipStarting = false;
-        if (!this.destroyed && this.appInBackground && !this.pipActive) this.onAppBackgroundChanged();
-      }
-    }
-  }
-
-  private syncPictureInPicture(): void {
-    if (this.pipController === null) return;
-    try {
-      this.pipController.updatePiPControlStatus(pictureInPicture.PiPControlType.VIDEO_PLAY_PAUSE,
-        this.playing ? pictureInPicture.PiPControlStatus.PLAY : pictureInPicture.PiPControlStatus.PAUSE);
-      if (this.realVideoWidth > 0 && this.realVideoHeight > 0) {
-        this.pipController.updateContentSize(this.realVideoWidth, this.realVideoHeight);
-      }
-    } catch (_) {}
-  }
-
-  private releasePictureInPicture(): void {
-    ++this.pipGeneration;
-    const controller: pictureInPicture.PiPController | null = this.pipController;
-    this.pipController = null;
-    this.pipActive = false;
-    this.pipStarting = false;
-    this.pipRestoring = false;
-    if (controller === null) return;
-    try {
-      controller.off('stateChange');
-      controller.off('controlEvent');
-      controller.setAutoStartEnabled(false);
-      controller.stopPiP().catch(() => {});
-    } catch (_) {}
-  }
-
   onAppBackgroundChanged(): void {
     if (this.destroyed) return;
-    if (this.appInBackground) {
-      this.dmClock.pause();
-      // 画中画异步启动期间也可能先收到后台通知，必须保留双轨播放。
-      if (this.pipActive || this.pipStarting || this.pipRestoring) return;
-      if (this.backgroundPlaybackEnabled) this.enterBackgroundAudioOnly();
-      else {
-        // 准备/换源/seek 中也要撤销自动恢复意图，不能只暂停已经 playing 的实例。
-        this.shouldPlayAfterPrepare = false;
-        if (this.seekCtl !== null) this.seekCtl.seekResumePlaying = false;
-        if (this.playing) this.togglePlay();
-        else this.cancelAudioGate();
-      }
-    } else {
-      // 从桌面/任务列表回到视频页时，系统不一定发出 ABOUT_TO_RESTORE。
-      // 主动交还画面给页面，并取消仍在启动的浮窗，避免窗口继续覆盖播放器。
-      if (this.pipActive || this.pipStarting || this.pipRestoring) this.releasePictureInPicture();
-      this.pipRestoring = false;
-      this.leaveBackgroundAudioOnly();
-      this.restoreForegroundDanmaku();
-    }
+    if (!this.appInBackground && this.pictureInPicture.keepsPlaybackAlive()) this.pictureInPicture.release();
+    this.playback.onBackgroundChanged();
+    if (!this.appInBackground) this.restoreForegroundDanmaku();
   }
 
   private restoreForegroundDanmaku(): void {
@@ -785,71 +702,10 @@ if (this.runtimeSources.length === 0) {
     if (this.playing && !this.seekLocked) this.spawnDanmaku(this.playheadSec);
   }
 
-  /** 每次实际起播都读取最新策略，覆盖 Watch 先到、prepare/seek/native 事件后到的时序。 */
-  private canStartPlayback(): boolean {
-    return !this.destroyed && (!this.appInBackground || this.backgroundPlaybackEnabled ||
-      this.pipActive || this.pipStarting || this.pipRestoring);
-  }
-
   private setBackgroundPlayback(next: boolean): void {
     AppStorage.setOrCreate<boolean>('backgroundPlaybackEnabled', next);
     AppTheme.persistBackgroundPlayback(next);
   }
-
-  private enterBackgroundAudioOnly(): void {
-    const video: media.AVPlayer | null = this.player;
-    const audio: media.AVPlayer | null = this.audioPlayer;
-    if (!this.playing || video === null || !this.prepared || audio === null || !this.audioPrepared) return;
-    this.backgroundAudioOnly = true;
-    this.backgroundVideoResumePending = false;
-    this.audioStartPending = false;
-    this.cancelAudioGate();
-    this.disarmFirstFrameMute();
-    try {
-      video.pause();
-      audio.play();
-      this.dmClock.pause();
-      Immersive.setKeepScreenOn(false);
-      this.updateAVSessionPlaybackState();
-      if (DEBUG) {
-        hilog.info(0x0000, 'BiliPlayback', 'background.audioOnly.enter position=%{public}d', audio.currentTime);
-      }
-    } catch (e) {
-      this.backgroundAudioOnly = false;
-      if (DEBUG) {
-        hilog.error(0x0000, 'BiliPlayback', 'background.audioOnly.enter.error %{public}s', String(e));
-      }
-    }
-  }
-
-  private leaveBackgroundAudioOnly(): void {
-    if (!this.backgroundAudioOnly) return;
-    const video: media.AVPlayer | null = this.player;
-    const audio: media.AVPlayer | null = this.audioPlayer;
-    const resume: boolean = this.playing;
-    const targetMs: number = audio !== null ? audio.currentTime : Math.floor(this.playheadSec * 1000);
-    this.backgroundAudioOnly = false;
-    this.backgroundVideoResumePending = resume;
-    if (video === null || !this.prepared) {
-      this.backgroundVideoResumePending = false;
-      return;
-    }
-    const targetSec: number = Math.max(0, targetMs / 1000);
-    this.playheadSec = targetSec;
-    this.curTime = targetSec;
-    this.onProgress(targetSec);
-    this.lastAudioSyncAtMs = -1;
-    this.seekLocked = true;
-    // 让统一 seek 状态机暂停并校准双轨；播放中的会话在 seekDone 后恢复视频与音频。
-    this.playing = false;
-    this.seekCtl?.request(targetMs, true, resume);
-    if (!resume) this.updateAVSessionPlaybackState();
-    if (DEBUG) {
-      hilog.info(0x0000, 'BiliPlayback',
-        'background.audioOnly.leave position=%{public}d resume=%{public}s', targetMs, String(resume));
-    }
-  }
-
 
   onSubtitlesChanged(): void {
     if (this.subtitleCtl === null) {
@@ -1021,73 +877,32 @@ if (this.runtimeSources.length === 0) {
 
   async onSourceVersionChanged(): Promise<void> {
     if (this.destroyed) return;
-    const request: number = this.sourceRequests.next();
-    this.qualityLoading = false;
+    const generation: number = ++this.playbackSourceGeneration;
+    ++this.exportMenuGeneration;
+    this.mediaExport.invalidate();
+    this.auxiliary.invalidate();
+    this.auxiliary.bind({ aid: this.aid, bvid: this.bvid, cid: this.cid });
+    this.pgcSkipTried = false;
+    this.hotPoints = [];
+    this.onlineTotal = '';
+    this.lastSystemPlaybackBucket = -1;
+    this.onOnlineCount('');
+    this.mediaExport.syncDownload();
     this.releaseSeekPreview();
-    this.invalidatePlayerCreation();
-    this.seekCtl?.cancel();
-    this.backgroundAudioOnly = false;
-    this.backgroundVideoResumePending = false;
-    this.audioStartPending = false;
-    this.cancelAudioGate();
-    this.cancelFirstFrameMute(false);
-    this.seekRecoveryActive = false;
-    this.seekRecoveryCoverVisible = false;
-    const oldPlayer: media.AVPlayer | null = this.player;
-    const oldAudioPlayer: media.AVPlayer | null = this.audioPlayer;
-    this.player = null;
-    this.audioPlayer = null;
-    this.prepared = false;
-    this.audioPrepared = false;
-    this.playing = false;
-    this.firstFrameShown = false;
-    this.firstRenderReady = false;
-    this.buffering = true;
-    this.errorText = '';
-    this.curTime = 0;
-    this.playheadSec = 0;
-    this.duration = 0;
-    this.sourceIndex = 0;
-    this.audioSourceIndex = 0;
-    this.resumeAfterPrepare = -1;
-    this.shouldPlayAfterPrepare = true;
-    this.runtimeSources = this.videoUrls.length > 0 ? this.videoUrls : (this.videoUrl.length > 0 ? [this.videoUrl] : []);
-    this.runtimeAudioSources = this.audioUrls;
-    this.runtimeQualityOptions = this.qualityOptions;
-    this.activeQuality = this.currentQuality;
     this.subtitleText = '';
     this.subtitleCtl?.reset();
-    // 换源立即作废旧视频的空降片段与章节：若等新首帧后的异步加载返回才清，
-    // 窗口期内新视频命中旧片段时间区间会误自动跳段、进度条短暂显示旧章节。
     this.sponsorCtl.invalidateForSourceChange();
     this.chapters = [];
     this.dmClock.stop(true);
     this.dmEngine.list = [];
     this.dmEngine.cursor = 0;
-    this.seekLocked = false;
     this.seekTargetCtl.show(-1);
     this.endScreenOpen = false;
-    this.onPlayingChange(false);
-    if (oldPlayer !== null) {
-      try {
-        await oldPlayer.release();
-      } catch (e) {
-      }
-    }
-    if (oldAudioPlayer !== null) {
-      try {
-        await oldAudioPlayer.release();
-      } catch (e) {
-      }
-    }
-    // await 期间组件可能已销毁（release 已执行），此时再 initPlayer 会泄漏无人释放的 AVPlayer。
-    if (this.destroyed || !this.sourceRequests.isCurrent(request)) return;
-    this.dmLoadedCid = -1;
+    await this.playback.replaceSource(this.playbackSource());
+    if (this.destroyed || generation !== this.playbackSourceGeneration) return;
     this.loadDanmaku();
-    // 换源后这些增强请求都属于新 cid，但同样要排在新首帧之后。
     this.deferredLoadsDone = false;
     this.armDeferredLoads();
-    await this.initPlayer();
   }
 
   onExternalDanmakuChanged(): void {
@@ -1114,15 +929,11 @@ if (this.runtimeSources.length === 0) {
     this.videoReportDialog = null;
     this.cancelDeferredLoadTimer();
     this.systemVolume.stop();
-    this.sourceRequests.invalidate();
-    this.invalidatePlayerCreation();
+    ++this.playbackSourceGeneration;
     AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
     this.endHoldSpeed();
     this.sponsorCtl.clearNoticeTimer();
-    this.resumeAfterPrepare = this.playheadSec;
-    this.shouldPlayAfterPrepare = false;
-    if (this.seekCtl !== null) this.seekCtl.seekResumePlaying = false;
-    this.muteImmediately();
+    this.playback.deactivate();
     this.release();
     Immersive.restoreWindowBrightness();
     // 销毁阶段写 @State 无效且高风险，只做资源清理；父组件通知保留但隔离异常。
@@ -1145,121 +956,7 @@ if (this.runtimeSources.length === 0) {
     if (seconds >= 0) this.seekTo(seconds, true);
   }
 
-  onPlaybackStopRequested(): void {
-    // 导航转场开始即静音并暂停；真正离开组件时再释放，返回后才能从原进度重建。
-    const video: media.AVPlayer | null = this.player;
-    const audio: media.AVPlayer | null = this.audioPlayer;
-    this.shouldPlayAfterPrepare = false;
-    if (this.seekCtl !== null) this.seekCtl.seekResumePlaying = false;
-    this.muteImmediately();
-    // 取消首帧门控，避免暂停期间的 seekDone 再把音频轨单独放出来。
-    this.audioStartPending = false;
-    this.cancelAudioGate();
-    this.cancelFirstFrameMute(false);
-    this.seekRecoveryActive = false;
-    this.seekRecoveryCoverVisible = false;
-    try {
-      if (video !== null && this.prepared) video.pause();
-      if (audio !== null && this.audioPrepared) audio.pause();
-    } catch (e) {
-      // 状态切换边界可能已由系统暂停。
-    }
-    this.playing = false;
-    this.showControls = true;
-    this.dmClock.pause();
-    this.onPlayingChange(false);
-    // pause 完成后恢复音量；播放器仍保持暂停，返回点击继续时声音正常。
-    if (this.volumeRestoreTimer >= 0) clearTimeout(this.volumeRestoreTimer);
-    this.volumeRestoreTimer = setTimeout(() => {
-      this.volumeRestoreTimer = -1;
-      if (this.destroyed) return;
-      try {
-        const restoreVolume: number = this.sponsorCtl.isMuted() ? 0 : 1;
-        if (this.player === video && video !== null && this.prepared) video.setVolume(restoreVolume);
-        if (this.audioPlayer === audio && audio !== null && this.audioPrepared) audio.setVolume(restoreVolume);
-      } catch (e) {
-      }
-    }, 100);
-  }
-
-  private muteImmediately(): void {
-    try {
-      if (this.player !== null && this.prepared) this.player.setVolume(0);
-      if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.setVolume(0);
-    } catch (e) {
-      // 播放器正处于切源/释放边界时无需重复处理。
-    }
-  }
-
-  private restoreUserVolume(): void {
-    try {
-      const restoreVolume: number = this.sponsorCtl.isMuted() ? 0 : 1;
-      if (this.player !== null && this.prepared) this.player.setVolume(restoreVolume);
-      if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.setVolume(restoreVolume);
-    } catch (e) {
-      // 播放器正处于切源/释放边界时无需重复处理。
-    }
-  }
-
-  /** 新 seek 接管播放器前清掉旧的首帧/音轨门控；旧回调不得恢复声音或误判完成。 */
-  private preparePlayersForSeek(targetMs: number, resumePlaying: boolean): void {
-    this.cancelFirstFrameMute(false);
-    this.cancelAudioGate();
-    this.audioDriftSamples = 0;
-    this.audioStartPending = false;
-    this.seekRecoveryActive = resumePlaying;
-    this.seekRecoveryCoverVisible = false;
-    // 快进按钮通常没有目标预览帧；旧拖动残留帧不能被拿来遮住本次 seek。
-    if (this.seekPreviewSeconds < 0 || Math.abs(this.seekPreviewSeconds * 1000 - targetMs) > 1500) {
-      this.seekPreviewFrame = null;
-    }
-    if (resumePlaying) this.muteImmediately();
-    if (DEBUG) {
-      hilog.info(0x0000, 'BiliPlayback',
-        'seek.dispatch target=%{public}d resume=%{public}s', targetMs, String(resumePlaying));
-    }
-  }
-
-  /** 起播/恢复播放前调用：双轨静音并等目标附近的首个 timeUpdate，超时后安全恢复。 */
-  private armFirstFrameMute(targetMs: number = -1, fallbackMs: number = 900): void {
-    if (this.firstFrameMuteTimer >= 0) clearTimeout(this.firstFrameMuteTimer);
-    this.firstFrameMuteArmed = true;
-    this.firstFrameMuteTargetMs = targetMs;
-    this.muteImmediately();
-    this.firstFrameMuteTimer = setTimeout(() => {
-      this.firstFrameMuteTimer = -1;
-      this.disarmFirstFrameMute();
-    }, fallbackMs);
-  }
-
-  private cancelFirstFrameMute(restore: boolean): void {
-    if (this.firstFrameMuteTimer >= 0) {
-      clearTimeout(this.firstFrameMuteTimer);
-      this.firstFrameMuteTimer = -1;
-    }
-    this.firstFrameMuteArmed = false;
-    this.firstFrameMuteTargetMs = -1;
-    if (restore) this.restoreUserVolume();
-  }
-
-  /** 过滤 seek 前排队的旧 timeUpdate；关键帧定位允许与请求位置存在一个 GOP 的偏差。 */
-  private canReleaseFrameMute(timeMs: number): boolean {
-    if (!this.firstFrameMuteArmed) return false;
-    if (this.firstFrameMuteTargetMs < 0) return timeMs > 50;
-    return Math.abs(timeMs - this.firstFrameMuteTargetMs) <= 1200;
-  }
-
-  /** 首帧已上屏（或兜底超时）：恢复用户手势音量。未武装时不写音量，避免与离页临时静音互踩。 */
-  private disarmFirstFrameMute(): void {
-    if (!this.firstFrameMuteArmed) return;
-    this.cancelFirstFrameMute(true);
-    if (this.seekRecoveryActive) {
-      this.seekRecoveryActive = false;
-      this.seekRecoveryCoverVisible = false;
-      this.buffering = false;
-      if (this.playing) this.dmClock.start();
-    }
-  }
+  onPlaybackStopRequested(): void { this.playback.stopForNavigation(); }
 
   private changeSponsorMode(category: string, mode: number): void {
     SponsorBlockStore.setMode(category, mode);
@@ -1441,131 +1138,13 @@ if (this.runtimeSources.length === 0) {
     this.toast('已跳过片头');
   }
 
-  async loadVideoHeatPoints(): Promise<void> {
-    const aid: number = this.aid;
-    const bvid: string = this.bvid;
-    const cid: number = this.cid;
-    try {
-      const points: Array<HotPoint> = await BiliApi.getVideoHeatPoints(aid, bvid, cid);
-      if (this.destroyed || this.aid !== aid || this.bvid !== bvid || this.cid !== cid) return;
-      this.hotPoints = points;
-    } catch (e) {
-      // 高能数据失败不影响播放与进度条。
-    }
-  }
-
-  async loadVideoChapters(): Promise<void> {
-    const aid: number = this.aid;
-    const bvid: string = this.bvid;
-    const cid: number = this.cid;
-    try {
-      const chapters: Array<VideoChapter> = await BiliApi.getVideoChapters(aid, bvid, cid);
-      if (this.destroyed || this.aid !== aid || this.bvid !== bvid || this.cid !== cid) return;
-      this.chapters = chapters;
-    } catch (e) {
-      // 章节请求失败时保留普通进度条，不影响播放。
-    }
-  }
-
   async loadDanmaku(): Promise<void> {
-    // 同一 cid 不重复加载；先占位再 await 的写法同时挡住 aboutToAppear 与换源触发的并发加载。
-    const cid: number = this.cid;
-    if (this.dmLoadedCid === cid) return;
-    this.dmLoadedCid = cid;
-    this.dmSegLoaded.clear();
-    this.dmSegLoading.clear();
-    this.dmSegFallback = false;
-    this.pgcSkipTried = false;
-    this.dmSegLoading.add(0);
-    try {
-      // 优先 protobuf 分段接口（每 6 分钟一段）；首段失败才回退 XML 整段。
-      const first: Array<DanmakuItem> | null = await BiliApi.getDanmakuSeg(cid, this.aid, 1);
-      if (this.destroyed || this.dmLoadedCid !== cid) return;
-      if (first === null) {
-        this.dmSegFallback = true;
-        const list: Array<DanmakuItem> = await BiliApi.getDanmaku(cid);
-        if (this.destroyed || this.dmLoadedCid !== cid) return;
-        list.sort((a: DanmakuItem, b: DanmakuItem) => a.time - b.time);
-        this.dmEngine.lastPlayerTime = this.playheadSec;
-        this.dmEngine.setList(list);
-        return;
-      }
-      this.dmSegLoaded.add(0);
-      this.mergeDanmakuSegment(first);
-      // 首屏并行预取第 2 段；时长未知时不限制段数，空段兜底。
-      const total: number = this.danmakuSegmentTotal();
-      if (total !== 1) {
-        this.ensureDanmakuSegment(1);
-      }
-    } catch (e) {
-      // 失败后允许下一次进入/换源重新请求，而不是把 cid 永久标记为已加载。
-      if (!this.destroyed && this.dmLoadedCid === cid) this.dmLoadedCid = -1;
-    } finally {
-      this.dmSegLoading.delete(0);
-    }
+    this.auxiliary.bind({ aid: this.aid, bvid: this.bvid, cid: this.cid });
+    await this.auxiliary.loadDanmaku();
   }
 
-  /** 弹幕分段总数：时长未知时返回 0，表示不限制段数（靠空段响应兜底）。 */
-  private danmakuSegmentTotal(): number {
-    const d: number = this.videoDuration > 0 ? this.videoDuration : this.duration;
-    return d > 0 ? Math.ceil(d / DM_SEGMENT_SECONDS) : 0;
-  }
-
-  /** 分段弹幕合入全局有序列表；游标重定位到播放头之后，避免重放已喷出的弹幕。 */
-  private mergeDanmakuSegment(items: Array<DanmakuItem>): void {
-    this.dmEngine.lastPlayerTime = this.playheadSec;
-    this.dmEngine.appendSorted(items);
-    if (DEBUG) hilog.info(0x0000, 'BiliPlayback',
-      'danmaku.segment cid=%{public}d added=%{public}d total=%{public}d',
-      this.cid, items.length, this.dmEngine.list.length);
-  }
-
-  /** 拉取指定分段（0 基）；已加载/加载中自动去重，失败不标记，播放头再次经过时重试。 */
-  private ensureDanmakuSegment(index: number): void {
-    if (this.dmSegFallback || this.cid <= 0 || index < 0) return;
-    const total: number = this.danmakuSegmentTotal();
-    if (total > 0 && index >= total) return;
-    if (this.dmSegLoaded.has(index) || this.dmSegLoading.has(index)) return;
-    this.dmSegLoading.add(index);
-    const cid: number = this.cid;
-    BiliApi.getDanmakuSeg(cid, this.aid, index + 1)
-      .then((items: Array<DanmakuItem> | null) => {
-        this.dmSegLoading.delete(index);
-        if (this.destroyed || this.dmLoadedCid !== cid) return;
-        if (items === null) return;
-        this.dmSegLoaded.add(index);
-        this.mergeDanmakuSegment(items);
-      })
-      .catch(() => {
-        this.dmSegLoading.delete(index);
-      });
-  }
-
-  /** 播放头推进时的分段预取：进入新段或逼近段尾（提前 30 秒）时拉取下一段。 */
-  private prefetchDanmakuSegments(now: number): void {
-    if (this.dmSegFallback || this.cid <= 0 || this.dmLoadedCid !== this.cid) return;
-    const current: number = Math.floor(now / DM_SEGMENT_SECONDS);
-    this.ensureDanmakuSegment(current);
-    if (now + 30 >= (current + 1) * DM_SEGMENT_SECONDS) {
-      this.ensureDanmakuSegment(current + 1);
-    }
-  }
-
-  // XComponent 就绪后初始化播放器
-  onSurfaceReady(): void {
-    this.surfaceId = this.xcController.getXComponentSurfaceId();
-    this.initPlayer();
-  }
-
-  /** AVPlayer 进入 playing 不等于 Surface 已有画面；两项都满足后才交叉淡出封面。 */
-  private revealFirstFrameIfReady(): void {
-    if (!this.firstFrameShown && this.playing && this.firstRenderReady) {
-      this.firstFrameShown = true;
-      this.onFirstFrameShown();
-      // 首帧已经出画，增强请求现在才允许占用带宽。
-      this.scheduleDeferredLoads();
-    }
-  }
+  // XComponent 的 Surface 标识是 UI 唯一传给播放会话的原生句柄。
+  onSurfaceReady(): void { this.playback.setSurface(this.xcController.getXComponentSurfaceId()); }
 
   /** 排定增强请求：首帧事件或 DEFERRED_LOAD_DELAY_MS 兜底，谁先到谁触发。 */
   private armDeferredLoads(): void {
@@ -1590,742 +1169,17 @@ if (this.runtimeSources.length === 0) {
     this.deferredLoadsDone = true;
     this.cancelDeferredLoadTimer();
     this.sponsorCtl.loadSponsorSegments();
-    this.loadVideoChapters();
-    this.loadVideoHeatPoints();
+    this.auxiliary.loadChapters();
+    this.auxiliary.loadHeatPoints();
     this.seekPreviewCtl.preload(this.aid, this.bvid, this.cid);
-    this.loadOnlineTotal();
+    this.auxiliary.loadOnline();
   }
 
-  async initPlayer(): Promise<void> {
-    if (this.destroyed || this.player !== null || this.playerCreating) {
-      return;
-    }
-    const generation: number = ++this.playerCreateGeneration;
-    this.playerCreating = true;
-    try {
-      const p: media.AVPlayer = await media.createAVPlayer();
-      if (this.destroyed || generation !== this.playerCreateGeneration) {
-        try {
-          await p.release();
-        } catch (e) {
-        }
-        return;
-      }
-      this.player = p;
-      this.playerCreating = false;
-      // 官方状态机模式：先挂监听再 setMediaSource，initialized 后再 prepare
-      p.on('stateChange', (state: media.AVPlayerState) => {
-        if (this.player !== p) return;
-        if (state === 'initialized') {
-          p.surfaceId = this.surfaceId;
-          p.prepare();
-        } else if (state === 'prepared') {
-          this.prepared = true;
-          this.errorText = '';
-          this.applyVideoScaleType();
-          this.reportVideoSize(p);
-          try {
-            p.setPlaybackRate(this.playbackRate);
-            p.setVolume(this.sponsorCtl.isMuted() ? 0 : 1);
-          } catch (e) {
-            // 某些视频解码器不支持非常用倍速，保持 1x 即可。
-          }
-          this.tryStartPreparedPlayers();
-        } else if (state === 'playing') {
-          // play() 已提交后才进后台时，原生 playing 事件仍可能迟到。
-          if (!this.canStartPlayback()) {
-            this.shouldPlayAfterPrepare = false;
-            this.playing = false;
-            this.showControls = true;
-            this.buffering = false;
-            this.cancelAudioGate();
-            this.cancelFirstFrameMute(true);
-            try { p.pause().catch(() => {}); } catch (e) {}
-            const audio: media.AVPlayer | null = this.audioPlayer;
-            if (audio !== null && this.audioPrepared && audio.state === 'playing') {
-              try { audio.pause().catch(() => {}); } catch (e) {}
-            }
-            this.dmClock.pause();
-            this.onPlayingChange(false);
-            this.updateAVSessionPlaybackState();
-            Immersive.setKeepScreenOn(false);
-            return;
-          }
-          this.backgroundVideoResumePending = false;
-          this.resumeTransitionActive = false;
-          this.playing = true;
-          this.applyPgcSkipIntroOnce();
-          this.revealFirstFrameIfReady();
-          this.onPlayingChange(true);
-          this.scheduleControlsHide();
-          this.dmClock.start();
-          this.buffering = false;
-          this.ensureAVSession();
-          this.updateAVSessionPlaybackState();
-          Immersive.setKeepScreenOn(true);
-        } else if (state === 'paused' && (this.backgroundAudioOnly || this.backgroundVideoResumePending)) {
-          // 后台音乐模式只暂停视频轨；逻辑播放态和 AVSession 仍由音频轨维持。
-          this.dmClock.pause();
-          Immersive.setKeepScreenOn(false);
-        } else if (state === 'paused' && ((this.seekCtl?.seekInFlight ?? false) || this.seekRecoveryActive)) {
-          // seek 内部暂停只是解码状态切换，不能把逻辑播放态、系统媒体会话和控制栏改成“用户暂停”。
-          this.dmClock.pause();
-        } else if (state === 'paused' || state === 'completed') {
-          this.resumeTransitionActive = false;
-          this.playing = false;
-          this.showControls = true;
-          if (this.hideTimer >= 0) {
-            clearTimeout(this.hideTimer);
-            this.hideTimer = -1;
-          }
-          this.onPlayingChange(false);
-          this.dmClock.pause();
-          this.updateAVSessionPlaybackState();
-          Immersive.setKeepScreenOn(false);
-            if (state === 'completed') {
-            if (this.playMode === 2) {
-              // 单集循环：从头自动重播，不出现结束画面。
-              this.endReplay();
-            } else {
-              // 自然播完：在播放区弹出「推荐/重播/分享」结束画面（覆盖整个视频播放区，不切全屏）。
-              this.clearSeekPreviewInteraction();
-              this.endScreenOpen = true;
-              this.onEnded();
-            }
-          }
-        }
-      });
-      // 官方首帧事件：stateChange('playing') 只表示播放器状态，不能证明 Surface 已经出画。
-      p.on('startRenderFrame', () => {
-        if (this.player !== p) return;
-        this.firstRenderReady = true;
-        this.revealFirstFrameIfReady();
-        this.tryStartGatedAudio();
-      });
-      p.on('playbackRateDone', (rate: number) => {
-        if (this.player !== p || !DEBUG) return;
-        hilog.info(0x0000, 'BiliPlayback', 'video.rate.done rate=%{public}s position=%{public}d',
-          String(rate), p.currentTime);
-      });
-      p.onMetricsEvent((events: Array<media.AVMetricsEvent>) => {
-        if (this.player !== p || !DEBUG) return;
-        for (let i: number = 0; i < events.length; i++) {
-          // 仅记事件类型和播放位置，不输出地址、鉴权参数或完整事件载荷。
-          hilog.info(0x0000, 'BiliPlayback', 'video.metric type=%{public}d position=%{public}d',
-            events[i].event, events[i].playbackPosition);
-        }
-      });
-      p.on('error', (err: BusinessError) => {
-        this.handlePlayerError(p, err.message);
-      });
-      p.on('seekDone', (position: number) => {
-        this.onVideoSeekDone(p, position);
-      });
-      p.on('timeUpdate', (t: number) => {
-        if (this.player !== p || this.seekLocked) return;
-        // 起播/seek 静音恢复点：seek 后必须等播放头落到目标附近，不能让旧位置回调提前放声。
-        if (this.canReleaseFrameMute(t)) this.disarmFirstFrameMute();
-        // AVPlayer 上报毫秒，播放器 UI/弹幕内部统一使用秒。
-        const nextTime: number = t / 1000;
-        if (this.dmEngine.lastPlayerTime > 0 && (nextTime < this.dmEngine.lastPlayerTime - 0.5 || nextTime > this.dmEngine.lastPlayerTime + 2.5)) {
-          this.resetDanmakuAt(nextTime);
-        }
-        this.dmEngine.lastPlayerTime = nextTime;
-        this.playheadSec = nextTime;
-        // 音画对齐：视频播放头开始推进后，将音频先定位到同一时间点再启动。
-        if (this.audioStartPending && nextTime > 0.05) {
-          this.tryStartGatedAudio();
-        }
-        // seek 锁定时 AVPlayer 仍会上报 seek 前的位置，忽略这些旧回写，让进度条钉在目标值。
-        if (!this.seekLocked && Math.floor(nextTime) !== Math.floor(this.curTime)) this.curTime = nextTime;
-        const systemPlaybackBucket: number = Math.floor(nextTime / 15);
-        if (systemPlaybackBucket !== this.lastSystemPlaybackBucket &&
-          this.resumeAfterPrepare <= 0 && nextTime > 0.05) {
-          this.lastSystemPlaybackBucket = systemPlaybackBucket;
-          this.updateAVSessionPlaybackState();
-          this.reportContinueWatching(nextTime);
-        }
-        if (this.timerFireAt > 0 && Date.now() >= this.timerFireAt) {
-          this.timerFireAt = 0;
-          this.timerMinutes = 0;
-          this.pauseForTimer();
-        }
-        this.onProgress(nextTime);
-        this.updateSubtitle(nextTime);
-        this.spawnDanmaku(nextTime);
-        // 弹幕分段预取：进入新段或逼近段尾时拉取下一段（XML 兜底模式下为空操作）。
-        this.prefetchDanmakuSegments(nextTime);
-        if (this.sponsorCtl.maybeSkipSponsor(nextTime)) return;
-        this.checkAudioSync(t);
-      });
-      p.on('durationUpdate', (d: number) => {
-        this.duration = d / 1000;
-        this.updateAVSessionMetadata();
-      });
-      let bufferingAudioPause: Promise<void> | null = null;
-      let bufferingAudioGeneration: number = -1;
-      let bufferGeneration: number = 0;
-      let speedBufferTimer: number = -1;
-      const pauseForBuffer = (): void => {
-        // 用户定位已经接管双轨，不能再排入一个会迟到的缓冲暂停。
-        if (this.seekLocked || (this.seekCtl?.seekInFlight ?? true)) return;
-        // seek 的短暂缓冲由延迟提示管理，快速定位不闪 loading。
-        if ((this.seekCtl?.seekInFlight ?? true) === false) this.buffering = true;
-        this.dmClock.pause();
-        const audio: media.AVPlayer | null = this.audioPlayer;
-        if (audio !== null && this.audioPrepared && this.playing &&
-          !(this.seekCtl?.seekInFlight ?? true) && bufferingAudioPause === null) {
-          this.cancelAudioGate();
-          bufferingAudioGeneration = this.audioGateGeneration;
-          const pauseGeneration: number = bufferingAudioGeneration;
-          audio.setVolume(0);
-          bufferingAudioPause = this.pauseAudioForSync(audio).catch(() => {
-            if (this.player === p && this.audioPlayer === audio &&
-              pauseGeneration === this.audioGateGeneration) {
-              this.handleAudioPlayerError(audio, '缓冲暂停失败');
-            }
-          });
-        }
-      };
-      p.on('bufferingUpdate', (infoType: media.BufferingInfoType, value: number) => {
-        if (this.player !== p || this.backgroundAudioOnly) return;
-        if (infoType === media.BufferingInfoType.BUFFERING_START) {
-          bufferGeneration++;
-          if (DEBUG) hilog.info(0x0000, 'BiliPlayback',
-            'buffer.start hold=%{public}s seek=%{public}s position=%{public}d',
-            String(this.holdSpeedActive), String(this.seekLocked), p.currentTime);
-          // 切速时短暂重新排帧不立即暂停音轨；真正持续的缓冲最多延迟 180ms 处理。
-          if (Date.now() < this.speedTransitionUntilMs) {
-            if (speedBufferTimer < 0) {
-              speedBufferTimer = setTimeout(() => {
-                speedBufferTimer = -1;
-                if (this.player === p && !this.backgroundAudioOnly) pauseForBuffer();
-              }, 180);
-            }
-          } else {
-            pauseForBuffer();
-          }
-        } else if (infoType === media.BufferingInfoType.BUFFERING_END) {
-          if (speedBufferTimer >= 0) {
-            clearTimeout(speedBufferTimer);
-            speedBufferTimer = -1;
-          }
-          const completedBuffer: number = bufferGeneration;
-          const completedAudioGeneration: number = bufferingAudioGeneration;
-          const paused: Promise<void> | null = bufferingAudioPause;
-          bufferingAudioPause = null;
-          if (paused !== null) {
-            paused.then(() => {
-              if (this.player !== p || completedBuffer !== bufferGeneration || !this.playing ||
-                completedAudioGeneration !== this.audioGateGeneration ||
-                this.backgroundAudioOnly || this.seekLocked) return;
-              // 首帧恢复期间仍可能 buffering；保留待启动标记，后续 timeUpdate 再尝试。
-              this.gateAudioStart();
-              this.tryStartGatedAudio();
-            });
-          }
-          // seek 尚未完成音轨对齐时不能提前隐藏 loading 或恢复弹幕时钟。
-          if ((this.seekCtl?.seekInFlight ?? true) === false && !this.seekRecoveryActive) {
-            this.buffering = false;
-            this.dmClock.start();
-          }
-        }
-      });
-      p.on('videoSizeChange', (width: number, height: number) => {
-        if (this.player !== p || height <= 0 || width <= 0) return;
-        this.realVideoWidth = width;
-        this.realVideoHeight = height;
-        this.syncPictureInPicture();
-        this.onVideoSizeChange(width, height);
-      });
-      const sourceUrl: string = this.currentSourceUrl();
-      if (sourceUrl.length === 0) {
-        this.errorText = '无法播放：播放地址为空';
-        await p.release();
-        this.player = null;
-        return;
-      }
-      const source: media.MediaSource = media.createMediaSourceWithUrl(sourceUrl, this.playbackHeaders());
-      // 音轨初始化不再 await：音/视频两条握手并行，起播耗时从“串行之和”降为“较慢一路”。
-      // tryStartPreparedPlayers 会等到两条轨都 prepared 才开播，并行不会引入竞态。
-      if (this.runtimeAudioSources.length > 0) {
-        this.initAudioPlayer(generation).catch(() => {
-          // initAudioPlayer 内部已把 setMediaSource 失败收敛到 handleAudioPlayerError；
-          // 这里只兜底清理残留引用，防止 tryStartPreparedPlayers 因音轨未就绪而永久等待。
-          // generation 已变说明有新一轮重建在途，动它的引用反而会破坏新初始化。
-          if (this.destroyed || generation !== this.playerCreateGeneration || this.retryingSource) return;
-          if (this.audioPlayer !== null && !this.audioPrepared && this.errorText.length === 0) {
-            this.audioPlayer = null;
-            this.tryStartPreparedPlayers();
-          }
-        });
-      }
-      if (this.destroyed || generation !== this.playerCreateGeneration || this.player !== p) return;
-      await p.setMediaSource(source, this.videoPlaybackStrategy(this.resumeAfterPrepare <= 0 && this.initialSeekSeconds <= 0));
-    } catch (e) {
-      if (generation === this.playerCreateGeneration) this.playerCreating = false;
-      if (this.destroyed || generation !== this.playerCreateGeneration) return;
-      const msg: string = (e as Error)?.message ?? JSON.stringify(e);
-      const failedPlayer: media.AVPlayer | null = this.player;
-      if (failedPlayer !== null && this.sourceIndex + 1 < this.sourceCount()) {
-        await this.handlePlayerError(failedPlayer, msg);
-        return;
-      }
-      this.errorText = '无法播放：' + msg.substring(0, 120);
-    }
-  }
-
-  private sourceCount(): number {
-    return this.runtimeSources.length;
-  }
-
-  private currentSourceUrl(): string {
-    return PlayerPlaybackConfig.sourceUrl(this.runtimeSources, this.sourceIndex);
-  }
-
-  private currentAudioSourceUrl(): string {
-    return PlayerPlaybackConfig.sourceUrl(this.runtimeAudioSources, this.audioSourceIndex);
-  }
-
-  private videoPlaybackStrategy(showFirstFrame: boolean = true): media.PlaybackStrategy {
-    return PlayerPlaybackConfig.videoStrategy(showFirstFrame);
-  }
-
-  private audioPlaybackStrategy(): media.PlaybackStrategy {
-    return PlayerPlaybackConfig.audioStrategy();
-  }
-
-  private playbackHeaders(): Record<string, string> {
-    return PlayerPlaybackConfig.playbackHeaders();
-  }
-
-  private async initAudioPlayer(generation: number): Promise<void> {
-    if (this.audioPlayer !== null || this.runtimeAudioSources.length === 0) return;
-    const sourceUrl: string = this.currentAudioSourceUrl();
-    if (sourceUrl.length === 0) return;
-    const audio: media.AVPlayer = await media.createAVPlayer();
-    if (this.destroyed || generation !== this.playerCreateGeneration || this.player === null) {
-      try {
-        await audio.release();
-      } catch (e) {
-      }
-      return;
-    }
-    this.audioPlayer = audio;
-    this.audioPrepared = false;
-    audio.on('stateChange', (state: media.AVPlayerState) => {
-      if (this.audioPlayer !== audio) return;
-      if (state === 'initialized') {
-        audio.prepare();
-      } else if (state === 'prepared') {
-        this.audioPrepared = true;
-        try {
-          audio.setPlaybackRate(this.playbackRate);
-          audio.setVolume(this.sponsorCtl.isMuted() ? 0 : 1);
-        } catch (e) {
-          // 倍速不被音频解码器支持时，设置入口会统一回退到 1x。
-        }
-        this.tryStartPreparedPlayers();
-      } else if (state === 'playing' && !this.canStartPlayback()) {
-        // 音轨 play 的原生完成也可能晚于后台通知，单独阻止迟到的声音。
-        this.cancelAudioGate();
-        try { audio.pause().catch(() => {}); } catch (e) {}
-      } else if (state === 'completed' && this.backgroundAudioOnly) {
-        this.playing = false;
-        this.showControls = true;
-        this.onPlayingChange(false);
-        this.updateAVSessionPlaybackState();
-        this.clearSeekPreviewInteraction();
-        this.endScreenOpen = true;
-        this.onEnded();
-      }
-    });
-    audio.on('playbackRateDone', (rate: number) => {
-      if (this.audioPlayer !== audio || !DEBUG) return;
-      hilog.info(0x0000, 'BiliPlayback', 'audio.rate.done rate=%{public}s position=%{public}d',
-        String(rate), audio.currentTime);
-    });
-    audio.on('error', (err: BusinessError) => {
-      this.handleAudioPlayerError(audio, err.message);
-    });
-    audio.on('seekDone', (position: number) => {
-      // 用户 seek 与首帧音频对齐共用 AVPlayer 的 seekDone。连续定位时，旧门控的
-      // 回调可能晚于新一轮双轨 seek；在途 seek 必须优先消费回调，避免音轨永久暂停。
-      if (this.seekCtl?.seekInFlight ?? false) {
-        this.onAudioSeekDone(audio, position);
-        return;
-      }
-      if (this.audioPlayer === audio && this.audioGateSeekPending) {
-        // 只消费门控自己发出的 seek；用户 seek 的回调交给 PlayerSeekController。
-        if (this.audioGateSeekTargetMs < 0 || Math.abs(position - this.audioGateSeekTargetMs) > 500) return;
-        this.finishGatedAudioStart(audio);
-        return;
-      }
-      this.onAudioSeekDone(audio, position);
-    });
-    audio.on('timeUpdate', (timeMs: number) => {
-      if (this.audioPlayer !== audio || !this.backgroundAudioOnly) return;
-      const nextTime: number = timeMs / 1000;
-      this.playheadSec = nextTime;
-      if (Math.floor(nextTime) !== Math.floor(this.curTime)) this.curTime = nextTime;
-      this.onProgress(nextTime);
-      const systemPlaybackBucket: number = Math.floor(nextTime / 15);
-      if (systemPlaybackBucket !== this.lastSystemPlaybackBucket) {
-        this.lastSystemPlaybackBucket = systemPlaybackBucket;
-        this.updateAVSessionPlaybackState();
-      }
-      if (this.timerFireAt > 0 && Date.now() >= this.timerFireAt) {
-        this.timerFireAt = 0;
-        this.timerMinutes = 0;
-        this.pauseForTimer();
-      }
-      // 后台听视频时视频轨已暂停，SponsorBlock 的跳段/静音只能由音频轨进度回调驱动；
-      // skip 触发的 seekTo 走双轨定位，与前台行为一致。
-      this.sponsorCtl.maybeSkipSponsor(nextTime);
-    });
-    try {
-      const source: media.MediaSource = media.createMediaSourceWithUrl(sourceUrl, this.playbackHeaders());
-      await audio.setMediaSource(source, this.audioPlaybackStrategy());
-    } catch (e) {
-      // setMediaSource 失败可能只走 rejection 不发 error 事件；必须收敛到统一兜底，
-      // 否则 audioPlayer 残留且 audioPrepared 恒为 false，tryStartPreparedPlayers 永久等待。
-      await this.handleAudioPlayerError(audio, '音轨资源加载失败');
-    }
-  }
-
-  private speedTransitionUntilMs: number = 0;
-  private audioSyncRate: number = -1;
-  private audioSyncPlayer: media.AVPlayer | null = null;
-
-  private resetAudioSyncRate(): void {
-    const audio: media.AVPlayer | null = this.audioPlayer;
-    if (audio !== null && audio === this.audioSyncPlayer && this.audioSyncRate >= 0 && this.audioPrepared) {
-      try { audio.setPlaybackRate(this.playbackRate); } catch (e) {}
-    }
-    this.audioSyncRate = -1;
-    this.audioSyncPlayer = null;
-  }
-
-  private checkAudioSync(videoTimeMs: number): void {
-    // 两轨倍速切换异步生效；稳定期间不依据瞬时钟差再次切速。
-    if (Date.now() < this.speedTransitionUntilMs) {
-      this.audioDriftSamples = 0;
-      return;
-    }
-    const audio: media.AVPlayer | null = this.audioPlayer;
-    if (this.holdSpeedActive) {
-      // 临时倍速由手势控制器接管，不能在 timeUpdate 中改回设置页倍速。
-      this.audioSyncRate = -1;
-      this.audioSyncPlayer = null;
-      this.audioDriftSamples = 0;
-      return;
-    }
-    if (!this.playing || this.backgroundAudioOnly || this.buffering || this.firstFrameMuteArmed ||
-      this.audioStartPending || this.audioGateSeekPending || this.seekLocked ||
-      (this.seekCtl?.seekInFlight ?? true) || audio === null || !this.audioPrepared || audio.state !== 'playing') {
-      this.audioDriftSamples = 0;
-      this.resetAudioSyncRate();
-      return;
-    }
-    const driftMs: number = audio.currentTime - (this.player?.currentTime ?? videoTimeMs);
-    if (Math.abs(driftMs) <= 100) {
-      this.audioDriftSamples = 0;
-      this.resetAudioSyncRate();
-      return;
-    }
-    // 350ms 才开始调整，回到 100ms 内停止，避免时钟回调抖动导致来回切速。
-    if (Math.abs(driftMs) <= 350 && this.audioSyncRate < 0) {
-      this.audioDriftSamples = 0;
-      return;
-    }
-    this.audioDriftSamples++;
-    const nowMs: number = Date.now();
-    if (this.audioDriftSamples < 3 || nowMs - this.lastAudioSyncAtMs < 3000) return;
-    this.audioDriftSamples = 0;
-    // 连续播放期间不再静音、pause 或 seek；以最多 3% 的速度差逐步收敛。
-    const rate: number = Math.max(0.125, Math.min(8, this.playbackRate * (driftMs > 0 ? 0.97 : 1.03)));
-    this.lastAudioSyncAtMs = nowMs;
-    if (this.audioSyncPlayer === audio && Math.abs(this.audioSyncRate - rate) < 0.001) return;
-    try {
-      audio.setPlaybackRate(rate);
-      this.audioSyncPlayer = audio;
-      this.audioSyncRate = rate;
-    } catch (e) {
-      // 设备不支持微调时保留连续播放，不能退回循环暂停/定位。
-      this.resetAudioSyncRate();
-    }
-  }
-
-  private invalidatePlayerCreation(): void {
-    this.playerCreateGeneration++;
-    this.playerCreating = false;
-    this.retryingSource = false;
-  }
-
-  private tryStartPreparedPlayers(): void {
-    const video: media.AVPlayer | null = this.player;
-    if (video === null || !this.prepared) return;
-    if (!this.canStartPlayback()) this.shouldPlayAfterPrepare = false;
-    const audio: media.AVPlayer | null = this.audioPlayer;
-    if (audio !== null && !this.audioPrepared) return;
-    // 清除可能残留的上一次起播静音（重建/换源路径会重新武装）。
-    this.disarmFirstFrameMute();
-    if (this.resumeAfterPrepare > 0) {
-      const resumeAt: number = this.resumeAfterPrepare;
-      const resumePlaying: boolean = this.shouldPlayAfterPrepare;
-      const recoveringSeek: boolean = this.seekRecoveryAttempts > 0;
-      this.resumeAfterPrepare = -1;
-      this.shouldPlayAfterPrepare = false;
-      if (this.seekCtl !== null) this.seekCtl.seekResumePlaying = resumePlaying;
-      // 重建/切清晰度后也走同一串行 seek，不能在 seekDone 前让两条轨道各自起播。
-      // seek 超时重建后的这一次定位必须保留重试计数，否则会重新进入无限重建循环。
-      this.seekTo(resumeAt, !recoveringSeek, !recoveringSeek);
-      return;
-    }
-    this.resumeAfterPrepare = -1;
-    if (this.shouldPlayAfterPrepare) {
-      // 起播先静音，首个 timeUpdate（首帧上屏）后放声，避免先闻其声后见画面。
-      this.armFirstFrameMute();
-      video.play();
-      // 音频不随视频同时 play：等视频首帧上屏后再启动，避免先闻其声。
-      this.gateAudioStart();
-    }
-  }
-
-  /** 起播时先等待视频播放头推进，禁止超时后绕过画面门控单独播放音频。 */
-  private gateAudioStart(): void {
-    const audio: media.AVPlayer | null = this.audioPlayer;
-    if (audio === null || !this.audioPrepared) return;
-    this.cancelAudioGate();
-    this.audioStartPending = true;
-  }
-
-  /** 视频已开始推进：先把尚未播放的 DASH 音轨定位到当前视频时间，再在 seekDone 后启动。 */
-  private tryStartGatedAudio(): void {
-    if (!this.audioStartPending || this.audioGateSeekPending || !this.playing) return;
-    if (this.buffering || this.seekLocked || this.backgroundAudioOnly ||
-      (this.seekCtl?.seekInFlight ?? false)) return;
-    const video: media.AVPlayer | null = this.player;
-    const audio: media.AVPlayer | null = this.audioPlayer;
-    if (video === null || !this.prepared || audio === null || !this.audioPrepared) return;
-    const targetMs: number = Math.max(0, video.currentTime);
-    if (Math.abs(audio.currentTime - targetMs) > 80) {
-      this.alignGatedAudio(video, audio);
-      return;
-    }
-    this.finishGatedAudioStart(audio);
-  }
-
-  private audioGateGeneration: number = 0;
-
-  /** 自动恢复只暂停、定位音轨；用户拖动仍由双轨 seek 状态机处理。 */
-  private async alignGatedAudio(video: media.AVPlayer, audio: media.AVPlayer): Promise<void> {
-    const generation: number = this.audioGateGeneration;
-    this.audioGateSeekPending = true;
-    try {
-      audio.setVolume(0);
-      await this.pauseAudioForSync(audio);
-      if (generation !== this.audioGateGeneration || this.player !== video || this.audioPlayer !== audio ||
-        !this.playing || this.seekLocked || this.backgroundAudioOnly) return;
-      this.audioGateSeekTargetMs = Math.max(0, video.currentTime);
-      audio.seek(this.audioGateSeekTargetMs);
-      this.audioGateTimer = setTimeout(() => {
-        this.audioGateTimer = -1;
-        if (generation !== this.audioGateGeneration || this.audioPlayer !== audio || !this.audioGateSeekPending) return;
-        if (Math.abs(audio.currentTime - this.audioGateSeekTargetMs) <= 500) {
-          this.finishGatedAudioStart(audio);
-        } else {
-          this.cancelAudioGate();
-          this.handleAudioPlayerError(audio, '音轨定位超时');
-        }
-      }, 1500);
-    } catch (e) {
-      if (generation !== this.audioGateGeneration || this.audioPlayer !== audio) return;
-      this.cancelAudioGate();
-      this.handleAudioPlayerError(audio, '音轨同步失败');
-    }
-  }
-
-  private finishGatedAudioStart(audio: media.AVPlayer): void {
-    if (this.audioGateTimer >= 0) {
-      clearTimeout(this.audioGateTimer);
-      this.audioGateTimer = -1;
-    }
-    this.audioGateSeekPending = false;
-    this.audioGateSeekTargetMs = -1;
-    this.audioStartPending = false;
-    if (this.audioPlayer !== audio || !this.audioPrepared || !this.playing || !this.canStartPlayback()) return;
-    try {
-      this.restoreUserVolume();
-      audio.play();
-    } catch (e) {
-    }
-  }
-
-  /** 所有自动音轨暂停共用屏障，用户 seek 必须等旧暂停真正完成。 */
-  private pauseAudioForSync(audio: media.AVPlayer): Promise<void> {
-    if (this.pendingAudioPausePlayer === audio && this.pendingAudioPause !== null) return this.pendingAudioPause;
-    const pending: Promise<void> = audio.state === 'playing' ? audio.pause() : Promise.resolve();
-    this.pendingAudioPause = pending;
-    this.pendingAudioPausePlayer = audio;
-    const clearPending = (): void => {
-      if (this.pendingAudioPause === pending) {
-        this.pendingAudioPause = null;
-        this.pendingAudioPausePlayer = null;
-      }
-    };
-    pending.then(clearPending, clearPending);
-    return pending;
-  }
-
-  private cancelAudioGate(): void {
-    this.resetAudioSyncRate();
-    this.audioGateGeneration++;
-    if (this.audioGateTimer >= 0) {
-      clearTimeout(this.audioGateTimer);
-      this.audioGateTimer = -1;
-    }
-    this.audioGateSeekPending = false;
-    this.audioGateSeekTargetMs = -1;
-    this.audioStartPending = false;
-  }
-
-  async changeQuality(qn: number): Promise<void> {
-    if (this.destroyed) return;
-    if (this.qualityLoading) return;
-    if (qn === this.activeQuality) {
-      PlayerQualityPreference.remember(qn);
-      this.closeSettingPanels();
-      return;
-    }
-    const request: number = this.sourceRequests.next();
-    const sourceVersion: number = this.sourceVersion;
-    const cid: number = this.cid;
-    this.qualityLoading = true;
-    try {
-      const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(this.aid, this.bvid, this.cid, qn, this.epId);
-      if (this.destroyed || !this.sourceRequests.isCurrent(request) ||
-        sourceVersion !== this.sourceVersion || cid !== this.cid) return;
-      if (info === null || info.urls.length === 0) {
-        this.errorText = '该清晰度暂时不可用';
-        return;
-      }
-      PlayerQualityPreference.remember(qn);
-      this.previewPlayback = info.isPreview;
-      const oldPlayer: media.AVPlayer | null = this.player;
-      const oldAudioPlayer: media.AVPlayer | null = this.audioPlayer;
-      this.invalidatePlayerCreation();
-      this.seekCtl?.cancel();
-      this.cancelAudioGate();
-      this.cancelFirstFrameMute(false);
-      this.seekRecoveryActive = false;
-      this.seekRecoveryCoverVisible = false;
-      this.resumeAfterPrepare = this.playheadSec;
-      this.shouldPlayAfterPrepare = this.playing;
-      this.runtimeSources = info.urls;
-      this.runtimeAudioSources = info.audioUrls;
-      if (info.qualities.length > 0) this.runtimeQualityOptions = info.qualities;
-      this.activeQuality = info.quality;
-      this.sourceIndex = 0;
-      this.audioSourceIndex = 0;
-      this.player = null;
-      this.audioPlayer = null;
-      this.audioPrepared = false;
-      this.prepared = false;
-      this.playing = false;
-      // 换清晰度重建播放后 surface 短暂空白：封面重新垫底，首帧上屏后再淡出。
-      this.firstFrameShown = false;
-      this.firstRenderReady = false;
-      this.buffering = true;
-      this.closeSettingPanels();
-      this.dmClock.stop(false);
-      if (oldPlayer !== null) {
-        try {
-          await oldPlayer.release();
-        } catch (e) {
-          // 错误状态播放器可能已经由系统释放。
-        }
-      }
-      if (oldAudioPlayer !== null) {
-        try {
-          await oldAudioPlayer.release();
-        } catch (e) {
-          // 错误状态音频播放器可能已经由系统释放。
-        }
-      }
-      // await 期间组件可能已销毁，此时重建播放器会泄漏。
-      if (this.destroyed || !this.sourceRequests.isCurrent(request) ||
-        sourceVersion !== this.sourceVersion || cid !== this.cid) return;
-      await this.initPlayer();
-    } catch (e) {
-      if (!this.destroyed && this.sourceRequests.isCurrent(request)) this.errorText = '切换清晰度失败，请重试';
-    } finally {
-      // 同步抛错（如签名异常）也必须复位，否则 qualityLoading 永远卡 true。
-      if (!this.destroyed && this.sourceRequests.isCurrent(request)) this.qualityLoading = false;
-    }
-  }
+  async changeQuality(qn: number): Promise<void> { await this.playback.changeQuality(qn); }
 
   setPlaybackSpeed(rate: number): void {
-    this.audioSyncRate = -1;
-    this.audioSyncPlayer = null;
-    this.audioDriftSamples = 0;
-    this.lastAudioSyncAtMs = Date.now();
-    this.speedTransitionUntilMs = this.lastAudioSyncAtMs + 1500;
-    this.playbackRate = rate;
-    this.dmEngine.setPlaybackRate(rate);
     this.closeSettingPanels();
-    const p: media.AVPlayer | null = this.player;
-    if (p !== null && this.prepared) {
-      try {
-        p.setPlaybackRate(rate);
-        if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.setPlaybackRate(rate);
-      } catch (e) {
-        this.playbackRate = 1.0;
-        this.dmEngine.setPlaybackRate(1.0);
-        p.setPlaybackRate(1.0);
-        if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.setPlaybackRate(1.0);
-      }
-    }
-  }
-
-  private applyTemporarySpeed(rate: number): void {
-    // 直接覆盖微调速率，不能先恢复旧倍速再设置目标倍速，造成一次手势两次重配。
-    this.audioSyncRate = -1;
-    this.audioSyncPlayer = null;
-    this.audioDriftSamples = 0;
-    this.lastAudioSyncAtMs = Date.now();
-    this.speedTransitionUntilMs = this.lastAudioSyncAtMs + 1500;
-    let videoApplied: boolean = false;
-    let audioApplied: boolean = false;
-    try {
-      if (this.player !== null && this.prepared) {
-        this.player.setPlaybackRate(rate);
-        videoApplied = true;
-      }
-    } catch (e) {
-      if (DEBUG) {
-        hilog.error(0x0000, 'BiliPlayback',
-          'holdSpeed.video.failed rate=%{public}s', String(rate));
-      }
-    }
-    try {
-      if (this.audioPlayer !== null && this.audioPrepared) {
-        this.audioPlayer.setPlaybackRate(rate);
-        audioApplied = true;
-      }
-    } catch (e) {
-      if (DEBUG) {
-        hilog.error(0x0000, 'BiliPlayback',
-          'holdSpeed.audio.failed rate=%{public}s', String(rate));
-      }
-    }
-    if (DEBUG) {
-      hilog.info(0x0000, 'BiliPlayback',
-        'holdSpeed.apply rate=%{public}s video=%{public}s audio=%{public}s',
-        String(rate), videoApplied ? 'true' : 'false', audioApplied ? 'true' : 'false');
-    }
-    // 弹幕设置速度保持不变，仅让滚动位移跟随视频当前实际倍速。
-    if (videoApplied) this.dmEngine.setPlaybackRate(rate);
+    this.playback.setSpeed(rate);
   }
 
   private beginHoldSpeed(): void {
@@ -2333,13 +1187,13 @@ if (this.runtimeSources.length === 0) {
     this.dmInteraction.cancelPending();
     if (!this.playing || !this.prepared || this.holdSpeedActive) return;
     Haptic.seek();
-    this.speedCtl?.beginHold(this.playbackRate);
+    this.playback.beginHold();
   }
 
   private endHoldSpeed(): void {
     // 长按快进松手还原正常倍速：落定震动（与按下的轻震呼应）；页面销毁等被动路径同样安全。
     if (this.holdSpeedActive) Haptic.release();
-    this.speedCtl?.endHold();
+    this.playback.endHold();
   }
 
   private loadGestureLevels(): void {
@@ -2350,22 +1204,6 @@ if (this.runtimeSources.length === 0) {
     try {
       this.systemVolumeLevel = this.systemVolume.levelForPercent(value);
     } catch (e) {}
-  }
-
-  private loadOnlineTotal(): void {
-    const request: number = ++this.onlineRequest;
-    const cid: number = this.cid;
-    BiliApi.getOnlineTotal(this.aid, this.bvid, cid).then((total: string) => {
-      if (!this.destroyed && request === this.onlineRequest && this.cid === cid) {
-        this.onlineTotal = total;
-        this.onOnlineCount(total);
-      }
-    }).catch(() => {
-      if (!this.destroyed && request === this.onlineRequest) {
-        this.onlineTotal = '';
-        this.onOnlineCount('');
-      }
-    });
   }
 
   private beginPlayerPan(event: GestureEvent): void {
@@ -2417,8 +1255,8 @@ if (this.runtimeSources.length === 0) {
   private requestSeekPreview(seconds: number): void {
     if (seconds < 0 || this.destroyed) return;
     this.seekPreviewSeconds = seconds;
-    this.seekPreviewCtl.request(seconds, this.aid, this.bvid, this.cid, this.currentSourceUrl(),
-      this.playbackHeaders(),
+    this.seekPreviewCtl.request(seconds, this.aid, this.bvid, this.cid, this.playback.sourceUrl,
+      PlayerPlaybackConfig.playbackHeaders(),
       (url: string, cell: number, xLen: number, yLen: number): void => {
         this.seekPreviewSprite = url;
         this.seekPreviewSpriteCell = cell;
@@ -2460,7 +1298,7 @@ if (this.runtimeSources.length === 0) {
   private handleDoubleTap(): void {
     if (this.doubleTapEnabled === false) return;
     this.dmInteraction.cancelPending();
-    if (!this.prepared || this.player === null || this.endScreenOpen) return;
+    if (!this.prepared || this.endScreenOpen) return;
     // 双击只切换播放/暂停，不再在屏幕中央弹图标；播放键状态由左下角按钮直接反映。
     this.togglePlay();
   }
@@ -2488,190 +1326,16 @@ if (this.runtimeSources.length === 0) {
     return this.activeQuality > 0 ? String(this.activeQuality) : '清晰度';
   }
 
-  /** 当前 CDN 失败时自动释放播放器并切换 durl.backup_url。 */
-  async handlePlayerError(failedPlayer: media.AVPlayer, message: string): Promise<void> {
-    if (this.player !== failedPlayer || this.retryingSource) {
-      return;
-    }
-    if (this.sourceIndex + 1 >= this.sourceCount()) {
-      // 备用线路已用尽：复位播放状态并释放仍挂在错误态的播放器，避免卡 loading。
-      this.errorText = '播放出错：' + message;
-      this.buffering = false;
-      this.release();
-      return;
-    }
-    this.invalidatePlayerCreation();
-    const generation: number = this.playerCreateGeneration;
-    this.retryingSource = true;
-    this.seekCtl?.cancel();
-    this.cancelAudioGate();
-    this.cancelFirstFrameMute(false);
-    this.seekRecoveryActive = false;
-    this.seekRecoveryCoverVisible = false;
-    this.resumeAfterPrepare = this.playheadSec;
-    this.shouldPlayAfterPrepare = this.playing;
-    this.player = null;
-    const failedAudio: media.AVPlayer | null = this.audioPlayer;
-    this.audioPlayer = null;
-    this.audioPrepared = false;
-    this.prepared = false;
-    this.playing = false;
-    this.firstFrameShown = false;
-    this.firstRenderReady = false;
-    this.buffering = false;
-    this.errorText = '当前线路不可用，正在切换备用 CDN…';
-    try {
-      await failedPlayer.release();
-    } catch (e) {
-      // 错误状态的播放器可能已被系统释放，继续切线即可。
-    }
-    if (failedAudio !== null) {
-      try {
-        await failedAudio.release();
-      } catch (e) {
-        // 音频播放器可能也已进入错误态。
-      }
-    }
-    // 换源/换清晰度已取得新代次时，旧恢复不能推进线路或复位新重试锁。
-    if (generation !== this.playerCreateGeneration) return;
-    // await 期间组件可能已销毁，放弃重建并复位重试标志。
-    if (this.destroyed) {
-      this.retryingSource = false;
-      return;
-    }
-    this.sourceIndex++;
-    this.retryingSource = false;
-    await this.initPlayer();
-  }
+  togglePlay(): void { this.playback.toggle(); }
 
-  private async handleAudioPlayerError(failedAudio: media.AVPlayer, message: string): Promise<void> {
-    if (this.audioPlayer !== failedAudio || this.retryingSource) return;
-    if (this.audioSourceIndex + 1 >= this.runtimeAudioSources.length) {
-      this.errorText = '音频播放出错：' + message.substring(0, 100);
-      return;
-    }
-    this.invalidatePlayerCreation();
-    const generation: number = this.playerCreateGeneration;
-    this.retryingSource = true;
-    this.seekCtl?.cancel();
-    this.cancelAudioGate();
-    this.cancelFirstFrameMute(false);
-    this.seekRecoveryActive = false;
-    this.seekRecoveryCoverVisible = false;
-    this.resumeAfterPrepare = this.playheadSec;
-    this.shouldPlayAfterPrepare = this.playing;
-    const video: media.AVPlayer | null = this.player;
-    this.player = null;
-    this.audioPlayer = null;
-    this.prepared = false;
-    this.audioPrepared = false;
-    this.playing = false;
-    this.firstFrameShown = false;
-    this.firstRenderReady = false;
-    this.buffering = true;
-    try {
-      await failedAudio.release();
-    } catch (e) {
-      // ignore
-    }
-    if (video !== null) {
-      try {
-        await video.release();
-      } catch (e) {
-        // ignore
-      }
-    }
-    // 换源/换清晰度已取得新代次时，旧恢复不能推进线路或复位新重试锁。
-    if (generation !== this.playerCreateGeneration) return;
-    // await 期间组件可能已销毁，放弃重建并复位重试标志。
-    if (this.destroyed) {
-      this.retryingSource = false;
-      return;
-    }
-    this.audioSourceIndex++;
-    this.retryingSource = false;
-    await this.initPlayer();
-  }
-
-  togglePlay(): void {
-    const p: media.AVPlayer | null = this.player;
-    if (p === null || !this.prepared) {
-      return;
-    }
-    if (this.playing) {
-      if (this.seekCtl !== null) this.seekCtl.seekResumePlaying = false;
-      this.seekRecoveryActive = false;
-      this.audioStartPending = false;
-      this.cancelAudioGate();
-      this.cancelFirstFrameMute(true);
-      try {
-        if (!this.backgroundAudioOnly) p.pause();
-        if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.pause();
-        // AVPlayer 状态回调可能滞后一帧以上；点击后立即刷新按钮，回调再做最终校准。
-        this.playing = false;
-        this.showControls = true;
-        this.dmClock.pause();
-        this.onPlayingChange(false);
-        if (this.backgroundAudioOnly) this.updateAVSessionPlaybackState();
-      } catch (e) {
-        // 底层状态不允许暂停时保持原 UI，等待 stateChange 校准。
-      }
-    } else {
-      if (!this.canStartPlayback()) return;
-      if (this.appInBackground && !this.pipActive && !this.pipStarting &&
-        this.audioPlayer !== null && this.audioPrepared) {
-        try {
-          this.backgroundAudioOnly = true;
-          this.audioPlayer.play();
-          this.playing = true;
-          this.onPlayingChange(true);
-          this.updateAVSessionPlaybackState();
-        } catch (e) {
-          this.backgroundAudioOnly = false;
-        }
-        return;
-      }
-      // 用户主动点击继续时先通知外层恢复完整播放器高度；首播/切清晰度不会误触发。
-      this.resumeTransitionActive = this.compactMode && !this.fullscreen;
-      this.onResumeRequest();
-      try {
-        // 恢复播放同样先静音等首帧（pause 期间画面虽在，但 resume 后首个解码帧仍可能滞后于声音）。
-        this.armFirstFrameMute(Math.max(0, p.currentTime), 1200);
-        p.play();
-        // 音频等视频首帧上屏后再启动（同一节奏，避免先闻其声）。
-        this.gateAudioStart();
-        this.playing = true;
-        this.onPlayingChange(true);
-        this.scheduleControlsHide();
-      } catch (e) {
-        this.resumeTransitionActive = false;
-      }
-    }
-  }
-
-  /** 结束画面「重播」：从头开始再播一遍（seek 0 并恢复播放）。 */
+  /** UI 的结束画面与空降状态由页面重置，双轨重播走同一 seek 状态机。 */
   endReplay(): void {
     this.clearSeekPreviewInteraction();
     this.endScreenOpen = false;
-    const p: media.AVPlayer | null = this.player;
-    if (p === null || !this.prepared) return;
-    this.resumeTransitionActive = this.compactMode && !this.fullscreen;
-    this.onResumeRequest();
-    try {
-      this.sponsorCtl.resetForReplay();
-      this.resetDanmakuAt(0);
-      this.playheadSec = 0;
-      this.curTime = 0;
-      this.lastAudioSyncAtMs = -1;
-      // resetDanmakuAt 已把游标同步到开头；保留已加载列表，避免单集循环/手动重播后
-      // dmLoadedCid 仍命中去重逻辑、却因为列表被清空而整轮都没有弹幕。
-      // seek 恢复播放：seek 到 0 后由 onSeekDone 回调自动 play。
-      this.seekLocked = true;
-      this.seekCtl?.request(0, true, true);
-      this.showControls = false;
-    } catch (e) {
-      this.resumeTransitionActive = false;
-    }
+    if (!this.prepared) return;
+    this.sponsorCtl.resetForReplay();
+    this.playback.replay();
+    this.showControls = false;
   }
 
   /** 结束画面关闭：回到剧终画面（保留控制层）。 */
@@ -2680,96 +1344,7 @@ if (this.runtimeSources.length === 0) {
     this.showControls = true;
   }
 
-  seekTo(positionSec: number, precise: boolean = true, resetRecoveryAttempts: boolean = true): void {
-    const p: media.AVPlayer | null = this.player;
-    if (p === null || !this.prepared) return;
-    const clampedRaw: number = Math.max(0, Math.min(this.duration > 0 ? this.duration : positionSec, positionSec));
-    // 用户把手势/滑块拖到最末尾时，停在结尾前 0.5s，避免精确 seek 到末帧被 AVPlayer 当作
-    // "自然播完"而触发自动连播切到下一视频；真正自然播完仍走 completed → onEnded 连线。
-    const clamped: number = this.duration > 0 && clampedRaw >= this.duration ?
-      Math.max(0, this.duration - 0.5) : clampedRaw;
-    // Slider 会产生小数秒，四舍五入到最近毫秒，避免最终落点被额外向前截断。
-    const targetMs: number = Math.round(clamped * 1000);
-    this.resetDanmakuAt(clamped);
-    this.playheadSec = clamped;
-    this.curTime = clamped;
-    this.onProgress(clamped);
-    this.updateSubtitle(clamped);
-    this.updateAVSessionPlaybackState();
-    this.lastAudioSyncAtMs = -1;
-    // seek 期间 AVPlayer 的 timeUpdate 仍会上报旧位置，若直接写回 curTime 会让进度条
-    // 从目标值弹回旧位置再跳过去（视觉上"抖动"）。用 seek 锁让进度显示钉住目标值，
-    // 等 seekDone 解锁后再跟随正常 timeUpdate。
-    this.seekLocked = true;
-    if (resetRecoveryAttempts) this.seekRecoveryAttempts = 0;
-    this.seekCtl?.request(targetMs, precise, this.playing);
-  }
-
-  onVideoSeekDone(video: media.AVPlayer, position: number): void {
-    this.seekCtl?.onVideoSeekDone(video, position);
-  }
-
-  onAudioSeekDone(audio: media.AVPlayer, position: number): void {
-    this.seekCtl?.onAudioSeekDone(audio, position);
-  }
-
-  private async recoverPlayersAfterSeekStall(stalledVideo: media.AVPlayer, targetMs: number): Promise<void> {
-    if (this.player !== stalledVideo) return;
-    const resume: boolean = (this.seekCtl?.seekResumePlaying ?? false) && this.canStartPlayback();
-    if (this.seekRecoveryAttempts >= 1) {
-      this.seekCtl?.cancel();
-      this.cancelAudioGate();
-      this.cancelFirstFrameMute(true);
-      this.seekRecoveryActive = false;
-      this.seekRecoveryCoverVisible = false;
-      this.seekLocked = false;
-      this.seekTargetCtl.show(-1);
-      this.buffering = false;
-      try {
-        if (resume && this.prepared) {
-          if (stalledVideo.state !== 'playing') stalledVideo.play();
-          this.gateAudioStart();
-        }
-      } catch (e) {
-        this.errorText = '定位失败，请重试';
-      }
-      // 本次恢复链已经结束；下一次用户主动定位应重新获得一次恢复机会。
-      this.seekRecoveryAttempts = 0;
-      return;
-    }
-    this.seekRecoveryAttempts++;
-    this.seekCtl?.cancel();
-    this.cancelAudioGate();
-    this.cancelFirstFrameMute(false);
-    this.seekRecoveryActive = false;
-    this.seekRecoveryCoverVisible = false;
-    this.seekLocked = false;
-    this.seekTargetCtl.show(-1);
-    this.invalidatePlayerCreation();
-    const stalledAudio: media.AVPlayer | null = this.audioPlayer;
-    this.player = null;
-    this.audioPlayer = null;
-    this.prepared = false;
-    this.audioPrepared = false;
-    this.playing = false;
-    this.firstFrameShown = false;
-    this.firstRenderReady = false;
-    this.resumeAfterPrepare = Math.max(0, targetMs / 1000);
-    this.shouldPlayAfterPrepare = resume;
-    this.buffering = true;
-    try {
-      await stalledVideo.release();
-    } catch (e) {
-    }
-    if (stalledAudio !== null) {
-      try {
-        await stalledAudio.release();
-      } catch (e) {
-      }
-    }
-    if (this.destroyed) return;
-    await this.initPlayer();
-  }
+  seekTo(positionSec: number, precise: boolean = true): void { this.playback.seekTo(positionSec, precise); }
 
   toggleFullscreen(): void {
     if (this.fullscreen) {
@@ -2779,7 +1354,6 @@ if (this.runtimeSources.length === 0) {
       this.dmEngine.fullscreen = true;
       this.restartDmLoopForViewport();
       AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', true);
-      this.applyVideoScaleType();
       // 先让详情页播放器占满窗口，再旋转；整个过程中不会重新创建 AVPlayer。
       this.onFullscreenChange(true);
       // 竖屏视频全屏保持竖屏：转横屏只会让画面瘦成中间一条，体验更差。
@@ -2833,28 +1407,7 @@ if (this.runtimeSources.length === 0) {
     this.dmEngine.fullscreen = false;
     this.onFullscreenChange(false);
     this.restartDmLoopForViewport();
-    this.applyVideoScaleType();
     AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', false);
-  }
-
-  applyVideoScaleType(): void {
-    const p: media.AVPlayer | null = this.player;
-    if (p === null || !this.prepared) {
-      return;
-    }
-    // 所有模式都完整等比显示：不拉伸，也不为了填满屏幕裁掉画面上下或左右内容。
-    p.videoScaleType = media.VideoScaleType.VIDEO_SCALE_TYPE_SCALED_ASPECT;
-  }
-
-  private reportVideoSize(p: media.AVPlayer): void {
-    // AVPlayer 在 prepared 后可读真实视频宽高。接口里的 dimension 有时缺失或只到上一个分 P，
-    // 这里把解码结果回传给详情页，让播放器容器按真实画幅重新算高度，避免上下被裁。
-    if (this.player !== p || p.width <= 0 || p.height <= 0) {
-      return;
-    }
-    this.realVideoWidth = p.width;
-    this.realVideoHeight = p.height;
-    this.onVideoSizeChange(p.width, p.height);
   }
 
   toggleControls(): void {
@@ -2929,17 +1482,8 @@ if (this.runtimeSources.length === 0) {
   }
 
   private pauseForTimer(): void {
-    const p: media.AVPlayer | null = this.player;
-    if (p === null || !this.prepared) return;
-    try {
-      if (!this.backgroundAudioOnly) p.pause();
-      if (this.audioPlayer !== null && this.audioPrepared) this.audioPlayer.pause();
-      this.playing = false;
-      this.showControls = true;
-      this.onPlayingChange(false);
-      if (this.backgroundAudioOnly) this.updateAVSessionPlaybackState();
-    } catch (e) {
-    }
+    if (!this.prepared) return;
+    this.playback.pause();
     this.toast('定时关闭，播放已暂停');
   }
 
@@ -2972,39 +1516,16 @@ if (this.runtimeSources.length === 0) {
     });
   }
 
-  /** 下载只选择音画一体的 MP4 档位；1080P+ 依赖 DASH 混流，不能伪装成可直接播放的单文件。 */
   private downloadQualityOptions(): Array<VideoQualityOption> {
-    const result: Array<VideoQualityOption> = [];
-    for (let i: number = 0; i < this.runtimeQualityOptions.length; i++) {
-      const option: VideoQualityOption = this.runtimeQualityOptions[i];
-      if (option.available && option.qn > 0 && option.qn <= 80 &&
-        result.findIndex((item: VideoQualityOption): boolean => item.qn === option.qn) < 0) {
-        result.push(option);
-      }
-    }
-    return result;
+    return MediaExportFormat.qualities(this.runtimeQualityOptions);
   }
 
   private downloadQualityValue(): number {
-    const options: Array<VideoQualityOption> = this.downloadQualityOptions();
-    if (this.downloadQuality > 0 &&
-      options.some((option: VideoQualityOption): boolean => option.qn === this.downloadQuality)) {
-      return this.downloadQuality;
-    }
-    if (this.activeQuality > 0 && this.activeQuality <= 80 &&
-      options.some((option: VideoQualityOption): boolean => option.qn === this.activeQuality)) {
-      return this.activeQuality;
-    }
-    return options.length > 0 ? options[0].qn : 64;
+    return MediaExportFormat.qualityValue(this.runtimeQualityOptions, this.downloadQuality, this.activeQuality);
   }
 
   private downloadQualityText(): string {
-    const qn: number = this.downloadQualityValue();
-    const options: Array<VideoQualityOption> = this.downloadQualityOptions();
-    for (let i: number = 0; i < options.length; i++) {
-      if (options[i].qn === qn) return options[i].label;
-    }
-    return qn === 80 ? '1080P' : (qn === 64 ? '720P' : String(qn));
+    return MediaExportFormat.qualityText(this.downloadQualityOptions(), this.downloadQualityValue());
   }
 
   private chooseDownloadQuality(): void {
@@ -3024,34 +1545,25 @@ if (this.runtimeSources.length === 0) {
     for (let i: number = 1; i < options.length && i < 6; i++) {
       buttons.push({ text: options[i].label, color: this.isDark ? '#E6E6E6' : '#18191C' });
     }
+    const generation: number = ++this.exportMenuGeneration;
     try {
       this.getUIContext().getPromptAction().showActionMenu({
         title: '下载画质（最高 1080P MP4）',
         buttons: buttons,
       }).then((result) => {
+        if (this.destroyed || generation !== this.exportMenuGeneration) return;
         const index: number = Number(result.index);
         if (index >= 0 && index < options.length) this.downloadQuality = options[index].qn;
-      });
+      }).catch(() => {});
     } catch (e) {
       this.toast('无法打开画质选择');
     }
   }
 
-  private safeDownloadName(value: string): string {
-    const invalid: string = "\\/:*?\"'`<>|{}[]";
-    let result: string = '';
-    for (let i: number = 0; i < value.length; i++) {
-      const ch: string = value.charAt(i);
-      result += invalid.indexOf(ch) >= 0 ? '_' : ch;
-    }
-    const trimmed: string = result.trim();
-    const safe: string = trimmed.length > 0 ? trimmed : 'BiliHarmony视频';
-    return safe.substring(0, Math.min(96, safe.length));
-  }
-
   private promptDownloadType(): void {
     const dark: boolean = this.isDark;
     const option: string = dark ? '#E6E6E6' : '#18191C';
+    const generation: number = ++this.exportMenuGeneration;
     try {
       this.getUIContext().getPromptAction().showActionMenu({
         title: '选择下载内容',
@@ -3063,23 +1575,24 @@ if (this.runtimeSources.length === 0) {
           { text: '弹幕 / 字幕 / 封面…', color: option },
         ],
       }).then((result) => {
+        if (this.destroyed || generation !== this.exportMenuGeneration) return;
         const index: number = Number(result.index);
         if (index === 0) {
-          this.enqueueCenterDownload(false).catch(() => {
+          this.mediaExport.enqueueCenterDownload(false).catch(() => {
           });
         } else if (index === 1) {
-          this.enqueueCenterDownload(true).catch(() => {
+          this.mediaExport.enqueueCenterDownload(true).catch(() => {
           });
         } else if (index === 2) {
-          this.startMediaDownload(false).catch(() => {
+          this.mediaExport.startMediaDownload(false).catch(() => {
           });
         } else if (index === 3) {
-          this.startMediaDownload(true).catch(() => {
+          this.mediaExport.startMediaDownload(true).catch(() => {
           });
         } else if (index === 4) {
           this.promptMediaExportMenu();
         }
-      });
+      }).catch(() => {});
     } catch (e) {
       this.toast('无法打开下载格式选择');
     }
@@ -3089,6 +1602,7 @@ if (this.runtimeSources.length === 0) {
   private promptMediaExportMenu(): void {
     const dark: boolean = this.isDark;
     const option: string = dark ? '#E6E6E6' : '#18191C';
+    const generation: number = ++this.exportMenuGeneration;
     try {
       this.getUIContext().getPromptAction().showActionMenu({
         title: '导出内容',
@@ -3098,263 +1612,21 @@ if (this.runtimeSources.length === 0) {
           { text: '下载封面（图片）', color: option },
         ],
       }).then((result) => {
+        if (this.destroyed || generation !== this.exportMenuGeneration) return;
         const index: number = Number(result.index);
         if (index === 0) {
-          this.exportDanmaku().catch(() => {
+          this.mediaExport.exportDanmaku().catch(() => {
           });
         } else if (index === 1) {
-          this.exportSubtitle().catch(() => {
+          this.mediaExport.exportSubtitle().catch(() => {
           });
         } else if (index === 2) {
-          this.exportCover().catch(() => {
+          this.mediaExport.exportCover().catch(() => {
           });
         }
-      });
+      }).catch(() => {});
     } catch (e) {
       this.toast('无法打开导出菜单');
-    }
-  }
-
-  /** 播放器截图：取进度预览雪碧图最近帧 → 存相册（系统安全组件确认）。 */
-  private async captureScreenshot(): Promise<void> {
-    const frame: image.PixelMap | null = await this.seekPreviewCtl.captureAt(this.playheadSec);
-    if (frame === null) {
-      this.toast('该视频暂不支持截图');
-      return;
-    }
-    try {
-      const packer: image.ImagePacker = image.createImagePacker();
-      const data: ArrayBuffer = await packer.packToData(frame, { format: 'image/jpeg', quality: 92 });
-      const context: common.UIAbilityContext | undefined =
-        this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
-      if (context === undefined) return;
-      const saved: boolean = await PhotoLibrarySaver.saveImage(context, data, 'jpeg',
-        'BiliHaromny_' + String(Math.floor(this.playheadSec)) + 's');
-      this.toast(saved ? '截图已保存到相册' : '截图未保存');
-    } catch (e) {
-      this.toast('截图保存失败，请重试');
-    }
-  }
-
-  /** 缓存到下载中心：任务持久化、可排队/重试，不再依赖当前页面存活。 */
-  private async enqueueCenterDownload(audioOnly: boolean): Promise<void> {
-    if (this.epId > 0) {
-      this.toast('番剧下载暂未开放');
-      return;
-    }
-    if (this.cid <= 0 || (this.aid <= 0 && this.bvid.length === 0)) {
-      this.toast('当前视频信息不完整，无法下载');
-      return;
-    }
-    const context: common.UIAbilityContext | undefined =
-      this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
-    if (context === undefined) return;
-    try {
-      await DownloadCenter.init(context);
-      let baseName: string = this.videoTitle;
-      if (this.videoPartTitle.trim().length > 0 && this.videoPartTitle.trim() !== this.videoTitle.trim()) {
-        baseName += ' - ' + this.videoPartTitle.trim();
-      }
-      const requestedQuality: number = this.downloadQualityValue();
-      const qualityLabel: string = audioOnly ? '音频' : this.downloadQualityText();
-      const title: string = this.safeDownloadName(baseName + ' [' + qualityLabel + ']');
-      await DownloadCenter.enqueue(audioOnly ? DOWNLOAD_KIND_AUDIO : DOWNLOAD_KIND_VIDEO,
-        this.aid, this.bvid, this.cid, 0, audioOnly ? 0 : requestedQuality, title, qualityLabel);
-      this.toast('已加入下载中心' + (DownloadCenter.hasActive() ? '，正在下载' : '，排队中'));
-    } catch (e) {
-      const message: string = e instanceof Error ? e.message : '';
-      this.toast(message.length > 0 ? message : '加入下载中心失败，请重试');
-    }
-  }
-
-  /** 弹幕导出：全部分段 protobuf → 标准 XML（官方弹幕XML格式 p 属性）。 */
-  private async exportDanmaku(): Promise<void> {
-    if (this.cid <= 0) {
-      this.toast('当前视频没有弹幕');
-      return;
-    }
-    this.toast('正在整理弹幕…');
-    let xml: string = '<?xml version="1.0" encoding="UTF-8"?><i><chatserver>chat.bilibili.com' +
-      '</chatserver><chatid>' + String(this.cid) + '</chatid><maxlimit>1500</maxlimit><source>k-v</source>';
-    let total: number = 0;
-    for (let seg: number = 1; seg <= 12; seg++) {
-      const items: Array<DanmakuItem> | null = await BiliApi.getDanmakuSeg(this.cid, this.aid, seg);
-      if (items === null || items.length === 0) break;
-      for (let i: number = 0; i < items.length; i++) {
-        const dm: DanmakuItem = items[i];
-        const text: string = dm.text.replace(/&/g, '&amp;').replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-        const p: string = dm.time.toFixed(2) + ',' + String(dm.mode) + ',' + String(dm.fontsize) + ',' +
-          String(dm.color) + ',0,0,0,' + (dm.idStr.length > 0 ? dm.idStr : String(dm.id));
-        xml += '<d p="' + p + '">' + text + '</d>';
-        total++;
-      }
-    }
-    xml += '</i>';
-    if (total === 0) {
-      this.toast('当前视频没有弹幕');
-      return;
-    }
-    const identity: string = this.bvid.length > 0 ? this.bvid : 'av' + String(this.aid);
-    await this.saveTextFile(this.safeDownloadName(this.videoTitle + ' [' + identity + ']') + '.xml',
-      '弹幕文件|.xml', xml);
-    this.toast('弹幕已保存（' + String(total) + ' 条）');
-  }
-
-  /** 字幕导出：当前轨道 CC JSON → SRT。 */
-  private async exportSubtitle(): Promise<void> {
-    const tracks: Array<SubtitleTrack> = this.subtitles;
-    if (tracks.length === 0) {
-      this.toast('该视频没有 CC 字幕');
-      return;
-    }
-    const track: SubtitleTrack = tracks[0];
-    const cues: Array<SubtitleCue> = await BiliApi.getSubtitleCues(track.url);
-    if (cues.length === 0) {
-      this.toast('字幕内容获取失败');
-      return;
-    }
-    let srt: string = '';
-    for (let i: number = 0; i < cues.length; i++) {
-      const cue: SubtitleCue = cues[i];
-      srt += String(i + 1) + '\n' + PlayerView.srtTime(cue.from) + ' --> ' + PlayerView.srtTime(cue.to) +
-        '\n' + cue.content + '\n\n';
-    }
-    const trackName: string = track.lanDoc.length > 0 ? track.lanDoc : (track.lan.length > 0 ? track.lan : '字幕');
-    await this.saveTextFile(this.safeDownloadName(this.videoTitle + ' [' + trackName + ']') + '.srt',
-      '字幕文件|.srt', srt);
-    this.toast('字幕已保存（' + String(cues.length) + ' 条）');
-  }
-
-  private static srtTime(seconds: number): string {
-    const total: number = Math.max(0, Math.round(seconds * 1000));
-    const ms: number = total % 1000;
-    const whole: number = Math.floor(total / 1000);
-    const h: number = Math.floor(whole / 3600);
-    const m: number = Math.floor((whole % 3600) / 60);
-    const sec: number = whole % 60;
-    const pad = (v: number, n: number): string => String(v).padStart(n, '0');
-    return pad(h, 2) + ':' + pad(m, 2) + ':' + pad(sec, 2) + ',' + pad(ms, 3);
-  }
-
-  /** 封面导出：原图字节经文件选择器落盘（JPG/PNG 按地址扩展名）。 */
-  private async exportCover(): Promise<void> {
-    if (this.videoCover.length === 0) {
-      this.toast('当前视频没有封面');
-      return;
-    }
-    try {
-      const bytes: ArrayBuffer = await HttpClient.getBytes(this.videoCover);
-      const lower: string = this.videoCover.split('?')[0].toLowerCase();
-      const extension: string = lower.endsWith('.png') ? '.png' : (lower.endsWith('.webp') ? '.webp' : '.jpg');
-      const identity: string = this.bvid.length > 0 ? this.bvid : 'av' + String(this.aid);
-      await this.saveBinaryFile(this.safeDownloadName(this.videoTitle + ' [封面] [' + identity + ']') + extension,
-        '图片文件|' + extension, bytes);
-      this.toast('封面已保存');
-    } catch (e) {
-      this.toast('封面下载失败，请重试');
-    }
-  }
-
-  private async saveTextFile(fileName: string, suffix: string, content: string): Promise<void> {
-    const encoder: util.TextEncoder = new util.TextEncoder();
-    await this.saveBinaryFile(fileName, suffix, encoder.encodeInto(content).buffer as ArrayBuffer);
-  }
-
-  private async saveBinaryFile(fileName: string, suffix: string, bytes: ArrayBuffer): Promise<void> {
-    const context: common.UIAbilityContext | undefined =
-      this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
-    if (context === undefined) return;
-    const documentPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
-    const options: picker.DocumentSaveOptions = new picker.DocumentSaveOptions();
-    options.newFileNames = [fileName];
-    options.fileSuffixChoices = [suffix];
-    const targets: Array<string> = await documentPicker.save(options);
-    if (targets.length === 0) return;
-    const file: fs.File = fs.openSync(targets[0], fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-    try {
-      fs.writeSync(file.fd, bytes);
-    } finally {
-      fs.closeSync(file);
-    }
-  }
-
-  private async startMediaDownload(audioOnly: boolean): Promise<void> {
-    if (this.epId > 0) {
-      this.toast('番剧下载暂未开放');
-      return;
-    }
-    if (this.downloadBusy || VideoDownloadService.isActive()) {
-      this.toast('已有下载任务正在进行');
-      return;
-    }
-    const context: common.UIAbilityContext | undefined =
-      this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
-    if (context === undefined || this.cid <= 0 || (this.aid <= 0 && this.bvid.length === 0)) {
-      this.toast('当前视频信息不完整，无法下载');
-      return;
-    }
-    this.downloadBusy = true;
-    this.downloadProgress = -1;
-    try {
-      const requestedQuality: number = this.downloadQualityValue();
-      const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(this.aid, this.bvid, this.cid, requestedQuality);
-      if (info === null) throw new Error('暂时无法获取下载地址');
-      const sourceUrls: Array<string> = audioOnly ? info.downloadAudioUrls : info.urls;
-      if (audioOnly && sourceUrls.length === 0) {
-        throw new Error('当前视频没有可下载的独立音轨');
-      }
-      if (!audioOnly && (sourceUrls.length === 0 || info.isDash)) {
-        throw new Error('该画质只有 DASH 分离流，暂时无法直接保存为单个 MP4');
-      }
-      if (!audioOnly) {
-        const mp4Source: boolean = info.format.startsWith('mp4') ||
-          sourceUrls.some((url: string): boolean => url.split('?')[0].toLowerCase().endsWith('.mp4'));
-        if (!mp4Source) throw new Error('该视频仅提供旧版分段格式，暂时无法保存为单个 MP4');
-      }
-      this.downloadQuality = info.quality;
-      let baseName: string = this.videoTitle;
-      if (this.videoPartTitle.trim().length > 0 && this.videoPartTitle.trim() !== this.videoTitle.trim()) {
-        baseName += ' - ' + this.videoPartTitle.trim();
-      }
-      const identity: string = this.bvid.length > 0 ? this.bvid : 'av' + String(this.aid);
-      const extension: string = audioOnly ? '.m4a' : '.mp4';
-      const formatTag: string = audioOnly ? '音频' : this.downloadQualityText();
-      const fileName: string = this.safeDownloadName(baseName + ' [' + identity + '] [' + formatTag + ']') + extension;
-      this.showMoreMenu = false;
-      this.showSideDrawer = false;
-      const documentPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
-      const options: picker.DocumentSaveOptions = new picker.DocumentSaveOptions();
-      options.newFileNames = [fileName];
-      options.fileSuffixChoices = [audioOnly ? '音频文件|.m4a' : '视频文件|.mp4'];
-      const targets: Array<string> = await documentPicker.save(options);
-      if (targets.length === 0) return;
-      this.downloadBusy = true;
-      this.downloadProgress = -1;
-      this.toast(audioOnly ? '音频已开始下载，可在通知栏查看进度' : '视频已开始下载，可在通知栏查看进度');
-      const refererId: string = this.bvid.length > 0 ? this.bvid : 'av' + String(this.aid);
-      await VideoDownloadService.downloadToUri(context, sourceUrls, targets[0], fileName,
-        HttpClient.getDownloadHeaders('https://www.bilibili.com/video/' + refererId),
-        (received: number, total: number): void => {
-          if (!this.destroyed) {
-            this.downloadBusy = true;
-            this.downloadProgress = total > 0 ? Math.max(0, Math.min(100,
-              Math.floor(received * 100 / total))) : -1;
-          }
-        });
-      if (!this.destroyed) this.toast(audioOnly ? '音频已保存到所选位置' : '视频已保存到所选位置');
-    } catch (e) {
-      const error: BusinessError = e as BusinessError;
-      // 文件选择器取消属于正常操作，不显示成网络失败。
-      if (!this.destroyed && error.code !== 13900042) {
-        const message: string = error.message ?? String(e);
-        this.toast(message.length > 0 ? message : '下载失败，请稍后重试');
-      }
-    } finally {
-      if (!this.destroyed) {
-        this.downloadBusy = VideoDownloadService.isActive();
-        this.downloadProgress = VideoDownloadService.currentProgress();
-      }
     }
   }
 
@@ -3369,56 +1641,23 @@ if (this.runtimeSources.length === 0) {
   }
 
   release(): void {
-    this.releasePictureInPicture();
-    this.invalidatePlayerCreation();
-    if (this.hideTimer >= 0) {
-      clearTimeout(this.hideTimer);
-      this.hideTimer = -1;
-    }
-    this.seekCtl?.cancel();
+    ++this.exportMenuGeneration;
+    this.mediaExport.invalidate();
+    this.auxiliary.invalidate();
+    this.pictureInPicture.release();
+    this.playback.release();
+    if (this.hideTimer >= 0) clearTimeout(this.hideTimer);
+    this.hideTimer = -1;
     this.releaseSeekPreview();
-    if (this.volumeRestoreTimer >= 0) {
-      clearTimeout(this.volumeRestoreTimer);
-      this.volumeRestoreTimer = -1;
-    }
-    this.audioStartPending = false;
-    this.cancelAudioGate();
-    this.backgroundAudioOnly = false;
-    this.backgroundVideoResumePending = false;
-    if (this.fullscreenExitCancel !== null) {
-      this.fullscreenExitCancel();
-      this.fullscreenExitCancel = null;
-    }
+    if (this.fullscreenExitCancel !== null) this.fullscreenExitCancel();
+    this.fullscreenExitCancel = null;
     this.fullscreenExitPending = false;
     this.fullscreenExitAnimationStarted = false;
-    this.cancelFirstFrameMute(false);
-    this.seekRecoveryActive = false;
-    this.seekRecoveryCoverVisible = false;
-    this.audioStartPending = false;
     this.dmClock.stop(true);
     this.dmClock.release();
     this.dmEngine.clearCaches();
     Immersive.setKeepScreenOn(false);
     this.deactivateAVSession();
-    const p: media.AVPlayer | null = this.player;
-    if (p !== null) {
-      this.player = null;
-      // release 返回 Promise，同步 try/catch 捕获不到异步 rejection，需显式 catch。
-      p.release().catch(() => {
-        // 释放失败无需兜底，组件已脱离该播放器。
-      });
-    }
-    const audio: media.AVPlayer | null = this.audioPlayer;
-    if (audio !== null) {
-      this.audioPlayer = null;
-      audio.release().catch(() => {
-        // 同上。
-      });
-    }
-    this.audioPrepared = false;
-    this.prepared = false;
-    this.playing = false;
-    this.firstRenderReady = false;
   }
 
   // ===== 弹幕引擎 =====
@@ -4218,7 +2457,7 @@ if (this.runtimeSources.length === 0) {
         AppStorage.setOrCreate<number>('subtitleScale', scale);
       },
       onBackgroundPlaybackChange: (next: boolean) => this.setBackgroundPlayback(next),
-      onPictureInPicture: () => { this.startPictureInPicture(); },
+      onPictureInPicture: () => { this.pictureInPicture.start(); },
       onReportVideo: () => this.reportCurrentVideo(),
       onSponsorToggle: (next: boolean) => {
         this.setSponsorEnabled(next);

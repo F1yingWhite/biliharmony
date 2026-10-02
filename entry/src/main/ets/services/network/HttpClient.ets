@@ -381,37 +381,32 @@ export class HttpClient {
     }
   }
 
-  static async get(url: string, extraHeaders?: Record<string, string>,
+  static get(url: string, extraHeaders?: Record<string, string>,
     priority: number = RequestPriority.NORMAL): Promise<HttpResponse> {
-    HttpClient.ensureInit();
-    const trusted: boolean = CredentialPolicy.allows(url);
-    const session: number = AuthSession.version;
-    if (trusted) await HttpClient.ensureBuvid();
-    if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
-    const execution: HttpExecution =
-      await HttpClient.execute(url, http.RequestMethod.GET, http.HttpDataType.STRING, extraHeaders, undefined, priority);
-    const resp: http.HttpResponse | null = execution.response;
-    if (resp === null) {
-      return new HttpResponse(-1, '', {}, execution.transportCode);
-    }
-    if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
-    if (trusted) HttpClient.absorbCookies(resp.header, asString(resp.cookies));
-    const parsed: HttpResponse = await HttpClient.prewarmParse(
-      new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>));
-    // taskpool 解析也有异步窗口，结果返回前仍必须属于当前账号代次。
-    if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
-    return parsed;
+    return HttpClient.requestText(url, http.RequestMethod.GET, undefined, extraHeaders, priority);
   }
 
-  static async post(url: string, body?: string, extraHeaders?: Record<string, string>,
+  static post(url: string, body?: string, extraHeaders?: Record<string, string>,
     priority: number = RequestPriority.NORMAL): Promise<HttpResponse> {
+    return HttpClient.requestText(url, http.RequestMethod.POST, body ?? '', extraHeaders, priority);
+  }
+
+  /**
+   * 文本 API 请求的唯一会话边界。三次检查分别封住设备标识初始化、传输与后台解析的异步窗口；
+   * 非受信主机不等待设备标识，也不参与账号代次或响应 Cookie 合并。
+   */
+  private static async requestText(url: string, method: http.RequestMethod, body: string | ArrayBuffer | undefined,
+    extraHeaders: Record<string, string> | undefined, priority: number, contentType?: string): Promise<HttpResponse> {
     HttpClient.ensureInit();
     const trusted: boolean = CredentialPolicy.allows(url);
     const session: number = AuthSession.version;
     if (trusted) await HttpClient.ensureBuvid();
     if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
+    // 上传入口允许调用方显式覆盖 Content-Type，与原来的额外头合并次序一致。
+    const headers: Record<string, string> | undefined = contentType === undefined ? extraHeaders :
+      HttpClient.merge({ 'Content-Type': contentType }, extraHeaders ?? {});
     const execution: HttpExecution =
-      await HttpClient.execute(url, http.RequestMethod.POST, http.HttpDataType.STRING, extraHeaders, body ?? '', priority);
+      await HttpClient.execute(url, method, http.HttpDataType.STRING, headers, body, priority);
     const resp: http.HttpResponse | null = execution.response;
     if (resp === null) {
       return new HttpResponse(-1, '', {}, execution.transportCode);
@@ -432,34 +427,10 @@ export class HttpClient {
    * 二进制 POST（multipart 上传等）：body 原样字节发送，Content-Type 由调用方显式给定。
    * 凭证/buvid/session 语义与 post() 完全一致。
    */
-  static async postBinary(url: string, contentType: string, body: ArrayBuffer,
+  static postBinary(url: string, contentType: string, body: ArrayBuffer,
     extraHeaders?: Record<string, string>, priority: number = RequestPriority.NORMAL)
     : Promise<HttpResponse> {
-    HttpClient.ensureInit();
-    const trusted: boolean = CredentialPolicy.allows(url);
-    const session: number = AuthSession.version;
-    if (trusted) await HttpClient.ensureBuvid();
-    if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
-    const headers: Record<string, string> = { 'Content-Type': contentType };
-    if (extraHeaders) {
-      const keys: Array<string> = Object.keys(extraHeaders);
-      for (let i: number = 0; i < keys.length; i++) {
-        headers[keys[i]] = extraHeaders[keys[i]];
-      }
-    }
-    const execution: HttpExecution =
-      await HttpClient.execute(url, http.RequestMethod.POST, http.HttpDataType.STRING, headers, body, priority);
-    const resp: http.HttpResponse | null = execution.response;
-    if (resp === null) {
-      return new HttpResponse(-1, '', {}, execution.transportCode);
-    }
-    if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
-    if (trusted) HttpClient.absorbCookies(resp.header, asString(resp.cookies));
-    const parsed: HttpResponse = await HttpClient.prewarmParse(
-      new HttpResponse(resp.responseCode, resp.result as string, asObject(resp.header) as Record<string, string>));
-    // taskpool 解析也有异步窗口，结果返回前仍必须属于当前账号代次。
-    if (trusted && session !== AuthSession.version) return new HttpResponse(-1, '', {});
-    return parsed;
+    return HttpClient.requestText(url, http.RequestMethod.POST, body, extraHeaders, priority, contentType);
   }
 
   /**

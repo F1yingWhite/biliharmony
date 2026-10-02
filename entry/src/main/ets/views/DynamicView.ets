@@ -1,1123 +1,24 @@
 import { MotionTokens } from '../common/MotionTokens';
-import { RequestEpoch } from '../common/RequestEpoch';
-/**
- * 动态视图：关注动态 feed（需登录）
- */
-import { DynamicItem, DynamicPageData, DynamicRichNode, BiliEmote, RelationUserItem,
-  RelationUserPageData } from '../model/Models';
-import { AppNavStack, HERO_NAV_TRANSITION_ACTIVE_KEY, HERO_NAV_TRANSITION_DURATION_KEY,
-  NAV_DYNAMIC_DETAIL,
-  NAV_IMAGE_VIEWER,
-  NAV_LIVE_ROOM, NAV_LOGIN,
-  NAV_VIDEO_DETAIL,
-  NAV_USER_SPACE, DynamicDetailParam, ImageViewerParam, ImageViewerSrcRect, LiveRoomParam, VideoDetailParam,
-    UserSpaceParam, NAV_BANGUMI_DETAIL, BangumiDetailParam, setHeroBgSnapshot, NAV_SEARCH } from '../common/AppRouter';
-import { ActionResult } from '../api/BiliApi';
+import { DynamicItem } from '../model/Models';
+import { AppNavStack, NAV_LOGIN } from '../common/AppRouter';
 import { UserStore } from '../services/auth/UserStore';
-import { AuthSession } from '../services/auth/AuthSession';
 import { LoadingView } from '../components/LoadingView';
 import { LoadMoreFooter } from '../components/LoadMoreFooter';
-import { formatCount, formatRelativeTime } from '../common/Utils';
-import { biliImageThumbnail } from '../common/ImageUrl';
 import { Immersive } from '../common/Immersive';
 import { AppTheme } from '../common/AppTheme';
 import { BasicDataSource } from '../common/BasicDataSource';
-import { DecoratedAvatar, UserDecorationBanner } from '../components/UserDecorations';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { Haptic } from '../common/Haptic';
 import { HeaderBackdrop } from '../components/GlassHeaderBar';
 import { Handedness } from '../common/Handedness';
-import { DynamicApi, DynUploadedImage } from '../api/DynamicApi';
-import { DynDraftImage, DynImagePreparer } from '../common/DynImagePreparer';
 import { EmoteResolver } from '../common/EmoteResolver';
-import { EmoteImageCache } from '../common/EmoteImageCache';
-import { LiveApi } from '../api/LiveApi';
-import { UserApi } from '../api/UserApi';
-import { hilog } from '@kit.PerformanceAnalysisKit';
-import { image } from '@kit.ImageKit';
-import { picker } from '@kit.CoreFileKit';
-import { common } from '@kit.AbilityKit';
-
-/** 动态图文发布的单条动态图片上限（与 B 站网页端/官方 App 一致）。 */
-const DYN_MAX_IMAGES: number = 9;
-
-/** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
-interface ReportButtonItem {
-  text: string;
-  color: string;
-}
-
-interface DynamicFeedState {
-  count: number;
-  loaded: boolean;
-  loading: boolean;
-  errorText: string;
-  needsLogin: boolean;
-  moreFailed: boolean;
-  retryReset: boolean;
-  hasMore: boolean;
-}
-
-class DynamicContentPart {
-  text: string = '';
-  image: string = '';
-  key: string = '';
-  /** 1 = 单行高，2 = 双行高（动态卡片行内表情放大 2 倍）。 */
-  imageSize: number = 1;
-  /** 表情标签（如 [doge]）：图加载失败时回退文字，避免行内空白。 */
-  imageLabel: string = '';
-  /** 话题片段（#话题#）：强调色渲染，点击跳搜索。 */
-  isTopic: boolean = false;
-}
-
-// 表情拆分结果按动态 id 缓存（内容不可变），避免每次 build 重算 O(内容×表情数) 扫描。
-const DYN_PARTS_CACHE_LIMIT: number = 100;
-const dynPartsCache: Map<string, Array<DynamicContentPart>> = new Map<string, Array<DynamicContentPart>>();
-const DYN_RICH_DETAIL_CACHE_LIMIT: number = 80;
-const dynRichDetailCache: Map<string, DynamicItem> = new Map<string, DynamicItem>();
-const dynRichDetailInFlight: Map<string, Promise<DynamicItem | null>> =
-  new Map<string, Promise<DynamicItem | null>>();
-
-function ensureDynamicRichDetail(dynId: string): Promise<DynamicItem | null> {
-  const cached: DynamicItem | undefined = dynRichDetailCache.get(dynId);
-  if (cached !== undefined) return Promise.resolve(cached);
-  const running: Promise<DynamicItem | null> | undefined = dynRichDetailInFlight.get(dynId);
-  if (running !== undefined) return running;
-  const request: Promise<DynamicItem | null> = DynamicApi.getDynamicDetail(dynId).then((detail: DynamicItem | null) => {
-    if (detail !== null) {
-      if (dynRichDetailCache.size >= DYN_RICH_DETAIL_CACHE_LIMIT) {
-        const oldest: IteratorResult<string> = dynRichDetailCache.keys().next();
-        if (!oldest.done) dynRichDetailCache.delete(oldest.value);
-      }
-      dynRichDetailCache.set(dynId, detail);
-    }
-    return detail;
-  }).catch((): DynamicItem | null => null).finally(() => {
-    dynRichDetailInFlight.delete(dynId);
-  });
-  dynRichDetailInFlight.set(dynId, request);
-  return request;
-}
-
-function splitDynamicText(text: string, emotes: Array<BiliEmote>, keyPrefix: string): Array<DynamicContentPart> {
-  const result: Array<DynamicContentPart> = [];
-  let rest: string = text;
-  let keyIndex: number = 0;
-  while (rest.length > 0) {
-    let foundAt: number = rest.length;
-    let found: BiliEmote | null = null;
-    for (let i: number = 0; i < emotes.length; i++) {
-      const at: number = rest.indexOf(emotes[i].text);
-      if (at >= 0 && (at < foundAt || (at === foundAt && found !== null &&
-        emotes[i].text.length > found.text.length))) {
-        foundAt = at;
-        found = emotes[i];
-      }
-    }
-    // 兜底：接口没下发 emoji 节点时（直播预告等），用通用表情表解析 [xxx] 占位符。
-    let fallbackUrl: string = '';
-    let fallbackToken: string = '';
-    if (found === null) {
-      // 官方主题表情的名称可能很长（例如活动周年同人表情），16 字限制会把它留成原文。
-      const tokenMatch: RegExpExecArray | null = /\[[^\[\]]{1,64}\]/.exec(rest);
-      if (tokenMatch !== null) {
-        const url: string = EmoteResolver.lookup(tokenMatch[0]);
-        if (url.length > 0) {
-          foundAt = tokenMatch.index;
-          fallbackUrl = url;
-          fallbackToken = tokenMatch[0];
-        }
-      }
-    }
-    if (found === null && fallbackUrl.length === 0) {
-      const part: DynamicContentPart = new DynamicContentPart();
-      part.text = rest; part.key = keyPrefix + '-t' + String(keyIndex++); result.push(part); break;
-    }
-    if (foundAt > 0) {
-      const part: DynamicContentPart = new DynamicContentPart();
-      part.text = rest.substring(0, foundAt); part.key = keyPrefix + '-t' + String(keyIndex++); result.push(part);
-    }
-    const emotePart: DynamicContentPart = new DynamicContentPart();
-    emotePart.image = found !== null ? found.displayUrl() : fallbackUrl;
-    emotePart.imageSize = found !== null ? found.size : 1;
-    emotePart.imageLabel = found !== null ? found.text : fallbackToken;
-    emotePart.key = keyPrefix + '-e' + String(keyIndex++);
-    result.push(emotePart);
-    rest = rest.substring(foundAt + (found !== null ? found.text.length : fallbackToken.length));
-  }
-  return result;
-}
-
-function contentPartsOf(item: DynamicItem, emoteVersion: number): Array<DynamicContentPart> {
-  // 同一 dynId 的 feed 简版与 detail 完整版可能拥有不同表情节点，缓存键必须包含节点签名。
-  let nodeSignature: string = '';
-  for (let i: number = 0; i < item.richNodes.length; i++) {
-    const node: DynamicRichNode = item.richNodes[i];
-    nodeSignature += '|n' + node.text + '=' + (node.emote !== null ? node.emote.displayUrl() : '');
-  }
-  // 版本号纳入缓存键：表情表加载完成后用旧缓存会永远拿不到表情图。
-  const cacheKey: string = item.dynId + '|v' + String(emoteVersion) + '|' + item.content + nodeSignature;
-  const cached: Array<DynamicContentPart> | undefined = dynPartsCache.get(cacheKey);
-  if (cached !== undefined) return cached;
-  let result: Array<DynamicContentPart> = [];
-  if (item.richNodes.length > 0) {
-    for (let i: number = 0; i < item.richNodes.length; i++) {
-      const node: DynamicRichNode = item.richNodes[i];
-      if (node.emote !== null && node.emote.displayUrl().length > 0) {
-        const emotePart: DynamicContentPart = new DynamicContentPart();
-        emotePart.image = node.emote.displayUrl();
-        emotePart.imageSize = node.emote.size;
-        emotePart.imageLabel = node.text;
-        emotePart.key = item.dynId + '-node-emote-' + String(i);
-        result.push(emotePart);
-      } else if (node.text.length > 0) {
-        if (node.isTopic) {
-          const topicPart: DynamicContentPart = new DynamicContentPart();
-          topicPart.text = node.text;
-          topicPart.key = item.dynId + '-node-topic-' + String(i);
-          topicPart.isTopic = true;
-          result.push(topicPart);
-        } else {
-          result = result.concat(splitDynamicText(node.text, [], item.dynId + '-node-' + String(i)));
-        }
-      }
-    }
-  } else {
-    result = splitDynamicText(item.content, item.emotes, item.dynId);
-  }
-  if (dynPartsCache.size >= DYN_PARTS_CACHE_LIMIT) {
-    const oldest: IteratorResult<string> = dynPartsCache.keys().next();
-    if (!oldest.done) {
-      dynPartsCache.delete(oldest.value);
-    }
-  }
-  dynPartsCache.set(cacheKey, result);
-  return result;
-}
-
-/** 单条动态卡片：独立 @Component，父组件状态变化不再整列表重建；@Reusable 复用滚动项。 */
-@Reusable
-@Component
-export struct DynCard {
-  @Prop @Watch('onItemChanged') item: DynamicItem = new DynamicItem();
-  @Prop embedded: boolean = false;
-  @Prop detailMode: boolean = false;
-  /** 是否启用图片共享元素转场（geometryTransition）。仅内嵌场景（用户空间等已入栈页面）可用；
-   *  主页底部 Tabs 内是 Navigation 根页面，geometryTransition 不生效，该场景走 srcRect 矩形放大 push。 */
-  @Prop sharedImageTransition: boolean = true;
-  /**
-   * 图片 id / 共享元素转场 id 前缀：同一动态可能同时存在于不同分类页签中，
-   * 同一动态会渲染出多张同 id 缩略图；getRectangleById 命中离屏页签的图时，
-   * 看图入场便从错误的矩形（常是相邻页签方向）放大。各容器传唯一前缀区分。
-   */
-  @Prop idPrefix: string = '';
-  /**
-   * 点赞成功回调：@Prop item 是深拷贝快照，卡片上的乐观更新不会进入数据源；
-   * 必须把结果回传给持有数据源的父级（按 dynId 定位，不捕获索引，复用场景不串卡）。
-   */
-  onLikeResult: (dynId: string, liked: boolean, count: number) => void = () => {};
-  @State liked: boolean = false;
-  @State likeCount: number = 0;
-  @State forwardCount: number = 0;
-  @State actionBusy: boolean = false;
-  private actionGeneration: number = 0;
-  private actionItem: DynamicItem | null = null;
-  /** 表情图本地缓存映射：原网络 URL → cacheDir 内本地路径（落盘缓存，离线可显示）。 */
-  @State emoteLocal: Map<string, string> = new Map<string, string>();
-  /** 确认加载失败的表情 URL：回退渲染 [表情名] 文字，避免行内空白块。 */
-  @State emoteFailed: Set<string> = new Set<string>();
-  /** Feed 缺失表情节点时按动态 ID 补拉的详情正文；只替换正文渲染，不改卡片其他字段。 */
-  @State hydratedContent: DynamicItem = new DynamicItem();
-  /** 图片宫格可用宽（onAreaChange 实测），用于按官方三列正方形单元计算高度。 */
-  @State gridWidth: number = 0;
-  @StorageProp('isDarkMode') isDark: boolean = false;
-  @StorageProp('accentColor') accent: string = '#FB7299';
-  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
-  // 表情表加载完成后版本号 +1：引用它的 build 会重跑，拆分缓存键也随之失效。
-  @StorageProp('emoteResolverVersion') emoteVer: number = 0;
-  private hydrateGeneration: number = 0;
-
-  aboutToAppear(): void {
-    EmoteResolver.ensureLoaded();
-    this.syncFromItem();
-  }
-
-  aboutToReuse(params: Record<string, Object>): void {
-    this.actionGeneration++;
-    // 复用实例直接换数据，避免整卡重建（LazyForEach 滚动性能）。
-    const next: DynamicItem | undefined = params.item as DynamicItem | undefined;
-    if (next !== undefined) {
-      this.item = next;
-    }
-    this.idPrefix = params.idPrefix === undefined ? '' : params.idPrefix as string;
-    // 普通成员变量复用时不会自动同步：数据源不变则各次创建传入的是同一父级回调，兜底重取一次。
-    const likeCb: ((dynId: string, liked: boolean, count: number) => void) | undefined =
-      params.onLikeResult as ((dynId: string, liked: boolean, count: number) => void) | undefined;
-    if (likeCb !== undefined) this.onLikeResult = likeCb;
-    this.actionBusy = false;
-    this.syncFromItem();
-  }
-
-  aboutToDisappear(): void {
-    this.hydrateGeneration++;
-    this.actionGeneration++;
-    this.actionBusy = false;
-  }
-
-  onItemChanged(): void {
-    this.syncFromItem();
-  }
-
-  private syncFromItem(): void {
-    // @Watch 也会收到本卡乐观字段写入；仅模型引用变化才撤销旧卡片操作。
-    if (this.actionItem !== this.item) {
-      this.actionGeneration++;
-      this.actionBusy = false;
-      this.actionItem = this.item;
-    }
-    this.liked = this.item.liked;
-    this.likeCount = this.item.like;
-    this.forwardCount = this.item.forward;
-    const cached: DynamicItem | undefined = dynRichDetailCache.get(this.item.dynId);
-    this.hydratedContent = cached !== undefined ? cached : new DynamicItem();
-    this.hydrateMissingRichContent();
-    this.primeEmoteLocalCache();
-  }
-
-  private renderContentItem(): DynamicItem {
-    return this.hydratedContent.dynId === this.item.dynId ? this.hydratedContent : this.item;
-  }
-
-  private hasUnresolvedRichEmote(item: DynamicItem): boolean {
-    const tokenPattern: RegExp = /\[[^\[\]\r\n]{1,64}\]/;
-    if (item.richNodes.length === 0) return tokenPattern.test(item.content);
-    for (let i: number = 0; i < item.richNodes.length; i++) {
-      if (item.richNodes[i].emote === null && tokenPattern.test(item.richNodes[i].text)) return true;
-    }
-    return false;
-  }
-
-  /** Web Feed 会省略部分主题表情的 emoji 对象；只为含未解析占位符的可见卡片补拉详情。 */
-  private hydrateMissingRichContent(): void {
-    const item: DynamicItem = this.item;
-    const generation: number = ++this.hydrateGeneration;
-    if (this.detailMode || item.dynId.length === 0 || !this.hasUnresolvedRichEmote(item) ||
-      this.hydratedContent.dynId === item.dynId) return;
-    ensureDynamicRichDetail(item.dynId).then((detail: DynamicItem | null): void => {
-      if (generation !== this.hydrateGeneration || detail === null || this.item.dynId !== item.dynId) return;
-      this.hydratedContent = detail;
-      this.primeEmoteLocalCache();
-    }).catch((): void => {
-    });
-  }
-
-  /** 把内容里出现的表情 URL 逐一下载到本地缓存；完成后触发重渲染走本地路径。 */
-  private primeEmoteLocalCache(): void {
-    const parts: Array<DynamicContentPart> = contentPartsOf(this.renderContentItem(), this.emoteVer);
-    for (let i: number = 0; i < parts.length; i++) {
-      const image: string = parts[i].image;
-      if (image.length === 0 || this.emoteLocal.has(image) || this.emoteFailed.has(image)) continue;
-      const cached: string = EmoteImageCache.localPathOf(image);
-      if (cached !== image) {
-        const nextCached: Map<string, string> = new Map<string, string>(this.emoteLocal);
-        nextCached.set(image, cached);
-        this.emoteLocal = nextCached;
-        continue;
-      }
-      EmoteImageCache.ensure(image).then((local: string) => {
-        // 与 image 相同表示下载失败；只有拿到了本地路径才更新，否则记失败走 [表情名] 回退。
-        if (local !== image) {
-          const nextLocal: Map<string, string> = new Map<string, string>(this.emoteLocal);
-          nextLocal.set(image, local);
-          this.emoteLocal = nextLocal;
-        } else {
-          const nextFailed: Set<string> = new Set<string>(this.emoteFailed);
-          nextFailed.add(image);
-          this.emoteFailed = nextFailed;
-        }
-      }).catch(() => {
-        const nextFailed: Set<string> = new Set<string>(this.emoteFailed);
-        nextFailed.add(image);
-        this.emoteFailed = nextFailed;
-      });
-    }
-  }
-
-  /** 表情图渲染源：只使用本地路径，等待统一下载器完成。 */
-  private emoteSrc(image: string): string {
-    if (image.length === 0) return '';
-    const local: string | undefined = this.emoteLocal.get(image);
-    if (local !== undefined && local.length > 0) return local;
-    const cached: string = EmoteImageCache.localPathOf(image);
-    return cached !== image ? cached : '';
-  }
-
-  /** 话题点击：注入关键词并直达搜索页（与视频 TAG 同一机制）。 */
-  private searchTopic(text: string): void {
-    const name: string = text.replace(/^#+/, '').replace(/#+$/, '').trim();
-    if (name.length === 0) return;
-    AppStorage.setOrCreate<string>('searchPrefillKeyword', name);
-    AppNavStack.pushPathByName(NAV_SEARCH, null);
-  }
-
-
-  private toast(message: string): void {
-    try {
-      this.getUIContext().getPromptAction().showToast({ message: message });
-    } catch (e) {
-      // 组件销毁或窗口异常时忽略提示。
-    }
-  }
-
-  private decorationNumberLabel(): string {
-    const raw: string = this.item.decorationNumber.trim();
-    if (raw.length === 0) return '';
-    if (/^(no|co)\.?\s/i.test(raw)) return raw;
-    return 'NO.' + raw;
-  }
-
-  private tapVibrate(): void {
-    Haptic.tap();
-  }
-
-  private async toggleLike(): Promise<void> {
-    if (this.actionBusy) return;
-    if (UserStore.isLogin === false) {
-      this.toast('请先登录后再点赞');
-      return;
-    }
-    if (this.item.dynId.length === 0) return;
-    // 点赞期间卡片可能被复用成另一条动态：本地状态只允许写回同一 dynId 的卡片，跨卡写入会串卡。
-    const dynId: string = this.item.dynId;
-    const item: DynamicItem = this.item;
-    this.actionItem = item;
-    const generation: number = ++this.actionGeneration;
-    const session: number = AuthSession.version;
-    const onLikeResult: (dynId: string, liked: boolean, count: number) => void = this.onLikeResult;
-    const isCurrent = (): boolean => this.actionGeneration === generation &&
-      AuthSession.version === session && this.item === item;
-    const next: boolean = this.liked ? false : true;
-    const prevLiked: boolean = this.liked;
-    const prevCount: number = this.likeCount;
-    const nextCount: number = Math.max(0, prevCount + (next ? 1 : -1));
-    // 乐观更新只写本卡 UI（@Prop 深拷贝），权威值由 onLikeResult 回写父级数据源。
-    this.liked = next;
-    this.likeCount = nextCount;
-    this.item.liked = next;
-    this.item.like = nextCount;
-    this.actionBusy = true;
-    try {
-      const result: ActionResult = await DynamicApi.likeDynamic(dynId, next);
-      if (AuthSession.version !== session) return;
-      if (result.ok === false) {
-        if (isCurrent()) {
-          this.liked = prevLiked;
-          this.likeCount = prevCount;
-          this.item.liked = prevLiked;
-          this.item.like = prevCount;
-          this.toast(result.message);
-        }
-      } else {
-        // 接口成功才回写数据源真身：卡片复用重建（aboutToReuse → syncFromItem）从数据源回读，
-        // 不回写则点赞态会随回收滚动回退。回调按 dynId 定位，卡片即使已复用也不受影响。
-        onLikeResult(dynId, next, nextCount);
-        if (isCurrent()) this.toast(next ? '点赞成功' : '已取消点赞');
-      }
-    } catch (e) {
-      if (isCurrent()) {
-        this.liked = prevLiked;
-        this.likeCount = prevCount;
-        this.item.liked = prevLiked;
-        this.item.like = prevCount;
-        this.toast('网络异常，请稍后重试');
-      }
-    } finally {
-      if (this.actionGeneration === generation && this.item === item) this.actionBusy = false;
-    }
-  }
-
-  private async forwardDynamic(): Promise<void> {
-    if (this.actionBusy) return;
-    if (UserStore.isLogin === false) {
-      this.toast('请先登录后再转发');
-      return;
-    }
-    if (this.item.dynId.length === 0) return;
-    const item: DynamicItem = this.item;
-    this.actionItem = item;
-    const generation: number = ++this.actionGeneration;
-    const session: number = AuthSession.version;
-    const isCurrent = (): boolean => this.actionGeneration === generation &&
-      AuthSession.version === session && this.item === item;
-    this.actionBusy = true;
-    try {
-      const result: ActionResult = await DynamicApi.repostDynamic(item.dynId);
-      if (!isCurrent()) return;
-      if (result.ok) {
-        this.forwardCount++;
-        this.item.forward = this.forwardCount;
-        this.toast('转发成功');
-      } else {
-        this.toast(result.message);
-      }
-    } catch (e) {
-      if (isCurrent()) this.toast('网络异常，请稍后重试');
-    } finally {
-      if (this.actionGeneration === generation && this.item === item) this.actionBusy = false;
-    }
-  }
-
-  /** 宫格单元边长：官方图文动态为三列正方形单元，间距 4vp；inset 为卡片内层额外左右留白之和。 */
-  private gridCell(inset: number = 0): number {
-    if (this.gridWidth <= 0) return 104;
-    return (this.gridWidth - inset - 8) / 3;
-  }
-
-  /** 图片网格高度：>=2 图按三列正方形单元；单图约占 2/3 宽的正方形。 */
-  private imageGridHeightFor(images: Array<string>, inset: number = 0): number {
-    const count: number = images.length;
-    const cell: number = this.gridCell(inset);
-    if (count <= 1) return cell * 2 + 4;
-    const rows: number = Math.ceil(count / 3);
-    return rows * cell + (rows - 1) * 4;
-  }
-
-  private imgId(dynId: string, index: number): string {
-    return this.idPrefix + 'dynamic-host-' + this.item.dynId + '-img-' + dynId + '-' + String(index);
-  }
-
-  private imgTransitionId(dynId: string, index: number): string {
-    return this.idPrefix + 'image-viewer-host-' + this.item.dynId + '-img-' + dynId + '-' + String(index);
-  }
-
-  private cardId(): string {
-    return this.idPrefix + 'dynamic-card-' + this.item.dynId;
-  }
-
-  private videoCoverId(item: DynamicItem): string {
-    const videoId: string = item.bvid.length > 0 ? item.bvid : 'a' + String(item.aid);
-    return this.idPrefix + 'dynamic-video-host-' + this.item.dynId + '-cover-' + item.dynId + '-' + videoId;
-  }
-
-  private videoCardId(item: DynamicItem): string {
-    const videoId: string = item.bvid.length > 0 ? item.bvid : 'a' + String(item.aid);
-    return this.idPrefix + 'dynamic-video-host-' + this.item.dynId + '-card-' + item.dynId + '-' + videoId;
-  }
-
-  /** 图文动态宫格：单图 2/3 宽正方形，多图三列正方形单元（对齐官方客户端）。
-   *  超过 9 张时只展示前 9 张，第 9 张压暗并叠加 +N（官方同款处理）。 */
-  @Builder
-  ImageGrid(item: DynamicItem, inset: number) {
-    if (item.images.length === 1) {
-      // 单图也必须有内容级 key。DynCard 被 LazyForEach 复用时，旧 Image 节点会在新图加载前
-      // 保留上一条动态的位图，视觉上就像“下面的图片串到上面”。
-      ForEach(item.images.slice(0, 1), (src: string) => {
-        Image(biliImageThumbnail(src, 900))
-          .width(this.gridCell(inset) * 2 + 4)
-          .height(this.gridCell(inset) * 2 + 4)
-          .objectFit(ImageFit.Cover)
-          .borderRadius(8)
-          .id(this.imgId(item.dynId, 0))
-          .geometryTransition(this.reduceMotion ? 'dynamic-reduced-' + this.imgTransitionId(item.dynId, 0) :
-            this.imgTransitionId(item.dynId, 0))
-          .onClick(() => {
-            this.openItemImage(item, 0);
-          })
-      }, (src: string) => item.dynId + '-single-' + src)
-    } else {
-      Grid() {
-        ForEach(item.images.slice(0, 9), (src: string, index: number) => {
-          GridItem() {
-            Stack({ alignContent: Alignment.Center }) {
-              // 宫格缩略图（320w webp）：动态流大批图片时避免原图占满内存。
-              Image(src.length > 0 ? biliImageThumbnail(src, 320) : src)
-                .width('100%')
-                .aspectRatio(1)
-                .objectFit(ImageFit.Cover)
-                .id(this.imgId(item.dynId, index))
-                .geometryTransition(this.reduceMotion ? 'dynamic-reduced-' + this.imgTransitionId(item.dynId, index) :
-                  this.imgTransitionId(item.dynId, index))
-              if (index === 8 && item.images.length > 9) {
-                Column() {
-                  Text('+' + String(item.images.length - 9))
-                    .fontSize(20)
-                    .fontWeight(FontWeight.Medium)
-                    .fontColor('#FFFFFF')
-                }
-                .width('100%')
-                .aspectRatio(1)
-                .justifyContent(FlexAlign.Center)
-                .backgroundColor('#59000000')
-                .hitTestBehavior(HitTestMode.None)
-              }
-            }
-            .width('100%')
-            .clip(true)
-            .borderRadius(6)
-            .onClick(() => {
-              this.openItemImage(item, index);
-            })
-          }
-        }, (src: string, index: number) => item.dynId + '-' + src + String(index))
-      }
-      .columnsTemplate('1fr 1fr 1fr')
-      .rowsTemplate(this.gridRowsTemplate(Math.min(9, item.images.length)))
-      .rowsGap(4)
-      .columnsGap(4)
-      .height(this.imageGridHeightFor(item.images.slice(0, 9), inset))
-      .width('100%')
-      .scrollBar(BarState.Off)
-    }
-  }
-
-  private gridRowsTemplate(count: number): string {
-    const rows: number = Math.max(1, Math.ceil(count / 3));
-    let tpl: string = '1fr';
-    for (let i: number = 1; i < rows; i++) {
-      tpl += ' 1fr';
-    }
-    return tpl;
-  }
-
-  private openDetail(focusComments: boolean = false): void {
-    if (this.detailMode || this.item.dynId.length === 0) return;
-    if (MotionTokens.isReduced()) {
-      const direct: DynamicDetailParam = { item: this.item as Object, focusComments: focusComments };
-      AppNavStack.pushPathByName(NAV_DYNAMIC_DETAIL, direct, false);
-      return;
-    }
-    let srcRect: ImageViewerSrcRect | undefined = undefined;
-    try {
-      const area = this.getUIContext().getComponentUtils().getRectangleById(this.cardId());
-      if (area.size.width > 0 && area.size.height > 0 && area.windowOffset.x >= 0) {
-        srcRect = {
-          x: this.getUIContext().px2vp(area.windowOffset.x),
-          y: this.getUIContext().px2vp(area.windowOffset.y),
-          w: this.getUIContext().px2vp(area.size.width),
-          h: this.getUIContext().px2vp(area.size.height),
-        };
-      }
-    } catch (e) {
-      // 取不到卡片矩形时保持普通导航。
-    }
-    const param: DynamicDetailParam = { item: this.item as Object, focusComments: focusComments, srcRect: srcRect };
-    if (srcRect !== undefined) {
-      AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
-      AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 380);
-    }
-    AppNavStack.pushPathByName(NAV_DYNAMIC_DETAIL, param);
-  }
-
-  private openItemDetail(item: DynamicItem): void {
-    if (item.dynId.length === 0) return;
-    const param: DynamicDetailParam = { item: item as Object };
-    AppNavStack.pushPathByName(NAV_DYNAMIC_DETAIL, param);
-  }
-
-  private openLive(item: DynamicItem): void {
-    if (item.liveRoomId <= 0) return;
-    const param: LiveRoomParam = {
-      roomId: item.liveRoomId,
-      uid: item.liveUid > 0 ? item.liveUid : item.mid,
-      title: item.title,
-      uname: item.uname,
-      face: item.face,
-      cover: item.cover,
-    };
-    AppNavStack.pushPathByName(NAV_LIVE_ROOM, param);
-  }
-
-  private openMajor(item: DynamicItem): void {
-    if (item.liveRoomId > 0) {
-      this.openLive(item);
-    } else if (item.seasonId > 0 || item.epId > 0) {
-      // PGC（番剧/影视）卡片进番剧详情页；UGC 合集卡没有 season_id/epid，仍走视频详情。
-      const param: BangumiDetailParam = { seasonId: item.seasonId, epId: item.epId, title: item.title };
-      AppNavStack.pushPathByName(NAV_BANGUMI_DETAIL, param);
-    } else if (item.bvid.length > 0 || item.aid > 0) {
-      this.openVideo(item);
-    } else {
-      this.openItemDetail(item);
-    }
-  }
-
-  /** 动态里的投稿视频与首页视频共用整卡扩展；快照失败时回退原有封面转场。 */
-  private openVideo(item: DynamicItem): void {
-    const entryCoverWidth: number = item.dynId === this.item.dynId ? 480 : 240;
-    const param: VideoDetailParam = {
-      bvid: item.bvid,
-      aid: item.aid,
-      title: item.title,
-      // 与卡片实际显示的缩略图保持同一 URL，hero 可直接复用已解码纹理。
-      cover: biliImageThumbnail(item.cover, entryCoverWidth),
-      // 动态流位于根 Tabs 的懒加载列表中，视频页覆盖期间来源卡可能被回收。
-      // 保留入场放大，返回使用普通出栈，避免详情页缩回后因目标节点缺失而悬停。
-      mirrorHeroReturn: false,
-    };
-    if (MotionTokens.isReduced()) {
-      AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param, false);
-      return;
-    }
-    try {
-      const cardArea = this.getUIContext().getComponentUtils().getRectangleById(this.videoCardId(item));
-      if (cardArea.size.width > 0 && cardArea.size.height > 0 &&
-        cardArea.windowOffset.x >= 0 && cardArea.windowOffset.y >= 0) {
-        const snapshot: image.PixelMap = this.getUIContext().getComponentSnapshot().getSync(this.videoCardId(item), {
-          waitUntilRenderFinished: true,
-        });
-        param.cardRect = {
-          x: this.getUIContext().px2vp(cardArea.windowOffset.x),
-          y: this.getUIContext().px2vp(cardArea.windowOffset.y),
-          w: this.getUIContext().px2vp(cardArea.size.width),
-          h: this.getUIContext().px2vp(cardArea.size.height),
-        };
-        setHeroBgSnapshot(snapshot);
-        AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
-        AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
-        AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
-        return;
-      }
-    } catch (e) {
-      // 组件快照不可用时继续走下方已验证的封面矩形动画。
-    }
-    let srcRect: ImageViewerSrcRect | undefined = undefined;
-    try {
-      const area = this.getUIContext().getComponentUtils().getRectangleById(this.videoCoverId(item));
-      if (area.size.width > 0 && area.size.height > 0 && area.windowOffset.x >= 0 && area.windowOffset.y >= 0) {
-        srcRect = {
-          x: this.getUIContext().px2vp(area.windowOffset.x),
-          y: this.getUIContext().px2vp(area.windowOffset.y),
-          w: this.getUIContext().px2vp(area.size.width),
-          h: this.getUIContext().px2vp(area.size.height),
-        };
-      }
-    } catch (e) {
-      // 无封面或尚未完成布局时退回普通导航。
-    }
-    if (srcRect !== undefined) {
-      param.srcRect = srcRect;
-      AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
-      AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
-    }
-    AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param);
-  }
-
-  private openItemImage(item: DynamicItem, index: number): void {
-    const images: Array<string> = item.images;
-    if (MotionTokens.isReduced()) {
-      const direct: ImageViewerParam = { images: images, initialIndex: index };
-      AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, direct, false);
-      return;
-    }
-    const rects: Array<ImageViewerSrcRect> = this.collectImageRects(item);
-    const rect: ImageViewerSrcRect | undefined = index < rects.length && rects[index].w > 0 ? rects[index] : undefined;
-    const ids: Array<string> = [];
-    const transitionIds: Array<string> = [];
-    const previews: Array<string> = [];
-    for (let i: number = 0; i < images.length; i++) {
-      // 第 10 张以后都由第 9 格的“+N”入口承载，返回时也以该格为实时目标。
-      ids.push(this.imgId(item.dynId, Math.min(i, 8)));
-      transitionIds.push(this.imgTransitionId(item.dynId, Math.min(i, 8)));
-      previews.push(biliImageThumbnail(images[i], images.length === 1 ? 900 : 320));
-    }
-    const viewer: ImageViewerParam = {
-      images: images,
-      initialIndex: index,
-      srcRect: rect,
-      srcRects: rects,
-      srcIds: ids,
-      srcPreviews: previews,
-    };
-    if (this.sharedImageTransition) {
-      viewer.transitionId = this.imgTransitionId(item.dynId, Math.min(index, 8));
-      viewer.transitionIds = transitionIds;
-    }
-    this.pushViewer(viewer);
-  }
-
-  /** 记录宫格每一格的窗口矩形；超过 9 张的图片统一收回“+N”所在的第 9 格。 */
-  private collectImageRects(item: DynamicItem): Array<ImageViewerSrcRect> {
-    const rects: Array<ImageViewerSrcRect> = [];
-    let overflowRect: ImageViewerSrcRect = { x: 0, y: 0, w: 0, h: 0 };
-    for (let i: number = 0; i < item.images.length; i++) {
-      if (i >= 9) {
-        rects.push(overflowRect);
-        continue;
-      }
-      let rect: ImageViewerSrcRect = { x: 0, y: 0, w: 0, h: 0 };
-      try {
-        const area = this.getUIContext().getComponentUtils().getRectangleById(this.imgId(item.dynId, i));
-        if (area.size.width > 0 && area.size.height > 0 && area.windowOffset.x >= 0) {
-          rect = {
-            x: this.getUIContext().px2vp(area.windowOffset.x),
-            y: this.getUIContext().px2vp(area.windowOffset.y),
-            w: this.getUIContext().px2vp(area.size.width),
-            h: this.getUIContext().px2vp(area.size.height),
-          };
-        }
-      } catch (e) {
-        // 未布局的格子保留零矩形，退出时退化为淡出。
-      }
-      rects.push(rect);
-      if (i === 8) overflowRect = rect;
-    }
-    return rects;
-  }
-
-  /** 普通 Navigation 层级使用 geometryTransition；根 Tabs 则使用窗口矩形 hero 规避坐标系偏移。 */
-  private pushViewer(viewer: ImageViewerParam): void {
-    if ((viewer.transitionId ?? '').length > 0) {
-      this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut }, () => {
-        AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer, false);
-      });
-      return;
-    }
-    AppStorage.setOrCreate<boolean>(HERO_NAV_TRANSITION_ACTIVE_KEY, true);
-    AppStorage.setOrCreate<number>(HERO_NAV_TRANSITION_DURATION_KEY, 360);
-    AppNavStack.pushPathByName(NAV_IMAGE_VIEWER, viewer);
-  }
-
-  @Builder
-  ForwardedCard(item: DynamicItem) {
-    Column({ space: 7 }) {
-      Text('@' + (item.uname.length > 0 ? item.uname : '原动态作者'))
-        .width('100%').fontSize(13).fontWeight(FontWeight.Medium).fontColor('#008AC5')
-        .onClick(() => {
-          this.openItemDetail(item);
-        })
-      if (item.content.length > 0) {
-        // 行内流：与评论区一致，表情随文字同流换行（Flex 独立 item 会把表情挤到新行），底部对齐。
-        Text() {
-          ForEach(contentPartsOf(item, this.emoteVer), (part: DynamicContentPart) => {
-            if (part.image.length > 0 && this.emoteFailed.has(part.image)) {
-              Span(part.imageLabel.length > 0 ? part.imageLabel : '[表情]')
-            } else if (part.image.length > 0) {
-              ImageSpan(this.emoteSrc(part.image)).width(part.imageSize > 1 ? 46 : 23).height(part.imageSize > 1 ? 46 : 23).objectFit(ImageFit.Contain).verticalAlign(ImageSpanAlignment.BOTTOM)
-            } else if (part.isTopic) {
-              Span(part.text)
-                .fontColor(this.accent)
-                .onClick(() => this.searchTopic(part.text))
-            } else {
-              Span(part.text)
-            }
-          }, (part: DynamicContentPart) => 'forward-' + part.key)
-        }
-        .fontSize(13)
-        .lineHeight(20)
-        .width('100%')
-        .fontColor(this.isDark ? '#D8D8DC' : '#303236')
-        .onClick(() => {
-          this.openItemDetail(item);
-        })
-      }
-      if (item.images.length > 0) {
-        this.ImageGrid(item, 20)
-      }
-      if (item.title.length > 0) {
-        Row({ space: 9 }) {
-          if (item.cover.length > 0) {
-            ForEach([item.cover], (cover: string) => {
-              Image(biliImageThumbnail(cover, 240))
-                .width(112)
-                .height(68)
-                .objectFit(ImageFit.Cover)
-                .borderRadius(6)
-                .id(this.videoCoverId(item))
-            }, (cover: string) => item.dynId + '-forward-cover-' + cover)
-          }
-          Column({ space: 5 }) {
-            Text(item.title).fontSize(13).fontColor(this.isDark ? '#E6E6E6' : '#18191C').maxLines(2)
-            if (item.badge.length > 0 || item.subtitle.length > 0) {
-              Text(item.badge.length > 0 ? item.badge : item.subtitle).fontSize(10)
-                .fontColor(item.liveRoomId > 0 ? '#FB7299' : '#9499A0')
-            }
-          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-        }
-        .width('100%')
-        .id(this.videoCardId(item))
-        .onClick(() => {
-          this.openMajor(item);
-        })
-      }
-      if (item.original !== null) this.ForwardedCard(item.original)
-    }
-    .width('100%').padding(10).borderRadius(8)
-    .backgroundColor(this.isDark ? '#222429' : '#F1F3F5')
-  }
-
-  build() {
-    Column({ space: 8 }) {
-      // 头部：头像 + 昵称 + 时间；有装扮时装扮小卡按原始比例显示在行右端（官方动态卡片样式）。
-      Row({ space: 8 }) {
-        DecoratedAvatar({
-          face: this.item.face,
-          pendant: this.item.pendant,
-          avatarSize: 36,
-          containerSize: 52,
-        })
-        Column({ space: 2 }) {
-          Row({ space: 4 }) {
-            Text(this.item.uname)
-              .fontSize(14)
-              .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-              .fontWeight(FontWeight.Medium)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-            if (this.item.decorationNumber.length > 0 && this.item.decorationCard.length === 0) {
-              Text(this.decorationNumberLabel())
-                .fontSize(10)
-                .fontWeight(FontWeight.Bold)
-                .fontColor(this.item.decorationColor.length > 0 ? this.item.decorationColor : this.accent)
-                .maxLines(1)
-            }
-          }
-          .alignItems(VerticalAlign.Center)
-          Text(formatRelativeTime(this.item.pubtime))
-            .fontSize(11)
-            .fontColor('#9499A0')
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-        if (this.item.decorationCard.length > 0) {
-          UserDecorationBanner({
-            imageUrl: this.item.decorationCard,
-            numberText: this.item.decorationNumber,
-            numberColor: this.item.decorationColor.length > 0 ? this.item.decorationColor : '#FFFFFF',
-            bannerHeight: 44,
-            fitWidth: true,
-          })
-        } else if (!this.embedded) {
-          Text('已关注')
-            .fontSize(12)
-            .fontColor('#9499A0')
-            .backgroundColor(this.isDark ? '#34363B' : '#EEF0F2')
-            .padding({ left: 10, right: 10, top: 4, bottom: 4 })
-            .borderRadius(12)
-        }
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-      .onClick(() => {
-        if (this.item.mid > 0) {
-          AppNavStack.pushPathByName(NAV_USER_SPACE, { mid: this.item.mid } as UserSpaceParam);
-        }
-      })
-
-      // 内容
-      if (this.renderContentItem().content.length > 0) {
-        // 行内流：与评论区一致，表情随文字同流换行（Flex 独立 item 会把表情挤到新行），底部对齐。
-        Text() {
-          ForEach(contentPartsOf(this.renderContentItem(), this.emoteVer), (part: DynamicContentPart) => {
-            if (part.image.length > 0 && this.emoteFailed.has(part.image)) {
-              Span(part.imageLabel.length > 0 ? part.imageLabel : '[表情]')
-            } else if (part.image.length > 0) {
-              ImageSpan(this.emoteSrc(part.image)).width(part.imageSize > 1 ? 50 : 25).height(part.imageSize > 1 ? 50 : 25).objectFit(ImageFit.Contain).verticalAlign(ImageSpanAlignment.BOTTOM)
-            } else if (part.isTopic) {
-              Span(part.text)
-                .fontColor(this.accent)
-                .onClick(() => this.searchTopic(part.text))
-            } else {
-              Span(part.text)
-            }
-          }, (part: DynamicContentPart) => part.key)
-        }
-        .fontSize(14)
-        .lineHeight(21)
-        .width('100%')
-        .fontColor(this.isDark ? '#D0D0D0' : '#222222')
-        .onClick(() => this.openDetail())
-      }
-
-      if (this.item.original !== null) {
-        this.ForwardedCard(this.item.original)
-      }
-
-      // 图文/专栏动态图片宫格（详情态也走缩略图，内存友好；点击进 ImageViewer 时再拉原图）。
-      if (this.item.images.length > 0) {
-        Stack({ alignContent: Alignment.TopStart }) {
-          // 图片本身仍打开看图器；单图左右的留白属于动态卡片，点击应进入动态详情。
-          Row()
-            .width('100%')
-            .height(this.imageGridHeightFor(this.item.images.slice(0, 9), 0))
-            .onClick(() => this.openDetail())
-          this.ImageGrid(this.item, 0)
-        }
-        .width('100%')
-        .height(this.imageGridHeightFor(this.item.images.slice(0, 9), 0))
-      }
-
-      // 视频卡片
-      if (this.item.title.length > 0) {
-        Row({ space: 10 }) {
-          if (this.item.cover.length > 0) {
-            ForEach([this.item.cover], (cover: string) => {
-              Stack({ alignContent: Alignment.TopEnd }) {
-                Image(biliImageThumbnail(cover, 480))
-                  .width(132)
-                  .height(78)
-                  .objectFit(ImageFit.Cover)
-                  .borderRadius(7)
-                if (this.item.badge.length > 0) {
-                  Text(this.item.badge)
-                    .fontSize(9).fontColor('#FFFFFF').backgroundColor('#B3FB7299')
-                    .padding({ left: 5, right: 5, top: 2, bottom: 2 }).borderRadius(4).margin(5)
-                }
-              }
-              .id(this.videoCoverId(this.item))
-            }, (cover: string) => this.item.dynId + '-video-cover-' + cover)
-          }
-          Column({ space: 6 }) {
-            Text(this.item.title)
-              .fontSize(14)
-              .fontColor(this.isDark ? '#E6E6E6' : '#18191C')
-              .maxLines(2)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-            if (this.item.subtitle.length > 0) {
-              Text(this.item.subtitle).fontSize(11).fontColor('#9499A0').maxLines(2)
-            }
-          }
-          .alignItems(HorizontalAlign.Start)
-          .layoutWeight(1)
-        }
-        .width('100%')
-        .padding(8)
-        .borderRadius(9)
-        .backgroundColor(this.isDark ? '#222429' : '#F5F7F9')
-        .id(this.videoCardId(this.item))
-        .onClick(() => {
-          this.openMajor(this.item);
-        })
-      }
-
-      // 底部互动：点赞/评论/转发均可点，点赞与转发走登录态接口。
-      Row({ space: 12 }) {
-        Row({ space: 4 }) {
-          Image(this.liked ? $r('app.media.ic_like_fill') : $r('app.media.ic_like'))
-            .width(16)
-            .height(16)
-            .fillColor(this.liked ? this.accent : '#9499A0')
-          Text(this.likeCount > 0 ? formatCount(this.likeCount) : '赞')
-            .fontSize(12)
-            .fontColor(this.liked ? this.accent : '#9499A0')
-        }
-        .height(44)
-        .constraintSize({ minWidth: 44 })
-        .alignItems(VerticalAlign.Center)
-        .accessibilityGroup(true)
-        .accessibilityText((this.liked ? '取消点赞，' : '点赞，') + String(this.likeCount) + '个赞')
-        .accessibilitySelected(this.liked)
-        .onClick(() => {
-          this.toggleLike().catch(() => {
-          });
-        })
-        Row({ space: 4 }) {
-          Image($r('app.media.ic_comment'))
-            .width(16)
-            .height(16)
-            .fillColor('#9499A0')
-          Text(this.item.comment > 0 ? formatCount(this.item.comment) : '评')
-            .fontSize(12)
-            .fontColor('#9499A0')
-        }
-        .height(44)
-        .constraintSize({ minWidth: 44 })
-        .alignItems(VerticalAlign.Center)
-        .accessibilityGroup(true)
-        .accessibilityText('查看评论，' + String(this.item.comment) + '条评论')
-        .onClick(() => {
-          this.openDetail(true);
-        })
-        Row({ space: 4 }) {
-          Image($r('app.media.ic_share'))
-            .width(16)
-            .height(16)
-            .fillColor('#9499A0')
-          Text(this.forwardCount > 0 ? formatCount(this.forwardCount) : '转')
-            .fontSize(12)
-            .fontColor('#9499A0')
-        }
-        .height(44)
-        .constraintSize({ minWidth: 44 })
-        .alignItems(VerticalAlign.Center)
-        .accessibilityGroup(true)
-        .accessibilityText('转发动态，' + String(this.forwardCount) + '次转发')
-        .onClick(() => {
-          this.forwardDynamic().catch(() => {
-          });
-        })
-        // 更多菜单固定贴齐卡片右边，不再紧跟在转发按钮后面。
-        Blank()
-          .layoutWeight(1)
-        Row({ space: 4 }) {
-          Image($r('app.media.ic_more'))
-            .width(16)
-            .height(16)
-            .fillColor('#9499A0')
-        }
-        .width(44)
-        .height(44)
-        .alignItems(VerticalAlign.Center)
-        .justifyContent(FlexAlign.End)
-        .accessibilityGroup(true)
-        .accessibilityText('举报动态')
-        .onClick(() => {
-          this.promptReportDynamic();
-        })
-      }
-      .width('100%')
-    }
-    .width('100%')
-    .padding(12)
-    .borderRadius(10)
-    .backgroundColor(this.isDark ? '#2A2C31' : '#FFFFFF')
-    .id(this.cardId())
-    .onAreaChange((oldV: Area, newV: Area) => {
-      // 实测卡片内容宽（减去自身 padding 24），供图片宫格计算正方形单元边长。
-      const w: number = Number.parseFloat(String(newV.width));
-      if (Number.isFinite(w) && w > 24 && Math.abs(w - 24 - this.gridWidth) > 1) {
-        this.gridWidth = w - 24;
-      }
-    })
-  }
-
-  /** 动态举报：原因选择弹窗（showDialog 不支持回调，用 index 回读）。 */
-  private promptReportDynamic(): void {
-    if (this.item.dynId.length === 0) {
-      this.toast('动态信息不完整，暂不支持举报');
-      return;
-    }
-    const reasons: Array<string> = ['违法违规', '色情低俗', '垃圾广告', '人身攻击', '抄袭洗稿', '其他'];
-    const buttons: Array<ReportButtonItem> = [];
-    for (let i: number = 0; i < reasons.length; i++) {
-      buttons.push({ text: reasons[i], color: this.isDark ? '#CCFFFFFF' : '#18191C' });
-    }
-    buttons.push({ text: '取消', color: '#9499A0' });
-    try {
-      this.getUIContext().getPromptAction().showDialog({
-        title: '举报动态',
-        message: this.item.content.substring(0, Math.min(24, this.item.content.length)),
-        buttons: buttons,
-      }).then((dialogResult) => {
-        const pick: number = Number(dialogResult.index);
-        if (pick < 0 || pick >= reasons.length) return;
-        if (UserStore.isLogin === false) {
-          this.toast('请先登录后再举报动态');
-          return;
-        }
-        const reasonValues: Array<string> = ['1', '2', '6', '5', '14', '99'];
-        DynamicApi.report(this.item.dynId, reasonValues[pick])
-          .then((r: ActionResult) => {
-            this.toast(r.ok ? '已提交举报，感谢反馈' : r.message);
-          })
-          .catch(() => {
-            this.toast('举报失败，请稍后重试');
-          });
-      });
-    } catch (e) {
-      // 窗口异常忽略。
-    }
-  }
-}
+import { DynCard } from '../components/dynamic/DynCard';
+import { DynamicFollowController, DynamicFollowState } from '../components/dynamic/DynamicFollowController';
+import { DynamicFollowStrip } from '../components/dynamic/DynamicFollowStrip';
+import { DynamicComposerController } from '../components/dynamic/DynamicComposerController';
+import { DynamicComposer } from '../components/dynamic/DynamicComposer';
+import { DynamicFeedController, DynamicFeedState } from '../components/dynamic/DynamicFeedController';
+export { DynCard } from '../components/dynamic/DynCard';
 
 @Component
 export struct DynamicView {
@@ -1127,42 +28,27 @@ export struct DynamicView {
   @Prop embedded: boolean = false;
   @State loading: boolean = true;
   @State login: boolean = false;
-  @State dynOffset: string = '';
   @State dynType: string = 'all';
   @State dynTab: number = 0;
-  @State dynHasMore: boolean = true;
-  @State feedLoading: boolean = false;
-  private feedLoaded: boolean = false;
   @State refreshing: boolean = false;
   @State refreshStatus: RefreshStatus = RefreshStatus.Inactive;
   private refreshOperation: number = 0;
-  @State dynCount: number = 0;
-  @State errorText: string = '';
   // 发布动态（纯文字 / 图文）面板状态
   @State showComposer: boolean = false;
-  @State composerText: string = '';
-  @State composing: boolean = false;
-  /** 已选图片草稿（选图时已预处理落盘缓存，发布阶段只上传）。 */
-  @State composerImages: Array<DynDraftImage> = [];
-  /** 发布进行中的阶段文案（上传图片 1/3、发布中…），为空时按钮显示默认文案。 */
-  @State composerStage: string = '';
+  private composer: DynamicComposerController = new DynamicComposerController(() => {
+    this.showComposer = false;
+    this.loadFeed(true);
+  }, (message: string) => {
+    try { this.getUIContext().getPromptAction().showToast({ message: message }); } catch (e) {}
+  });
   // 发布气泡（悬浮入口）：随惯用手换边。必须是本页 @Builder 而非自定义组件——
   // 自定义组件的包装节点是 HitTestMode.Default，全屏容器会拦截整个动态列表的滑动与点击。
   @StorageProp(Handedness.KEY_SIDE) @Watch('onComposeHandSideChanged') composeHandSide: string = Handedness.RIGHT;
   @State composeHandPosition: number = 0;
   @State composeContainerWidth: number = 0;
-  // 顶部「关注 UP 主」横滑栏：登录后拉取关注列表第一页，不阻塞动态流加载。
-  @State followed: Array<RelationUserItem> = [];
-  /** uid -> 直播间 roomId（仅直播中的 UP；由批量开播状态接口异步补充，失败不影响横滑条）。 */
-  @State liveRooms: Map<number, number> = new Map<number, number>();
-  @State followingLoaded: boolean = false;
-  private followLoading: boolean = false;
-  private liveFetching: boolean = false;
-  private accountGeneration: number = 0;
-  @State feedMoreFailed: boolean = false;
-  @State feedNeedsLogin: boolean = false;
-  private feedRetryReset: boolean = false;
-  private feedEpoch: RequestEpoch = new RequestEpoch();
+  @State following: DynamicFollowState = new DynamicFollowState();
+  private follow: DynamicFollowController = new DynamicFollowController(
+    (state: DynamicFollowState) => { this.following = state; });
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
@@ -1171,55 +57,54 @@ export struct DynamicView {
   /** 惯用手侧：分类胶囊上滑让位的方向依据（左手头像在左，胶囊向右让位）。 */
   @StorageProp(Handedness.KEY_SIDE) handSide: string = Handedness.RIGHT;
   @StorageProp('loginVersion') @Watch('onLoginChanged') loginVer: number = 0;
-  private dynSource: BasicDataSource<DynamicItem> = new BasicDataSource<DynamicItem>();
   private dynTabsController: TabsController = new TabsController();
   private dynTypes: Array<string> = ['all', 'video', 'pgc', 'article'];
-  /** 分类页签会话级缓存：切回已看过的分类即时恢复列表，不重拉不闪烁（下拉刷新仍强制更新）。 */
-  private typeItems: Map<string, Array<DynamicItem>> = new Map<string, Array<DynamicItem>>();
-  private typeOffset: Map<string, string> = new Map<string, string>();
-  private typeHasMore: Map<string, boolean> = new Map<string, boolean>();
-  /** 每页数据源保持稳定，横滑时离场页和入场页同时展示自己的内容。 */
-  private typeSources: Map<string, BasicDataSource<DynamicItem>> = new Map<string, BasicDataSource<DynamicItem>>();
-  private typeStates: Map<string, DynamicFeedState> = new Map<string, DynamicFeedState>();
+  @State feedStates: Array<DynamicFeedState> = [new DynamicFeedState(), new DynamicFeedState(),
+    new DynamicFeedState(), new DynamicFeedState()];
+  private feed: DynamicFeedController = new DynamicFeedController(() => this.hostMid,
+    (states: Array<DynamicFeedState>) => { this.feedStates = states; });
   private initializing: boolean = false;
+  private active: boolean = true;
+  private lifecycle: number = 0;
   /** 初始化期间收到登录广播时补跑一次，避免 Tabs 保活页面永久停在旧登录态。 */
   private initPending: boolean = false;
 
   onLoginChanged(): void {
     // 登录/登出广播：重载动态流（Tabs 保活，aboutToAppear 不会再触发）
     // 关注列表与直播角标属于账号数据，切换账号时必须清空并重新拉取。
-    this.accountGeneration++;
-    this.feedEpoch.invalidate();
+    this.composer.reset();
+    this.showComposer = false;
+    this.follow.reset();
+    this.feed.reset();
     this.refreshOperation++;
     this.refreshing = false;
     this.refreshStatus = RefreshStatus.Inactive;
-    this.feedLoading = false;
-    this.feedLoaded = false;
-    this.typeSources.forEach((source: BasicDataSource<DynamicItem>) => source.clear());
-    this.typeStates.clear();
-    this.dynSource.clear();
-    this.dynCount = 0;
-    this.dynOffset = '';
-    this.dynHasMore = true;
-    this.typeItems.clear();
-    this.typeOffset.clear();
-    this.typeHasMore.clear();
-    this.followed = [];
-    this.liveRooms = new Map<number, number>();
-    this.followingLoaded = false;
-    this.followLoading = false;
-    this.liveFetching = false;
     this.init().catch(() => {
     });
   }
 
   aboutToAppear(): void {
+    this.active = true;
+    this.lifecycle++;
     EmoteResolver.ensureLoaded();
     // 切到动态 Tab 时强制回到顶部状态，避免残留 fade 导致搜索栏和搜索球同时出现。
     AppTheme.resetHeaderFade();
     this.composeHandPosition = this.composeHandSide === Handedness.LEFT ? 1 : 0;
     this.init().catch(() => {
     });
+  }
+
+  aboutToDisappear(): void {
+    this.active = false;
+    this.lifecycle++;
+    this.initPending = false;
+    this.refreshOperation++;
+    this.refreshing = false;
+    this.refreshStatus = RefreshStatus.Inactive;
+    this.feed.cancel();
+    this.follow.cancel();
+    this.composer.detach();
+    this.composer.reset();
   }
 
   /** 惯用手切换：只驱动气泡位移动画，不触发动态列表刷新。 */
@@ -1231,6 +116,7 @@ export struct DynamicView {
   }
 
   async init(): Promise<void> {
+    if (!this.active) return;
     // aboutToAppear 与登录广播可能同时触发，防重入
     if (this.initializing) {
       this.initPending = true;
@@ -1238,26 +124,29 @@ export struct DynamicView {
     }
     this.initializing = true;
     this.initPending = false;
+    const lifecycle: number = this.lifecycle;
     try {
       this.loading = true;
-      this.errorText = '';
       if (this.hostMid <= 0 && !UserStore.isLogin) {
         await UserStore.ensureLoaded();
       }
+      if (!this.active || lifecycle !== this.lifecycle) return;
       this.login = this.hostMid > 0 || UserStore.isLogin;
       if (this.login) {
         // 只有主页关注流展示 UP 横滑栏；用户空间内嵌版与指定用户动态都不需要。
         if (this.hostMid <= 0 && !this.embedded) {
-          this.loadFollowStrip();
+          this.follow.load();
         }
         await this.loadFeed(true);
       }
     } catch (e) {
-      this.errorText = '动态加载失败，请检查登录状态或网络后重试';
+      if (this.active && lifecycle === this.lifecycle) {
+        this.feed.setInitialError('动态加载失败，请检查登录状态或网络后重试');
+      }
     } finally {
-      this.loading = false;
+      if (this.active && lifecycle === this.lifecycle) this.loading = false;
       this.initializing = false;
-      if (this.initPending) {
+      if (this.active && this.initPending) {
         this.initPending = false;
         this.init().catch(() => {
         });
@@ -1266,117 +155,14 @@ export struct DynamicView {
   }
 
   async loadFeed(reset: boolean): Promise<void> {
-    if (!reset && (this.feedLoading || !this.dynHasMore)) return;
-    const epoch: number = this.feedEpoch.next();
-    this.feedMoreFailed = false;
-    this.feedNeedsLogin = false;
-    this.feedRetryReset = reset;
-    this.errorText = '';
-    this.feedLoading = true;
-    try {
-      const off: string = reset ? '' : this.dynOffset;
-      const page: DynamicPageData = this.hostMid > 0 ?
-        await DynamicApi.getUserDynamicFeed(this.hostMid, off) : await DynamicApi.getDynamicFeed(off, this.dynType);
-      if (!this.feedEpoch.isCurrent(epoch)) return;
-      if (reset) {
-        this.dynSource.reset(page.items);
-      } else {
-        this.dynSource.append(page.items);
-      }
-      this.dynCount = this.dynSource.totalCount();
-      this.dynOffset = page.offset;
-      this.dynHasMore = page.hasMore;
-      this.feedLoaded = true;
-    } catch (e) {
-      if (!this.feedEpoch.isCurrent(epoch)) return;
-      this.feedNeedsLogin = (e as Error).message === '登录已失效，请重新登录后查看动态';
-      if (this.dynSource.isEmpty()) this.errorText = (e as Error).message || '动态加载失败，请稍后重试';
-      else this.feedMoreFailed = true;
-    } finally {
-      if (this.feedEpoch.isCurrent(epoch)) this.feedLoading = false;
-    }
+    await this.feed.load(reset);
   }
 
   private recoverFeed(): void {
-    if (this.feedNeedsLogin) {
-      AppNavStack.pushPathByName(NAV_LOGIN, null);
-    } else if (this.dynCount === 0) {
-      this.init();
-    } else {
-      this.loadFeed(this.feedMoreFailed && this.feedRetryReset);
-    }
-  }
-
-  /**
-   * 点赞结果回写数据源真身：DynCard 的 @Prop item 是深拷贝，卡片内改动不进入 dynSource，
-   * 卡片被回收再复用时 syncFromItem 会从数据源回读旧值导致点赞态回退。这里按 dynId 找到
-   * 真身原地重赋值字段即可——触发点赞的卡片保持乐观 UI，无需 notifyItemChanged 重绑
-   * 在途点赞可能跨越分类切换，因此同时更新各分类已缓存的模型，后续复用不会回退。
-   */
-  private handleLikeResult(dynId: string, liked: boolean, count: number): void {
-    const sources: Set<BasicDataSource<DynamicItem>> = new Set<BasicDataSource<DynamicItem>>([this.dynSource]);
-    this.typeSources.forEach((source: BasicDataSource<DynamicItem>) => sources.add(source));
-    sources.forEach((source: BasicDataSource<DynamicItem>) => {
-      const items: Array<DynamicItem> = source.getAll();
-      for (let i: number = 0; i < items.length; i++) {
-        if (items[i].dynId === dynId) {
-          items[i].liked = liked;
-          items[i].like = count;
-        }
-      }
-    });
-  }
-
-  /** 并行拉取关注 UP 主第一页，仅作横滑栏展示，失败静默（不影响动态主流程）。 */
-  private async loadFollowStrip(): Promise<void> {
-    if (this.followingLoaded || this.followLoading) return;
-    const generation: number = this.accountGeneration;
-    this.followLoading = true;
-    try {
-      await UserStore.ensureLoaded();
-      const mid: number = UserStore.current !== null ? UserStore.current.mid : 0;
-      if (mid <= 0) return;
-      const page: RelationUserPageData = await UserApi.getRelationUsers(mid, 'following', 1);
-      if (generation !== this.accountGeneration || UserStore.current === null || UserStore.current.mid !== mid) return;
-      if (page.users.length > 0) {
-        this.followed = page.users;
-      }
-    } catch (e) {
-      // 关注列表失败时静默隐藏横滑条。
-    } finally {
-      if (generation === this.accountGeneration) {
-        this.followingLoaded = true;
-        this.followLoading = false;
-        // 列表到位后异步补开播状态（直播角标）；失败静默。
-        this.refreshLiveBadges();
-      }
-    }
-  }
-
-  /** 批量查询关注 UP 的开播状态，驱动横滑栏「直播中」角标。 */
-  private async refreshLiveBadges(): Promise<void> {
-    if (this.followed.length === 0 || this.liveFetching) return;
-    const generation: number = this.accountGeneration;
-    this.liveFetching = true;
-    try {
-      const uids: Array<number> = [];
-      for (let i: number = 0; i < this.followed.length; i++) {
-        uids.push(this.followed[i].mid);
-      }
-      const items = await LiveApi.getLiveStatusByUids(uids);
-      if (generation !== this.accountGeneration) return;
-      const next: Map<number, number> = new Map<number, number>();
-      for (let i: number = 0; i < items.length; i++) {
-        if (items[i].liveStatus === 1 && items[i].roomId > 0) {
-          next.set(items[i].uid, items[i].roomId);
-        }
-      }
-      this.liveRooms = next;
-    } catch (e) {
-      // 开播状态失败时只少一个角标，不打扰。
-    } finally {
-      if (generation === this.accountGeneration) this.liveFetching = false;
-    }
+    const state: DynamicFeedState = this.feed.state();
+    if (state.needsLogin) AppNavStack.pushPathByName(NAV_LOGIN, null);
+    else if (state.count === 0) this.init();
+    else this.loadFeed(state.moreFailed && state.retryReset);
   }
 
   private onRefresh(): void {
@@ -1426,100 +212,21 @@ export struct DynamicView {
     Haptic.tap();
   }
 
-  /** 关注栏 UP「直播中」角标点击：直达直播间。 */
-  private openLiveRoom(mid: number): void {
-    const roomId: number | undefined = this.liveRooms.get(mid);
-    if (roomId === undefined || roomId <= 0) return;
-    this.tapVibrate();
-    const followee: RelationUserItem | undefined =
-      this.followed.find((u: RelationUserItem) => u.mid === mid);
-    const param: LiveRoomParam = {
-      roomId: roomId,
-      uid: mid,
-      title: '',
-      uname: followee !== undefined ? followee.uname : '',
-      face: followee !== undefined ? followee.face : '',
-      cover: '',
-    };
-    AppNavStack.pushPathByName(NAV_LIVE_ROOM, param);
-  }
-
   private changeDynType(type: string): void {
     if (this.dynType === type) return;
-    // 选中态改变之后，原生 Tabs 动画仍会继续渲染离场页。
-    this.typeStates.set(this.dynType, this.pageState(this.dynTypes.indexOf(this.dynType)));
-    this.typeSources.set(this.dynType, this.dynSource);
-    // 缓存命中不会发新请求，也必须先让旧分类的首屏/分页失效。
-    // 分类切换清除旧请求的展示状态，旧刷新 finally 不能收起新分类的刷新提示。
-    this.feedEpoch.invalidate();
     this.refreshOperation++;
-    this.feedLoading = false;
-    this.feedMoreFailed = false;
-    this.feedNeedsLogin = false;
-    this.feedRetryReset = false;
-    this.errorText = '';
     this.refreshing = false;
     this.refreshStatus = RefreshStatus.Inactive;
-    // 当前列表快照进缓存（同一数组引用，含已追加的分页）。
-    this.typeItems.set(this.dynType, this.dynSource.getAll());
-    this.typeOffset.set(this.dynType, this.dynOffset);
-    this.typeHasMore.set(this.dynType, this.dynHasMore);
-    this.dynSource = this.pageSource(this.dynTypes.indexOf(type));
     this.dynType = type;
-    const cached: Array<DynamicItem> | undefined = this.typeItems.get(type);
-    const state: DynamicFeedState | undefined = this.typeStates.get(type);
-    this.feedLoaded = state?.loaded ?? false;
-    if (cached !== undefined && (cached.length > 0 || this.feedLoaded)) {
-      // 看过的分类：即时恢复，不重拉不闪烁。
-      this.dynSource.reset(cached);
-      this.dynOffset = this.typeOffset.get(type) ?? '';
-      this.dynHasMore = this.typeHasMore.get(type) ?? true;
-      this.dynCount = this.dynSource.totalCount();
-      this.errorText = state?.errorText ?? '';
-      this.feedMoreFailed = state?.moreFailed ?? false;
-      this.feedNeedsLogin = state?.needsLogin ?? false;
-      this.feedRetryReset = state?.retryReset ?? false;
-      return;
-    }
-    // 首次进入的分类才清空重拉。
-    this.dynOffset = '';
-    this.dynHasMore = true;
-    this.dynSource.clear();
-    this.dynCount = 0;
-    this.errorText = '';
-    this.loadFeed(true).catch(() => {
-    });
+    this.feed.select(type);
   }
 
   private pageSource(tabIdx: number): BasicDataSource<DynamicItem> {
-    const type: string = this.dynTypes[tabIdx] ?? 'all';
-    if (type === this.dynType) return this.dynSource;
-    let source: BasicDataSource<DynamicItem> | undefined = this.typeSources.get(type);
-    if (source === undefined) {
-      source = new BasicDataSource<DynamicItem>();
-      source.reset(this.typeItems.get(type) ?? []);
-      this.typeSources.set(type, source);
-    }
-    return source;
+    return this.feed.source(this.dynTypes[tabIdx] ?? 'all');
   }
 
   private pageState(tabIdx: number): DynamicFeedState {
-    const type: string = this.dynTypes[tabIdx] ?? 'all';
-    if (type === this.dynType) {
-      return { count: this.dynCount, loaded: this.feedLoaded, loading: this.feedLoading,
-        errorText: this.errorText, needsLogin: this.feedNeedsLogin, moreFailed: this.feedMoreFailed,
-        retryReset: this.feedRetryReset, hasMore: this.dynHasMore };
-    }
-    const cached: DynamicFeedState | undefined = this.typeStates.get(type);
-    if (cached !== undefined) {
-      return { count: cached.count, loaded: cached.loaded,
-        loading: cached.count === 0 && !cached.loaded && cached.errorText.length === 0,
-        errorText: cached.errorText, needsLogin: cached.needsLogin, moreFailed: cached.moreFailed,
-        retryReset: cached.retryReset, hasMore: cached.hasMore };
-    }
-    const count: number = this.pageSource(tabIdx).totalCount();
-    return { count: count, loaded: count > 0, loading: count === 0, errorText: '',
-      needsLogin: false, moreFailed: false, retryReset: false, hasMore: this.typeHasMore.get(type) ?? true };
+    return this.feedStates[tabIdx] ?? this.feedStates[0];
   }
 
   private isActivePage(tabIdx: number): boolean {
@@ -1549,72 +256,6 @@ export struct DynamicView {
       }
       this.changeDynType(type);
     })
-  }
-
-  /** 顶部「关注 UP 主」横滑栏：第一条动态下展示关注对象，点击进用户空间；开播中的 UP 带红点。 */
-  @Builder
-  FollowStrip() {
-    List({ space: 14 }) {
-      ForEach(this.followed, (u: RelationUserItem) => {
-        ListItem() {
-          Column({ space: 6 }) {
-            Stack({ alignContent: Alignment.TopEnd }) {
-              Stack({ alignContent: Alignment.Center }) {
-                Image(u.face.length > 0 ? u.face : $r('app.media.placeholder_avatar_noface'))
-                  .width(46)
-                  .height(46)
-                  .borderRadius(23)
-                  .objectFit(ImageFit.Cover)
-                  .backgroundColor(this.isDark ? '#33353A' : '#EEF0F2')
-                  .syncLoad(false)
-              }
-              .width(47)
-              .height(47)
-              if (this.liveRooms.get(u.mid) !== undefined) {
-                // 直播中角标：与 B 站 App 关注栏一致，点角标直达直播间。
-                Text('直播中')
-                  .fontSize(8)
-                  .fontColor('#FFFFFF')
-                  .backgroundColor('#F53F3F')
-                  .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-                  .borderRadius(6)
-                  .margin({ right: -2, top: -2 })
-                  .priorityGesture(TapGesture().onAction(() => {
-                    this.openLiveRoom(u.mid);
-                  }))
-              }
-            }
-            .width(47)
-            .height(47)
-            Text(u.uname)
-              .fontSize(11)
-              .fontColor(this.isDark ? '#C9C9CE' : '#61666D')
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .width(62)
-              .textAlign(TextAlign.Center)
-          }
-          .width(64)
-          .onClick(() => {
-            this.tapVibrate();
-            if (u.mid > 0) {
-              const param: UserSpaceParam = { mid: u.mid };
-              AppNavStack.pushPathByName(NAV_USER_SPACE, param);
-            }
-          })
-          .stateStyles({
-            pressed: { opacity: 0.6 },
-            normal: { opacity: 1 },
-          })
-        }
-      }, (u: RelationUserItem) => String(u.mid))
-    }
-    .listDirection(Axis.Horizontal)
-    .width('100%')
-    .height(84)
-    .padding({ left: 4, right: 4 })
-    .scrollBar(BarState.Off)
-    .cachedCount(4)
   }
 
   @Builder
@@ -1723,21 +364,21 @@ export struct DynamicView {
     } else {
       Refresh({ refreshing: this.isActivePage(tabIdx) && this.refreshing, builder: this.DynRefreshHeader() }) {
         List({ space: 10 }) {
-          if (this.followed.length > 0 && !this.embedded && this.hostMid <= 0) {
+          if (this.following.followed.length > 0 && !this.embedded && this.hostMid <= 0) {
             ListItem() {
               Column({ space: 8 }) {
                 Row({ space: 6 }) {
                   Text('关注')
                     .fontSize(12)
                     .fontColor('#9499A0')
-                  Text(this.followed.length + ' 位')
+                  Text(this.following.followed.length + ' 位')
                     .fontSize(11)
                     .fontColor('#B0B3B8')
                   Blank()
                 }
                 .width('100%')
                 .padding({ left: 2, right: 2 })
-                this.FollowStrip()
+                DynamicFollowStrip({ followed: this.following.followed, liveRooms: this.following.liveRooms })
               }
               .width('100%')
               .padding({ top: 10, bottom: 2 })
@@ -1750,7 +391,7 @@ export struct DynamicView {
               DynCard({ item: item, embedded: this.embedded, sharedImageTransition: this.embedded,
                 idPrefix: this.cardIdPrefix(tabIdx),
                 onLikeResult: (dynId: string, liked: boolean, count: number) => {
-                  this.handleLikeResult(dynId, liked, count);
+                  this.feed.updateLike(dynId, liked, count);
                 } })
             }
           }, (item: DynamicItem) => item.dynId)
@@ -1787,7 +428,7 @@ export struct DynamicView {
           if (this.isActivePage(tabIdx) && !this.embedded) AppTheme.updateHeaderFade(offset);
         })
         .onReachEnd(() => {
-          if (this.isActivePage(tabIdx) && !this.feedMoreFailed) this.loadFeed(false);
+          if (this.isActivePage(tabIdx) && !this.pageState(tabIdx).moreFailed) this.loadFeed(false);
         })
       }
       .refreshOffset(56)
@@ -1799,205 +440,9 @@ export struct DynamicView {
     }
   }
 
-  /** 发布动态（纯文字 / 图文）底部面板：输入 + 选图 + 发布；发布成功后重载 feed。用系统 bindSheet 从底部滑出。 */
   @Builder
   DynComposerSheet() {
-    Column({ space: 12 }) {
-      Row() {
-        Text('发布动态').fontSize(16).fontWeight(FontWeight.Bold)
-          .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-        Blank()
-        Text('取消').fontSize(13).fontColor('#9499A0')
-          .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-          .stateStyles({
-            pressed: { opacity: 0.6 },
-            normal: { opacity: 1 },
-          })
-          .onClick(() => this.showComposer = false)
-      }
-      .width('100%')
-      TextArea({ placeholder: '分享新鲜事…', text: this.composerText })
-        .width('100%')
-        .height(150)
-        .fontSize(15)
-        .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
-        .placeholderColor('#9499A0')
-        .backgroundColor(this.isDark ? '#26272B' : '#F3F4F6')
-        .borderRadius(10)
-        .onChange((value: string) => this.composerText = value)
-      if (this.composerImages.length > 0 || !this.composing) {
-        // 图片九宫格：已选缩略图 + 末尾的添加块（满 9 张时隐藏）。
-        Flex({ wrap: FlexWrap.Wrap }) {
-          ForEach(this.composerImages, (img: DynDraftImage) => {
-            Stack({ alignContent: Alignment.TopEnd }) {
-              Image('file://' + img.cachePath)
-                .width(72)
-                .height(72)
-                .borderRadius(8)
-                .objectFit(ImageFit.Cover)
-                .alt($r('app.media.placeholder_cover'))
-              Text('×')
-                .fontSize(13)
-                .fontColor('#FFFFFF')
-                .textAlign(TextAlign.Center)
-                .width(20)
-                .height(20)
-                .borderRadius(10)
-                .backgroundColor('#99000000')
-                .margin(3)
-                .onClick(() => this.removeDynImage(img))
-            }
-            .margin({ right: 8, bottom: 8 })
-          }, (img: DynDraftImage) => img.key)
-          if (this.composerImages.length < DYN_MAX_IMAGES && !this.composing) {
-            Column() {
-              Text('+').fontSize(26).fontColor('#9499A0')
-              Text(String(this.composerImages.length) + '/' + String(DYN_MAX_IMAGES))
-                .fontSize(9)
-                .fontColor('#B0B3B8')
-                .margin({ top: 1 })
-            }
-            .width(72)
-            .height(72)
-            .borderRadius(8)
-            .justifyContent(FlexAlign.Center)
-            .backgroundColor(this.isDark ? '#26272B' : '#F3F4F6')
-            .margin({ right: 8, bottom: 8 })
-            .stateStyles({
-              pressed: { opacity: 0.6 },
-              normal: { opacity: 1 },
-            })
-            .onClick(() => this.pickDynImages())
-          }
-        }
-        .width('100%')
-      }
-      Text(this.composerText.length + ' / 2000')
-        .width('100%').fontSize(11).fontColor('#B0B3B8').textAlign(TextAlign.End)
-      Button(this.composing ? (this.composerStage.length > 0 ? this.composerStage : '发布中…') : '发布')
-        .width('100%').height(42).borderRadius(21)
-        .fontSize(15).fontColor('#FFFFFF')
-        .backgroundColor(this.accent)
-        .enabled(!this.composing && (this.composerText.trim().length > 0 || this.composerImages.length > 0))
-        .onClick(() => this.submitDynamic())
-    }
-    .width('100%')
-    .padding({ left: 16, right: 16, top: 16, bottom: 16 })
-  }
-
-  /** 调起系统相册多选；选中的图片立即预处理成草稿（GIF 保真 / 静态图限边重编码）。 */
-  private async pickDynImages(): Promise<void> {
-    if (this.composing) return;
-    const remaining: number = DYN_MAX_IMAGES - this.composerImages.length;
-    if (remaining <= 0) {
-      this.showToast('一条动态最多 ' + String(DYN_MAX_IMAGES) + ' 张图片');
-      return;
-    }
-    try {
-      const photoPicker: picker.PhotoViewPicker = new picker.PhotoViewPicker();
-      const options: picker.PhotoSelectOptions = {
-        MIMEType: picker.PhotoViewMIMETypes.IMAGE_TYPE,
-        maxSelectNumber: remaining,
-      };
-      const result: picker.PhotoSelectResult = await photoPicker.select(options);
-      if (result.photoUris.length === 0) return;
-      this.composerStage = '处理图片…';
-      this.composing = true;
-      const context: common.Context | undefined = this.getUIContext().getHostContext();
-      if (context === undefined) return;
-      let failed: number = 0;
-      for (let i: number = 0; i < result.photoUris.length; i++) {
-        if (this.composerImages.length >= DYN_MAX_IMAGES) break;
-        const draft: DynDraftImage | null = await DynImagePreparer.prepare(context, result.photoUris[i]);
-        if (draft === null) {
-          failed++;
-          continue;
-        }
-        this.composerImages.push(draft);
-      }
-      if (failed > 0) {
-        this.showToast(String(failed) + ' 张图片处理失败，已跳过');
-      }
-    } catch (e) {
-      // 用户取消选择或 picker 异常：静默返回。
-    } finally {
-      this.composing = false;
-      this.composerStage = '';
-    }
-  }
-
-  private removeDynImage(img: DynDraftImage): void {
-    // 发布（上传）进行中不允许增删：上传列表与草稿列表必须保持一致。
-    if (this.composing) return;
-    const next: Array<DynDraftImage> = [];
-    for (let i: number = 0; i < this.composerImages.length; i++) {
-      if (this.composerImages[i] !== img) next.push(this.composerImages[i]);
-    }
-    this.composerImages = next;
-    DynImagePreparer.cleanup([img]);
-  }
-
-  private clearComposerImages(): void {
-    DynImagePreparer.cleanup(this.composerImages);
-    this.composerImages = [];
-  }
-
-  private async submitDynamic(): Promise<void> {
-    if (this.composing) return;
-    const text: string = this.composerText.trim();
-    const images: Array<DynDraftImage> = this.composerImages;
-    if (text.length === 0 && images.length === 0) return;
-    if (text.length > 2000) {
-      this.showToast('动态内容过长（最多 2000 字）');
-      return;
-    }
-    this.composing = true;
-    let result: ActionResult | null = null;
-    try {
-      if (images.length > 0) {
-        // 逐张上传，阶段文案实时反馈；任何一张失败立即中止（已上传的不重传也无需回滚）。
-        const uploaded: Array<DynUploadedImage> = [];
-        for (let i: number = 0; i < images.length; i++) {
-          this.composerStage = '上传图片 ' + String(i + 1) + '/' + String(images.length);
-          const bytes: ArrayBuffer = await DynImagePreparer.readBytes(images[i].cachePath);
-          const up = await DynamicApi.uploadDynImage(bytes, images[i].fileName, images[i].mimeType);
-          if (!up.ok || up.image === null) {
-            result = new ActionResult(false, up.message);
-            break;
-          }
-          uploaded.push(up.image);
-        }
-        if (uploaded.length === images.length) {
-          this.composerStage = '发布中…';
-          result = await DynamicApi.publishWithImages(text, uploaded);
-        }
-      } else {
-        result = await DynamicApi.publish(text);
-      }
-      if (result !== null && result.ok) {
-        this.showComposer = false;
-        this.composerText = '';
-        this.clearComposerImages();
-        this.showToast('发布成功');
-        this.loadFeed(true).catch(() => {
-        });
-      } else if (result !== null) {
-        this.showToast(result.message);
-      }
-    } catch (e) {
-      this.showToast('发布失败，请检查网络');
-    } finally {
-      this.composing = false;
-      this.composerStage = '';
-    }
-  }
-
-  private showToast(message: string): void {
-    try {
-      this.getUIContext().getPromptAction().showToast({ message: message });
-    } catch (e) {
-      // 组件销毁或窗口异常时忽略提示。
-    }
+    DynamicComposer({ controller: this.composer, onClose: () => { this.showComposer = false; } })
   }
 
   build() {
