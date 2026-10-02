@@ -17,6 +17,8 @@
 <img src="docs/screenshots/live.jpg" width="260" alt="直播频道"/>
 <img src="docs/screenshots/search.jpg" width="260" alt="搜索与热搜榜"/>
 
+<p><sub>截图来自 1.3.1 · HarmonyOS 模拟器 · 2026-10-02</sub></p>
+
 </div>
 
 > 本项目仅供学习交流，是第三方客户端，与哔哩哔哩官方无关联。哔哩哔哩及相关商标归其权利人所有。
