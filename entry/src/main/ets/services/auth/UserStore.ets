@@ -61,11 +61,14 @@ export class UserStore {
    */
   private static async restoreAuth(context: common.UIAbilityContext, legacyRaw: string,
     legacyAccessToken: string, legacyRefreshToken: string): Promise<void> {
+    const generation: number = UserStore.authGeneration;
     try {
       const store: preferences.Preferences = await preferences.getPreferences(context, {
         name: UserStore.AUTH_PREFERENCES_NAME,
       });
       UserStore.authPreferences = store;
+      // 仍发布存储句柄供新登录/退出写盘，但不能让迟到的启动副本覆盖更新的账号。
+      if (generation !== UserStore.authGeneration) return;
       const diskRaw: string = store.getSync(UserStore.COOKIE_STORAGE_KEY, '') as string;
       const diskAccessToken: string = store.getSync(UserStore.ACCESS_TOKEN_STORAGE_KEY, '') as string;
       const diskRefreshToken: string = store.getSync(UserStore.REFRESH_TOKEN_STORAGE_KEY, '') as string;
@@ -101,14 +104,18 @@ export class UserStore {
    * refresh_token。不 bump AuthSession（不打断在途请求），随后静默刷新一次 nav。
    */
   private static async onCookieRefreshed(refreshToken: string): Promise<void> {
-    UserStore.webRefreshToken = refreshToken;
+    const generation: number = UserStore.authGeneration;
+    const raw: string = HttpClient.exportCookieJson();
     await UserStore.waitForPersistence();
+    if (generation !== UserStore.authGeneration) return;
+    UserStore.webRefreshToken = refreshToken;
     if (UserStore.authPreferences !== null) {
-      UserStore.authPreferences.putSync(UserStore.COOKIE_STORAGE_KEY, HttpClient.exportCookieJson());
+      UserStore.authPreferences.putSync(UserStore.COOKIE_STORAGE_KEY, raw);
       UserStore.authPreferences.putSync(UserStore.REFRESH_TOKEN_STORAGE_KEY, refreshToken);
       await UserStore.authPreferences.flush();
     }
-    AppStorage.setOrCreate<string>(UserStore.COOKIE_STORAGE_KEY, HttpClient.exportCookieJson());
+    if (generation !== UserStore.authGeneration) return;
+    AppStorage.setOrCreate<string>(UserStore.COOKIE_STORAGE_KEY, raw);
     AppStorage.setOrCreate<string>(UserStore.REFRESH_TOKEN_STORAGE_KEY, refreshToken);
     UserStore.refresh().catch(() => {
       // nav 刷新失败不影响已续期的 Cookie。
@@ -149,6 +156,9 @@ export class UserStore {
   /** 刷新登录态（nav 接口） */
   static async refresh(): Promise<UserInfo> {
     const generation: number = UserStore.authGeneration;
+    // MineView 等调用方会直接 refresh，也必须等权威凭证恢复后再发 nav。
+    await UserStore.waitForPersistence();
+    if (generation !== UserStore.authGeneration) return UserStore.user ?? new UserInfo();
     const u: UserInfo = await UserApi.getNav();
     if (generation !== UserStore.authGeneration) {
       return UserStore.user ?? new UserInfo();
@@ -183,13 +193,14 @@ export class UserStore {
       HttpClient.setCookie(cookies[i].name, cookies[i].value);
     }
     HttpClient.setAppAccessToken(accessToken);
-    if (refreshToken.length > 0) UserStore.webRefreshToken = refreshToken;
+    // 密码/短信登录可能没有 Web 续期令牌；空值也属于新账号，必须清掉旧令牌。
+    UserStore.webRefreshToken = refreshToken;
     CookieRefresher.noteLogin();
     await UserStore.persistCookies(HttpClient.exportCookieJson());
     if (generation !== UserStore.authGeneration) return;
     await UserStore.persistAccessToken(accessToken);
     if (generation !== UserStore.authGeneration) return;
-    if (refreshToken.length > 0) await UserStore.persistRefreshToken(refreshToken);
+    await UserStore.persistRefreshToken(refreshToken);
     if (generation !== UserStore.authGeneration) return;
     await UserStore.refresh();
     if (generation !== UserStore.authGeneration) return;

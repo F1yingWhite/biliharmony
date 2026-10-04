@@ -179,7 +179,7 @@ export default class EntryAbility extends UIAbility {
       if (DEBUG) hilog.info(DOMAIN, TAG, 'Succeeded in loading the content.');
       // Cookie 自动续期：启动后错峰静默检查一次（内部 6 小时节流，失败不影响任何功能）。
       setTimeout(() => {
-        CookieRefresher.maybeRefresh().catch(() => {
+        UserStore.ensureLoaded().then(() => CookieRefresher.maybeRefresh()).catch(() => {
         });
       }, 10000);
     });

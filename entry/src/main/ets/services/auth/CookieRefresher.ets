@@ -3,12 +3,12 @@
  *
  * B 站 Web Cookie（SESSDATA）会随时间与敏感接口访问逐渐失效；B 站网页端自身的续期流程是：
  *  1. GET /x/passport-login/web/cookie/info —— 判断是否需要刷新（data.refresh）；
- *  2. correspondPath = RSA-OAEP(SHA-256)(毫秒时间戳字符串)，公钥来自
- *     GET /x/frontend/finger/spi（data.rsa_key，PEM），密文以 hex 编码拼入 URL；
+ *  2. correspondPath = RSA-OAEP(SHA-256)(refresh_ + info 返回的 timestamp)，
+ *     使用官方 Web 端固定公钥，密文以 hex 编码拼入 URL；
  *  3. GET https://www.bilibili.com/correspond/1/{correspondPath} —— 返回的 HTML 里
  *     <div id="1-name">…</div> 即 refresh_csrf；
  *  4. POST /x/passport-login/web/cookie/refresh —— 携带旧 csrf/refresh_csrf/refresh_token，
- *     响应 Set-Cookie 下发新 SESSDATA/bili_jct（HttpClient 自动吸收），body 带新 refresh_token；
+ *     响应 Set-Cookie 下发新 SESSDATA/bili_jct（HttpClient 自动吸收），body 带新 refresh_token，先一起落盘；
  *  5. POST /x/passport-login/web/confirm/refresh —— 用新 csrf + 旧 refresh_token 确认，
  *     旧凭证作废。
  *
@@ -20,11 +20,16 @@ import { HttpClient, HttpResponse } from '../network/HttpClient';
 import { Constants } from '../../common/Constants';
 import { RsaUtil } from '../../common/RsaUtil';
 import { asBool, asNumber, asObject, asString } from '../../common/Utils';
-import { util } from '@kit.ArkTS';
+import { AuthSession } from './AuthSession';
 
 export class CookieRefresher {
-  private static readonly COOKIE_INFO_URL: string = 'https://api.bilibili.com/x/passport-login/web/cookie/info';
-  private static readonly SPI_URL: string = 'https://api.bilibili.com/x/frontend/finger/spi';
+  private static readonly COOKIE_INFO_URL: string = 'https://passport.bilibili.com/x/passport-login/web/cookie/info';
+  // 官方 header-v2/header.js 与 wasm_rsa_encrypt_bg.wasm 使用的 RSA 公钥（n/e）。
+  private static readonly REFRESH_PUBLIC_KEY: string = '-----BEGIN PUBLIC KEY-----\n' +
+    'MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDLgd2OAkcGVtoE3ThUREbio0Eg\n' +
+    'Uc/prcajMKXvkCKFCWhJYJcLkcM2DKKcSeFpD/j6Boy538YXnR6VhcuUJOhH2x71\n' +
+    'nzPjfdTcqMz7djHum0qSZA0AyCBDABUqCrfNgCiJ00Ra7GmRj+YCK1NJEuewlb40\n' +
+    'JNrRuoEUXpabUzGB8QIDAQAB\n-----END PUBLIC KEY-----';
   private static readonly CORRESPOND_URL: string = 'https://www.bilibili.com/correspond/1/';
   private static readonly REFRESH_URL: string = 'https://passport.bilibili.com/x/passport-login/web/cookie/refresh';
   private static readonly CONFIRM_URL: string = 'https://passport.bilibili.com/x/passport-login/web/confirm/refresh';
@@ -33,6 +38,7 @@ export class CookieRefresher {
   private static lastAttemptAt: number = 0;
   private static authFailTriggered: boolean = false;
   private static inflight: Promise<boolean> | null = null;
+  private static inflightAccount: number = -1;
   /** UserStore 注册：刷新成功后持久化 cookie 罐 + refresh_token；读取已保存的 refresh_token。 */
   private static persister: ((refreshToken: string) => Promise<void>) | null = null;
   private static tokenReader: (() => string) | null = null;
@@ -45,11 +51,14 @@ export class CookieRefresher {
   /** 登录成功写入新 refresh_token 后同步节流基线。 */
   static noteLogin(): void {
     CookieRefresher.lastAttemptAt = Date.now();
+    CookieRefresher.authFailTriggered = false;
+    CookieRefresher.inflight = null;
   }
 
   static logout(): void {
     CookieRefresher.lastAttemptAt = 0;
     CookieRefresher.authFailTriggered = false;
+    CookieRefresher.inflight = null;
   }
 
   /**
@@ -59,22 +68,30 @@ export class CookieRefresher {
   static onAuthFailure(): void {
     if (CookieRefresher.authFailTriggered) return;
     CookieRefresher.authFailTriggered = true;
-    CookieRefresher.maybeRefresh().catch(() => {
+    CookieRefresher.startCheck(true).catch(() => {
     });
   }
 
   /** 例行检查（节流 6 小时，并发合并）。 */
   static maybeRefresh(): Promise<boolean> {
+    return CookieRefresher.startCheck(false);
+  }
+
+  private static startCheck(ignoreThrottle: boolean): Promise<boolean> {
     if (!CookieRefresher.isLoginCandidate()) return Promise.resolve(false);
-    if (Date.now() - CookieRefresher.lastAttemptAt < CookieRefresher.THROTTLE_MS) {
+    const account: number = AuthSession.version;
+    if (CookieRefresher.inflight !== null && CookieRefresher.inflightAccount === account) {
+      return CookieRefresher.inflight;
+    }
+    if (!ignoreThrottle && Date.now() - CookieRefresher.lastAttemptAt < CookieRefresher.THROTTLE_MS) {
       return Promise.resolve(false);
     }
-    if (CookieRefresher.inflight !== null) return CookieRefresher.inflight;
     CookieRefresher.lastAttemptAt = Date.now();
-    const task: Promise<boolean> = CookieRefresher.refresh().finally(() => {
-      CookieRefresher.inflight = null;
+    const task: Promise<boolean> = CookieRefresher.refresh(account).finally(() => {
+      if (CookieRefresher.inflight === task) CookieRefresher.inflight = null;
     });
     CookieRefresher.inflight = task;
+    CookieRefresher.inflightAccount = account;
     return task;
   }
 
@@ -82,20 +99,23 @@ export class CookieRefresher {
     return HttpClient.getCookie('SESSDATA').length > 0 && HttpClient.getCookie('bili_jct').length > 0;
   }
 
-  private static async refresh(): Promise<boolean> {
+  private static async refresh(account: number): Promise<boolean> {
     try {
       // 1. 是否需要刷新
       const info: HttpResponse = await HttpClient.get(CookieRefresher.COOKIE_INFO_URL, Constants.webHeaders);
+      if (account !== AuthSession.version) return false;
       const infoData: Record<string, Object> | null = CookieRefresher.dataOf(info);
       if (infoData === null || !asBool(infoData['refresh'], false)) return false;
+      const timestamp: number = asNumber(infoData['timestamp'], 0);
+      if (!Number.isFinite(timestamp) || timestamp <= 0) return false;
 
       const oldCsrf: string = HttpClient.getCookie('bili_jct');
       const oldRefreshToken: string = CookieRefresher.tokenReader !== null ? CookieRefresher.tokenReader() : '';
       if (oldCsrf.length === 0 || oldRefreshToken.length === 0) return false;
 
       // 2+3. correspondPath → refresh_csrf
-      const refreshCsrf: string = await CookieRefresher.fetchRefreshCsrf();
-      if (refreshCsrf.length === 0) return false;
+      const refreshCsrf: string = await CookieRefresher.fetchRefreshCsrf(timestamp, account);
+      if (account !== AuthSession.version || refreshCsrf.length === 0) return false;
 
       // 4. 刷新：新 Cookie 经 Set-Cookie 自动入罐
       const refreshResp: HttpResponse = await HttpClient.post(CookieRefresher.REFRESH_URL,
@@ -105,11 +125,17 @@ export class CookieRefresher {
           'refresh_token': oldRefreshToken,
           'source': 'main_web',
         }), Constants.webHeaders);
-      if (!refreshResp.ok) return false;
+      if (account !== AuthSession.version || !refreshResp.ok) return false;
       const refreshData: Record<string, Object> | null = CookieRefresher.dataOf(refreshResp);
       if (refreshData === null) return false;
       const newCsrf: string = HttpClient.getCookie('bili_jct');
-      if (newCsrf.length === 0 || newCsrf === oldCsrf) return false;
+      const newRefreshToken: string = asString(refreshData['refresh_token'], '');
+      if (newCsrf.length === 0 || newRefreshToken.length === 0) return false;
+
+      // 新 cookie 已入罐，先保存配对的新 token；确认请求失败也不能丢失新凭证。
+      if (CookieRefresher.persister === null) return false;
+      await CookieRefresher.persister(newRefreshToken);
+      if (account !== AuthSession.version) return false;
 
       // 5. 确认：旧 refresh_token 作废
       const confirmResp: HttpResponse = await HttpClient.post(CookieRefresher.CONFIRM_URL,
@@ -117,41 +143,22 @@ export class CookieRefresher {
           'csrf': newCsrf,
           'refresh_token': oldRefreshToken,
         }), Constants.webHeaders);
-      if (!confirmResp.ok || asNumber(CookieRefresher.codeOf(confirmResp), -1) !== 0) return false;
+      if (account !== AuthSession.version || !confirmResp.ok || CookieRefresher.codeOf(confirmResp) !== 0) return false;
 
-      // 持久化：cookie 罐已被 HttpClient 吸收，这里落盘 + 保存新 refresh_token。
-      const newRefreshToken: string = asString(refreshData['refresh_token'], '');
-      const effectiveToken: string = newRefreshToken.length > 0 ? newRefreshToken : oldRefreshToken;
-      if (CookieRefresher.persister !== null) {
-        await CookieRefresher.persister(effectiveToken);
-      }
       return true;
     } catch (e) {
       return false;
     }
   }
 
-  /** 步骤 2+3：RSA-OAEP 加密毫秒时间戳得 correspondPath，请求 correspond 页并抽取 refresh_csrf。 */
-  private static async fetchRefreshCsrf(): Promise<string> {
-    const pubKey: string = await CookieRefresher.fetchRsaKey();
-    if (pubKey.length === 0) return '';
-    const cipher: Uint8Array = await RsaUtil.encryptWithPublicKeyOAEP256(pubKey, String(Date.now()));
-    if (cipher.length === 0) return '';
-    // 密文以 hex 编码拼接；base64 作为个别服务端实现的兼容回退。
-    const hexHtml: string = await CookieRefresher.fetchCorrespond(CookieRefresher.toHex(cipher));
-    const csrf: string = CookieRefresher.extractCsrf(hexHtml);
-    if (csrf.length > 0) return csrf;
-    const b64: string = CookieRefresher.toBase64(cipher);
-    if (b64.length === 0) return '';
-    return CookieRefresher.extractCsrf(await CookieRefresher.fetchCorrespond(b64));
-  }
-
-  private static async fetchRsaKey(): Promise<string> {
-    const resp: HttpResponse = await HttpClient.get(CookieRefresher.SPI_URL, Constants.webHeaders);
-    if (!resp.ok) return '';
-    const data: Record<string, Object> | null = CookieRefresher.dataOf(resp);
-    if (data === null) return '';
-    return asString(data['rsa_key'], '');
+  /** 步骤 2+3：加密服务端时间戳，hex correspond 页返回 refresh_csrf。 */
+  private static async fetchRefreshCsrf(timestamp: number, account: number): Promise<string> {
+    const cipher: Uint8Array = await RsaUtil.encryptWithPublicKeyOAEP256(
+      CookieRefresher.REFRESH_PUBLIC_KEY, 'refresh_' + String(timestamp));
+    if (account !== AuthSession.version || cipher.length === 0) return '';
+    const html: string = await CookieRefresher.fetchCorrespond(CookieRefresher.toHex(cipher));
+    if (account !== AuthSession.version) return '';
+    return CookieRefresher.extractCsrf(html);
   }
 
   private static async fetchCorrespond(correspondPath: string): Promise<string> {
@@ -178,14 +185,6 @@ export class CookieRefresher {
       out += (bytes[i] < 16 ? '0' : '') + bytes[i].toString(16);
     }
     return out;
-  }
-
-  private static toBase64(bytes: Uint8Array): string {
-    try {
-      return new util.Base64Helper().encodeToStringSync(bytes);
-    } catch (e) {
-      return '';
-    }
   }
 
   private static dataOf(resp: HttpResponse): Record<string, Object> | null {

@@ -10,6 +10,8 @@ import { ReplyCard } from '../reply/ReplyCard';
 import { ReplyComposer } from '../reply/ReplyComposer';
 import { ReplyEmotePanel } from '../reply/ReplyEmotePanel';
 import { ReplySortChips } from '../reply/ReplySortChips';
+import { DynDraftImage } from '../../common/DynImagePreparer';
+import { ReplySubmissionController } from '../reply/ReplySubmissionController';
 
 /** 「加载更多」底部块参数：对象字面量按引用传入，状态变化才能驱动 @Builder 刷新。 */
 interface LoadMoreFooterOptions {
@@ -32,6 +34,9 @@ export struct VideoReplyTab {
   @Prop itemCount: number = 0;
   @Prop version: number = 0;
   @Prop draft: string = '';
+  @Prop images: Array<DynDraftImage> = [];
+  @Prop allowImages: boolean = true;
+  submission: ReplySubmissionController | null = null;
   @Prop sending: boolean = false;
   @Prop placeholder: string = '发一条友善的评论';
   @Prop emoteOpen: boolean = false;
@@ -161,6 +166,9 @@ export struct VideoReplyTab {
   private inputBar() {
     ReplyComposer({
       text: this.draft,
+      images: this.images,
+      allowImages: this.allowImages,
+      submission: this.submission,
       emotePackages: this.emotePackages,
       placeholder: this.placeholder,
       sending: this.sending,

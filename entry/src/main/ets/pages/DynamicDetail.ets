@@ -25,6 +25,7 @@ import { ReplySubmissionController, ReplySubmissionSnapshot } from '../component
 import { DynamicDetailController, DynamicDetailStatus } from '../components/dynamic/DynamicDetailController';
 import { EmoteResolver } from '../common/EmoteResolver';
 import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
+import { DynDraftImage } from '../common/DynImagePreparer';
 
 class DynamicHeroFrameCallback extends FrameCallback {
   private task: () => void;
@@ -55,11 +56,13 @@ export struct DynamicDetailPage {
   @State replySortMode: number = 3; // 3 最热，2 最新
   @State replyVersion: number = 0;
   @State replyDraft: string = '';
+  @State replyImages: Array<DynDraftImage> = [];
   @State replySending: boolean = false;
   private replySubmit: ReplySubmissionController = new ReplySubmissionController({
     isAlive: () => !this.destroyed,
     getTarget: () => ({ oid: this.item.commentId, type: this.item.commentType, root: 0, parent: 0, scope: 'main', active: true }),
     getDraft: () => this.replyDraft,
+    setImages: (images: Array<DynDraftImage>) => this.replyImages = images,
     setSending: (sending: boolean) => this.replySending = sending,
     toast: (message: string) => this.toast(message),
     onSuccess: (_snapshot: ReplySubmissionSnapshot, _reply: ReplyItem | null, clearDraft: boolean) => {
@@ -378,7 +381,7 @@ export struct DynamicDetailPage {
       isDestroyed: () => !current(),
       resolveOid: (item: ReplyItem) => item.oid > 0 ? item.oid : this.item.commentId,
       resolveType: (item: ReplyItem) => item.type > 0 ? item.type : this.item.commentType,
-      clearDislikeOnLike: false,
+      clearDislikeOnLike: true,
     };
   }
 
@@ -620,6 +623,8 @@ export struct DynamicDetailPage {
       .scrollBar(BarState.Off)
       ReplyComposer({
         text: this.replyDraft,
+        images: this.replyImages,
+        submission: this.replySubmit,
         sending: this.replySending,
         showEmoteButton: false,
         onChange: (value: string) => {

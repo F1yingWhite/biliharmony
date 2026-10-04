@@ -16,6 +16,7 @@ export class PlayerSeekController {
 
   private generation: number = 0;
   private activePrecise: boolean = true;
+  private videoSeekDispatched: boolean = false;
   private dispatchTimer: number = -1;
   private seekSpinnerTimer: number = -1;
   private seekWatchdogTimer: number = -1;
@@ -78,6 +79,7 @@ export class PlayerSeekController {
     this.pendingSeekMs = -1;
     this.pendingSeekPrecise = true;
     this.seekInFlight = false;
+    this.videoSeekDispatched = false;
     this.activeSeekMs = -1;
     this.activeAudioSeekMs = -1;
     this.activeVideo = null;
@@ -97,6 +99,8 @@ export class PlayerSeekController {
     this.activeSeekMs = targetMs;
     this.activeAudioSeekMs = -1;
     this.activeVideo = video;
+    this.activePrecise = precise;
+    this.videoSeekDispatched = false;
     this.videoSeekDone = false;
     const audio: media.AVPlayer | null = this.getAudio();
     this.activeAudio = audio;
@@ -132,8 +136,11 @@ export class PlayerSeekController {
       if (!this.seekAudio(audio, video, targetMs)) return;
     }
     try {
+      // 暂停屏障期间可能收到上一轮 seekDone；只有本轮真正发出 seek 后才接受视频回调。
+      this.videoSeekDispatched = true;
       video.seek(targetMs, mode);
     } catch (e) {
+      this.videoSeekDispatched = false;
       this.seekInFlight = false;
       this.onStall(video, targetMs);
       return;
@@ -171,9 +178,10 @@ export class PlayerSeekController {
   }
 
   onVideoSeekDone(video: media.AVPlayer, positionMs: number): void {
-    if (this.activeVideo !== video || !this.seekInFlight) return;
+    if (this.activeVideo !== video || !this.seekInFlight || !this.videoSeekDispatched) return;
     // seekDone 回报的是本次请求位置。过滤同一 AVPlayer 上延迟到达的旧回调，避免提前恢复。
     if (this.activePrecise && this.activeSeekMs >= 0 && Math.abs(positionMs - this.activeSeekMs) > 500) return;
+    this.videoSeekDispatched = false;
     // 关键帧恢复的实际落点可能偏离请求数秒；音频必须跟随实际视频位置。
     if (!this.activePrecise && this.activeAudio !== null && this.isAudioPrepared()) {
       if (!this.seekAudio(this.activeAudio, video, positionMs)) return;
@@ -199,6 +207,7 @@ export class PlayerSeekController {
     const completedTargetMs: number = this.activeSeekMs;
     this.generation++;
     this.seekInFlight = false;
+    this.videoSeekDispatched = false;
     this.activeSeekMs = -1;
     this.activeAudioSeekMs = -1;
     this.activeVideo = null;

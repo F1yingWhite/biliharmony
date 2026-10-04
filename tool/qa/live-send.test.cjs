@@ -86,6 +86,18 @@ test('live send: normal emote payload and local representation remain intact', a
   f.calls[0].resolve({ok: true}); await p; assert.equal(f.messages[0].text, 'smile'); assert.deepEqual(f.messages[0].emotes, [emote]); assert.equal(f.page.emotePanelOpen, false);
 });
 
+test('live send: emote-only success preserves an unsent text draft', async () => {
+  const f = fixture(); f.page.draft = 'text to send after this emote';
+  const emote = {emoji: 'smile', unique: 'official_smile'};
+  const pending = f.page.sendDanmaku(emote);
+  f.calls[0].resolve({ok: true}); await pending;
+  assert.equal(f.messages[0].text, 'smile');
+  assert.deepEqual(f.messages[0].emotes, [emote]);
+  assert.equal(f.page.draft, 'text to send after this emote');
+  assert.equal(f.page.emotePanelOpen, false);
+  assert.equal(f.page.sending, false);
+});
+
 test('live send: re-entering the same room also invalidates the old success', async () => {
   const f = fixture(); const old = f.page.sendDanmaku(); f.page.aboutToDisappear(); f.page.aboutToAppear();
   f.page.draft = 'same room new draft'; const next = f.page.sendDanmaku();

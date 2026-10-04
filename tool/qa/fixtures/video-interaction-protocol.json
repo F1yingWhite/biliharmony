@@ -1,0 +1,110 @@
+{
+  "checkedAtUtc": "2026-10-04T01:17:45.364Z",
+  "primarySources": {
+    "player": "https://s1.hdslb.com/bfs/static/player/main/core.ba67b466.js",
+    "parserAndSubmission": "https://s1.hdslb.com/bfs/static/player/main/widgets/npd.505.2d76eed1.js",
+    "renderer": "https://s1.hdslb.com/bfs/static/player/main/widgets/npd.922.abeff5e5.js",
+    "schema": "https://github.com/bggRGjQaUbCoE/PiliPlus/blob/334d758127c8126e7f3bb3df7470b3229bc9b0ee/lib/grpc/bilibili/community/service/dm/v1.pbjson.dart#L2088"
+  },
+  "playerVersion": "4.10.4-eb60d6e3",
+  "view": {
+    "endpoint": "/x/v2/dm/web/view",
+    "query": {
+      "type": 1,
+      "oid": "cid",
+      "pid": "aid",
+      "duration": "whole playback seconds; 0 when unknown",
+      "without_subtitle": true
+    },
+    "commandRepeatedField": 9,
+    "commandFields": {
+      "id": 1,
+      "oid": 2,
+      "mid": 3,
+      "command": 4,
+      "content": 5,
+      "progressMilliseconds": 6,
+      "extraJson": 9,
+      "idstr": 10
+    }
+  },
+  "grade": {
+    "command": "#GRADE#",
+    "fields": [
+      "grade_id",
+      "msg",
+      "mid_score",
+      "avg_score",
+      "count",
+      "duration"
+    ],
+    "stars": 5,
+    "storedScore": "2 * visible stars",
+    "endpoint": "/x/v2/dm/command/grade/post",
+    "postFields": [
+      "aid",
+      "cid",
+      "progress",
+      "grade_id",
+      "grade_score",
+      "polaris_app_id",
+      "polaris_platform",
+      "csrf"
+    ]
+  },
+  "vote": {
+    "command": "#VOTE#",
+    "fields": [
+      "vote_id",
+      "question",
+      "duration",
+      "my_vote",
+      "vote_type",
+      "options"
+    ],
+    "optionFields": [
+      "idx",
+      "desc",
+      "cnt",
+      "percent",
+      "has_self_def"
+    ],
+    "endpoint": "/x/v2/dm/command/vote/post",
+    "postFields": [
+      "aid",
+      "cid",
+      "progress",
+      "vote_id",
+      "vote_type",
+      "cmd_id_str",
+      "option_id",
+      "has_self_def",
+      "polaris_app_id",
+      "polaris_platform",
+      "csrf"
+    ],
+    "selected": "my_vote matches option.idx",
+    "excluded": "Self-defined answers require an additional ordinary comment; UI and API disable them."
+  },
+  "link": {
+    "command": "#LINK#",
+    "fields": [
+      "aid",
+      "bvid",
+      "epid",
+      "arc_pic",
+      "arc_duration",
+      "arc_type",
+      "duration"
+    ],
+    "navigation": "epid -> bangumi/play except arc_type=2 -> paid classroom; unsupported paid classroom cards omitted"
+  },
+  "anonymousViewCheck": {
+    "endpoint": "https://api.bilibili.com/x/v2/dm/web/view?type=1&oid=279786&pid=170001&duration=199&without_subtitle=true",
+    "status": 200,
+    "contentType": "application/octet-stream",
+    "bytes": 309,
+    "commands": 0
+  },
+  "safety": "Only anonymous public GET requests used for research. All regression accounts/CSRF are fabricated; no real rating or vote submitted."
+}

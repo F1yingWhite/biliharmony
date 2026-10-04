@@ -51,6 +51,24 @@ test('session: serial seek waits for both tracks and holds the target through ol
   video.emit('timeUpdate', 10200); assert.equal(f.session.isFrameMuted, false); f.session.deactivate();
 });
 
+test('session: pause then resume during synchronization waits for both seek completions', async () => {
+  const f = fixture(); const {video, audio} = await f.boot(); f.playing();
+  video.currentTime = 5000; audio.currentTime = 0;
+  f.session.audioSync.gateAudioStart(); f.session.audioSync.tryStartGatedAudio();
+  f.advance(60); await tick();
+  const videoPlays = f.calls(video, 'play').length, audioPlays = f.calls(audio, 'play').length;
+  f.session.pause(); f.session.toggle();
+  assert.equal(f.calls(video, 'play').length, videoPlays);
+  assert.equal(f.calls(audio, 'play').length, audioPlays);
+  video.currentTime = audio.currentTime = 5000;
+  video.emit('seekDone', 5000);
+  assert.equal(f.calls(video, 'play').length, videoPlays);
+  audio.emit('seekDone', 5000);
+  assert.equal(f.calls(video, 'play').length, videoPlays + 1);
+  assert.equal(f.calls(audio, 'play').length, audioPlays + 1);
+  assert.equal(f.state().seekLocked, false); f.session.deactivate();
+});
+
 test('session: seeking to the endpoint preserves the final half-second instead of completing', async () => {
   const f = fixture(); const {video} = await f.boot(); f.prepared(); video.emit('durationUpdate', 100000);
   f.session.seekTo(100); f.advance(60); await tick();

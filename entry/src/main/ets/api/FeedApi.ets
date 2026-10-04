@@ -10,11 +10,13 @@
  * 推荐源由设置项控制（AppStorage 'recommendMode'：'web' | 'app'），可在「我的 → 外观与交互」切换。
  */
 import { HttpClient, HttpResponse } from '../services/network/HttpClient';
+import { AuthSession } from '../services/auth/AuthSession';
+import { ApiResult } from '../services/network/ApiResult';
 import { Api, Constants, RecommendParams } from '../common/Constants';
 import { appSign } from '../common/AppSign';
 import { asObject, asArray, asString, asNumber } from '../common/Utils';
 import { VideoItem } from '../model/Models';
-import { getData, webGet, webGetSigned } from './internal/ApiCommon';
+import { getData, parseDataResult, webGet, webGetSigned } from './internal/ApiCommon';
 
 /** 一页推荐：items 为展示数据；feedId/bucketId/cursor 为解析出的会话游标。 */
 export class FeedPage {
@@ -112,48 +114,50 @@ export class FeedApi {
   static async getRecommend(reset: boolean): Promise<Array<VideoItem>> {
     if (reset) FeedApi.resetRecommendSession();
     const session: number = FeedApi.sessionVersion;
+    const account: number = AuthSession.version;
     const loggedIn: boolean = HttpClient.getCookie('SESSDATA').length > 0 &&
       HttpClient.getCookie('DedeUserID').length > 0;
     // Cookie 登录不代表拥有 App OAuth token；缺失时优先 Web 个性化，避免静默变成游客推流。
     const preferApp: boolean = FeedApi.recommendMode() === 'app' &&
       (!loggedIn || HttpClient.getAppAccessToken().length > 0);
-    if (preferApp) {
+    // 游客的 Web 模式沿用 App 公共推流；其失败也须让调用方显示重试入口。
+    if (!preferApp && !loggedIn) return FeedApi.getRecommendApp();
+    let validPage: boolean = false;
+    let failure: Error = new Error('推荐加载失败，请检查网络后重试');
+    for (let attempt: number = 0; attempt < 2; attempt++) {
       try {
-        const appPage: Array<VideoItem> = await FeedApi.getRecommendApp();
-        if (appPage.length > 0) return appPage;
+        const useApp: boolean = attempt === 0 ? preferApp : !preferApp;
+        const rows: Array<VideoItem> = useApp ? await FeedApi.getRecommendApp() : await FeedApi.getRecommendWeb();
+        if (!FeedApi.currentSession(session, account)) return [];
+        validPage = true;
+        if (rows.length > 0) return rows;
       } catch (e) {
-        // App 推流被风控或网络失败：回退 Web。
-      }
-      if (session !== FeedApi.sessionVersion) return [];
-      try {
-        const webPage: Array<VideoItem> = await FeedApi.getRecommendWeb();
-        if (webPage.length > 0) return webPage;
-      } catch (e) {
-        // 同上，回退也失败则返回空。
-      }
-      return [];
-    }
-    if (loggedIn) {
-      try {
-        const personalized: Array<VideoItem> = await FeedApi.getRecommendWeb();
-        if (personalized.length > 0) return personalized;
-      } catch (e) {
-        // WBI key 获取或签名被风控时继续走 App 推荐，不能让首页永久停在加载态。
+        if (!FeedApi.currentSession(session, account)) return [];
+        failure = e instanceof Error ? e : new Error('推荐加载失败，请检查网络后重试');
       }
     }
-    if (session !== FeedApi.sessionVersion) return [];
-    return FeedApi.getRecommendApp();
+    // 至少一路有效空页表示本次暂无内容；两路均失败才是可重试的加载错误。
+    if (validPage) return [];
+    throw failure;
+  }
+
+  private static currentSession(session: number, account: number): boolean {
+    return session === FeedApi.sessionVersion && account === AuthSession.version;
   }
 
   static async getRecommendWeb(): Promise<Array<VideoItem>> {
     const session: number = FeedApi.sessionVersion;
+    const account: number = AuthSession.version;
     // 官方协议：页序号从 1 起，每页 +1；把上一页的会话标识回传。
     const idx: number = FeedApi.webFreshIdx + 1;
     const params: Record<string, string> =
       FeedApi.buildWebRcmdParams(idx, FeedApi.webFeedId, FeedApi.webBucketId);
     const resp: HttpResponse = await webGetSigned(Api.recommendListWeb, params);
-    const data: Record<string, Object> | null = getData(resp);
-    if (data === null || session !== FeedApi.sessionVersion) return [];
+    if (!FeedApi.currentSession(session, account)) return [];
+    const parsed: ApiResult<Record<string, Object>> = parseDataResult(resp);
+    if (!parsed.ok || parsed.data === null) throw new Error(parsed.message);
+    const data: Record<string, Object> = parsed.data;
+    if (!Array.isArray(data['item'])) throw new Error('推荐响应格式异常，请重试');
     const page: FeedPage = FeedApi.parseWebRcmd(data);
     // 只有拿到有效响应才推进会话；feed_id 服务端可能不回，保留旧值比清空好。
     FeedApi.webFreshIdx = idx;
@@ -164,17 +168,20 @@ export class FeedApi {
 
   static async getRecommendApp(): Promise<Array<VideoItem>> {
     const session: number = FeedApi.sessionVersion;
+    const account: number = AuthSession.version;
     const params: Record<string, string> =
       FeedApi.buildAppFeedParams(FeedApi.appCursor, HttpClient.getAppAccessToken());
     await appSign(params);
+    if (!FeedApi.currentSession(session, account)) return [];
     const query: string = HttpClient.buildQuery(params);
     const url: string = Api.recommendListApp + '?' + query;
     const headers: Record<string, string> = HttpClient.merge(Constants.appHeaders, { 'buvid': HttpClient.buvid });
     const resp: HttpResponse = await HttpClient.get(url, headers);
-    const data: Record<string, Object> | null = getData(resp);
-    if (data === null || session !== FeedApi.sessionVersion) {
-      return [];
-    }
+    if (!FeedApi.currentSession(session, account)) return [];
+    const parsed: ApiResult<Record<string, Object>> = parseDataResult(resp);
+    if (!parsed.ok || parsed.data === null) throw new Error(parsed.message);
+    const data: Record<string, Object> = parsed.data;
+    if (!Array.isArray(data['items'])) throw new Error('推荐响应格式异常，请重试');
     const page: FeedPage = FeedApi.parseAppFeed(data);
     if (page.cursor > 0) FeedApi.appCursor = page.cursor;
     return page.items;

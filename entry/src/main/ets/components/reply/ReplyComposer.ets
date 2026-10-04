@@ -1,5 +1,9 @@
 import { BiliEmote, BiliEmotePackage } from '../../model/Models';
 import { Immersive } from '../../common/Immersive';
+import { DynDraftImage } from '../../common/DynImagePreparer';
+import { ReplySubmissionController } from './ReplySubmissionController';
+import { picker } from '@kit.CoreFileKit';
+import { common } from '@kit.AbilityKit';
 
 /** 视频评论与动态评论共用的底部发送栏。父页面只负责草稿与请求。 */
 @Component
@@ -8,6 +12,9 @@ export struct ReplyComposer {
   @Prop @Watch('onPackagesChanged') emotePackages: Array<BiliEmotePackage> = [];
   @Prop placeholder: string = '发一条友善的评论';
   @Prop sending: boolean = false;
+  @Prop images: Array<DynDraftImage> = [];
+  @Prop allowImages: boolean = true;
+  submission: ReplySubmissionController | null = null;
   @Prop emoteOpen: boolean = false;
   @Prop showEmoteButton: boolean = true;
   /** 页面与回复详情 Sheet 可能同时挂载，焦点 ID 必须唯一，避免聚焦到底层编辑器。 */
@@ -17,6 +24,8 @@ export struct ReplyComposer {
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @State focused: boolean = false;
+  @State previewOpen: boolean = false;
+  @State previewIndex: number = 0;
   private editorController: RichEditorController = new RichEditorController();
   private editorReady: boolean = false;
   private syncingEditor: boolean = false;
@@ -25,6 +34,32 @@ export struct ReplyComposer {
   onToggleEmote: () => void = () => {};
   onRequestKeyboard: () => void = () => {};
   onFocusChange: (focused: boolean) => void = () => {};
+
+  private hasContent(): boolean {
+    return this.text.trim().length > 0;
+  }
+
+  private pickImages(): void {
+    const context: common.Context | undefined = this.getUIContext().getHostContext();
+    if (context === undefined || this.submission === null || this.sending || !this.allowImages) return;
+    this.submission.pick(context, async (remaining: number): Promise<Array<string>> => {
+      const photoPicker: picker.PhotoViewPicker = new picker.PhotoViewPicker();
+      const result: picker.PhotoSelectResult = await photoPicker.select({
+        MIMEType: picker.PhotoViewMIMETypes.IMAGE_TYPE, maxSelectNumber: remaining,
+      });
+      return result.photoUris;
+    }).catch(() => {});
+  }
+
+  private removeImage(key: string): void {
+    if (!this.sending) this.submission?.removeImage(key);
+  }
+
+  private previewImage(index: number): void {
+    if (index < 0 || index >= this.images.length) return;
+    this.previewIndex = index;
+    this.previewOpen = true;
+  }
 
   private onFocusTick(): void {
     if (this.focusTick <= 0) return;
@@ -37,7 +72,7 @@ export struct ReplyComposer {
   }
 
   private expanded(): boolean {
-    return this.focused || this.emoteOpen || this.text.length > 0;
+    return this.focused || this.emoteOpen || this.text.length > 0 || this.images.length > 0;
   }
 
   /**
@@ -172,8 +207,66 @@ export struct ReplyComposer {
     .onClick(() => this.onToggleEmote())
   }
 
+  @Builder
+  ImageButton() {
+    Text('图片')
+      .fontSize(13)
+      .fontColor(this.sending ? '#9499A0' : this.accent)
+      .padding({ left: 8, right: 8 })
+      .height(38)
+      .enabled(!this.sending)
+      .onClick(() => this.pickImages())
+  }
+
+  @Builder
+  ImagePreview() {
+    Swiper() {
+      ForEach(this.images, (image: DynDraftImage) => {
+        Image('file://' + image.cachePath)
+          .width('100%')
+          .height('100%')
+          .objectFit(ImageFit.Contain)
+      }, (image: DynDraftImage) => image.key)
+    }
+    .index(this.previewIndex)
+    .loop(false)
+    .indicator(this.images.length > 1)
+    .width('100%')
+    .height('100%')
+  }
+
   build() {
     Column({ space: this.expanded() ? 6 : 0 }) {
+      if (this.images.length > 0) {
+        Scroll() {
+          Row({ space: 8 }) {
+            ForEach(this.images, (image: DynDraftImage, index: number) => {
+              Stack({ alignContent: Alignment.TopEnd }) {
+                Image('file://' + image.cachePath)
+                  .width(64)
+                  .height(64)
+                  .borderRadius(8)
+                  .objectFit(ImageFit.Cover)
+                  .onClick(() => this.previewImage(index))
+                Text('×')
+                  .fontSize(15)
+                  .fontColor('#FFFFFF')
+                  .textAlign(TextAlign.Center)
+                  .width(22)
+                  .height(22)
+                  .borderRadius(11)
+                  .backgroundColor('#99000000')
+                  .enabled(!this.sending)
+                  .onClick(() => this.removeImage(image.key))
+              }
+            }, (image: DynDraftImage) => image.key)
+          }
+        }
+        .width('100%')
+        .height(68)
+        .scrollable(ScrollDirection.Horizontal)
+        .scrollBar(BarState.Off)
+      }
       Row({ space: 8 }) {
         RichEditor({ controller: this.editorController })
           .id(this.focusId)
@@ -210,6 +303,7 @@ export struct ReplyComposer {
           })
           .onSubmit(() => this.onSend())
         if (!this.expanded() && this.showEmoteButton) this.EmoteButton()
+        if (!this.expanded() && this.allowImages && this.submission !== null) this.ImageButton()
       }
       .width('100%')
       .height(this.expanded() ? 48 : 40)
@@ -220,6 +314,7 @@ export struct ReplyComposer {
       if (this.expanded()) {
         Row({ space: 8 }) {
           if (this.showEmoteButton) this.EmoteButton()
+          if (this.allowImages && this.submission !== null) this.ImageButton()
           Blank()
           Button(this.sending ? '发布中…' : '发布')
             .height(36)
@@ -228,8 +323,8 @@ export struct ReplyComposer {
             .fontColor('#FFFFFF')
             .backgroundColor(this.accent)
             .borderRadius(18)
-            .opacity(!this.sending && this.text.trim().length > 0 ? 1 : 0.45)
-            .enabled(!this.sending && this.text.trim().length > 0)
+            .opacity(!this.sending && this.hasContent() ? 1 : 0.45)
+            .enabled(!this.sending && this.hasContent())
             .onClick(() => this.onSend())
         }
         .width('100%')
@@ -240,5 +335,8 @@ export struct ReplyComposer {
     .padding({ left: 12, right: 12, top: this.expanded() ? 6 : 8, bottom: this.bottomPadding() })
     .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
     .border({ width: { top: 0.5 }, color: this.isDark ? '#333333' : '#EEEEEE' })
+    .bindSheet($$this.previewOpen, this.ImagePreview(), {
+      height: '90%', showClose: true, backgroundColor: '#101012',
+    })
   }
 }

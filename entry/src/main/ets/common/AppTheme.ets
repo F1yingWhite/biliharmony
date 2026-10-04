@@ -47,6 +47,8 @@ export class AppTheme {
   static readonly KEY_DARK: string = 'isDarkMode';
   static readonly KEY_THEME_MODE: string = 'themeMode';
   static readonly KEY_SYSTEM_DARK: string = 'systemDarkMode';
+  /** UP 主发布的评分/投票/视频链接卡片，独立于普通滚动弹幕开关。 */
+  static readonly KEY_PLAYER_INTERACTION: string = 'playerInteractionEnabled';
   static readonly MODE_SYSTEM: string = 'system';
   static readonly MODE_LIGHT: string = 'light';
   static readonly MODE_DARK: string = 'dark';
@@ -120,6 +122,7 @@ export class AppTheme {
     PersistentStorage.persistProp<boolean>('backgroundPlaybackEnabled', false);
     AppTheme.ensureBool('backgroundPlaybackEnabled', false);
     AppTheme.ensureBool('sponsorSkipEnabled', true);
+    AppTheme.ensureBool(AppTheme.KEY_PLAYER_INTERACTION, true);
     AppTheme.ensureNumber('videoQualityPref', 0);
     AppTheme.ensureNumber('videoManualQuality', 0);
     // 首页推荐源：'web'（Web 个性化推荐，默认）| 'app'（App 推流，服务端个性化最强）。
@@ -173,6 +176,10 @@ export class AppTheme {
       if (auto.length > 0) AppStorage.setOrCreate<boolean>('autoContinuePlay', auto === 'true');
       const sponsor: string = AppTheme.themePreferences.getSync('sponsorSkipEnabled', '') as string;
       if (sponsor.length > 0) AppStorage.setOrCreate<boolean>('sponsorSkipEnabled', sponsor === 'true');
+      const interaction: string = AppTheme.themePreferences.getSync(AppTheme.KEY_PLAYER_INTERACTION, '') as string;
+      if (interaction === 'true' || interaction === 'false') {
+        AppStorage.setOrCreate<boolean>(AppTheme.KEY_PLAYER_INTERACTION, interaction === 'true');
+      }
       const recMode: string = AppTheme.themePreferences.getSync('recommendMode', '') as string;
       if (DEBUG) hilog.info(0x0000, 'RecMode', 'restore read=%{public}s', recMode);
       if (recMode === 'app' || recMode === 'web') AppStorage.setOrCreate<string>('recommendMode', recMode);
@@ -230,6 +237,12 @@ export class AppTheme {
   /** 广告空降开关写 Preferences。 */
   static persistSponsorSkip(on: boolean): void {
     AppTheme.syncBooleanPref('sponsorSkipEnabled', on);
+  }
+
+  /** 更新互动卡片显示偏好：立刻驱动播放器，显式落盘供下次启动恢复。 */
+  static persistPlayerInteractionEnabled(on: boolean): void {
+    AppStorage.setOrCreate<boolean>(AppTheme.KEY_PLAYER_INTERACTION, on);
+    AppTheme.syncBooleanPref(AppTheme.KEY_PLAYER_INTERACTION, on);
   }
 
   /** 首页推荐源写 Preferences（'web' | 'app'；切换即落盘，重启还原）。 */

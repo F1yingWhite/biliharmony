@@ -43,6 +43,11 @@ export class PlayerPlaybackSession {
       changed: (): void => this.publish(),
       clock: (action: string): void => this.event('clock.' + action),
       rate: (rate: number): void => this.event('rate', rate),
+      resync: (targetMs: number): void => {
+        if (this.state.playing && this.canPlay() && !this.state.seekLocked && !this.state.backgroundAudioOnly) {
+          this.seekTo(targetMs / 1000, true, false);
+        }
+      },
       error: (audio: media.AVPlayer, message: string): void => {
         if (this.pair.audio === audio) this.recoverSource(true, message);
       },
@@ -205,9 +210,7 @@ export class PlayerPlaybackSession {
       case 'seek': {
         if (event.audio) {
           const audio: media.AVPlayer | null = this.pair.audio;
-          if (audio !== null && (this.seek.seekInFlight || !this.audioSync.onAudioSeekDone(event.value))) {
-            this.seek.onAudioSeekDone(audio, event.value);
-          }
+          if (audio !== null) this.seek.onAudioSeekDone(audio, event.value);
         } else if (this.pair.video !== null) this.seek.onVideoSeekDone(this.pair.video, event.value);
         break;
       }
@@ -308,6 +311,13 @@ export class PlayerPlaybackSession {
     if (this.state.playing) { this.pause(); return; }
     if (!this.canPlay()) return;
     this.shouldPlayAfterPrepare = true;
+    // 自动同步/用户跳转尚未完成时只更新意图，不能提前启动任一播放头。
+    if (this.state.seekLocked) {
+      this.seek.seekResumePlaying = true;
+      this.state.playing = true;
+      this.publish(); this.event('playing');
+      return;
+    }
     const policy: PlayerPlaybackPolicy = this.observer.policy();
     if (policy.background && !policy.pipVisible && this.pair.audio !== null && this.pair.audioPrepared) {
       this.state.backgroundAudioOnly = true;
@@ -336,6 +346,9 @@ export class PlayerPlaybackSession {
     const video: media.AVPlayer | null = this.pair.video;
     const audio: media.AVPlayer | null = this.pair.audio;
     this.shouldPlayAfterPrepare = false; this.seek.seekResumePlaying = false;
+    this.seek.cancel();
+    if (this.state.seekLocked) this.event('seek.finished');
+    this.state.seekLocked = false; this.state.buffering = false;
     this.audioSync.muteImmediately(); this.audioSync.reset();
     try {
       if (video !== null && this.pair.prepared) video.pause().catch(() => {});

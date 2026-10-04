@@ -7,6 +7,7 @@ const ts = require(process.env.ARKTS_TEST_TYPESCRIPT ||
 const root = process.env.ARKTS_TEST_SOURCE_ROOT || path.resolve(__dirname, '../../entry/src/main/ets');
 
 function loader(overrides) {
+  overrides = {'common/DynImagePreparer': {DynImagePreparer: {cleanup() {}}}, ...overrides};
   const cache = new Map();
   function load(name) {
     if (Object.hasOwn(overrides, name)) return overrides[name];

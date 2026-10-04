@@ -28,6 +28,7 @@ export struct PlayerSettingsPanel {
   @Prop blockColorDm: boolean = false;
   @Prop dmMerge: boolean = false;
   @Prop dmMergeCount: boolean = true;
+  @Prop interactionEnabled: boolean = true;
   @Prop qualityOptions: Array<VideoQualityOption> = [];
   @Prop activeQuality: number = 0;
   @Prop chapters: Array<VideoChapter> = [];
@@ -53,6 +54,7 @@ export struct PlayerSettingsPanel {
   onToggleDmBlock: (kind: string) => void = () => {};
   onDmMergeChange: (next: boolean) => void = () => {};
   onDmMergeCountChange: (next: boolean) => void = () => {};
+  onInteractionEnabledChange: (next: boolean) => void = () => {};
   onQualityChange: (qn: number) => void = () => {};
   onChapterChange: (seconds: number) => void = () => {};
   onSpeedChange: (rate: number) => void = () => {};
@@ -251,6 +253,12 @@ export struct PlayerSettingsPanel {
       .onClick(() => this.onSubtitleScaleChange(scale))
   }
 
+  @Builder
+  InteractionSetting() {
+    this.DmSwitchRow('UP主互动', '显示视频内的评分、投票和链接卡片', this.interactionEnabled,
+      (next: boolean): void => this.onInteractionEnabledChange(next))
+  }
+
   build() {
     Column({ space: this.which === 0 ? 2 : 8 }) {
       if (this.which === 0) {
@@ -338,6 +346,8 @@ export struct PlayerSettingsPanel {
             .width('100%')
             .margin({ bottom: 8 })
           Column() {
+            this.InteractionSetting()
+            this.DmDivider()
             this.DmSwitchRow('弹幕观看屏蔽词', '仅对我不展示特定弹幕', this.dmFilterRulesCount > 0, (): void => {
               this.onDmFilterTap();
             })

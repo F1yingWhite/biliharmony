@@ -1,6 +1,30 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const ts = require(process.env.ARKTS_TEST_TYPESCRIPT ||
+  '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript');
 const {createArktsLoader, deferred, tick} = require('./arkts-module.cjs');
+
+// Execute the page's production hooks so a wrong option at the UI/domain
+// boundary cannot be hidden by hand-selecting a corrected test option.
+function productionReactionHooks(kind, controller) {
+  const root = process.env.ARKTS_TEST_SOURCE_ROOT || path.resolve(__dirname, '../../entry/src/main/ets');
+  const pageFile = kind === 'dynamic' ? 'DynamicDetail.ets' : 'BangumiDetail.ets';
+  const source = fs.readFileSync(path.join(root, 'pages', pageFile), 'utf8');
+  const start = source.indexOf('  private replyReactionHooks(');
+  const end = source.indexOf(kind === 'dynamic' ? '  private async likeReply(' : '  private closeReplyThread(', start);
+  assert.ok(start >= 0 && end > start, 'production reaction hooks are present in ' + pageFile);
+  const code = ts.transpileModule('class PageHarness {\n' + source.slice(start, end) + '\n}; return PageHarness;', {
+    compilerOptions: {target: ts.ScriptTarget.ES2020}
+  }).outputText;
+  const PageHarness = new Function('UserStore', 'AppNavStack', 'NAV_LOGIN', code)(
+    {isLogin: true}, {pushPathByName() {}}, 'login');
+  const page = new PageHarness();
+  Object.assign(page, {replies: controller, item: {commentId: 1, commentType: 17},
+    ensureReplyLogin: () => true, toast() {}, replyOid: () => 1});
+  return page.replyReactionHooks(true);
+}
 
 function fixture(kind = 'dynamic') {
   const requests = [], threads = [], reactions = [], logs = [];
@@ -8,6 +32,7 @@ function fixture(kind = 'dynamic') {
   const page = {destroyed: false, subject: {oid: 1, type: kind === 'dynamic' ? 17 : 1},
     main: null, thread: null, loaded: 0, sorts: 0, threadErrors: 0, shareDisposals: 0};
   const load = createArktsLoader({mocks: {
+    'common/DynImagePreparer': {DynImagePreparer: {cleanup() {}}},
     'api/BiliApi': {BiliApi: {}},
     'api/CommentApi': {CommentApi: {getReplies: fetch(requests), getReplyReplies: fetch(threads),
       likeReply: fetch(reactions), hateReply: fetch(reactions)}},
@@ -198,6 +223,29 @@ for (const action of ['runReplyLike', 'runReplyDislike']) {
     assert.equal(f.controller.source.getData(0).like, 10); assert.equal(f.controller.source.getData(0).liked, true);
     assert.deepEqual(notices, []);
     const reused = f.controller.captureGuard(); f.controller.dispose(); assert.equal(reused(), false);
+  });
+}
+
+for (const kind of ['dynamic', 'bangumi']) {
+  test(`${kind}: production page hooks keep dislike then like mutually exclusive`, async () => {
+    const f = fixture(kind); await f.seed([f.item(10, {like: 1})], '', false);
+    f.controller.beginThread(f.controller.source.getData(0).clone(), []);
+    const {runReplyLike, runReplyDislike} = f.load('common/ReplyMutation');
+    const busy = new Set(), hooks = productionReactionHooks(kind, f.controller);
+    const mutate = (rpid, operation) => f.controller.mutate(rpid, operation);
+    const down = runReplyDislike(f.controller.source.getData(0).clone(), busy, mutate, hooks);
+    await tick(); f.reactions.at(-1).resolve({ok: true}); await down;
+    assert.deepEqual([f.controller.source.getData(0).liked, f.controller.source.getData(0).disliked], [false, true]);
+
+    // ReplyCard immediately clears its visual dislike before invoking the page.
+    // The authoritative controller state must preserve that mutual exclusion.
+    const clicked = f.controller.source.getData(0).clone();
+    clicked.liked = true; clicked.disliked = false; clicked.like++;
+    const up = runReplyLike(clicked, busy, mutate, hooks);
+    await tick(); f.reactions.at(-1).resolve({ok: true}); await up;
+    const main = f.controller.source.getData(0), threadRoot = f.controller.thread.root;
+    assert.deepEqual([main.liked, main.disliked, main.like], [true, false, 2]);
+    assert.deepEqual([threadRoot.liked, threadRoot.disliked, threadRoot.like], [true, false, 2]);
   });
 }
 

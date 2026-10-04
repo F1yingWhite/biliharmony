@@ -24,6 +24,7 @@ export class PlayerTrackPair {
   firstRenderReady: boolean = false;
   private generation: number = 0;
   private creating: boolean = false;
+  private lastSyncSampleAtMs: number = 0;
   private releases: Array<Promise<void>> = [];
   private readonly notify: (event: PlayerTrackEvent) => void;
 
@@ -36,6 +37,7 @@ export class PlayerTrackPair {
     if (this.exists || surfaceId.length === 0) return;
     const generation: number = ++this.generation;
     this.creating = true;
+    this.lastSyncSampleAtMs = 0;
     this.audioExpected = audioUrl.length > 0;
     // 同一 Surface 在旧 release 真正完成前不能绑定新的解码器。
     await Promise.all(this.releases.slice());
@@ -74,6 +76,11 @@ export class PlayerTrackPair {
     const current = (): boolean => generation === this.generation && (audio ? this.audio : this.video) === player;
     player.on('stateChange', (state: media.AVPlayerState) => {
       if (!current()) return;
+      if (DEBUG) {
+        hilog.info(0x0000, 'BiliPlayback', '%{public}s.state.change state=%{public}s currentTime=%{public}d',
+          audio ? 'audio' : 'video', state, player.currentTime);
+      }
+      if (!audio && state === 'idle') this.lastSyncSampleAtMs = 0;
       if (state === 'initialized') {
         if (!audio) player.surfaceId = surface;
         try { player.prepare().catch(() => { if (current()) this.error(audio, '播放器准备失败'); }); }
@@ -93,12 +100,31 @@ export class PlayerTrackPair {
       this.notify(event);
     });
     player.on('error', (error: BusinessError) => { if (current()) this.error(audio, error.message); });
-    player.on('seekDone', (position: number) => { if (current()) this.emit('seek', audio, position); });
-    player.on('timeUpdate', (time: number) => { if (current()) this.emit('time', audio, time); });
+    player.on('seekDone', (position: number) => {
+      if (!current()) return;
+      if (DEBUG) {
+        hilog.info(0x0000, 'BiliPlayback', '%{public}s.seek.done position=%{public}d currentTime=%{public}d',
+          audio ? 'audio' : 'video', position, player.currentTime);
+      }
+      this.emit('seek', audio, position);
+    });
+    player.on('timeUpdate', (time: number) => {
+      if (!current()) return;
+      if (!audio) this.sampleSync();
+      this.emit('time', audio, time);
+    });
     player.on('playbackRateDone', (rate: number) => {
       if (!current() || !DEBUG) return;
       hilog.info(0x0000, 'BiliPlayback', '%{public}s.rate.done rate=%{public}s position=%{public}d',
         audio ? 'audio' : 'video', String(rate), player.currentTime);
+    });
+    player.on('bufferingUpdate', (kind: media.BufferingInfoType, value: number) => {
+      if (!current()) return;
+      if (DEBUG && (kind === media.BufferingInfoType.BUFFERING_START || kind === media.BufferingInfoType.BUFFERING_END)) {
+        hilog.info(0x0000, 'BiliPlayback', '%{public}s.buffering kind=%{public}d value=%{public}d currentTime=%{public}d',
+          audio ? 'audio' : 'video', kind, value, player.currentTime);
+      }
+      if (!audio) this.emit('buffer', false, kind, value);
     });
     if (audio) return;
     player.onMetricsEvent((events: Array<media.AVMetricsEvent>) => {
@@ -114,9 +140,6 @@ export class PlayerTrackPair {
       if (!current()) return;
       this.firstRenderReady = true;
       this.emit('frame');
-    });
-    player.on('bufferingUpdate', (kind: media.BufferingInfoType, value: number) => {
-      if (current()) this.emit('buffer', false, kind, value);
     });
     player.on('videoSizeChange', (width: number, height: number) => {
       if (current() && width > 0 && height > 0) this.emit('size', false, width, height);
@@ -135,6 +158,7 @@ export class PlayerTrackPair {
     this.audioPrepared = false;
     this.audioExpected = false;
     this.firstRenderReady = false;
+    this.lastSyncSampleAtMs = 0;
     if (video !== null) this.retire(video);
     if (audio !== null) this.retire(audio);
     return Promise.all(this.releases.slice()).then(() => {});
@@ -149,6 +173,29 @@ export class PlayerTrackPair {
       if (index >= 0) this.releases.splice(index, 1);
     });
     return pending;
+  }
+
+  private sampleSync(): void {
+    if (!DEBUG || !this.prepared || !this.audioPrepared || this.video === null || this.audio === null) return;
+    const nowMs: number = Date.now();
+    if (nowMs - this.lastSyncSampleAtMs < 1000) return;
+    this.lastSyncSampleAtMs = nowMs;
+    const cachedVideoMs: number = this.video.currentTime;
+    const cachedAudioMs: number = this.audio.currentTime;
+    let videoMs: number;
+    let audioMs: number;
+    const queryStartedAtMs: number = Date.now();
+    try {
+      videoMs = this.video.getPlaybackPosition();
+      audioMs = this.audio.getPlaybackPosition();
+    } catch (e) {
+      return;
+    }
+    const queryCostMs: number = Date.now() - queryStartedAtMs;
+    hilog.info(0x0000, 'BiliPlayback',
+      'avsync.sample videoMs=%{public}d audioMs=%{public}d driftMs=%{public}d cachedVideoMs=%{public}d cachedAudioMs=%{public}d cachedDriftMs=%{public}d queryCostMs=%{public}d videoState=%{public}s audioState=%{public}s',
+      videoMs, audioMs, audioMs - videoMs, cachedVideoMs, cachedAudioMs, cachedAudioMs - cachedVideoMs,
+      queryCostMs, this.video.state, this.audio.state);
   }
 
   private error(audio: boolean, message: string): void {

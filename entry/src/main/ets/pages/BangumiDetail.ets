@@ -25,6 +25,7 @@ import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/Rep
 import { colorWithAlpha, formatCount } from '../common/Utils';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { ReplySubmissionController, ReplySubmissionSnapshot } from '../components/reply/ReplySubmissionController';
+import { DynDraftImage } from '../common/DynImagePreparer';
 import { BangumiEpisodeCatalog } from '../components/bangumi/BangumiEpisodeCatalog';
 import { BangumiEpisodeSection } from '../components/bangumi/BangumiEpisodeSection';
 import { BangumiFollowController, BangumiFollowState } from '../components/bangumi/BangumiFollowController';
@@ -51,11 +52,13 @@ export struct BangumiDetailPage {
   @State replySortMode: number = 3; // 3 最热，2 最新
   @State replyVersion: number = 0;
   @State replyDraft: string = '';
+  @State replyImages: Array<DynDraftImage> = [];
   @State replySending: boolean = false;
   private replySubmit: ReplySubmissionController = new ReplySubmissionController({
     isAlive: () => !this.destroyed,
     getTarget: () => ({ oid: this.replyOid(), type: 1, root: 0, parent: 0, scope: 'main', active: true }),
     getDraft: () => this.replyDraft,
+    setImages: (images: Array<DynDraftImage>) => this.replyImages = images,
     setSending: (sending: boolean) => this.replySending = sending,
     toast: (message: string) => this.toast(message),
     onSuccess: (_snapshot: ReplySubmissionSnapshot, _reply: ReplyItem | null, clearDraft: boolean) => {
@@ -254,7 +257,7 @@ export struct BangumiDetailPage {
       isDestroyed: () => !current(),
       resolveOid: () => this.replyOid(),
       resolveType: () => 1,
-      clearDislikeOnLike: false,
+      clearDislikeOnLike: true,
     };
   }
 
@@ -777,6 +780,8 @@ export struct BangumiDetailPage {
         if (this.replyOid() > 0) {
           ReplyComposer({
             text: this.replyDraft,
+            images: this.replyImages,
+            submission: this.replySubmit,
             sending: this.replySending,
             showEmoteButton: false,
             onChange: (value: string) => {

@@ -11,6 +11,7 @@ from qa_common import (
     parse_bounds, has_text, tap_bounds, swipe_up, key_back,
     snapshot_shot, back_home, SCREEN_W, SCREEN_H,
 )
+from library_layout import LIBRARY_TITLES, first_visible_text, require_library_destination
 
 report = QaReport('BiliHarmony 深度回归（Python 跨平台）')
 
@@ -201,16 +202,23 @@ def test_d6():
         cold_start()
         t = load_ui_tree(dump_ui('d6_home'))
         n = first_node(t, lambda x: node_text(x) == '我的' and (parse_bounds(node_bounds(x)) or {}).get('y1', -1) > 2400)
-        if n:
-            tap_bounds(node_bounds(n), 1200)
-        t2 = load_ui_tree(dump_ui('d6_mine'))
+        if not n:
+            report.fail('我的入口未找到')
+            return
+        tap_bounds(node_bounds(n), 1200)
         for label in ('历史', '稍后'):
-            n = first_node(t2, lambda x: label in node_text(x))
+            t2 = load_ui_tree(dump_ui('d6_mine'))
+            n = first_visible_text(t2, LIBRARY_TITLES[label])
             if not n:
+                report.skip(f'{label}入口未找到')
                 continue
             tap_bounds(node_bounds(n), 2000)
             t3 = load_ui_tree(dump_ui('d6_' + label))
-            report.pass_(f'{label} 打开 N={len(all_texts(t3))}')
+            try:
+                require_library_destination(t3, label)
+                report.pass_(f'{label} 打开 N={len(all_texts(t3))}')
+            except RuntimeError as e:
+                report.fail(f'{label}未打开：{e}')
             snapshot_shot('d6_' + label)
             key_back()
             time.sleep(0.8)
@@ -228,6 +236,8 @@ def test_d6():
             else:
                 report.fail('收藏页空')
             snapshot_shot('d6_fav')
+        else:
+            report.skip('收藏入口未找到')
     except Exception as e:
         report.fail(f'D6: {e}')
     finally:

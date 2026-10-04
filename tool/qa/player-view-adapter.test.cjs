@@ -33,6 +33,8 @@ function viewFixture() {
     dmClock: {start: () => effects.push(['clock', 'start']), pause: () => effects.push(['clock', 'pause']), stop: () => effects.push(['clock', 'stop'])},
     pictureInPicture: {sync: () => effects.push(['pip'])},
     auxiliary: {prefetch: seconds => effects.push(['prefetch', seconds])},
+    interactionCtl: {update: seconds => effects.push(['interaction.time', seconds]),
+      resetForReplay: () => effects.push(['interaction.replay'])},
     sponsorCtl: {maybeSkipSponsor: () => false, resetForReplay: () => effects.push(['sponsor.replay'])},
     seekTargetCtl: {show: value => effects.push(['seek.target', value])},
     onPlayingChange: value => effects.push(['playing', value]), onFirstFrameShown: () => effects.push(['firstFrame']),
@@ -71,7 +73,7 @@ test('player UI adapter: timeline reaches subtitles, danmaku, prefetch and conti
   const f = viewFixture(); const {video} = await f.boot(); f.playing();
   video.emit('durationUpdate', 100000); video.currentTime = 5050; video.emit('timeUpdate', 5050);
   assert.equal(f.page.duration, 100); assert.equal(f.page.curTime, 5.05); assert.equal(f.page.playheadSec, 5.05);
-  for (const kind of ['subtitle', 'dm.spawn', 'prefetch', 'continue']) assert.ok(f.effects.some(e => e[0] === kind && e[1] === 5.05));
+  for (const kind of ['subtitle', 'dm.spawn', 'prefetch', 'continue', 'interaction.time']) assert.ok(f.effects.some(e => e[0] === kind && e[1] === 5.05));
   video.emit('timeUpdate', 5200); assert.equal(f.page.curTime, 5.05, 'reactive time remains second-granular');
   assert.equal(f.page.playheadSec, 5.2); f.session.deactivate();
 });
@@ -82,12 +84,15 @@ test('player UI adapter: replay retains loaded danmaku while the core performs t
   assert.deepEqual(f.page.dmEngine.list, ['loaded']); assert.equal(f.page.endScreenOpen, false);
   assert.equal(f.calls(video, 'seek').at(-1)[1], 0); assert.equal(f.calls(audio, 'seek').at(-1)[1], 0);
   assert.ok(f.effects.some(e => e[0] === 'sponsor.replay')); assert.ok(f.effects.some(e => e[0] === 'dm.reset' && e[1] === 0));
+  assert.ok(f.effects.some(e => e[0] === 'interaction.replay'), 'replay restores dismissed UP interaction cards');
   f.session.deactivate();
 });
 
 test('player UI adapter: seek dispatch clears unrelated preview and completion clears the target overlay', async () => {
   const f = viewFixture(); const {video, audio} = await f.boot(); f.playing(); f.session.seekTo(12);
   f.advance(60); await tick(); assert.equal(f.page.seekPreviewFrame, null); assert.equal(f.page.curTime, 12);
+  assert.ok(f.effects.some(e => e[0] === 'prefetch' && e[1] === 12), 'paused/active seek should request the target danmaku segment');
+  assert.ok(f.effects.some(e => e[0] === 'interaction.time' && e[1] === 12), 'seek updates command-card visibility while paused');
   video.currentTime = audio.currentTime = 12000; video.emit('seekDone', 12000); audio.emit('seekDone', 12000);
   assert.ok(f.effects.some(e => e[0] === 'seek.target' && e[1] === -1)); f.session.deactivate();
 });

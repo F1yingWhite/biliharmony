@@ -10,11 +10,14 @@ export interface PlayerAuxiliarySource {
 export interface PlayerAuxiliaryHost {
   isDestroyed: () => boolean;
   duration: () => number;
+  position: () => number;
   danmaku: (items: Array<DanmakuItem>, replace: boolean) => void;
   heatPoints: (items: Array<HotPoint>) => void;
   chapters: (items: Array<VideoChapter>) => void;
   online: (value: string) => void;
 }
+
+const DM_RETRY_INTERVAL_MS: number = 5000;
 
 /** One source owns its auxiliary requests and segment locks, including an A → B → A switch. */
 export class PlayerAuxiliaryController {
@@ -23,9 +26,11 @@ export class PlayerAuxiliaryController {
   private generation: number = 0;
   private active: boolean = false;
   private initialized: boolean = false;
+  private initialLoading: boolean = false;
   private fallback: boolean = false;
   private loaded: Set<number> = new Set<number>();
   private loading: Set<number> = new Set<number>();
+  private retryAfter: Map<number, number> = new Map<number, number>();
   private heatRequest: number = 0;
   private chapterRequest: number = 0;
   private onlineRequest: number = 0;
@@ -46,44 +51,63 @@ export class PlayerAuxiliaryController {
     ++this.generation;
     this.active = false;
     this.initialized = false;
+    this.initialLoading = false;
     this.fallback = false;
     this.loaded.clear();
     this.loading.clear();
+    this.retryAfter.clear();
   }
 
   async loadDanmaku(): Promise<void> {
-    if (!this.active || this.source.cid <= 0 || this.initialized || this.loading.has(0)) return;
+    if (!this.current(this.generation) || this.source.cid <= 0 || this.initialLoading) return;
+    const position: number = this.host.position();
+    const now: number = Number.isFinite(position) && position >= 0 ? position : 0;
+    if (this.initialized) {
+      this.prefetch(now);
+      return;
+    }
+    const index: number = Math.floor(now / DM_SEGMENT_SECONDS);
     const generation: number = this.generation;
     const source: PlayerAuxiliarySource = this.source;
-    this.loading.add(0);
+    this.initialLoading = true;
+    this.loading.add(index);
     try {
-      const first: Array<DanmakuItem> | null = await BiliApi.getDanmakuSeg(source.cid, source.aid, 1);
+      let first: Array<DanmakuItem> | null = null;
+      try {
+        first = await BiliApi.getDanmakuSeg(source.cid, source.aid, index + 1);
+      } catch (_) {}
       if (!this.current(generation)) return;
       if (first === null) {
-        const items: Array<DanmakuItem> = await BiliApi.getDanmaku(source.cid);
+        this.retryAfter.set(index, Date.now() + DM_RETRY_INTERVAL_MS);
+        let items: Array<DanmakuItem> = [];
+        try {
+          items = await BiliApi.getDanmaku(source.cid);
+        } catch (_) {}
         if (!this.current(generation)) return;
+        // XML supplies a temporary list while protobuf requests recover.
         this.fallback = true;
         this.initialized = true;
         this.host.danmaku(items.slice().sort((a: DanmakuItem, b: DanmakuItem): number => a.time - b.time), true);
       } else {
         this.initialized = true;
-        this.loaded.add(0);
+        this.loaded.add(index);
         this.host.danmaku(first, true);
         // Unknown duration still allows the second segment; empty is a valid loaded segment.
-        this.ensureSegment(1);
+        this.ensureSegment(index + 1);
       }
-    } catch (_) {
-      // The same source may retry after an initial request failure.
     } finally {
-      if (this.current(generation)) this.loading.delete(0);
+      if (this.current(generation)) {
+        this.initialLoading = false;
+        this.loading.delete(index);
+      }
     }
   }
 
   prefetch(now: number): void {
-    if (!this.active || !this.initialized || this.fallback || !Number.isFinite(now) || now < 0) return;
+    if (!this.current(this.generation) || !this.initialized || !Number.isFinite(now) || now < 0) return;
     const index: number = Math.floor(now / DM_SEGMENT_SECONDS);
     this.ensureSegment(index);
-    if (now + 30 >= (index + 1) * DM_SEGMENT_SECONDS) this.ensureSegment(index + 1);
+    if (!this.fallback && now + 30 >= (index + 1) * DM_SEGMENT_SECONDS) this.ensureSegment(index + 1);
   }
 
   async loadHeatPoints(): Promise<void> {
@@ -126,18 +150,28 @@ export class PlayerAuxiliaryController {
   }
 
   private ensureSegment(index: number): void {
-    if (!this.active || this.fallback || this.source.cid <= 0 || index < 0) return;
+    if (!this.current(this.generation) || this.source.cid <= 0 || index < 0) return;
     const duration: number = this.host.duration();
     if (duration > 0 && index >= Math.ceil(duration / DM_SEGMENT_SECONDS)) return;
     if (this.loaded.has(index) || this.loading.has(index)) return;
+    if ((this.retryAfter.get(index) ?? 0) > Date.now()) return;
     const source: PlayerAuxiliarySource = this.source;
     const generation: number = this.generation;
     this.loading.add(index);
     BiliApi.getDanmakuSeg(source.cid, source.aid, index + 1).then((items: Array<DanmakuItem> | null): void => {
-      if (!this.current(generation) || items === null) return;
+      if (!this.current(generation)) return;
+      if (items === null) {
+        this.retryAfter.set(index, Date.now() + DM_RETRY_INTERVAL_MS);
+        return;
+      }
       this.loaded.add(index);
-      this.host.danmaku(items, false);
-    }).catch(() => {}).finally((): void => {
+      this.retryAfter.delete(index);
+      const replace: boolean = this.fallback;
+      this.fallback = false;
+      this.host.danmaku(items, replace);
+    }).catch((): void => {
+      if (this.current(generation)) this.retryAfter.set(index, Date.now() + DM_RETRY_INTERVAL_MS);
+    }).finally((): void => {
       // A stale completion must not unlock a replacement request for the same segment.
       if (this.current(generation)) this.loading.delete(index);
     });

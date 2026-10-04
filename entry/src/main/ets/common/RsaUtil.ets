@@ -39,9 +39,8 @@ export class RsaUtil {
   }
 
   /**
-   * RSA-OAEP(SHA-256) 公钥加密，返回原始密文字节（调用方自行编码为 hex/base64）。
-   * Web 端 Cookie 续期的 correspondPath 用此规格；MGF1 摘要在部分系统版本上只接受 SHA1，
-   * 失败时回退 MGF1-SHA1 重试一次。
+   * RSA-OAEP(SHA-256) 公钥加密，返回原始密文字节。
+   * Web Cookie 续期要求 OAEP 与 MGF1 都使用 SHA256，不能回退到另一种摘要。
    */
   static async encryptWithPublicKeyOAEP256(pemKey: string, plaintext: string): Promise<Uint8Array> {
     const base64: util.Base64Helper = new util.Base64Helper();
@@ -62,25 +61,10 @@ export class RsaUtil {
     }
     const textEncoder: util.TextEncoder = new util.TextEncoder();
     const input: cryptoFramework.DataBlob = { data: textEncoder.encodeInto(plaintext) };
-    try {
-      return await RsaUtil.encryptOAEP(keyPair, alg, 'SHA256', 'SHA256', input);
-    } catch (e) {
-      return await RsaUtil.encryptOAEP(keyPair, alg, 'SHA256', 'SHA1', input);
-    }
-  }
-
-  private static async encryptOAEP(keyPair: cryptoFramework.KeyPair, alg: string, md: string, mgfMd: string,
-    input: cryptoFramework.DataBlob): Promise<Uint8Array> {
-    const cipher: cryptoFramework.Cipher = cryptoFramework.createCipher(alg + '|OAEP');
-    cipher.setCipherSpec(cryptoFramework.CipherSpecItem.OAEP_MD_NAME_STR, RsaUtil.specBytes(md));
-    cipher.setCipherSpec(cryptoFramework.CipherSpecItem.OAEP_MGF_NAME_STR, RsaUtil.specBytes('MGF1'));
-    cipher.setCipherSpec(cryptoFramework.CipherSpecItem.OAEP_MGF1_MD_STR, RsaUtil.specBytes(mgfMd));
+    const cipher: cryptoFramework.Cipher = cryptoFramework.createCipher(alg + '|PKCS1_OAEP|SHA256|MGF1_SHA256');
     await cipher.init(cryptoFramework.CryptoMode.ENCRYPT_MODE, keyPair.pubKey, null);
     const output: cryptoFramework.DataBlob = await cipher.doFinal(input);
     return output.data;
   }
 
-  private static specBytes(value: string): Uint8Array {
-    return new util.TextEncoder().encodeInto(value);
-  }
 }

@@ -11,6 +11,7 @@ export interface PlayerAudioSyncEvents {
   changed: () => void;
   clock: (action: string) => void;
   rate: (value: number) => void;
+  resync: (targetMs: number) => void;
   error: (audio: media.AVPlayer, message: string) => void;
 }
 
@@ -23,10 +24,8 @@ export class PlayerAudioSync {
   pendingAudioPausePlayer: media.AVPlayer | null = null;
   lastAudioSyncAtMs: number = -1;
   audioDriftSamples: number = 0;
+  private audioDriftDirection: number = 0;
   audioStartPending: boolean = false;
-  audioGateSeekPending: boolean = false;
-  audioGateSeekTargetMs: number = -1;
-  private audioGateTimer: number = -1;
   firstFrameMuteArmed: boolean = false;
   private firstFrameMuteTimer: number = -1;
   private firstFrameMuteTargetMs: number = -1;
@@ -64,15 +63,6 @@ export class PlayerAudioSync {
     this.seekRecoveryActive = resume;
     this.state.seekRecoveryCoverVisible = false;
     if (resume) this.muteImmediately();
-  }
-
-  onAudioSeekDone(position: number): boolean {
-    const audio: media.AVPlayer | null = this.pair.audio;
-    if (audio === null || !this.audioGateSeekPending) return false;
-    if (this.audioGateSeekTargetMs >= 0 && Math.abs(position - this.audioGateSeekTargetMs) <= 500) {
-      this.finishGatedAudioStart(audio);
-    }
-    return true;
   }
 
   onBuffer(kind: media.BufferingInfoType): void {
@@ -200,6 +190,17 @@ export class PlayerAudioSync {
     this.audioSyncPlayer = null;
   }
 
+  /** currentTime 是独立更新的进度缓存；同步判断优先查询当前播放头，避免回调相位差误判。 */
+  private playbackPosition(player: media.AVPlayer, prepared: boolean): number {
+    if (prepared) {
+      try {
+        const positionMs: number = player.getPlaybackPosition();
+        if (Number.isFinite(positionMs) && positionMs >= 0) return positionMs;
+      } catch (e) {}
+    }
+    return player.currentTime;
+  }
+
   checkAudioSync(videoTimeMs: number): void {
     // 两轨倍速切换异步生效；稳定期间不依据瞬时钟差再次切速。
     if (Date.now() < this.speedTransitionUntilMs) {
@@ -215,29 +216,44 @@ export class PlayerAudioSync {
       return;
     }
     if (!this.state.playing || this.state.backgroundAudioOnly || this.state.buffering || this.firstFrameMuteArmed ||
-      this.audioStartPending || this.audioGateSeekPending || this.state.seekLocked ||
+      this.audioStartPending || this.state.seekLocked ||
       this.host.isSeeking() || audio === null || !this.pair.audioPrepared || audio.state !== 'playing') {
       this.audioDriftSamples = 0;
       this.resetAudioSyncRate();
       return;
     }
-    const driftMs: number = audio.currentTime - (this.pair.video?.currentTime ?? videoTimeMs);
-    if (Math.abs(driftMs) <= 100) {
+    const video: media.AVPlayer | null = this.pair.video;
+    const currentVideoMs: number = video === null ? videoTimeMs : this.playbackPosition(video, this.pair.prepared);
+    const currentAudioMs: number = this.playbackPosition(audio, this.pair.audioPrepared);
+    const driftMs: number = currentAudioMs - currentVideoMs;
+    if (Math.abs(driftMs) <= 80) {
       this.audioDriftSamples = 0;
       this.resetAudioSyncRate();
       return;
     }
-    // 350ms 才开始调整，回到 100ms 内停止，避免时钟回调抖动导致来回切速。
-    if (Math.abs(driftMs) <= 350 && this.audioSyncRate < 0) {
+    // 实时钟差持续超过 150ms 才调整，回到 80ms 内停止，避免可感知偏差和边界抖动。
+    if (Math.abs(driftMs) <= 150 && this.audioSyncRate < 0) {
       this.audioDriftSamples = 0;
       return;
     }
+    const direction: number = driftMs > 0 ? 1 : -1;
+    if (direction !== this.audioDriftDirection) this.audioDriftSamples = 0;
+    this.audioDriftDirection = direction;
     this.audioDriftSamples++;
     const nowMs: number = Date.now();
     if (this.audioDriftSamples < 3 || nowMs - this.lastAudioSyncAtMs < 3000) return;
     this.audioDriftSamples = 0;
-    // 连续播放期间不再静音、pause 或 seek；以最多 3% 的速度差逐步收敛。
+    // 秒级偏差靠 3% 微调需要几十秒；交给双轨屏障一次对齐，避免持续音画错位。
+    if (Math.abs(driftMs) >= 1500) {
+      this.resyncTracks(Math.max(0, currentVideoMs));
+      return;
+    }
+    // 小偏差以最多 3% 的速度差逐步收敛。
     const rate: number = Math.max(0.125, Math.min(8, this.state.playbackRate * (driftMs > 0 ? 0.97 : 1.03)));
+    if (Math.abs(rate - this.state.playbackRate) < 0.001) {
+      this.resyncTracks(Math.max(0, currentVideoMs));
+      return;
+    }
     this.lastAudioSyncAtMs = nowMs;
     if (this.audioSyncPlayer === audio && Math.abs(this.audioSyncRate - rate) < 0.001) return;
     try {
@@ -245,8 +261,8 @@ export class PlayerAudioSync {
       this.audioSyncPlayer = audio;
       this.audioSyncRate = rate;
     } catch (e) {
-      // 设备不支持微调时保留连续播放，不能退回循环暂停/定位。
-      this.resetAudioSyncRate();
+      // 不支持微调的设备也必须能恢复同步，复用带超时和取消保护的双轨定位。
+      this.resyncTracks(Math.max(0, currentVideoMs));
     }
   }
 
@@ -258,17 +274,18 @@ export class PlayerAudioSync {
     this.audioStartPending = true;
   }
 
-  /** 视频已开始推进：先把尚未播放的 DASH 音轨定位到当前视频时间，再在 seekDone 后启动。 */
+  /** 视频已开始推进：有偏差时冻结两轨定位，禁止音轨等待 seekDone 时视频继续前进。 */
   tryStartGatedAudio(): void {
-    if (!this.audioStartPending || this.audioGateSeekPending || !this.state.playing) return;
+    if (!this.audioStartPending || !this.state.playing || !this.host.canPlay()) return;
     if (this.state.buffering || this.state.seekLocked || this.state.backgroundAudioOnly ||
       this.host.isSeeking()) return;
     const video: media.AVPlayer | null = this.pair.video;
     const audio: media.AVPlayer | null = this.pair.audio;
     if (video === null || !this.pair.prepared || audio === null || !this.pair.audioPrepared) return;
-    const targetMs: number = Math.max(0, video.currentTime);
-    if (Math.abs(audio.currentTime - targetMs) > 80) {
-      this.alignGatedAudio(video, audio);
+    const targetMs: number = Math.max(0, this.playbackPosition(video, this.pair.prepared));
+    const audioTimeMs: number = this.playbackPosition(audio, this.pair.audioPrepared);
+    if (Math.abs(audioTimeMs - targetMs) > 80) {
+      this.resyncTracks(targetMs);
       return;
     }
     this.finishGatedAudioStart(audio);
@@ -276,41 +293,14 @@ export class PlayerAudioSync {
 
   private audioGateGeneration: number = 0;
 
-  /** 自动恢复只暂停、定位音轨；用户拖动仍由双轨 seek 状态机处理。 */
-  private async alignGatedAudio(video: media.AVPlayer, audio: media.AVPlayer): Promise<void> {
-    const generation: number = this.audioGateGeneration;
-    this.audioGateSeekPending = true;
-    try {
-      audio.setVolume(0);
-      await this.pauseAudioForSync(audio);
-      if (generation !== this.audioGateGeneration || this.pair.video !== video || this.pair.audio !== audio ||
-        !this.state.playing || this.state.seekLocked || this.state.backgroundAudioOnly) return;
-      this.audioGateSeekTargetMs = Math.max(0, video.currentTime);
-      audio.seek(this.audioGateSeekTargetMs);
-      this.audioGateTimer = setTimeout(() => {
-        if (generation !== this.audioGateGeneration || this.pair.audio !== audio || !this.audioGateSeekPending) return;
-        this.audioGateTimer = -1;
-        if (Math.abs(audio.currentTime - this.audioGateSeekTargetMs) <= 500) {
-          this.finishGatedAudioStart(audio);
-        } else {
-          this.cancelAudioGate();
-          this.host.error(audio, '音轨定位超时');
-        }
-      }, 1500);
-    } catch (e) {
-      if (generation !== this.audioGateGeneration || this.pair.audio !== audio) return;
-      this.cancelAudioGate();
-      this.host.error(audio, '音轨同步失败');
-    }
+  private resyncTracks(targetMs: number): void {
+    this.cancelAudioGate();
+    this.audioDriftSamples = 0;
+    this.lastAudioSyncAtMs = Date.now();
+    this.host.resync(targetMs);
   }
 
   finishGatedAudioStart(audio: media.AVPlayer): void {
-    if (this.audioGateTimer >= 0) {
-      clearTimeout(this.audioGateTimer);
-      this.audioGateTimer = -1;
-    }
-    this.audioGateSeekPending = false;
-    this.audioGateSeekTargetMs = -1;
     this.audioStartPending = false;
     if (this.pair.audio !== audio || !this.pair.audioPrepared || !this.state.playing || !this.host.canPlay()) return;
     try {
@@ -339,12 +329,6 @@ export class PlayerAudioSync {
   cancelAudioGate(): void {
     this.resetAudioSyncRate();
     this.audioGateGeneration++;
-    if (this.audioGateTimer >= 0) {
-      clearTimeout(this.audioGateTimer);
-      this.audioGateTimer = -1;
-    }
-    this.audioGateSeekPending = false;
-    this.audioGateSeekTargetMs = -1;
     this.audioStartPending = false;
   }
 

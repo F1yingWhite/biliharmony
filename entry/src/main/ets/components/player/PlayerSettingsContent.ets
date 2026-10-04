@@ -63,6 +63,7 @@ export struct PlayerSettingsContent {
   @Prop blockColorDm: boolean = false;
   @Prop dmMerge: boolean = false;
   @Prop dmMergeCount: boolean = true;
+  @Prop interactionEnabled: boolean = true;
   @Prop dmListCount: number = 0;
   @Prop dmFilterLoading: boolean = false;
   @Prop dmFilterType: number = 0;
@@ -95,6 +96,7 @@ export struct PlayerSettingsContent {
   onToggleDmBlock: (kind: string) => void = () => {};
   onDmMergeChange: (next: boolean) => void = () => {};
   onDmMergeCountChange: (next: boolean) => void = () => {};
+  onInteractionEnabledChange: (next: boolean) => void = () => {};
   onQualityChange: (qn: number) => void = () => {};
   onChapterChange: (seconds: number) => void = () => {};
   onSpeedChange: (rate: number) => void = () => {};
@@ -149,6 +151,7 @@ export struct PlayerSettingsContent {
       blockColorDm: this.blockColorDm,
       dmMerge: this.dmMerge,
       dmMergeCount: this.dmMergeCount,
+      interactionEnabled: this.interactionEnabled,
       qualityOptions: this.qualityOptions,
       activeQuality: this.activeQuality,
       chapters: this.chapters,
@@ -174,6 +177,7 @@ export struct PlayerSettingsContent {
       onToggleDmBlock: (kind: string) => this.onToggleDmBlock(kind),
       onDmMergeChange: (next: boolean) => this.onDmMergeChange(next),
       onDmMergeCountChange: (next: boolean) => this.onDmMergeCountChange(next),
+      onInteractionEnabledChange: (next: boolean) => this.onInteractionEnabledChange(next),
       onQualityChange: (qn: number) => this.onQualityChange(qn),
       onChapterChange: (seconds: number) => this.onChapterChange(seconds),
       onSpeedChange: (rate: number) => this.onSpeedChange(rate),

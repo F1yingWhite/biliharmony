@@ -263,6 +263,9 @@ export class Api {
   static readonly danmakuXml: string = HttpString.commentBaseUrl + '/';
   // 网页端分段弹幕（每 6 分钟一段，DmSegMobileReply protobuf）
   static readonly danmakuSeg: string = HttpString.apiBaseUrl + '/x/v2/dm/web/seg.so';
+  static readonly danmakuView: string = HttpString.apiBaseUrl + '/x/v2/dm/web/view';
+  static readonly commandGrade: string = HttpString.apiBaseUrl + '/x/v2/dm/command/grade/post';
+  static readonly commandVote: string = HttpString.apiBaseUrl + '/x/v2/dm/command/vote/post';
   static readonly sendDanmaku: string = HttpString.apiBaseUrl + '/x/v2/dm/post';
   // 弹幕举报（dmid + cid + reason，需登录）
   static readonly reportDanmaku: string = HttpString.apiBaseUrl + '/x/v2/dm/report/add';

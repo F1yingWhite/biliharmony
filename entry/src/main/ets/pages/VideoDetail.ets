@@ -39,6 +39,7 @@ import { RepliesController } from '../components/reply/RepliesController';
 import { MainRepliesState, ReplySubject, ThreadRepliesState, mergeUniqueReplies } from '../components/reply/ReplyState';
 import { ReplyShareController } from '../components/reply/ReplyShareController';
 import { ReplySubmissionController, ReplySubmissionSnapshot } from '../components/reply/ReplySubmissionController';
+import { DynDraftImage } from '../common/DynImagePreparer';
 import { RelatedVideoRow } from '../components/video/VideoRelatedRow';
 import { VideoReplyTab } from '../components/video/VideoReplyTab';
 import { CoinSheetView } from '../components/video/CoinSheetView';
@@ -48,6 +49,7 @@ import { ReplyShareCard } from '../components/reply/ReplyShareCard';
 import { safeToast } from '../common/Toast';
 import { CommentLog } from '../common/CommentLog';
 import { VideoDetailGeometry } from '../common/VideoDetailGeometry';
+import { VideoInteractionLink } from '../model/video/VideoInteractionModels';
 import { biliImageThumbnail } from '../common/ImageUrl';
 import { VideoIntroSection } from '../components/video/VideoIntroSection';
 import { VideoHeroTransitionController } from '../components/video/VideoHeroTransitionController';
@@ -130,12 +132,14 @@ export struct VideoDetailPage {
   @State replyFocusTick: number = 0;
   @State threadReplyFocusTick: number = 0;
   @State replyDraft: string = '';
+  @State replyImages: Array<DynDraftImage> = [];
   @State replySending: boolean = false;
   private replySubmit: ReplySubmissionController = new ReplySubmissionController({
     isAlive: () => !this.destroyed,
     getTarget: () => ({ oid: this.detail.aid, type: 1, root: this.replyTargetRootRpid,
       parent: this.replyTargetRpid, scope: this.replyThreadOpen ? 'thread' : 'main', active: true }),
     getDraft: () => this.replyDraft,
+    setImages: (images: Array<DynDraftImage>) => this.replyImages = images,
     setSending: (sending: boolean) => this.replySending = sending,
     toast: (message: string) => this.toast(message),
     onSuccess: (snapshot: ReplySubmissionSnapshot, reply: ReplyItem | null, clearDraft: boolean) => {
@@ -591,7 +595,8 @@ export struct VideoDetailPage {
     if (thread) this.threadReplyComposerFocused = focused;
     else this.mainReplyComposerFocused = focused;
     // 系统键盘自行消费返回键时会触发 blur；空草稿同时退出定向回复态。
-    if (!focused && !this.emotePanelOpen && this.replyDraft.trim().length === 0) {
+    if (!focused && !this.emotePanelOpen && !this.replySending &&
+      this.replyDraft.trim().length === 0 && this.replyImages.length === 0) {
       this.replySubmit.reset();
       if (this.replyThreadOpen) {
         this.replyTargetRootRpid = this.replyThreadRoot.rpid;
@@ -618,7 +623,7 @@ export struct VideoDetailPage {
     }
     this.mainReplyComposerFocused = false;
     this.threadReplyComposerFocused = false;
-    if (this.replyDraft.trim().length === 0) {
+    if (this.replyDraft.trim().length === 0 && this.replyImages.length === 0) {
       this.replySubmit.reset();
       if (this.replyThreadOpen) {
         this.replyTargetRootRpid = this.replyThreadRoot.rpid;
@@ -1172,6 +1177,13 @@ export struct VideoDetailPage {
       (ep.bvid.length === 0 && ep.aid === this.detail.aid))) return;
     const param: VideoDetailParam = { bvid: ep.bvid, aid: ep.aid, title: ep.title };
     this.navigateVideoDetail(param, true);
+  }
+
+  private openInteractionVideo(target: VideoInteractionLink): void {
+    if (target.aid <= 0 && target.bvid.length === 0 && target.epId <= 0) return;
+    const param: VideoDetailParam = { bvid: target.bvid, aid: target.aid,
+      epId: target.epId, title: target.title, cover: target.cover };
+    this.pushVideoDetail(param);
   }
 
   private performVideoNavigation(param: VideoDetailParam, replace: boolean): void {
@@ -1845,6 +1857,9 @@ export struct VideoDetailPage {
           itemCount: this.replyItemCount,
           version: this.replyLikeVersion,
           draft: this.replyDraft,
+          images: this.replyImages,
+          allowImages: this.replyTargetRootRpid === 0,
+          submission: this.replySubmit,
           sending: this.replySending,
           placeholder: this.replyTargetRootRpid > 0 ? '回复 @' +
             (this.replyTargetName.length > 0 ? this.replyTargetName : this.replyThreadRoot.uname) : '发一条友善的评论',
@@ -2051,6 +2066,7 @@ export struct VideoDetailPage {
               onEndRecOpen: (item: VideoItem) => {
                 this.onPlayerEndRecOpen(item);
               },
+              onInteractionVideo: (target: VideoInteractionLink) => this.openInteractionVideo(target),
               onLike: () => {
                 this.actions.actionLike();
               },

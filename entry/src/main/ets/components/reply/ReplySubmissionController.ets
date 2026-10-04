@@ -1,4 +1,4 @@
-import { CommentApi } from '../../api/CommentApi';
+import { CommentApi, ReplyUploadedPicture } from '../../api/CommentApi';
 import { ActionResult } from '../../api/BiliApi';
 import { asNumber, asObject } from '../../common/Utils';
 import { CommentLog } from '../../common/CommentLog';
@@ -6,6 +6,10 @@ import { ReplyItem } from '../../model/reply/ReplyModels';
 import { UserInfo } from '../../model/user/UserModels';
 import { AuthSession } from '../../services/auth/AuthSession';
 import { UserStore } from '../../services/auth/UserStore';
+import { common } from '@kit.AbilityKit';
+import { DynDraftImage, DynImagePreparer } from '../../common/DynImagePreparer';
+
+export const REPLY_MAX_IMAGES: number = 9;
 
 export interface ReplySubmissionTarget {
   oid: number;
@@ -56,7 +60,8 @@ export class ReplySubmissionSnapshot {
 }
 
 /** 补齐精简发布响应；身份和目标来自提交时快照，不读取当前页面或全局账号。 */
-export function normalizeSentReply(result: ActionResult, snapshot: ReplySubmissionSnapshot): ReplyItem | null {
+export function normalizeSentReply(result: ActionResult, snapshot: ReplySubmissionSnapshot,
+  pictures: Array<ReplyUploadedPicture> = []): ReplyItem | null {
   if (!result.ok) return null;
   const returned: ReplyItem = ReplyItem.from(asObject(result.data['reply']));
   const rpid: number = returned.rpid > 0 ? returned.rpid :
@@ -74,6 +79,7 @@ export function normalizeSentReply(result: ActionResult, snapshot: ReplySubmissi
   if (item.avatar.length === 0) item.avatar = snapshot.avatar;
   if (item.level <= 0) item.level = snapshot.level;
   if (item.content.length === 0) item.content = snapshot.content;
+  if (item.pictures.length === 0) item.pictures = pictures.map((picture: ReplyUploadedPicture) => picture.url);
   if (item.ctime <= 0) item.ctime = snapshot.timestamp;
   return item;
 }
@@ -105,6 +111,8 @@ export interface ReplySubmissionHost {
   getTarget: () => ReplySubmissionTarget;
   getDraft: () => string;
   setSending: (sending: boolean) => void;
+  /** 页面镜像附件供输入栏响应式显示；缓存所有权始终属于发送事务。 */
+  setImages?: (images: Array<DynDraftImage>) => void;
   toast: (message: string) => void;
   /** 同步提交 UI 状态；后续刷新由已有分页控制器自行维护代际。 */
   onSuccess: (snapshot: ReplySubmissionSnapshot, reply: ReplyItem | null, clearDraft: boolean) => void;
@@ -117,6 +125,8 @@ export class ReplySubmissionController {
   private session: number = 0;
   private draftRevision: number = 0;
   private busy: boolean = false;
+  private images: Array<DynDraftImage> = [];
+  private imagesAccount: number = -1;
 
   constructor(host: ReplySubmissionHost) {
     this.host = host;
@@ -136,9 +146,63 @@ export class ReplySubmissionController {
     this.session++;
     this.draftRevision++;
     this.busy = false;
+    this.clearImages();
+  }
+
+  async pick(context: common.Context, select: (remaining: number) => Promise<Array<string>>): Promise<void> {
+    if (this.busy || !this.host.isAlive()) return;
+    this.discardPreviousAccountImages();
+    const user: UserInfo | null = UserStore.current;
+    if (!UserStore.isLogin || user === null) { this.host.toast('请先登录后再添加图片'); return; }
+    const target: ReplySubmissionTarget = this.host.getTarget();
+    if (!target.active || target.oid <= 0 || target.type <= 0 || target.root > 0) return;
+    const remaining: number = REPLY_MAX_IMAGES - this.images.length;
+    if (remaining <= 0) { this.host.toast('一条评论最多 ' + String(REPLY_MAX_IMAGES) + ' 张图片'); return; }
+    const snapshot: ReplySubmissionSnapshot = new ReplySubmissionSnapshot(target,
+      this.host.getDraft(), user, AuthSession.version, this.session,
+      this.draftRevision, Math.floor(Date.now() / 1000));
+    const operation: number = ++this.operation;
+    this.busy = true;
+    this.host.setSending(true);
+    try {
+      const uris: Array<string> = await select(remaining);
+      if (!this.isCurrent(operation, snapshot)) return;
+      let failed: number = 0;
+      for (let i: number = 0; i < uris.length && this.images.length < REPLY_MAX_IMAGES; i++) {
+        const image: DynDraftImage | null = await DynImagePreparer.prepare(context, uris[i]);
+        if (!this.isCurrent(operation, snapshot)) {
+          if (image !== null) DynImagePreparer.cleanup([image]);
+          return;
+        }
+        if (image === null) failed++;
+        else {
+          this.imagesAccount = snapshot.account;
+          this.images.push(image);
+          this.draftChanged();
+          this.emitImages();
+        }
+      }
+      if (failed > 0) this.host.toast(String(failed) + ' 张图片处理失败，已跳过');
+    } catch (e) {
+      // 系统相册取消保留已有草稿。
+    } finally {
+      this.finish(operation);
+    }
+  }
+
+  removeImage(key: string): void {
+    if (this.busy) return;
+    const removed: Array<DynDraftImage> = this.images.filter((image: DynDraftImage) => image.key === key);
+    if (removed.length === 0) return;
+    this.images = this.images.filter((image: DynDraftImage) => image.key !== key);
+    DynImagePreparer.cleanup(removed);
+    this.draftChanged();
+    this.emitImages();
   }
 
   async send(): Promise<void> {
+    if (this.busy) return;
+    this.discardPreviousAccountImages();
     const target: ReplySubmissionTarget = this.host.getTarget();
     const draft: string = this.host.getDraft();
     const user: UserInfo | null = UserStore.current;
@@ -147,14 +211,26 @@ export class ReplySubmissionController {
     const snapshot: ReplySubmissionSnapshot = new ReplySubmissionSnapshot(target, draft, user,
       AuthSession.version, this.session, this.draftRevision, Math.floor(Date.now() / 1000));
     const operation: number = ++this.operation;
+    const images: Array<DynDraftImage> = this.images.slice();
     this.busy = true;
     this.host.setSending(true);
     CommentLog.info('ui.send.start', 'oid=' + String(snapshot.oid) + ' root=' + String(snapshot.root) +
       ' parent=' + String(snapshot.parent) + ' messageLen=' + String(snapshot.content.length));
     let accepted: boolean = false;
     try {
-      const result: ActionResult = await CommentApi.addReply(snapshot.oid, snapshot.type,
-        snapshot.content, snapshot.root, snapshot.parent);
+      const pictures: Array<ReplyUploadedPicture> = [];
+      for (let i: number = 0; i < images.length; i++) {
+        const bytes: ArrayBuffer = await DynImagePreparer.readBytes(images[i].cachePath);
+        if (!this.isCurrent(operation, snapshot)) return;
+        const uploaded = await CommentApi.uploadReplyImage(bytes, images[i].fileName, images[i].mimeType);
+        if (!this.isCurrent(operation, snapshot)) return;
+        if (!uploaded.ok || uploaded.picture === null) { this.host.toast(uploaded.message); return; }
+        pictures.push(uploaded.picture);
+      }
+      if (!this.isCurrent(operation, snapshot)) return;
+      const result: ActionResult = pictures.length > 0 ? await CommentApi.addReply(snapshot.oid, snapshot.type,
+        snapshot.content, snapshot.root, snapshot.parent, pictures) : await CommentApi.addReply(snapshot.oid,
+        snapshot.type, snapshot.content, snapshot.root, snapshot.parent);
       if (!this.isCurrent(operation, snapshot)) {
         CommentLog.info('ui.send.drop', 'reason=stale-session root=' + String(snapshot.root));
         return;
@@ -164,10 +240,11 @@ export class ReplySubmissionController {
         return;
       }
       accepted = true;
-      const reply: ReplyItem | null = normalizeSentReply(result, snapshot);
+      const reply: ReplyItem | null = normalizeSentReply(result, snapshot, pictures);
       const clearDraft: boolean = this.draftRevision === snapshot.draftRevision &&
         this.host.getDraft() === snapshot.draft;
       CommentLog.info('ui.send.done', 'root=' + String(snapshot.root) + ' local=' + String(reply !== null));
+      this.clearImages();
       this.host.toast(snapshot.root > 0 ? '回复成功' : '评论成功');
       this.host.onSuccess(snapshot, reply, clearDraft);
     } catch (e) {
@@ -176,10 +253,7 @@ export class ReplySubmissionController {
       }
     } finally {
       // 账号切换丢弃内容，但当前发送仍需解锁；旧会话不能解锁新的发送。
-      if (operation === this.operation) {
-        this.busy = false;
-        if (this.host.isAlive()) this.host.setSending(false);
-      }
+      this.finish(operation);
     }
   }
 
@@ -190,5 +264,26 @@ export class ReplySubmissionController {
     const parent: number = target.root > 0 ? (target.parent > 0 ? target.parent : target.root) : 0;
     return target.active && target.oid === snapshot.oid && target.type === snapshot.type &&
       target.root === snapshot.root && parent === snapshot.parent && target.scope === snapshot.scope;
+  }
+
+  private finish(operation: number): void {
+    if (operation !== this.operation) return;
+    this.busy = false;
+    if (this.host.isAlive()) this.host.setSending(false);
+  }
+
+  private discardPreviousAccountImages(): void {
+    if (this.images.length > 0 && this.imagesAccount !== AuthSession.version) this.clearImages();
+  }
+
+  private clearImages(): void {
+    DynImagePreparer.cleanup(this.images);
+    this.images = [];
+    this.imagesAccount = -1;
+    this.emitImages();
+  }
+
+  private emitImages(): void {
+    if (this.host.isAlive() && this.host.setImages !== undefined) this.host.setImages(this.images.slice());
   }
 }

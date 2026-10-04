@@ -13,6 +13,9 @@ import { chapterTitleAt } from './PlayerChapterSupport';
  */
 import { PlayerPictureInPicture, PlayerVideoSize } from './PlayerPictureInPicture';
 import { PlayerAuxiliaryController } from './PlayerAuxiliaryController';
+import { PlayerInteractionController, PlayerInteractionState } from './PlayerInteractionController';
+import { PlayerInteractionPanel } from './PlayerInteractionPanel';
+import { VideoInteractionCard, VideoInteractionLink } from '../../model/video/VideoInteractionModels';
 import { PlayerMediaExportController, PlayerMediaExportSnapshot, PlayerDownloadUi } from './PlayerMediaExportController';
 import { MediaExportFormat } from '../../services/media/MediaExportFormat';
 import { image } from '@kit.ImageKit';
@@ -134,6 +137,7 @@ export struct PlayerView {
   onFavorite: () => void = () => {};
   onShare: () => void = () => {};
   onWatchLater: () => void = () => {};
+  onInteractionVideo: (target: VideoInteractionLink) => void = () => {};
   /** 播完后「立即播放」下一段（由业务页替换为推荐视频/下一集）。 */
   onEndPlayNow: () => void = () => {};
   // 播完推荐卡数据（推荐列表第一条的排布）
@@ -249,6 +253,12 @@ export struct PlayerView {
   @StorageLink('sponsorSkipEnabled') sponsorSkipEnabled: boolean = true;
   /** 播完自动连播下一集（UGC 合集）；关闭后播完停在剧终画面，由用户手动选择。 */
   @StorageLink('autoContinuePlay') autoContinuePlay: boolean = true;
+  @StorageProp('playerInteractionEnabled') @Watch('onInteractionEnabledChanged') interactionEnabled: boolean = true;
+  @StorageProp('loginVersion') @Watch('onInteractionAccountChanged') interactionLoginVersion: number = 0;
+  @State interactionCard: VideoInteractionCard | null = null;
+  @State interactionLoading: boolean = false;
+  @State interactionSubmitting: boolean = false;
+  @State interactionMessage: string = '';
   private videoReportDialog: CustomDialogController | null = null;
   private pictureInPicture: PlayerPictureInPicture = new PlayerPictureInPicture({
     isDestroyed: (): boolean => this.destroyed,
@@ -457,6 +467,8 @@ export struct PlayerView {
         break;
       case 'seek':
         this.resetDanmakuAt(event.value);
+        this.auxiliary.prefetch(event.value);
+        this.interactionCtl.update(event.value);
         this.onProgress(event.value);
         this.updateSubtitle(event.value);
         this.updateAVSessionPlaybackState();
@@ -465,7 +477,11 @@ export struct PlayerView {
         if (this.seekPreviewSeconds < 0 || Math.abs(this.seekPreviewSeconds * 1000 - event.value) > 1500) this.seekPreviewFrame = null;
         break;
       case 'seek.finished': this.seekTargetCtl.show(-1); break;
-      case 'foregroundSeek': this.onProgress(event.value); this.updateAVSessionPlaybackState(); break;
+      case 'foregroundSeek':
+        this.interactionCtl.update(event.value);
+        this.onProgress(event.value);
+        this.updateAVSessionPlaybackState();
+        break;
       case 'backgroundAudio': Immersive.setKeepScreenOn(false); this.updateAVSessionPlaybackState(); break;
       case 'resume': this.resumeTransitionActive = this.compactMode && !this.fullscreen; this.onResumeRequest(); break;
       case 'closePanels': this.closeSettingPanels(); break;
@@ -483,6 +499,7 @@ export struct PlayerView {
 
   private onPlaybackProgress(seconds: number, background: boolean): boolean {
     this.playheadSec = seconds;
+    this.interactionCtl.update(seconds);
     if (!background) {
       if (this.dmEngine.lastPlayerTime > 0 &&
         (seconds < this.dmEngine.lastPlayerTime - 0.5 || seconds > this.dmEngine.lastPlayerTime + 2.5)) this.resetDanmakuAt(seconds);
@@ -511,6 +528,7 @@ export struct PlayerView {
   private auxiliary: PlayerAuxiliaryController = new PlayerAuxiliaryController({
     isDestroyed: (): boolean => this.destroyed,
     duration: (): number => this.videoDuration > 0 ? this.videoDuration : this.duration,
+    position: (): number => this.playheadSec,
     danmaku: (items: Array<DanmakuItem>, replace: boolean): void => {
       this.dmEngine.lastPlayerTime = this.playheadSec;
       if (replace) this.dmEngine.setList(items);
@@ -522,6 +540,42 @@ export struct PlayerView {
   });
   private deferredLoadsDone: boolean = false;
   private deferredLoadTimer: number = -1;
+  private interactionCtl: PlayerInteractionController = new PlayerInteractionController({
+    isDestroyed: (): boolean => this.destroyed,
+    getPlayhead: (): number => this.playheadSec,
+    applyState: (state: PlayerInteractionState): void => {
+      if (this.destroyed) return;
+      this.interactionCard = state.current;
+      this.interactionLoading = state.loading;
+      this.interactionSubmitting = state.submitting;
+      this.interactionMessage = state.message;
+    },
+    toast: (message: string): void => this.toast(message),
+    openVideo: (target: VideoInteractionLink): void => this.onInteractionVideo(target),
+  });
+
+  private bindInteractions(): void {
+    this.interactionCtl.setEnabled(this.interactionEnabled);
+    this.interactionCtl.bind({ aid: this.aid, bvid: this.bvid, cid: this.cid,
+      duration: this.videoDuration > 0 ? this.videoDuration : this.duration });
+  }
+
+  onInteractionEnabledChanged(): void {
+    if (this.destroyed) return;
+    this.interactionCtl.setEnabled(this.interactionEnabled);
+    if (this.interactionEnabled && this.deferredLoadsDone) this.interactionCtl.load().catch(() => {});
+  }
+
+  onInteractionAccountChanged(): void {
+    if (!this.destroyed) this.interactionCtl.onAccountChanged();
+  }
+
+  private setInteractionEnabled(next: boolean): void {
+    AppTheme.persistPlayerInteractionEnabled(next);
+    // 同步控制器，点击开关当次就撤掉卡片；StorageProp Watch 负责其他页面的修改。
+    this.interactionCtl.setEnabled(next);
+    if (next && this.deferredLoadsDone) this.interactionCtl.load().catch(() => {});
+  }
 
   aboutToAppear(): void {
     PersistentStorage.persistProp<number>('subtitleScale', 1.0);
@@ -530,6 +584,7 @@ export struct PlayerView {
     if (persistedScale > 0) this.subtitleScale = persistedScale;
     // 被其他 NavDestination 覆盖时 aboutToDisappear 已置位；返回同一实例时恢复。
     this.destroyed = false;
+    this.bindInteractions();
     try { this.systemVolumeLevel = this.systemVolume.level(); } catch (e) {}
     this.systemVolume.start((percent: number) => {
       if (this.destroyed) return;
@@ -882,6 +937,8 @@ export struct PlayerView {
     this.mediaExport.invalidate();
     this.auxiliary.invalidate();
     this.auxiliary.bind({ aid: this.aid, bvid: this.bvid, cid: this.cid });
+    this.interactionCtl.invalidate();
+    this.bindInteractions();
     this.pgcSkipTried = false;
     this.hotPoints = [];
     this.onlineTotal = '';
@@ -894,8 +951,7 @@ export struct PlayerView {
     this.sponsorCtl.invalidateForSourceChange();
     this.chapters = [];
     this.dmClock.stop(true);
-    this.dmEngine.list = [];
-    this.dmEngine.cursor = 0;
+    this.dmEngine.setList([]);
     this.seekTargetCtl.show(-1);
     this.endScreenOpen = false;
     await this.playback.replaceSource(this.playbackSource());
@@ -1173,6 +1229,7 @@ export struct PlayerView {
     this.auxiliary.loadHeatPoints();
     this.seekPreviewCtl.preload(this.aid, this.bvid, this.cid);
     this.auxiliary.loadOnline();
+    this.interactionCtl.load().catch(() => {});
   }
 
   async changeQuality(qn: number): Promise<void> { await this.playback.changeQuality(qn); }
@@ -1334,6 +1391,7 @@ export struct PlayerView {
     this.endScreenOpen = false;
     if (!this.prepared) return;
     this.sponsorCtl.resetForReplay();
+    this.interactionCtl.resetForReplay();
     this.playback.replay();
     this.showControls = false;
   }
@@ -1644,6 +1702,7 @@ export struct PlayerView {
     ++this.exportMenuGeneration;
     this.mediaExport.invalidate();
     this.auxiliary.invalidate();
+    this.interactionCtl.invalidate();
     this.pictureInPicture.release();
     this.playback.release();
     if (this.hideTimer >= 0) clearTimeout(this.hideTimer);
@@ -1755,9 +1814,8 @@ export struct PlayerView {
   /** 重复弹幕合并开关：切换后重载弹幕以重新聚类（列表已被合并/展开过，无法原地逆变换）。 */
   setDmMerge(on: boolean): void {
     this.dmMerge = on;
-    this.dmEngine.mergeDuplicates = on;
+    this.dmEngine.setMergeDuplicates(on);
     this.persistDanmaku();
-    this.loadDanmaku();
   }
 
   setDmMergeCount(on: boolean): void {
@@ -1834,7 +1892,7 @@ export struct PlayerView {
     this.blockTopDm = defaults.blockTop;
     this.blockBottomDm = defaults.blockBottom;
     this.blockColorDm = defaults.blockColor;
-    this.dmMerge = defaults.mergeDuplicates;
+    this.setDmMerge(defaults.mergeDuplicates);
     this.dmMergeCount = defaults.mergeShowCount;
     this.applyDmFilters();
   }
@@ -1961,6 +2019,25 @@ export struct PlayerView {
           .padding({ left: 10, right: 10, top: 5, bottom: 5 }).borderRadius(6)
           .align(Alignment.TopEnd).margin({ top: 42, right: 12 })
           .hitTestBehavior(HitTestMode.None)
+      }
+
+      if (this.interactionEnabled && this.interactionCard !== null &&
+        !this.compactMode && !this.endScreenOpen && this.errorText.length === 0 &&
+        !this.appInBackground && !this.showMoreMenu && !this.showSideDrawer) {
+        PlayerInteractionPanel({
+          current: this.interactionCard,
+          fullscreen: this.fullscreen,
+          loading: this.interactionLoading,
+          submitting: this.interactionSubmitting,
+          message: this.interactionMessage,
+          onGrade: (id: string, stars: number) => { this.interactionCtl.submitGrade(id, stars); },
+          onVote: (id: string, optionId: number) => { this.interactionCtl.submitVote(id, optionId); },
+          onLink: (id: string) => { this.interactionCtl.openLink(id); },
+          onDismiss: (id: string) => { this.interactionCtl.dismiss(id); },
+        })
+        .align(Alignment.BottomEnd)
+        .margin({ right: 10, bottom: this.showControls ? (this.fullscreen ? 92 : 48) : 12 })
+        .zIndex(90)
       }
 
       // 错误遮罩
@@ -2408,6 +2485,7 @@ export struct PlayerView {
       blockColorDm: this.blockColorDm,
       dmMerge: this.dmMerge,
       dmMergeCount: this.dmMergeCount,
+      interactionEnabled: this.interactionEnabled,
       dmListCount: this.dmListCount,
       dmFilterLoading: this.dmFilterLoading,
       dmFilterType: this.dmFilterType,
@@ -2433,6 +2511,7 @@ export struct PlayerView {
       onDownload: () => this.promptDownloadType(),
       onSubtitleChange: (index: number) => this.changeSubtitle(index),
       onResetDanmaku: () => this.resetDanmakuSettings(),
+      onInteractionEnabledChange: (next: boolean) => this.setInteractionEnabled(next),
       onDmOpacityChange: (value: number) => this.setDmOpacity(value),
       onDmFrameRateChange: (value: number) => this.setDmFrameRate(value),
       onDmSpeedChange: (value: number) => this.setDmSpeed(value),

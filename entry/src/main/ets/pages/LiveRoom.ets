@@ -172,7 +172,8 @@ export struct LiveRoomPage {
       this.chatAtBottom = true;
       this.chat.appendLocal(local);
       if (this.draft === submittedDraft) {
-        this.draft = '';
+        // 表情发送只提交表情本身，输入框里的文字仍是待发送草稿。
+        if (emote === null) this.draft = '';
         this.emotePanelOpen = false;
       }
       this.getUIContext().getPromptAction().showToast({ message: '弹幕发送成功' });

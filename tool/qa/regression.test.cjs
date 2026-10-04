@@ -1437,7 +1437,7 @@ test('emote disk cache survives a fresh service instance and deduplicates simult
   }
 });
 
-test('automatic audio alignment preserves video buffer and cancels stale pause completion', async () => {
+test('automatic audio alignment freezes both clocks and cancels stale pause completion', async () => {
   const f = playbackFixture(); const {video, audio} = await f.boot(); f.playing();
   const view = f.session.audioSync;
   const pause = deferred();
@@ -1445,19 +1445,23 @@ test('automatic audio alignment preserves video buffer and cancels stale pause c
   const plays = f.calls(audio, 'play').length;
   view.gateAudioStart();
   view.tryStartGatedAudio();
-  view.cancelAudioGate(); // user seeks or switches source before pause resolves
+  f.advance(60); await tick();
+  assert.equal(video.state, 'paused');
+  f.session.stopForNavigation();
   pause.resolve();
   await tick();
   assert.equal(f.calls(audio, 'seek').length, 0);
   audio.state = 'paused';
+  f.session.toggle();
   view.gateAudioStart();
   view.tryStartGatedAudio();
+  f.advance(60);
   await tick();
   assert.equal(f.calls(audio, 'seek').length, 1);
-  assert.equal(f.calls(video, 'seek').length, 0, 'background synchronization must not seek video');
-  view.finishGatedAudioStart(audio);
+  assert.equal(f.calls(video, 'seek').length, 1);
+  video.currentTime = audio.currentTime = 5000;
+  video.emit('seekDone', 5000); audio.emit('seekDone', 5000);
   assert.equal(f.calls(audio, 'play').length, plays + 1);
-  assert.equal(view.audioGateTimer, -1);
   f.session.deactivate();
 });
 

@@ -359,11 +359,19 @@ export class DownloadCenter {
       t.status === DOWNLOAD_STATUS_DONE || t.status === DOWNLOAD_STATUS_FAILED ||
       t.status === DOWNLOAD_STATUS_INTERRUPTED);
     for (let i: number = 0; i < finished.length; i++) {
+      const t: DownloadTaskItem = finished[i];
       try {
-        const t: DownloadTaskItem = finished[i];
         if (t.filePath.length > 0 && fileExists(t.filePath)) fs.unlinkSync(t.filePath);
       } catch (e) {
         // 忽略单个文件失败。
+      }
+      // 进程退出时中间文件可能已落盘，恢复记录尚无最终 filePath；清记录前一起回收。
+      try {
+        const part: string = DownloadCenter.context !== null
+          ? DownloadCenter.context.filesDir + '/downloads/' + t.id + '.part' : '';
+        if (part.length > 0 && fileExists(part)) fs.unlinkSync(part);
+      } catch (e) {
+        // 单个文件失败不妨碍清理其它任务。
       }
     }
     DownloadCenter.tasks = DownloadCenter.tasks.filter((t: DownloadTaskItem): boolean =>

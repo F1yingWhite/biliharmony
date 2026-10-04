@@ -47,6 +47,7 @@ export class PlayerSponsorController {
   private undoTime: number = -1;
   private muted: boolean = false;
   private readonly handled: Set<string> = new Set<string>();
+  private readonly undoneMutes: Set<string> = new Set<string>();
   private readonly dismissed: Set<string> = new Set<string>();
   private readonly viewed: Set<string> = new Set<string>();
   private fullLabel: string = '';
@@ -63,6 +64,7 @@ export class PlayerSponsorController {
 
   resetRuntime(): void {
     this.handled.clear();
+    this.undoneMutes.clear();
     this.dismissed.clear();
     this.viewed.clear();
     this.setMuted(false);
@@ -165,6 +167,7 @@ export class PlayerSponsorController {
     this.handled.add(key);
     this.dismissed.delete(key);
     if (segment.actionType === 'mute') {
+      this.undoneMutes.delete(key);
       this.undoTime = now;
       this.setMuted(true);
       this.showNotice(segment, false, true);
@@ -201,6 +204,7 @@ export class PlayerSponsorController {
       const inside: boolean = now >= segment.start && now < segment.end - 0.04;
       if (!inside) continue;
       const key: string = this.sponsorKey(segment);
+      if (segment.actionType === 'mute' && this.undoneMutes.has(key)) continue;
       if (segment.actionType === 'mute' && (mode === SponsorBlockMode.AUTO || this.handled.has(key))) {
         keepMuted = true;
       }
@@ -227,12 +231,28 @@ export class PlayerSponsorController {
     const segment: SponsorBlockSegment | null = this.noticeSegment;
     if (segment === null) return;
     if (segment.actionType === 'mute') {
-      this.setMuted(false);
+      this.undoneMutes.add(this.sponsorKey(segment));
+      this.setMuted(this.hasActiveMute(this.access.getPlayhead()));
     } else if (this.undoTime >= 0) {
       this.access.seekTo(this.undoTime, true);
     }
     this.handled.add(this.sponsorKey(segment));
     this.hideNotice(false);
+  }
+
+  /** 撤销只解除当前片段；重叠的其他已生效静音仍遵循各自的结束时间。 */
+  private hasActiveMute(now: number): boolean {
+    if (!this.access.getSponsorSkipEnabled()) return false;
+    const segments: Array<SponsorBlockSegment> = this.access.getSegments();
+    for (let i: number = 0; i < segments.length; i++) {
+      const segment: SponsorBlockSegment = segments[i];
+      if (segment.actionType !== 'mute' || now < segment.start || now >= segment.end - 0.04) continue;
+      const key: string = this.sponsorKey(segment);
+      const mode: number = SponsorBlockStore.modeFor(segment.category);
+      if (!this.undoneMutes.has(key) && mode !== SponsorBlockMode.DISABLED &&
+        (mode === SponsorBlockMode.AUTO || this.handled.has(key))) return true;
+    }
+    return false;
   }
 
   noticePrimary(): void {
@@ -279,6 +299,7 @@ export class PlayerSponsorController {
   /** 单集重播：允许片段重新触发，解除静音并收起提示卡。 */
   resetForReplay(): void {
     this.handled.clear();
+    this.undoneMutes.clear();
     this.dismissed.clear();
     this.setMuted(false);
     this.hideNotice(false);

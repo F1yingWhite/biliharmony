@@ -61,6 +61,9 @@ export class PlayerDanmakuEngine {
   pinned: ActiveDm | null = null;
 
   private ctx: CanvasRenderingContext2D;
+  /** 保留未合并的有序数据，设置变化可以原地重建，不依赖再次请求已缓存的分段。 */
+  private sourceList: Array<DanmakuItem> | null = null;
+  private consumedBeforeMerge: Set<DanmakuItem> = new Set<DanmakuItem>();
   lastDrawMs: number = 0;
   private nextScrollLane: number = 0;
   private nextTopLane: number = 0;
@@ -77,13 +80,27 @@ export class PlayerDanmakuEngine {
   }
 
   setList(list: Array<DanmakuItem>): void {
-    this.list = this.applyMerge(list);
+    // seg.so 的条目按服务端选择顺序返回，不能直接交给二分游标和时间线消费。
+    this.sourceList = list.slice().sort((a: DanmakuItem, b: DanmakuItem): number => a.time - b.time);
+    this.list = this.applyMerge(this.sourceList);
     this.syncCursor(this.lastPlayerTime);
+  }
+
+  setMergeDuplicates(enabled: boolean): void {
+    const consumed: Set<DanmakuItem> = new Set<DanmakuItem>();
+    for (const item of this.consumedBeforeMerge) consumed.add(item);
+    for (let i: number = 0; i < this.cursor; i++) consumed.add(this.list[i]);
+    this.mergeDuplicates = enabled;
+    if (this.sourceList === null) this.sourceList = this.list.slice();
+    this.list = this.applyMerge(this.sourceList);
+    this.syncCursor(this.lastPlayerTime);
+    this.consumedBeforeMerge = consumed;
   }
 
   /** 重复弹幕合并：相同文本在窗口内只保留最早一条，计数累加到簇头。 */
   private applyMerge(items: Array<DanmakuItem>): Array<DanmakuItem> {
-    if (!this.mergeDuplicates || items.length === 0) return items;
+    for (const item of items) item.mergeCount = 1;
+    if (!this.mergeDuplicates || items.length === 0) return items.slice();
     const out: Array<DanmakuItem> = [];
     const heads: Map<string, DanmakuItem> = new Map();
     for (let i: number = 0; i < items.length; i++) {
@@ -110,7 +127,9 @@ export class PlayerDanmakuEngine {
   /** 把分段弹幕合并进全局有序列表，并把游标推到播放头之后，避免重放已喷出的弹幕。 */
   appendSorted(items: Array<DanmakuItem>): void {
     if (items.length === 0) return;
-    // protobuf 分段通常已经有序；仅在脏响应无序时排序新段，再与旧列表线性归并。
+    const pending: DanmakuItem | null = this.cursor < this.list.length ? this.list[this.cursor] : null;
+    const previous: Array<DanmakuItem> = this.sourceList ?? this.list;
+    // 服务端分段可能无序；排序新段，再与旧列表线性归并。
     let incoming: Array<DanmakuItem> = items;
     for (let i: number = 1; i < items.length; i++) {
       if (items[i - 1].time > items[i].time) {
@@ -119,20 +138,21 @@ export class PlayerDanmakuEngine {
         break;
       }
     }
-    const merged: Array<DanmakuItem> = new Array<DanmakuItem>(this.list.length + incoming.length);
+    const merged: Array<DanmakuItem> = new Array<DanmakuItem>(previous.length + incoming.length);
     let oldIndex: number = 0;
     let newIndex: number = 0;
     let mergedIndex: number = 0;
-    while (oldIndex < this.list.length && newIndex < incoming.length) {
-      if (this.list[oldIndex].time <= incoming[newIndex].time) {
-        merged[mergedIndex++] = this.list[oldIndex++];
+    while (oldIndex < previous.length && newIndex < incoming.length) {
+      if (previous[oldIndex].time <= incoming[newIndex].time) {
+        merged[mergedIndex++] = previous[oldIndex++];
       } else {
         merged[mergedIndex++] = incoming[newIndex++];
       }
     }
-    while (oldIndex < this.list.length) merged[mergedIndex++] = this.list[oldIndex++];
+    while (oldIndex < previous.length) merged[mergedIndex++] = previous[oldIndex++];
     while (newIndex < incoming.length) merged[mergedIndex++] = incoming[newIndex++];
-    this.list = merged;
+    this.sourceList = merged;
+    this.list = this.applyMerge(merged);
     const guard: number = this.lastPlayerTime + 0.1;
     let low: number = 0;
     let high: number = this.list.length;
@@ -142,10 +162,20 @@ export class PlayerDanmakuEngine {
       else high = middle;
     }
     this.cursor = low;
+    // 预取不应消费旧列表里尚未调度的当前弹幕；它们仍受 spawn 的正常延迟窗口约束。
+    if (pending !== null && pending.time >= this.lastPlayerTime - MAX_SPAWN_LATENCY_SECONDS) {
+      const pendingIndex: number = this.list.indexOf(pending);
+      if (pendingIndex >= 0) this.cursor = Math.min(this.cursor, pendingIndex);
+    }
   }
 
   /** 本地发送弹幕按时间插入有序列表；若插入在游标前，游标同步后移。 */
   insertLocal(item: DanmakuItem): void {
+    if (this.sourceList !== null) {
+      let rawIndex: number = this.sourceList.length;
+      while (rawIndex > 0 && this.sourceList[rawIndex - 1].time > item.time) rawIndex--;
+      this.sourceList.splice(rawIndex, 0, item);
+    }
     let low: number = 0;
     let high: number = this.list.length;
     while (low < high) {
@@ -290,6 +320,7 @@ export class PlayerDanmakuEngine {
       }
       const item: DanmakuItem = this.list[this.cursor];
       this.cursor++;
+      if (this.consumedBeforeMerge.has(item)) continue;
       // mode 8 代码弹幕 / 9 BAS 弹幕 / 0 等非法类型不按文本渲染（B 站客户端同样不显示原始内容）。
       if (item.mode < 1 || item.mode > 7) {
         continue;
@@ -564,6 +595,7 @@ export class PlayerDanmakuEngine {
   }
 
   syncCursor(time: number): void {
+    this.consumedBeforeMerge.clear();
     let low: number = 0;
     let high: number = this.list.length;
     const threshold: number = Math.max(0, time - 0.12);

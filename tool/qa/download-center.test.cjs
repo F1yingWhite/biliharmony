@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const path = require('node:path');
 const ts = require(process.env.ARKTS_TEST_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript');
 
@@ -11,15 +12,18 @@ function deferred() {
   return {promise, resolve};
 }
 
-function fixture(getPlayUrl, downloadFile, preferencesMock) {
-  const source = fs.readFileSync('entry/src/main/ets/services/media/DownloadCenter.ets', 'utf8');
+function fixture(getPlayUrl, downloadFile, preferencesMock, files = new Set()) {
+  const sourceRoot = process.env.ARKTS_TEST_SOURCE_ROOT || path.resolve(__dirname, '../../entry/src/main/ets');
+  const source = fs.readFileSync(path.join(sourceRoot, 'services/media/DownloadCenter.ets'), 'utf8');
   const module = {exports: {}};
   const writes = [];
   const platform = {
     '@kit.AbilityKit': {common: {}},
     '@kit.BasicServicesKit': {request: {downloadFile}},
     '@kit.CoreFileKit': {fileIo: {
-      accessSync: () => false, mkdirSync() {}, unlinkSync() {}, moveFileSync() {},
+      accessSync: name => files.has(name), mkdirSync(name) {files.add(name);},
+      unlinkSync(name) {assert.ok(files.delete(name), 'unlink missing file: ' + name);},
+      moveFileSync(from, to) {assert.ok(files.delete(from), 'move missing file: ' + from); files.add(to);},
     }},
     '@kit.ArkData': {preferences: preferencesMock || {}},
     '../network/HttpClient': {HttpClient: {getDownloadHeaders: () => ({})}},
@@ -45,7 +49,7 @@ function fixture(getPlayUrl, downloadFile, preferencesMock) {
     Center.ready = null;
     Center.tasks = [];
   }
-  return {Center, item, writes};
+  return {Center, item, writes, files};
 }
 
 function systemTask() {
@@ -101,18 +105,21 @@ test('removing an active system download stops it without trying another CDN', a
 
 test('many progress callbacks coalesce writes while completion persists immediately', async () => {
   const task = systemTask();
-  const {Center, item, writes} = fixture(async () => ({downloadAudioUrls: ['cdn1']}),
+  const {Center, item, writes, files} = fixture(async () => ({downloadAudioUrls: ['cdn1']}),
     async () => task);
   const running = Center.runOne(item);
   await tick();
   for (let i = 1; i <= 80; i++) task.emit('progress', i, 100);
   assert.equal(item.progress, 80);
   assert.equal(writes.length, 1, 'progress events should wait for the coalescing timer');
+  files.add(Center.context.filesDir + '/downloads/' + item.id + '.part');
   task.emit('complete');
   await running;
   assert.equal(item.status, 2);
   assert.equal(writes.length, 2);
   assert.equal(Center.progressPersistTimer, -1);
+  assert.equal(files.has(item.filePath), true);
+  assert.equal(files.has(Center.context.filesDir + '/downloads/' + item.id + '.part'), false);
 });
 
 function restoration(getPreferences) {
@@ -220,4 +227,29 @@ test('empty preferences initialize normally', async () => {
   await Center.init(context);
   assert.deepEqual(Center.list(), []);
   assert.equal(store.writes.length, 0);
+});
+
+test('clearing restored interrupted downloads removes their partial files and completed files', async () => {
+  const store = savedStore(JSON.stringify([
+    {id: 'interrupted', status: 1, filePath: ''},
+    {id: 'done', status: 2, filePath: context.filesDir + '/downloads/done.m4a'},
+  ]));
+  const files = new Set([context.filesDir + '/downloads/interrupted.part', context.filesDir + '/downloads/done.m4a']);
+  const {Center} = fixture(async () => null, async () => systemTask(), {getPreferences: async () => store}, files);
+  await Center.init(context);
+  assert.equal(Center.list()[0].status, 4);
+  await Center.clearFinished();
+  assert.deepEqual(Center.list(), []);
+  assert.deepEqual([...files], [], 'record cleanup must also reclaim partial media left by a killed process');
+  assert.equal(store.raw(), '[]');
+});
+
+test('clearing finished records preserves active download records and their partial files', async () => {
+  const files = new Set(['/tmp/test-downloads/downloads/task1.part', '/tmp/test-downloads/downloads/failed.part']);
+  const {Center, item} = fixture(async () => null, async () => systemTask(), null, files);
+  item.status = 1;
+  Center.tasks.push({id: 'failed', status: 3, filePath: ''});
+  await Center.clearFinished();
+  assert.deepEqual(Center.list().map(task => task.id), ['task1']);
+  assert.deepEqual([...files], ['/tmp/test-downloads/downloads/task1.part']);
 });

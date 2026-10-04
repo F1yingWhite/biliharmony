@@ -10,6 +10,27 @@ import { ActionResult, getData, postVideoAction, webGet, webGetWithPriority,
   webPost } from './internal/ApiCommon';
 import { EmotePackageCache } from '../common/EmotePackageCache';
 import { CommentLog } from '../common/CommentLog';
+import { DynamicApi, DynUploadResult } from './DynamicApi';
+
+/** 评论 pictures 字段中的 BFS 图片；尺寸和大小取上传响应，不取本地猜测值。 */
+export class ReplyUploadedPicture {
+  url: string = '';
+  width: number = 0;
+  height: number = 0;
+  size: number = 0;
+}
+
+export class ReplyImageUploadResult {
+  readonly ok: boolean;
+  readonly message: string;
+  readonly picture: ReplyUploadedPicture | null;
+
+  constructor(ok: boolean, message: string, picture: ReplyUploadedPicture | null) {
+    this.ok = ok;
+    this.message = message;
+    this.picture = picture;
+  }
+}
 
 export class CommentApi {
   private static isTransientFailure(status: number, code: number): boolean {
@@ -154,7 +175,23 @@ export class CommentApi {
     }
   }
 
-  static async addReply(oid: number, type: number, message: string, root: number = 0, parent: number = 0): Promise<ActionResult> {
+  /** 官方 commentpc 同动态共用 upload_bfs（category=daily、biz=new_dyn、file_up）。 */
+  static async uploadReplyImage(data: ArrayBuffer, fileName: string, mimeType: string): Promise<ReplyImageUploadResult> {
+    const uploaded: DynUploadResult = await DynamicApi.uploadDynImage(data, fileName, mimeType);
+    if (!uploaded.ok || uploaded.image === null) return new ReplyImageUploadResult(false, uploaded.message, null);
+    const picture: ReplyUploadedPicture = new ReplyUploadedPicture();
+    picture.url = uploaded.image.imgSrc;
+    picture.width = uploaded.image.imgWidth;
+    picture.height = uploaded.image.imgHeight;
+    picture.size = uploaded.image.imgSize;
+    if (!Number.isFinite(picture.width) || !Number.isFinite(picture.height) ||
+      picture.width <= 0 || picture.height <= 0) return new ReplyImageUploadResult(false, '图片上传响应缺少尺寸', null);
+    return new ReplyImageUploadResult(true, '上传成功', picture);
+  }
+
+  static async addReply(oid: number, type: number, message: string, root: number = 0, parent: number = 0,
+    pictures: Array<ReplyUploadedPicture> = []): Promise<ActionResult> {
+    if (pictures.length > 9) return new ActionResult(false, '一条评论最多 9 张图片');
     const params: Record<string, string> = {
       'oid': String(oid),
       'type': String(type),
@@ -163,6 +200,16 @@ export class CommentApi {
     };
     if (root > 0) params['root'] = String(root);
     if (parent > 0) params['parent'] = String(parent);
+    if (pictures.length > 0) {
+      // 官方 commentpc/PiliPlus 的 pictures JSON 结构；ai_gen_pic 缺省时不发送。
+      const payload: Array<Record<string, Object>> = pictures.map((picture: ReplyUploadedPicture): Record<string, Object> => {
+        const item: Record<string, Object> = {
+          'img_src': picture.url, 'img_width': picture.width, 'img_height': picture.height, 'img_size': picture.size,
+        };
+        return item;
+      });
+      params['pictures'] = JSON.stringify(payload);
+    }
     return CommentApi.runAction('api.add', 'oid=' + String(oid) + ' type=' + String(type) +
       ' root=' + String(root) + ' parent=' + String(parent) + ' messageLen=' + String(message.length),
       (): Promise<ActionResult> => postVideoAction(Api.replyAdd, params));
