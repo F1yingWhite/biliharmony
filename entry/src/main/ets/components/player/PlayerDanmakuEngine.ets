@@ -63,6 +63,9 @@ export class PlayerDanmakuEngine {
   private ctx: CanvasRenderingContext2D;
   /** 保留未合并的有序数据，设置变化可以原地重建，不依赖再次请求已缓存的分段。 */
   private sourceList: Array<DanmakuItem> | null = null;
+  private localItems: Array<DanmakuItem> = [];
+  private readonly localTokens: Set<number> = new Set<number>();
+  private readonly localEchoConsumed: Set<DanmakuItem> = new Set<DanmakuItem>();
   private consumedBeforeMerge: Set<DanmakuItem> = new Set<DanmakuItem>();
   lastDrawMs: number = 0;
   private nextScrollLane: number = 0;
@@ -81,9 +84,28 @@ export class PlayerDanmakuEngine {
 
   setList(list: Array<DanmakuItem>): void {
     // seg.so 的条目按服务端选择顺序返回，不能直接交给二分游标和时间线消费。
-    this.sourceList = list.slice().sort((a: DanmakuItem, b: DanmakuItem): number => a.time - b.time);
+    this.sourceList = this.remoteWithoutLocal(list).concat(this.localItems)
+      .sort((a: DanmakuItem, b: DanmakuItem): number => a.time - b.time);
     this.list = this.applyMerge(this.sourceList);
     this.syncCursor(this.lastPlayerTime);
+  }
+
+  /** Source changes clear local confirmations; ordinary late server lists keep them. */
+  resetList(): void {
+    this.localItems = [];
+    this.localTokens.clear();
+    this.localEchoConsumed.clear();
+    this.consumedBeforeMerge.clear();
+    this.sourceList = [];
+    this.list = [];
+    this.cursor = 0;
+    this.lastPlayerTime = 0;
+    this.clearActive();
+  }
+
+  private remoteWithoutLocal(items: Array<DanmakuItem>): Array<DanmakuItem> {
+    return items.filter((item: DanmakuItem): boolean => !this.localItems.some((local: DanmakuItem): boolean =>
+      local === item || (local.idStr.length > 0 && local.idStr === item.idStr)));
   }
 
   setMergeDuplicates(enabled: boolean): void {
@@ -105,6 +127,11 @@ export class PlayerDanmakuEngine {
     const heads: Map<string, DanmakuItem> = new Map();
     for (let i: number = 0; i < items.length; i++) {
       const item: DanmakuItem = items[i];
+      // A confirmed sender preview stays independent of older identical remote comments.
+      if (this.localItems.indexOf(item) >= 0) {
+        out.push(item);
+        continue;
+      }
       const head: DanmakuItem | undefined = heads.get(item.text);
       if (head !== undefined && item.time - head.time <= MERGE_WINDOW_SECONDS) {
         head.mergeCount++;
@@ -125,7 +152,8 @@ export class PlayerDanmakuEngine {
   }
 
   /** 把分段弹幕合并进全局有序列表，并把游标推到播放头之后，避免重放已喷出的弹幕。 */
-  appendSorted(items: Array<DanmakuItem>): void {
+  appendSorted(segment: Array<DanmakuItem>): void {
+    const items: Array<DanmakuItem> = this.remoteWithoutLocal(segment);
     if (items.length === 0) return;
     const pending: DanmakuItem | null = this.cursor < this.list.length ? this.list[this.cursor] : null;
     const previous: Array<DanmakuItem> = this.sourceList ?? this.list;
@@ -169,13 +197,33 @@ export class PlayerDanmakuEngine {
     }
   }
 
-  /** 本地发送弹幕按时间插入有序列表；若插入在游标前，游标同步后移。 */
-  insertLocal(item: DanmakuItem): void {
-    if (this.sourceList !== null) {
-      let rawIndex: number = this.sourceList.length;
-      while (rawIndex > 0 && this.sourceList[rawIndex - 1].time > item.time) rawIndex--;
-      this.sourceList.splice(rawIndex, 0, item);
+  /** Store the submitted timestamp, but show its confirmation immediately at the current playhead. */
+  insertLocal(item: DanmakuItem, now: number = this.lastPlayerTime, token: number = 0): boolean {
+    if (!Number.isFinite(item.time) || item.time < 0 || !Number.isFinite(now) || now < 0 || item.text.length === 0) return false;
+    if (token > 0 && this.localTokens.has(token)) return false;
+    if (token > 0) this.localTokens.add(token);
+    if (this.localItems.some((local: DanmakuItem): boolean => local === item ||
+      (item.idStr.length > 0 && local.idStr === item.idStr))) return false;
+    let prior: ActiveDm | undefined = undefined;
+    if (item.idStr.length > 0) {
+      // A segment response can precede the send acknowledgement; unify both directions by precise ID.
+      prior = this.pinned !== null && this.pinned.item.idStr === item.idStr ? this.pinned :
+        this.active.find((dm: ActiveDm): boolean => dm.item.idStr === item.idStr);
+      let removedBeforeCursor: number = 0;
+      this.list = this.list.filter((remote: DanmakuItem, index: number): boolean => {
+        if (remote.idStr !== item.idStr) return true;
+        if (index < this.cursor) removedBeforeCursor++;
+        this.consumedBeforeMerge.delete(remote);
+        return false;
+      });
+      this.cursor = Math.max(0, this.cursor - removedBeforeCursor);
+      if (this.sourceList !== null) this.sourceList = this.sourceList.filter((remote: DanmakuItem): boolean => remote.idStr !== item.idStr);
     }
+    this.localItems.push(item);
+    if (this.sourceList === null) this.sourceList = this.list.slice();
+    let rawIndex: number = this.sourceList.length;
+    while (rawIndex > 0 && this.sourceList[rawIndex - 1].time > item.time) rawIndex--;
+    this.sourceList.splice(rawIndex, 0, item);
     let low: number = 0;
     let high: number = this.list.length;
     while (low < high) {
@@ -185,6 +233,48 @@ export class PlayerDanmakuEngine {
     }
     this.list.splice(low, 0, item);
     if (low < this.cursor) this.cursor++;
+    if (!this.enabled || item.mode !== 1 || this.blockScrollDm ||
+      (this.blockColorDm && item.color !== 16777215) || item.weight < this.minWeight) return false;
+    if (item.idStr.length > 0) this.active = this.active.filter((dm: ActiveDm): boolean => dm.item.idStr !== item.idStr);
+    this.lastPlayerTime = now;
+    this.localEchoConsumed.add(item);
+    this.rebuildLaneBuckets();
+    const size: number = this.sizeFor(item);
+    const text: string = this.renderTextFor(item);
+    const textWidth: number = this.measure(text, size);
+    // Pause must show actual pixels now, rather than a comment waiting outside the right edge.
+    const x: number = Math.max(4, this.width - textWidth - 12);
+    const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / this.scrollSpeedFactor();
+    const speed: number = (this.width + Math.max(10, size * 0.3) + textWidth) / travelSeconds;
+    let lane: number = this.allocLane(x, speed);
+    if (lane < 0) {
+      // Sender confirmation gets one lane even when the incoming remote burst occupies every lane.
+      lane = this.nextScrollLane % this.laneCount();
+      this.nextScrollLane = (lane + 1) % this.laneCount();
+    }
+    if (this.active.length >= this.maxActive()) {
+      const oldest: number = this.active.findIndex((dm: ActiveDm): boolean => dm !== this.pinned);
+      if (oldest >= 0) this.active.splice(oldest, 1);
+    }
+    const active: ActiveDm = prior ?? new ActiveDm(item, x, lane, speed, 0, false, now, textWidth, text, this.colorFor(item.color));
+    active.item = item;
+    if (active !== this.pinned) {
+      active.x = x;
+      active.lane = lane;
+    }
+    active.speed = speed;
+    active.fixedUntil = 0;
+    active.isFixed = false;
+    active.born = now;
+    active.textWidth = textWidth;
+    active.renderText = text;
+    active.renderColor = this.colorFor(item.color);
+    active.reverse = false;
+    active.special = null;
+    active.fontSizeVp = size;
+    this.active.push(active);
+    this.drawFrame(false);
+    return true;
   }
 
   /**
@@ -320,7 +410,7 @@ export class PlayerDanmakuEngine {
       }
       const item: DanmakuItem = this.list[this.cursor];
       this.cursor++;
-      if (this.consumedBeforeMerge.has(item)) continue;
+      if (this.consumedBeforeMerge.has(item) || this.localEchoConsumed.has(item)) continue;
       // mode 8 代码弹幕 / 9 BAS 弹幕 / 0 等非法类型不按文本渲染（B 站客户端同样不显示原始内容）。
       if (item.mode < 1 || item.mode > 7) {
         continue;
@@ -385,6 +475,7 @@ export class PlayerDanmakuEngine {
         this.active.push(dm);
         this.addToLaneBucket(dm);
       }
+      if (this.localItems.indexOf(item) >= 0) this.localEchoConsumed.add(item);
     }
   }
 
@@ -511,6 +602,7 @@ export class PlayerDanmakuEngine {
   }
 
   resetAt(time: number): void {
+    this.localEchoConsumed.clear();
     this.lastPlayerTime = time;
     this.clearActive();
     this.syncCursor(time);

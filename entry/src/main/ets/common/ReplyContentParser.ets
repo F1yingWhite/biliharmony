@@ -1,13 +1,11 @@
 import { BiliEmote, ReplyItem, ReplyJump, ReplyMention } from '../model/Models';
 import { CommentLog } from './CommentLog';
+import { normalizeBiliWebUrl, parseBiliLink, BiliLinkTarget } from './BiliLinkParser';
 
 // 模块级正则与结果缓存：列表重渲染会反复解析同一条评论，避免重复建正则与重复解析
 const BVID_REGEX: RegExp = /BV[0-9A-Za-z]{10}/;
-// 整条视频链接（含协议与域名前缀）作为一个片段：拆成“白字前缀+蓝 BV”两半时，
-// Flex/Text 会在两片之间换行，出现上半行白下半行蓝的断裂感。
-const VIDEO_URL_REGEX: RegExp = /https?:\/\/(?:www\.)?bilibili\.com\/video\/(?:BV[0-9A-Za-z]{10}|av\d{1,18})\/?/i;
 /** 普通网页链接；末尾常见中英文标点在命中后剥离，避免把句号带进浏览器。 */
-const WEB_URL_REGEX: RegExp = /https?:\/\/[^\s<>"'，。！？；、（）【】《》\[\]{}]+/i;
+const WEB_URL_REGEX: RegExp = /(?:(?:https?:\/\/|\/\/)[^\s<>"'，。！？；、（）【】《》\[\]{}]+|\b(?:(?:(?:www|m|space|live|t)\.)?bilibili\.com|(?:www\.)?b23\.tv)\/[^\s<>"'，。！？；、（）【】《》\[\]{}]+)/i;
 const URL_TRAILING_PUNCTUATION_REGEX: RegExp = /[.,;!?，。！？；：、]+$/;
 const AID_REGEX: RegExp = /(?:^|[^A-Za-z])av(\d{1,18})/i;
 const ACTION_REGEX: RegExp = /(BV[0-9A-Za-z]{10}|(?:^|\s|[（(【\[])(?:\d{1,2}:)?[0-5]?\d:[0-5]\d|(?:^|[^A-Za-z])av\d{1,18})/i;
@@ -125,7 +123,7 @@ function normalizedWebUrl(value: string): string {
 }
 
 function isWebUrl(value: string): boolean {
-  return /^https?:\/\//i.test(value);
+  return normalizeBiliWebUrl(value).length > 0;
 }
 
 function pushText(result: Array<ReplyRenderPart>, item: ReplyItem, text: string, index: number): void {
@@ -191,9 +189,7 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
       }
     }
     for (let i: number = 0; i < item.jumps.length; i++) {
-      const videoId: string = bvidFrom(item.jumps[i].url);
-      const aid: number = aidFrom(item.jumps[i].url);
-      if (videoId.length === 0 && aid <= 0 && !isWebUrl(item.jumps[i].url)) continue;
+      if (!/^(?:BV[0-9A-Za-z]{10}|av[1-9][0-9]*)$/i.test(item.jumps[i].url) && !isWebUrl(item.jumps[i].url)) continue;
       const at: number = rest.indexOf(item.jumps[i].label);
       if (at >= 0 && at < foundAt) {
         foundAt = at;
@@ -214,15 +210,6 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
         foundMention = item.mentions[i];
         foundToken = '';
       }
-    }
-    const urlMatch: RegExpExecArray | null = VIDEO_URL_REGEX.exec(rest);
-    if (urlMatch !== null && urlMatch.index < foundAt) {
-      foundAt = urlMatch.index;
-      foundLength = urlMatch[0].length;
-      foundEmote = null;
-      foundJump = null;
-      foundMention = null;
-      foundToken = urlMatch[0];
     }
     const webUrlMatch: RegExpExecArray | null = WEB_URL_REGEX.exec(rest);
     if (webUrlMatch !== null && webUrlMatch.index < foundAt) {
@@ -277,9 +264,14 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
     } else {
       part.text = foundJump !== null ? foundJump.label : foundToken;
       const target: string = foundJump !== null ? foundJump.url : foundToken;
-      part.bvid = bvidFrom(target);
-      part.aid = aidFrom(target);
-      if (isWebUrl(target)) part.url = target;
+      if (isWebUrl(target)) {
+        part.url = normalizeBiliWebUrl(target);
+        const internal: BiliLinkTarget | null = parseBiliLink(part.url);
+        if (internal !== null && internal.kind === 'video') { part.bvid = internal.bvid; part.aid = internal.aid; }
+      } else {
+        part.bvid = bvidFrom(target);
+        part.aid = aidFrom(target);
+      }
       if (part.bvid.length === 0 && part.aid <= 0 && part.url.length === 0) {
         part.seekSeconds = parseClock(foundToken);
       }

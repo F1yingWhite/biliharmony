@@ -102,6 +102,8 @@ export struct PlayerView {
   onDanmakuEngineReady: (engine: PlayerDanmakuEngine) => void = (engine: PlayerDanmakuEngine) => {
   };
   @Prop localDanmakuText: string = '';
+  @Prop localDanmakuId: string = '';
+  @Prop localDanmakuSeconds: number = 0;
   @Prop @Watch('onLocalDanmakuRequested') localDanmakuToken: number = 0;
   @Prop @Watch('onCompactModeChanged') compactMode: boolean = false;
   onBack: () => void = () => {};
@@ -259,6 +261,7 @@ export struct PlayerView {
   @State interactionLoading: boolean = false;
   @State interactionSubmitting: boolean = false;
   @State interactionMessage: string = '';
+  @State interactionViewportHeight: number = 0;
   private videoReportDialog: CustomDialogController | null = null;
   private pictureInPicture: PlayerPictureInPicture = new PlayerPictureInPicture({
     isDestroyed: (): boolean => this.destroyed,
@@ -553,6 +556,23 @@ export struct PlayerView {
     toast: (message: string): void => this.toast(message),
     openVideo: (target: VideoInteractionLink): void => this.onInteractionVideo(target),
   });
+
+  private interactionBottomMargin(): number {
+    return this.showControls ? (this.fullscreen ? 92 : 48) : 12;
+  }
+
+  private interactionAvailableHeight(): number {
+    const height: number = this.interactionViewportHeight > 0 ? this.interactionViewportHeight :
+      this.danmakuFixedHeight > 0 ? this.danmakuFixedHeight : this.dmEngine.height;
+    return Math.max(0, height - this.interactionBottomMargin() - 8);
+  }
+
+  private onInteractionViewportChanged(height: Length): void {
+    const measured: number = Number.parseFloat(String(height));
+    if (Number.isFinite(measured) && measured > 0 && measured !== this.interactionViewportHeight) {
+      this.interactionViewportHeight = measured;
+    }
+  }
 
   private bindInteractions(): void {
     this.interactionCtl.setEnabled(this.interactionEnabled);
@@ -951,7 +971,7 @@ export struct PlayerView {
     this.sponsorCtl.invalidateForSourceChange();
     this.chapters = [];
     this.dmClock.stop(true);
-    this.dmEngine.setList([]);
+    this.dmEngine.resetList();
     this.seekTargetCtl.show(-1);
     this.endScreenOpen = false;
     await this.playback.replaceSource(this.playbackSource());
@@ -966,11 +986,12 @@ export struct PlayerView {
   }
 
   onLocalDanmakuRequested(): void {
-    const text: string = this.localDanmakuText.trim();
-    if (text.length === 0) return;
-    const item: DanmakuItem = new DanmakuItem(this.playheadSec, 1, 0xFFFFFF, text);
-    this.dmEngine.insertLocal(item);
-    this.spawnDanmaku(this.playheadSec);
+    if (this.destroyed) return;
+    this.dmEngine.enabled = this.externalDanmakuOn && !this.appInBackground;
+    const shown: boolean = this.dmInteraction.showLocal(this.localDanmakuText, this.localDanmakuSeconds,
+      this.playheadSec, this.localDanmakuId, this.localDanmakuToken);
+    this.dmEngine.enabled = this.externalDanmakuOn;
+    if (shown && this.playing) this.dmClock.start();
   }
 
   onCompactModeChanged(): void {
@@ -2022,11 +2043,13 @@ export struct PlayerView {
       }
 
       if (this.interactionEnabled && this.interactionCard !== null &&
+        this.interactionAvailableHeight() >= 104 &&
         !this.compactMode && !this.endScreenOpen && this.errorText.length === 0 &&
         !this.appInBackground && !this.showMoreMenu && !this.showSideDrawer) {
         PlayerInteractionPanel({
           current: this.interactionCard,
           fullscreen: this.fullscreen,
+          availableHeight: this.interactionAvailableHeight(),
           loading: this.interactionLoading,
           submitting: this.interactionSubmitting,
           message: this.interactionMessage,
@@ -2036,7 +2059,7 @@ export struct PlayerView {
           onDismiss: (id: string) => { this.interactionCtl.dismiss(id); },
         })
         .align(Alignment.BottomEnd)
-        .margin({ right: 10, bottom: this.showControls ? (this.fullscreen ? 92 : 48) : 12 })
+        .margin({ right: 10, bottom: this.interactionBottomMargin() })
         .zIndex(90)
       }
 
@@ -2305,6 +2328,9 @@ export struct PlayerView {
     .height('100%')
     .clip(true)
     .backgroundColor('#000000')
+    .onSizeChange((_previous: SizeOptions, current: SizeOptions) => {
+      this.onInteractionViewportChanged(current.height ?? 0);
+    })
     .bindSheet($$this.showMoreMenu, this.MoreMenuSheetContent(), {
       height: this.moreSheetHeight > 0 ? this.moreSheetHeight : 760,
       dragBar: false,

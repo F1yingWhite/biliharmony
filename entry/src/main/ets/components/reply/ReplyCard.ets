@@ -23,6 +23,8 @@ import { UserStore } from '../../services/auth/UserStore';
 import { CommentApi } from '../../api/CommentApi';
 import { RemoteAssetCache } from '../../services/cache/RemoteAssetCache';
 import { common } from '@kit.AbilityKit';
+import { ReplyLinkController } from './ReplyLinkController';
+import { BiliLinkNavigation } from '../../common/BiliLinkRouter';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -130,6 +132,17 @@ export struct ReplyCard {
   @State mirrorLike: number = 0;
   @State nameplateLocal: string = '';
   private destroyed: boolean = false;
+  private links: ReplyLinkController = new ReplyLinkController({
+    isAlive: (): boolean => !this.destroyed,
+    getSourceKey: (): string => String(this.item.oid) + ':' + String(this.item.type) + ':' +
+      String(this.item.rpid) + ':' + this.item.content,
+    navigate: (navigation: BiliLinkNavigation): void => {
+      this.onNavigate(() => AppNavStack.pushPathByName(navigation.name, navigation.param));
+    },
+    openExternal: (url: string): void => this.openExternalLink(url),
+    stopPlayer: (): void => PlayerCommandBus.stop(),
+    toast: (message: string): void => this.toast(message),
+  });
   private likeTimers: Set<number> = new Set<number>();
   /** 卡片已应用的模型修订号；稳定 key 的列表闭包可能再次传回旧快照，不能倒灌 UI。 */
   private mirrorRpid: number = -1;
@@ -156,6 +169,7 @@ export struct ReplyCard {
    * 回到初始态，避免上一条评论的点赞动效/连接线残留。
    */
   aboutToReuse(params: Record<string, Object>): void {
+    this.links.dispose();
     this.destroyed = false;
     this.likeTimers.forEach((id: number) => clearTimeout(id));
     this.likeTimers.clear();
@@ -185,6 +199,7 @@ export struct ReplyCard {
   }
 
   private onItemChanged(): void {
+    this.links.dispose();
     // LazyForEach 使用稳定 rpid key 时，其 builder 闭包可能在父级 version 更新后再次
     // 传回最初的 rev=0 快照。只接受新评论，或严格更新的修订号，防止旧点赞态倒灌。
     if (this.item.rpid !== this.mirrorRpid || this.item.rev > this.mirrorRev) {
@@ -214,6 +229,7 @@ export struct ReplyCard {
   }
 
   aboutToDisappear(): void {
+    this.links.dispose();
     this.destroyed = true;
     this.likeTimers.forEach((id: number) => clearTimeout(id));
     this.likeTimers.clear();
@@ -263,22 +279,22 @@ export struct ReplyCard {
     } else if (part.seekSeconds >= 0) {
       PlayerCommandBus.seek(part.seekSeconds);
       this.getUIContext().getPromptAction().showToast({ message: '已空降到 ' + formatDuration(part.seekSeconds) });
+    } else if (part.url.length > 0) {
+      this.links.open(part.url, part.text);
     } else if (part.bvid.length > 0 || part.aid > 0) {
       PlayerCommandBus.stop();
       const param: VideoDetailParam = { bvid: part.bvid, aid: part.aid, title: part.text };
       this.onNavigate(() => AppNavStack.pushPathByName(NAV_VIDEO_DETAIL, param));
-    } else if (part.url.length > 0) {
-      const context: common.UIAbilityContext | undefined =
-        this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
-      if (context === undefined) {
-        this.toast('暂时无法打开网页');
-        return;
-      }
-      PlayerCommandBus.stop();
-      this.onNavigate(() => {
-        context.openLink(part.url).catch((): void => this.toast('网页打开失败'));
-      });
     }
+  }
+
+  private openExternalLink(url: string): void {
+    const context: common.UIAbilityContext | undefined =
+      this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+    if (context === undefined) { this.toast('暂时无法打开网页'); return; }
+    this.onNavigate(() => {
+      context.openLink(url).catch((): void => { if (!this.destroyed) this.toast('网页打开失败'); });
+    });
   }
 
   private openUser(): void {

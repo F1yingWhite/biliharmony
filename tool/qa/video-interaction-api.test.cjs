@@ -30,6 +30,7 @@ function fixture(options = {}) {
   const load = createArktsLoader({mocks: {
     'common/WbiSign': {WbiSign: {}}, 'common/AppSign': {},
     'services/auth/CookieRefresher': {CookieRefresher: {onAuthFailure() {}}},
+    'services/auth/UserStore': {UserStore: {get isLogin() {return options.loggedIn !== false;}}},
     '@kit.ArkTS': {taskpool: {execute: (fn, ...args) => options.decodeGate ?
       options.decodeGate.promise.then(() => fn(...args)) : Promise.resolve(fn(...args))},
       util: {TextDecoder: {create: () => ({decodeToString: data => new TextDecoder().decode(data)})}}},
@@ -147,4 +148,59 @@ test('guest submissions stay local and server business failure remains unsuccess
     response(JSON.stringify({code: -400, message: '评分已结束'}))});
   const gradeCard = (await f.API.load(source))[0], result = await f.API.submitGrade(source, gradeCard, 2, 3);
   assert.equal(result.ok, false); assert.match(result.message, /评分已结束/); assert.equal(gradeCard.selectedStars, 0);
+});
+
+function interactionController(f, seconds = 12.345) {
+  const state = {seconds, snapshots: []};
+  const {PlayerInteractionController} = f.load('components/player/PlayerInteractionController');
+  const controller = new PlayerInteractionController({
+    isDestroyed: () => false, getPlayhead: () => state.seconds,
+    applyState: value => state.snapshots.push(value), toast: () => {}, openVideo: () => {},
+  });
+  controller.bind(source);
+  return {controller, state, current: () => state.snapshots.at(-1).current};
+}
+
+test('whole native HTTP to controller chain retains the second answer and confirms its result counts', async () => {
+  const f = fixture(), ui = interactionController(f);
+  await ui.controller.load();
+  const before = ui.current();
+  assert.deepEqual(before.options.map(option => [option.id, option.text, option.votes]),
+    [[3, '第一项', 4], [9, '第二项', 8], [12, '其他', 1]]);
+  assert.equal(before.selectedOptionId, 0);
+  assert.equal(await ui.controller.submitVote(before.id, 9), true);
+  assert.equal(f.requests.at(-1).form.get('option_id'), '9', 'the second answer uses its actual server index');
+  assert.equal(ui.current().selectedOptionId, 9);
+  assert.deepEqual(ui.current().options.map(option => option.votes), [4, 9, 1]);
+  assert.deepEqual(before.options.map(option => option.votes), [4, 8, 1], 'earlier reactive snapshots remain intact');
+  const count = f.requests.length;
+  assert.equal(await ui.controller.submitVote(before.id, 3), false);
+  assert.equal(f.requests.length, count, 'already-voted results must not send another choice');
+  ui.state.seconds = 21; ui.controller.update(21); assert.equal(ui.current(), null);
+  ui.state.seconds = 12; ui.controller.update(12);
+  assert.equal(ui.current().selectedOptionId, 9);
+  assert.deepEqual(ui.current().options.map(option => option.votes), [4, 9, 1], 'seeking back preserves the confirmed comparison');
+});
+
+test('whole production vote chain preserves every answer on failure, retries and restores server-selected results', async () => {
+  let writes = 0;
+  const f = fixture({handler: request => request.url.includes('/web/view') ?
+    response(arrayBuffer(view(vote({}, {id: '19', progress: 10000})))) :
+    response(JSON.stringify(++writes === 1 ? {code: -400, message: '暂时无法投票'} : {code: 0, data: {dmidStr: '999'}}))});
+  const ui = interactionController(f); await ui.controller.load();
+  assert.equal(await ui.controller.submitVote('19', 9), false);
+  assert.equal(ui.current().selectedOptionId, 0);
+  assert.deepEqual(ui.current().options.map(option => option.votes), [4, 8, 1]);
+  assert.match(ui.state.snapshots.at(-1).message, /暂时无法投票/);
+  assert.equal(await ui.controller.submitVote('19', 9), true);
+  assert.equal(ui.current().selectedOptionId, 9);
+  assert.deepEqual(ui.current().options.map(option => option.votes), [4, 9, 1]);
+
+  const restored = fixture({handler: () => response(arrayBuffer(view(vote({my_vote: 9,
+    options: [{idx: 3, desc: '第一项', cnt: 4}, {idx: 9, desc: '第二项', cnt: 9}]}, {id: '19', progress: 10000}))))});
+  const reopened = interactionController(restored); await reopened.controller.load();
+  assert.equal(reopened.current().selectedOptionId, 9);
+  assert.deepEqual(reopened.current().options.map(option => [option.id, option.votes]), [[3, 4], [9, 9]]);
+  assert.equal(await reopened.controller.submitVote('19', 3), false);
+  assert.equal(restored.requests.length, 1, 'a restored vote renders results without resubmitting');
 });

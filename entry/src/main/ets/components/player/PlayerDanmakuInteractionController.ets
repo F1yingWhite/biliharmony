@@ -22,6 +22,15 @@ export class PlayerDanmakuInteractionController {
     this.engine = engine;
   }
 
+  /** Called only for a successfully submitted comment; the page owns request/source/account guards. */
+  showLocal(text: string, submittedSeconds: number, nowSeconds: number, idStr: string = '', token: number = 0): boolean {
+    const content: string = text.trim();
+    if (content.length === 0) return false;
+    const preciseId: string = /^[1-9][0-9]*$/.test(idStr) ? idStr : '';
+    const item: DanmakuItem = new DanmakuItem(submittedSeconds, 1, 16777215, content, 0, 25, 10, preciseId);
+    return this.engine.insertLocal(item, nowSeconds, token);
+  }
+
   rememberTouch(x: number, y: number, pinnedVisible: boolean): void {
     if (!pinnedVisible && this.engine.active.length > 0) this.pending = this.engine.hitTestActive(x, y);
   }

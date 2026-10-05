@@ -48,12 +48,12 @@ function createNativeComponent(name, {props = {}, mocks = {}, globals: supplied 
     return proxy;
   }
   for (const type of ['Column', 'Row', 'Scroll', 'Text', 'Button', 'Image', 'Blank', 'LoadingProgress',
-    'Slider', 'Toggle', 'Divider', 'Flex', 'List', 'ListItem', 'Stack']) globals[type] = (...args) => native(type, ...args);
+    'Slider', 'Toggle', 'Divider', 'Flex', 'List', 'ListItem', 'Stack', 'Progress']) globals[type] = (...args) => native(type, ...args);
   globals.ForEach = (items, render) => items.forEach(render);
   globals.$r = resource => resource;
   for (const type of ['FlexAlign', 'ItemAlign', 'HorizontalAlign', 'FontWeight', 'ButtonType', 'ImageFit',
     'BarState', 'ScrollDirection', 'TextAlign', 'ToggleType', 'SliderStyle', 'ImageRenderMode', 'FlexWrap',
-    'FlexDirection', 'TextOverflow', 'Alignment', 'TransitionEffect', 'Curve']) {
+    'FlexDirection', 'TextOverflow', 'Alignment', 'TransitionEffect', 'Curve', 'ProgressType', 'HitTestMode']) {
     globals[type] = new Proxy({}, {get: (_target, key) => key});
   }
   Object.assign(globals, supplied);

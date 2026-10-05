@@ -55,6 +55,7 @@ import { VideoIntroSection } from '../components/video/VideoIntroSection';
 import { VideoHeroTransitionController } from '../components/video/VideoHeroTransitionController';
 import { VideoActionController } from '../components/video/VideoActionController';
 import { VideoPlaybackController } from '../components/video/VideoPlaybackController';
+import { VideoDanmakuSubmissionController } from '../components/video/VideoDanmakuSubmissionController';
 import { VideoDetailController, VideoDetailMetadata, VideoDetailStatus } from '../components/video/VideoDetailController';
 import { VideoAccountController, VideoAccountRelation, VideoEmoteStatus, VideoFollowStatus } from '../components/video/VideoAccountController';
 import { RelatedVideoStatus, VideoRecommendations } from '../components/video/VideoRecommendations';
@@ -200,6 +201,8 @@ export struct VideoDetailPage {
   @State danmakuDraft: string = '';
   @State danmakuSending: boolean = false;
   @State localDanmakuText: string = '';
+  @State localDanmakuId: string = '';
+  @State localDanmakuSeconds: number = 0;
   @State localDanmakuToken: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
   /** 卡片 hero：只移动封面边界，详情内容不参与缩放。 */
@@ -363,6 +366,26 @@ export struct VideoDetailPage {
   private replyScroller: Scroller = new Scroller();
   private threadScroller: Scroller = new Scroller();
   private videoProgressSeconds: number = 0;
+  private danmakuDraftVersion: number = 0;
+  private danmakuSubmit: VideoDanmakuSubmissionController = new VideoDanmakuSubmissionController({
+    isDestroyed: (): boolean => this.destroyed || this.closing,
+    getTarget: () => ({ aid: this.detail.aid, bvid: this.detail.bvid,
+      cid: this.currentCid, version: this.playerSourceVersion }),
+    getProgress: (): number => this.videoProgressSeconds,
+    getDraft: (): string => this.danmakuDraft,
+    getDraftVersion: (): number => this.danmakuDraftVersion,
+    setDraft: (value: string): void => { this.updateDanmakuDraft(value); },
+    setSending: (value: boolean): void => { this.danmakuSending = value; },
+    ensureLogin: (): boolean => this.ensureLogin(),
+    showLocal: (message: string, seconds: number, id: string): void => {
+      this.danmakuOn = true;
+      this.localDanmakuText = message;
+      this.localDanmakuId = id;
+      this.localDanmakuSeconds = seconds;
+      this.localDanmakuToken++;
+    },
+    toast: (message: string): void => this.toast(message),
+  });
   private playback: VideoPlaybackController = new VideoPlaybackController({
     isDestroyed: (): boolean => this.destroyed,
     getDetail: (): VideoDetail => this.detail,
@@ -936,6 +959,7 @@ export struct VideoDetailPage {
     this.favoritePicker.reset();
     this.followLoading = false;
     this.danmakuSending = false;
+    this.danmakuSubmit.reset();
     this.pageSwitchingCid = 0;
     this.replyThreadOpen = false;
     // 弹幕总开关从持久化设置恢复（其余弹幕项由 PlayerView 自行恢复后经此页透传/回传）。
@@ -1000,6 +1024,7 @@ export struct VideoDetailPage {
   }
 
   aboutToDisappear(): void {
+    this.danmakuSubmit.reset();
     this.actions.dispose();
     this.replySubmit.dispose();
     this.videoReportDialog?.close();
@@ -1082,9 +1107,11 @@ export struct VideoDetailPage {
     this.playbackAddressFailed = false;
     // 最后发布版本，播放器只读取同一次选择的完整属性。
     this.playerSourceVersion++;
+    this.danmakuSubmit.reset();
   }
 
   async init(): Promise<void> {
+    this.danmakuSubmit.reset();
     this.actions.reset();
     this.playback.invalidate();
     this.pageSwitchingCid = 0;
@@ -1151,6 +1178,7 @@ export struct VideoDetailPage {
 
   onLoginVersionChanged(): void {
     if (this.destroyed) return;
+    this.danmakuSubmit.reset();
     this.replyLikeBusy = new Set<number>();
     this.actions.reset();
     this.replySubmit.reset();
@@ -1499,28 +1527,13 @@ export struct VideoDetailPage {
     }
   }
 
+  private updateDanmakuDraft(value: string): void {
+    if (value !== this.danmakuDraft) this.danmakuDraftVersion++;
+    this.danmakuDraft = value;
+  }
+
   async sendVideoDanmaku(): Promise<void> {
-    const message: string = this.danmakuDraft.trim();
-    if (message.length === 0 || this.danmakuSending || !this.ensureLogin()) return;
-    this.danmakuSending = true;
-    try {
-      const result: ActionResult = await BiliApi.sendDanmaku(this.detail.aid, this.detail.bvid,
-        this.currentCid, this.videoProgressSeconds, message);
-      if (this.destroyed) return;
-      if (!result.ok) {
-        this.toast(result.message);
-        return;
-      }
-      this.danmakuDraft = '';
-      this.localDanmakuText = message;
-      this.localDanmakuToken++;
-      if (!this.danmakuOn) this.danmakuOn = true;
-      this.toast('弹幕发送成功');
-    } catch (e) {
-      if (!this.destroyed) this.toast('网络异常，发送失败');
-    } finally {
-      if (!this.destroyed) this.danmakuSending = false;
-    }
+    await this.danmakuSubmit.send();
   }
 
   private danmakuComposerWidth(): number {
@@ -1801,7 +1814,7 @@ export struct VideoDetailPage {
             .enabled(this.danmakuOn)
             .enterKeyType(EnterKeyType.Send)
             .onChange((value: string) => {
-              this.danmakuDraft = value;
+              this.updateDanmakuDraft(value);
             })
             .onSubmit(() => this.sendVideoDanmaku())
           Row()
@@ -1986,6 +1999,8 @@ export struct VideoDetailPage {
                 this.sponsorFullColor = color;
               },
               localDanmakuText: this.localDanmakuText,
+              localDanmakuId: this.localDanmakuId,
+              localDanmakuSeconds: this.localDanmakuSeconds,
               localDanmakuToken: this.localDanmakuToken,
               compactMode: !this.playerFullscreen && !this.playerEnded && this.visiblePlayerHeight() < 176,
                onBack: () => {
@@ -2030,7 +2045,7 @@ export struct VideoDetailPage {
               dmDraft: this.danmakuDraft,
               dmSending: this.danmakuSending,
               onDmDraftChange: (value: string) => {
-                this.danmakuDraft = value;
+                this.updateDanmakuDraft(value);
               },
               onDmSend: () => {
                 this.sendVideoDanmaku();
