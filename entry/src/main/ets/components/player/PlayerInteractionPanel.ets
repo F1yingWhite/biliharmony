@@ -107,21 +107,21 @@ export struct PlayerInteractionPanel {
   }
 
   private cardHeight(): number {
-    const maximum: number = this.fullscreen ? 280 : 140;
+    const maximum: number = this.fullscreen ? 120 : 104;
     return Number.isFinite(this.availableHeight) && this.availableHeight > 0 ?
       Math.min(maximum, this.availableHeight) : maximum;
   }
 
   private cardPadding(card: VideoInteractionCard): number {
-    return card.kind === 'vote' ? 8 : 10;
+    return 6;
   }
 
   private cardGap(card: VideoInteractionCard): number {
-    return card.kind === 'vote' ? 4 : 6;
+    return 4;
   }
 
   private headerHeight(card: VideoInteractionCard): number {
-    return card.kind === 'vote' ? 32 : 24;
+    return card.kind !== 'link' && card.title.length > 0 ? 28 : 24;
   }
 
   private bodyHeight(card: VideoInteractionCard): number {
@@ -130,7 +130,7 @@ export struct PlayerInteractionPanel {
 
   private voteOptionHeight(card: VideoInteractionCard): number {
     // 两个常见答案始终共享完整可用视口；更多答案继续在同一列表内滚动。
-    return Math.max(1, Math.min(40, Math.floor((this.bodyHeight(card) - 4) / 2)));
+    return Math.max(1, Math.min(this.fullscreen ? 32 : 28, Math.floor((this.bodyHeight(card) - 4) / 2)));
   }
 
   private hasVoteResult(card: VideoInteractionCard): boolean {
@@ -167,9 +167,10 @@ export struct PlayerInteractionPanel {
     Row({ space: 4 }) {
       ForEach(this.starScores(this.liveCard()), (star: number) => {
         Button(star <= this.liveCard().selectedStars ? '★' : '☆', { type: ButtonType.Normal })
-          .width(36)
-          .height(34)
-          .fontSize(28)
+          .width(26)
+          .height(28)
+          .padding(0)
+          .fontSize(22)
           .fontColor('#FFC857')
           .backgroundColor('#00000000')
           .borderRadius(6)
@@ -182,7 +183,7 @@ export struct PlayerInteractionPanel {
     .width('100%')
     .justifyContent(FlexAlign.Center)
     Text(this.liveCard().selectedStars > 0 ? '已评 ' + String(this.liveCard().selectedStars) + ' 星' : '点击星星评分')
-      .fontSize(11)
+      .fontSize(10)
       .fontColor('#DDFFFFFF')
     if (this.liveCard().count > 0) {
       Text(this.liveCard().averageScore.toFixed(1) + ' 分 · ' + formatCount(this.liveCard().count) + ' 人评分')
@@ -199,7 +200,7 @@ export struct PlayerInteractionPanel {
             Column({ space: 3 }) {
               Row({ space: 4 }) {
                 Text(option.text)
-                  .fontSize(12)
+                  .fontSize(11)
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                   .layoutWeight(1)
@@ -209,8 +210,8 @@ export struct PlayerInteractionPanel {
                 }
                 if (this.hasVoteResult(this.liveCard())) {
                   Text(formatCount(this.safeVotes(option)) + '票').fontSize(10).fontColor('#CCFFFFFF')
-                  Text(String(this.votePercent(this.liveCard(), option)) + '%').fontSize(11).fontColor('#FFFFFF')
-                    .width(34).textAlign(TextAlign.End)
+                  Text(String(this.votePercent(this.liveCard(), option)) + '%').fontSize(10).fontColor('#FFFFFF')
+                    .width(28).textAlign(TextAlign.End)
                 }
               }
               .width('100%')
@@ -229,8 +230,8 @@ export struct PlayerInteractionPanel {
           }
           .width('100%')
           .height(this.voteOptionHeight(this.liveCard()))
-          .padding({ left: 8, right: 8, top: 2, bottom: 2 })
-          .borderRadius(8)
+          .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+          .borderRadius(6)
           .backgroundColor(this.liveCard().selectedOptionId === option.id ? '#55FB7299' : '#25FFFFFF')
           .opacity(option.hasSelfDef && !this.hasVoteResult(this.liveCard()) ? 0.5 : 1)
           .accessibilityText('投票选项' + String(option.id))
@@ -253,10 +254,10 @@ export struct PlayerInteractionPanel {
   LinkContent() {
     Row({ space: 8 }) {
       if (this.linkCover(this.liveCard()).length > 0) {
-        Image(this.linkCover(this.liveCard())).width(52).height(36).borderRadius(4).objectFit(ImageFit.Cover)
+        Image(this.linkCover(this.liveCard())).width(40).height(28).borderRadius(4).objectFit(ImageFit.Cover)
       }
       Text(this.linkTitle(this.liveCard()))
-        .fontSize(12)
+        .fontSize(11)
         .fontColor('#FFFFFF')
         .maxLines(2)
         .layoutWeight(1)
@@ -264,9 +265,9 @@ export struct PlayerInteractionPanel {
     .width('100%')
     Button('观看推荐视频', { type: ButtonType.Normal })
       .width('100%')
-      .height(32)
-      .borderRadius(8)
-      .fontSize(12)
+      .height(28)
+      .borderRadius(6)
+      .fontSize(11)
       .fontColor('#FFFFFF')
       .backgroundColor(this.accent)
       .accessibilityText('观看推荐视频')
@@ -277,24 +278,26 @@ export struct PlayerInteractionPanel {
   @Builder
   Card() {
     Column({ space: this.cardGap(this.liveCard()) }) {
-      Row({ space: 6 }) {
-        if (this.liveCard().kind === 'vote') {
+      Row({ space: 4 }) {
+        if (this.liveCard().kind !== 'link' && this.liveCard().title.length > 0) {
           Column({ space: 0 }) {
             Text(this.kindLabel(this.liveCard()) + (this.hasVoteResult(this.liveCard()) ? ' · 已投票' :
-              (this.liveCard().options.length > 2 ? ' · 上下滑动查看选项' : '')))
-              .fontSize(10).fontColor('#BFFFFFFF').height(12).maxLines(1)
-            Text(this.liveCard().title).fontSize(12).fontWeight(FontWeight.Medium).fontColor('#FFFFFF')
-              .height(16).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+              (this.liveCard().kind === 'vote' && this.liveCard().options.length > 2 ? ' · 更多选项 ↓' : '')))
+              .fontSize(9).fontColor('#BFFFFFFF').height(10).maxLines(1)
+            Text(this.liveCard().title).fontSize(10).fontWeight(FontWeight.Medium).fontColor('#FFFFFF')
+              .height(14).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+              .accessibilityDescription(this.liveCard().title)
           }
           .layoutWeight(1)
           .alignItems(HorizontalAlign.Start)
         } else {
-          Text(this.kindLabel(this.liveCard())).fontSize(10).fontColor('#BFFFFFFF').layoutWeight(1)
+          Text(this.kindLabel(this.liveCard())).fontSize(9).fontColor('#BFFFFFFF').layoutWeight(1)
         }
         Button('×', { type: ButtonType.Normal })
           .width(24)
           .height(24)
-          .fontSize(18)
+          .padding(0)
+          .fontSize(16)
           .fontColor('#DDFFFFFF')
           .backgroundColor('#00000000')
           .accessibilityText('关闭当前互动卡片')
@@ -304,11 +307,7 @@ export struct PlayerInteractionPanel {
       .height(this.headerHeight(this.liveCard()))
       .flexShrink(0)
       Scroll() {
-        Column({ space: 6 }) {
-          if (this.liveCard().kind !== 'vote' && this.liveCard().title.length > 0) {
-            Text(this.liveCard().title).fontSize(13).fontWeight(FontWeight.Medium).fontColor('#FFFFFF')
-              .maxLines(2).width('100%')
-          }
+        Column({ space: 4 }) {
           if (this.liveCard().kind === 'grade') this.GradeContent()
           else if (this.liveCard().kind === 'vote') this.VoteContent()
           else if (this.liveCard().kind === 'link') this.LinkContent()
@@ -319,7 +318,7 @@ export struct PlayerInteractionPanel {
             }
           }
           if (this.message.length > 0) {
-            Text(this.message).fontSize(11).fontColor('#DDFFFFFF').maxLines(2).width('100%')
+            Text(this.message).fontSize(10).fontColor('#DDFFFFFF').maxLines(2).width('100%')
           }
         }
         .width('100%')
@@ -332,16 +331,15 @@ export struct PlayerInteractionPanel {
     .width('100%')
     .constraintSize({ maxHeight: this.cardHeight() })
     .padding(this.cardPadding(this.liveCard()))
-    .borderRadius(12)
-    .backgroundColor('#E618191C')
-    .border({ width: 0.5, color: '#44FFFFFF' })
+    .borderRadius(8)
+    .backgroundColor('#C918191C')
+    .border({ width: 0.5, color: '#30FFFFFF' })
   }
 
   build() {
     Column() {
       if (this.current !== null) this.Card()
     }
-    .width('85%')
-    .constraintSize({ maxWidth: this.fullscreen ? 320 : 260 })
+    .width(this.fullscreen ? 210 : 180)
   }
 }

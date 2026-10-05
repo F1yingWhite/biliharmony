@@ -29,7 +29,13 @@ test('real interaction build renders five stars and routes grade/dismiss with th
   f.button('评分4星').props.onClick(); assert.deepEqual(f.callbacks, [['grade', '100000000000000001', 4]]);
   f.button('关闭当前互动卡片').props.onClick(); assert.deepEqual(f.callbacks.at(-1), ['dismiss', '100000000000000001']);
   const rootNode = f.nodes[0];
-  assert.equal(rootNode.props.width, '85%'); assert.ok(rootNode.props.constraintSize.maxWidth <= 260);
+  assertCompactWidth(rootNode, 180);
+  const stars = f.nodes.filter(node => node.type === 'Button' && /^评分\d星$/.test(node.props.accessibilityText || ''));
+  assert.ok(stars.every(node => node.props.width === 26 && node.props.height === 28 && node.props.fontSize === 22 && node.props.padding === 0));
+  assert.equal(f.button('关闭当前互动卡片').props.padding, 0, 'native Button padding must not clip the compact close glyph');
+  assert.ok(stars.reduce((width, node) => width + node.props.width, 0) + stars[0].parent.args[0].space * 4 <= 180 - 12,
+    'five compact stars must fit the portrait card without horizontal clipping');
+  f.panel.fullscreen = true; f.build(); assertCompactWidth(f.nodes[0], 210);
 });
 
 test('real grade buttons ignore busy, completed and stale card clicks', () => {
@@ -51,16 +57,39 @@ test('real vote options submit their protocol option ID and disable custom/previ
   f.panel.current = {...card, selectedOptionId: 2}; normal.props.onClick(); assert.equal(f.callbacks.length, 1);
   f.build(); assert.equal(f.button('投票选项2').props.enabled, false);
   const scroll = f.nodes.find(node => node.type === 'Scroll');
-  assert.ok((scroll.props.height || scroll.props.constraintSize?.maxHeight) <= 90);
+  assert.equal(scroll.props.height, 60);
   assert.ok(!scroll.children.some(node => node.props.accessibilityText === '关闭当前互动卡片'));
-  assert.ok(f.nodes.some(node => node.type === 'Column' && node.props.constraintSize?.maxHeight === 140));
+  assertCompactVoteLayout(f, 104, 180, 28);
   f.panel.fullscreen = true; f.build();
-  assert.ok(f.nodes.some(node => node.type === 'Scroll' && (node.props.height || node.props.constraintSize?.maxHeight) >= 220));
-  assert.ok(f.nodes.some(node => node.type === 'Column' && node.props.constraintSize?.maxHeight === 280));
+  assertCompactVoteLayout(f, 120, 210, 32);
 });
 
 function descendants(node) {
   return node.children.flatMap(child => [child, ...descendants(child)]);
+}
+
+function assertCompactWidth(rootNode, maximum) {
+  const width = typeof rootNode.props.width === 'number' ? rootNode.props.width : rootNode.props.constraintSize?.maxWidth;
+  assert.equal(width, maximum, 'interaction footprint must use the compact portrait/fullscreen width');
+  if (rootNode.props.constraintSize?.maxWidth !== undefined) assert.ok(rootNode.props.constraintSize.maxWidth <= maximum);
+}
+
+function assertCompactVoteLayout(f, height, width, optionHeight) {
+  assertCompactWidth(f.nodes[0], width);
+  const scroll = f.nodes.find(node => node.type === 'Scroll'), card = scroll.parent;
+  const header = card.children.find(node => node.type === 'Row');
+  assert.equal(card.props.constraintSize.maxHeight, height);
+  assert.equal(card.props.padding, 6); assert.equal(card.args[0].space, 4); assert.equal(header.props.height, 28);
+  assert.equal(scroll.props.height, height - header.props.height - card.args[0].space - card.props.padding * 2);
+  const buttons = descendants(scroll).filter(node => node.type === 'Button' && /^投票选项/.test(node.props.accessibilityText || ''));
+  assert.ok(buttons.every(button => button.props.height === optionHeight));
+  const close = f.button('关闭当前互动卡片'); assert.equal(close.props.width, 24); assert.equal(close.props.height, 24);
+  const question = descendants(header).find(node => node.type === 'Text' && node.args[0] === f.panel.current.title);
+  assert.equal(question.props.fontSize, 10); assert.equal(question.props.maxLines, 1);
+  for (const button of buttons) {
+    const label = descendants(button).find(node => node.type === 'Text' && node.args[0] === button.props.accessibilityDescription);
+    assert.equal(label.props.fontSize, 11); assert.equal(label.props.maxLines, 1);
+  }
 }
 
 const voteCard = (selectedOptionId = 0, votes = [30, 70]) => ({...grade(), id: 'two-answer-vote', kind: 'vote',
@@ -72,14 +101,15 @@ const voteCard = (selectedOptionId = 0, votes = [30, 70]) => ({...grade(), id: '
 
 test('portrait vote reserves a measured body for both answers and keeps its question/close outside scrolling', () => {
   const f = fixture(voteCard());
-  for (const availableHeight of [120, 132, 140]) {
+  for (const availableHeight of [104, 120, 132, 140]) {
     f.panel.availableHeight = availableHeight; f.build();
+    assertCompactVoteLayout(f, 104, 180, 28);
     const scroll = f.nodes.find(node => node.type === 'Scroll');
     const first = f.button('投票选项2'), second = f.button('投票选项9');
     assert.ok(first && second);
     assert.equal(descendants(scroll).some(node => node.type === 'Text' && node.args[0] === f.panel.current.title), false,
       'question must not consume the answer viewport');
-    assert.equal(first.props.height, second.props.height); assert.ok(first.props.height >= 30);
+    assert.equal(first.props.height, second.props.height); assert.equal(first.props.height, 28);
     assert.ok(scroll.props.height >= first.props.height + second.props.height + first.parent.args[0].space,
       'both real answer buttons must fit before scrolling');
     assert.equal(scroll.props.flexShrink, 0, 'parent must not shrink the reserved answer viewport');
@@ -113,6 +143,7 @@ test('confirmed vote rebuild shows proportional bars, selected state and prevent
 
 test('both confirmed answer labels and comparison bars fit the smallest supported player space', () => {
   const f = fixture(voteCard(9)); f.panel.availableHeight = 104; f.build();
+  assertCompactVoteLayout(f, 104, 180, 28);
   const scroll = f.nodes.find(node => node.type === 'Scroll');
   for (const button of [f.button('投票选项2'), f.button('投票选项9')]) {
     const content = button.children.find(node => node.type === 'Column');
@@ -127,13 +158,17 @@ test('both confirmed answer labels and comparison bars fit the smallest supporte
 
 test('server-selected zero-vote results remain finite and all multi-option choices scroll in fullscreen', () => {
   const f = fixture(voteCard(2, [0, 0])); f.panel.fullscreen = true; f.panel.availableHeight = 270; f.build();
+  assertCompactVoteLayout(f, 120, 210, 32);
   assert.deepEqual(f.nodes.filter(node => node.type === 'Progress').map(node => node.args[0].value), [0, 0]);
   assert.equal(f.button('投票选项2').props.enabled, false);
   f.panel.current = {...voteCard(), options: [...voteCard().options,
     {id: 17, text: '第三个答案', votes: 0, hasSelfDef: false}, {id: 22, text: '第四个答案', votes: 0, hasSelfDef: false}]};
   f.build(); const scroll = f.nodes.find(node => node.type === 'Scroll');
   assert.equal(descendants(scroll).filter(node => node.type === 'Button').length, 4);
-  assert.equal(scroll.props.scrollBar, 'Auto'); assert.ok(scroll.props.height > 90);
+  assert.equal(scroll.props.scrollBar, 'Auto'); assert.equal(scroll.props.height, 76);
+  const first = f.button('投票选项2'), second = f.button('投票选项9');
+  assert.ok(first.props.height + second.props.height + first.parent.args[0].space <= scroll.props.height,
+    'fullscreen stays compact while its first two answers fit and additional answers remain scrollable');
   f.button('投票选项22').props.onClick(); assert.deepEqual(f.callbacks, [['vote', 'two-answer-vote', 22]]);
 });
 

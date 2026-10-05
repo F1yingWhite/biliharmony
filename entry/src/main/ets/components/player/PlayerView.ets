@@ -557,14 +557,18 @@ export struct PlayerView {
     openVideo: (target: VideoInteractionLink): void => this.onInteractionVideo(target),
   });
 
+  private interactionTopMargin(): number {
+    return this.fullscreen ? 52 : 42;
+  }
+
   private interactionBottomMargin(): number {
-    return this.showControls ? (this.fullscreen ? 92 : 48) : 12;
+    return this.fullscreen ? 92 : 48;
   }
 
   private interactionAvailableHeight(): number {
     const height: number = this.interactionViewportHeight > 0 ? this.interactionViewportHeight :
       this.danmakuFixedHeight > 0 ? this.danmakuFixedHeight : this.dmEngine.height;
-    return Math.max(0, height - this.interactionBottomMargin() - 8);
+    return Math.max(0, height - this.interactionTopMargin() - this.interactionBottomMargin() - 8);
   }
 
   private onInteractionViewportChanged(height: Length): void {
@@ -2046,20 +2050,25 @@ export struct PlayerView {
         this.interactionAvailableHeight() >= 104 &&
         !this.compactMode && !this.endScreenOpen && this.errorText.length === 0 &&
         !this.appInBackground && !this.showMoreMenu && !this.showSideDrawer) {
-        PlayerInteractionPanel({
-          current: this.interactionCard,
-          fullscreen: this.fullscreen,
-          availableHeight: this.interactionAvailableHeight(),
-          loading: this.interactionLoading,
-          submitting: this.interactionSubmitting,
-          message: this.interactionMessage,
-          onGrade: (id: string, stars: number) => { this.interactionCtl.submitGrade(id, stars); },
-          onVote: (id: string, optionId: number) => { this.interactionCtl.submitVote(id, optionId); },
-          onLink: (id: string) => { this.interactionCtl.openLink(id); },
-          onDismiss: (id: string) => { this.interactionCtl.dismiss(id); },
-        })
-        .align(Alignment.BottomEnd)
-        .margin({ right: 10, bottom: this.interactionBottomMargin() })
+        Row() {
+          PlayerInteractionPanel({
+            current: this.interactionCard,
+            fullscreen: this.fullscreen,
+            availableHeight: this.interactionAvailableHeight(),
+            loading: this.interactionLoading,
+            submitting: this.interactionSubmitting,
+            message: this.interactionMessage,
+            onGrade: (id: string, stars: number) => { this.interactionCtl.submitGrade(id, stars); },
+            onVote: (id: string, optionId: number) => { this.interactionCtl.submitVote(id, optionId); },
+            onLink: (id: string) => { this.interactionCtl.openLink(id); },
+            onDismiss: (id: string) => { this.interactionCtl.dismiss(id); },
+          })
+        }
+        .width('100%')
+        .justifyContent(FlexAlign.End)
+        .padding({ right: 10 })
+        .position({ right: 0, bottom: this.interactionBottomMargin() })
+        .hitTestBehavior(HitTestMode.Transparent)
         .zIndex(90)
       }
 
