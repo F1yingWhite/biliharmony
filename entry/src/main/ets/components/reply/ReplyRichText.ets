@@ -7,20 +7,13 @@
  * 一个高 item，表情作为下一个 flex item 必然落到新行——行尾哪怕还有空位，
  * 表情也会"莫名其妙单独成一行"。行内流下表情与文字同流排版，换行与官方一致。
  *
- * 点击：本 SDK 无 onSpanClick / 文本测量 API，无法按 span 命中。改为 Text 整体
- *  onTouch + 轻量布局模拟：CJK 全角=fontSize、半角≈0.52*fontSize、表情=emoteSize，
- * 按 contentWidth 模拟折行并记录每个片段占用的 (行号, x 区间)。lineHeight 固定，
- * y/lineHeight 精确落到行号，x 在行内区间判定，足够命中 @/空降/BV 这类短片段。
+ * 点击交给 Span 原生命中，跟随真实字形、换行和表情排版。Text 只记录触摸移动，
+ * 防止滚动或长按复制后的同一触点顺带打开链接，不再估算文字点击区域。
  */
 import { parseReplyContent, ReplyRenderPart } from '../../common/ReplyContentParser';
 import { EmoteImageCache } from '../../common/EmoteImageCache';
 import { ReplyItem } from '../../model/Models';
 
-/** 点击命中所需的片段布局盒：segs 为 [行号, startX, endX, 行号, startX, endX, ...]。 */
-class PartHit {
-  part: ReplyRenderPart = new ReplyRenderPart();
-  segs: number[] = [];
-}
 @Component
 export struct ReplyRichText {
   @Prop @Watch('onReplyChanged') reply: ReplyItem = new ReplyItem();
@@ -39,15 +32,12 @@ export struct ReplyRichText {
   };
   onLongPress: () => void = () => {
   };
-  /** 正文宽度（vp）：onAreaChange 提供，布局模拟与点击命中都需要。 */
-  private contentWidth: number = 0;
-  private hits: PartHit[] = [];
-  /** 各行实际高度（vp）：含 2x 大表情的行会比 lineHeight 高，命中测试按累计行顶落行。 */
-  private lineHeights: number[] = [];
   /** 触点按下坐标：判断"点按"还是"划过/滚动"，避免划动松手误触发跳转。 */
   private tapDownX: number = 0;
   private tapDownY: number = 0;
   private tapDownValid: boolean = false;
+  private tapMoved: boolean = false;
+  private actionGeneration: number = 0;
   /** 长按已处理后吞掉同一触点的 Up，避免顺带打开 @/时间点/BV 链接。 */
   private longPressHandled: boolean = false;
 
@@ -56,8 +46,17 @@ export struct ReplyRichText {
   }
 
   onReplyChanged(): void {
+    this.actionGeneration++;
+    this.tapDownValid = false;
+    this.tapMoved = false;
+    this.longPressHandled = false;
     this.plainHeight = 0;
     this.primeEmotes();
+  }
+
+  aboutToDisappear(): void {
+    this.actionGeneration++;
+    this.tapDownValid = false;
   }
 
   /** 把正文里出现的表情图下载到本地缓存；成功回填 ImageSpan 本地路径，
@@ -94,109 +93,6 @@ export struct ReplyRichText {
     }
   }
 
-  private isFullWidth(code: number): boolean {
-    return code > 0x2E7F;
-  }
-
-  private charWidth(code: number): number {
-    return this.isFullWidth(code) ? this.fontSize : this.fontSize * 0.52;
-  }
-
-  /** 模拟行内折行，记录每个片段占用的 (行号, x 区间)，供 onTouch 命中。
-   *  大表情会让所在行变高，lineHeights 按行累计用于 y→行号 的精确落行。 */
-  private rebuildHits(): void {
-    if (this.contentWidth <= 0) {
-      this.hits = [];
-      this.lineHeights = [];
-      return;
-    }
-    const parts: Array<ReplyRenderPart> = parseReplyContent(this.reply);
-    this.hits = [];
-    this.lineHeights = [this.lineHeight];
-    let line: number = 0;
-    let x: number = 0;
-    for (let pi: number = 0; pi < parts.length; pi++) {
-      const part: ReplyRenderPart = parts[pi];
-      const hit: PartHit = new PartHit();
-      hit.part = part;
-      if (part.image.length > 0) {
-        const w: number = part.imageSize > 1 ? this.emoteSize * 2 : this.emoteSize;
-        if (x > 0 && x + w > this.contentWidth) {
-          line++;
-          x = 0;
-          this.lineHeights.push(this.lineHeight);
-        }
-        if (w > this.lineHeights[line]) {
-          this.lineHeights[line] = w;
-        }
-        hit.segs.push(line, x, x + w);
-        x += w;
-      } else {
-        let segLine: number = line;
-        let segStart: number = x;
-        for (let ci: number = 0; ci < part.text.length; ci++) {
-          const code: number = part.text.charCodeAt(ci);
-          if (code === 10) {
-            if (x > segStart) {
-              hit.segs.push(segLine, segStart, x);
-            }
-            line++;
-            x = 0;
-            this.lineHeights.push(this.lineHeight);
-            segLine = line;
-            segStart = 0;
-            continue;
-          }
-          const w: number = this.charWidth(code);
-          if (x > 0 && x + w > this.contentWidth) {
-            hit.segs.push(segLine, segStart, x);
-            line++;
-            x = 0;
-            this.lineHeights.push(this.lineHeight);
-            segLine = line;
-            segStart = 0;
-          }
-          x += w;
-        }
-        if (x > segStart) {
-          hit.segs.push(segLine, segStart, x);
-        }
-      }
-      this.hits.push(hit);
-    }
-  }
-
-  /** ty（相对 Text 顶）→ 行号：按 lineHeights 累计行高向下落，兼容大表情增高行。 */
-  private lineAt(ty: number): number {
-    let y: number = ty;
-    for (let i: number = 0; i < this.lineHeights.length; i++) {
-      if (y < this.lineHeights[i]) {
-        return i;
-      }
-      y -= this.lineHeights[i];
-    }
-    return -1;
-  }
-
-  private hitAt(tx: number, ty: number): ReplyRenderPart | null {
-    if (this.hits.length === 0 || this.lineHeights.length === 0) {
-      return null;
-    }
-    const line: number = this.lineAt(ty);
-    if (line < 0) {
-      return null;
-    }
-    for (let hi: number = 0; hi < this.hits.length; hi++) {
-      const segs: number[] = this.hits[hi].segs;
-      for (let s: number = 0; s + 2 < segs.length; s += 3) {
-        if (segs[s] === line && tx >= segs[s + 1] && tx < segs[s + 2]) {
-          return this.hits[hi].part;
-        }
-      }
-    }
-    return null;
-  }
-
   /** ImageSpan 源：只读本地缓存，未就绪保持原有尺寸占位。 */
   private emoteSrc(image: string): string {
     const local: string | undefined = this.emoteLocal.get(image);
@@ -216,6 +112,21 @@ export struct ReplyRichText {
   private isClickable(part: ReplyRenderPart): boolean {
     return part.mentionMid > 0 || part.seekSeconds >= 0 || part.bvid.length > 0 || part.aid > 0 ||
       part.url.length > 0;
+  }
+
+  private spanClick(part: ReplyRenderPart): () => void {
+    const generation: number = this.actionGeneration;
+    const oid: number = this.reply.oid;
+    const type: number = this.reply.type;
+    const rpid: number = this.reply.rpid;
+    const key: string = part.key;
+    return (): void => {
+      if (generation !== this.actionGeneration || oid !== this.reply.oid || type !== this.reply.type ||
+        rpid !== this.reply.rpid || this.tapMoved || this.longPressHandled) return;
+      const current: ReplyRenderPart | undefined = parseReplyContent(this.reply)
+        .find((value: ReplyRenderPart): boolean => value.key === key);
+      if (current !== undefined && this.isClickable(current)) this.onOpenPart(current);
+    };
   }
 
   private isPlainContent(): boolean {
@@ -313,49 +224,38 @@ export struct ReplyRichText {
           } else {
             Span(part.text)
               .fontColor(this.isClickable(part) ? this.linkColor() : this.plainColor())
+              .onClick(this.spanClick(part))
           }
-        }, (part: ReplyRenderPart) => part.key)
+        }, (part: ReplyRenderPart) => part.key + ':' + String(this.actionGeneration))
       }
       .fontSize(this.fontSize)
       .lineHeight(this.lineHeight)
       .width('100%')
       .constraintSize({ minHeight: this.richContentMinHeight() })
-      .onAreaChange((_o: Area, n: Area): void => {
-        this.contentWidth = Number(n.width);
-        this.rebuildHits();
-      })
       .onTouch((ev: TouchEvent): void => {
         if (ev.type === TouchType.Down) {
           const d: TouchObject = ev.touches[0];
           this.tapDownX = d.x;
           this.tapDownY = d.y;
           this.tapDownValid = true;
+          this.tapMoved = false;
           this.longPressHandled = false;
           return;
         }
         if (ev.type === TouchType.Cancel) {
           this.tapDownValid = false;
-          this.longPressHandled = false;
+          this.tapMoved = true;
           return;
         }
-        if (ev.type === TouchType.Up && this.longPressHandled) {
-          this.tapDownValid = false;
-          this.longPressHandled = false;
+        if ((ev.type !== TouchType.Move && ev.type !== TouchType.Up) || !this.tapDownValid) {
           return;
         }
-        if (ev.type !== TouchType.Up || !this.tapDownValid) {
-          return;
-        }
-        this.tapDownValid = false;
         const t: TouchObject = ev.touches[0];
-        // 位移超过 10vp 视为划动/滚动，不触发跳转
+        // Keep these flags through Up: native Span.onClick may follow Text.onTouch.
         if (Math.abs(t.x - this.tapDownX) > 10 || Math.abs(t.y - this.tapDownY) > 10) {
-          return;
+          this.tapMoved = true;
         }
-        const part: ReplyRenderPart | null = this.hitAt(t.x, t.y);
-        if (part !== null && this.isClickable(part)) {
-          this.onOpenPart(part);
-        }
+        if (ev.type === TouchType.Up) this.tapDownValid = false;
       })
       .gesture(
         LongPressGesture({ fingers: 1, repeat: false, duration: 450 })

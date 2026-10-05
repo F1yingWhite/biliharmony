@@ -1,7 +1,7 @@
 import { BiliApi } from '../api/BiliApi';
 import { DynamicItem, VideoDetail, VideoPage } from '../model/Models';
-import { ArticlePageParam, BangumiDetailParam, DynamicDetailParam, LiveRoomParam, UserSpaceParam, VideoDetailParam,
-  NAV_ARTICLE, NAV_BANGUMI_DETAIL, NAV_DYNAMIC_DETAIL, NAV_LIVE_ROOM, NAV_USER_SPACE, NAV_VIDEO_DETAIL } from './AppRouter';
+import { ArticlePageParam, BangumiDetailParam, DynamicDetailParam, LiveRoomParam, SearchPageParam, UserSpaceParam, VideoDetailParam,
+  NAV_ARTICLE, NAV_BANGUMI_DETAIL, NAV_DYNAMIC_DETAIL, NAV_LIVE_ROOM, NAV_SEARCH, NAV_USER_SPACE, NAV_VIDEO_DETAIL } from './AppRouter';
 import { BiliLinkTarget } from './BiliLinkParser';
 
 export class BiliLinkNavigation {
@@ -46,6 +46,9 @@ export async function createBiliLinkNavigation(target: BiliLinkTarget, title: st
   } else if (target.kind === 'article') {
     const param: ArticlePageParam = { id: target.articleId, title: title };
     navigation.name = NAV_ARTICLE; navigation.param = param;
+  } else if (target.kind === 'search') {
+    const param: SearchPageParam = { keyword: target.keyword };
+    navigation.name = NAV_SEARCH; navigation.param = param;
   }
   return navigation;
 }

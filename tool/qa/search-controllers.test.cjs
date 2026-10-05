@@ -38,6 +38,68 @@ test('search aggregate pagination keeps stable data sources and sends only fresh
   assert.notEqual(snapshots.at(-1), snapshots.at(-2));
 });
 
+for (const category of ['all', 'video']) {
+  for (const terminal of ['empty', 'duplicate']) {
+    test(`saturated video total in ${category} search continues past 50 controller pages and stops on ${terminal} results`, async () => {
+      const calls = [];
+      const pageVideos = page => Array.from({length: 20}, (_value, index) => video((page - 1) * 20 + index + 1));
+      const responseVideos = page => page <= 51 ? pageVideos(page) : terminal === 'empty' ? [] : pageVideos(51);
+      const load = loader({'api/SearchApi': {SearchApi: {
+        searchAll: async (_keyword, page) => {
+          calls.push(['all', page]);
+          return aggregate(responseVideos(page), 1000, page === 1 ? [{type: 'bili_user', users: [{mid: 7}]}] : []);
+        },
+        searchVideosByType: async (_keyword, page) => {
+          calls.push(['video', page]); return {videos: responseVideos(page), numResults: 1000};
+        },
+      }}});
+      const ctl = new (load('components/search/SearchResultsController').SearchResultsController)();
+      const query = new (load('components/search/SearchQuery').SearchQuery)();
+      await ctl.submit('openutau', query);
+      if (category === 'video') await ctl.select(1, query);
+      const source = category === 'all' ? ctl.store.allVideos : ctl.store.videos;
+      const firstRow = source.getAll()[0];
+      for (let page = 2; page <= 50; page++) await ctl.loadMore();
+      assert.deepEqual(calls.filter(([kind]) => kind === category).map(([, page]) => page),
+        Array.from({length: 50}, (_value, index) => index + 1), 'controller must drive every page rather than patch private page state');
+      assert.equal(source.totalCount(), 1000);
+      assert.equal(ctl.view.totals[1], 1000);
+      assert.equal(ctl.view.hasMore, true, 'the saturated protocol count is not an exhaustion signal');
+      await ctl.loadMore();
+      assert.equal(calls.at(-1)[1], 51); assert.equal(source.totalCount(), 1020);
+      assert.equal(source.getAll()[0], firstRow, 'pagination preserves existing lazy rows');
+      assert.deepEqual(source.getAll().slice(-20).map(item => item.aid), pageVideos(51).map(item => item.aid));
+      assert.equal(ctl.view.hasMore, true);
+      await ctl.loadMore();
+      assert.equal(calls.at(-1)[1], 52); assert.equal(source.totalCount(), 1020);
+      assert.equal(ctl.view.hasMore, false, 'an empty or all-duplicate page must terminate capped video pagination');
+      const count = calls.length; await ctl.loadMore(); assert.equal(calls.length, count);
+    });
+  }
+}
+
+test('small video totals and non-video totals remain genuine controller pagination limits', async () => {
+  for (const category of ['all', 'video', 'user']) {
+    const calls = [];
+    const pageVideos = page => Array.from({length: 20}, (_value, index) => video((page - 1) * 20 + index + 1));
+    const load = loader({'api/SearchApi': {SearchApi: {
+      searchAll: async (_keyword, page) => {calls.push(['all', page]); return aggregate(pageVideos(page), 40);},
+      searchVideosByType: async (_keyword, page) => {calls.push(['video', page]); return {videos: pageVideos(page), numResults: 40};},
+      searchUsers: async (_keyword, page) => {calls.push(['user', page]); return {
+        users: Array.from({length: 20}, (_value, index) => ({mid: (page - 1) * 20 + index + 1})), numResults: 1000};},
+    }}});
+    const ctl = new (load('components/search/SearchResultsController').SearchResultsController)();
+    const query = new (load('components/search/SearchQuery').SearchQuery)();
+    await ctl.submit('query', query);
+    if (category !== 'all') await ctl.select(category === 'video' ? 1 : 6, query);
+    for (let page = 2; page <= (category === 'user' ? 50 : 2); page++) await ctl.loadMore();
+    assert.equal(ctl.view.hasMore, false);
+    const count = calls.length; await ctl.loadMore(); assert.equal(calls.length, count);
+    assert.deepEqual(calls.filter(([kind]) => kind === category).map(([, page]) => page),
+      Array.from({length: category === 'user' ? 50 : 2}, (_value, index) => index + 1));
+  }
+});
+
 for (const [tab, field, sourceName, key] of [
   [1, 'videos', 'videos', 'aid'], [2, 'media', 'bangumi', 'seasonId'], [3, 'media', 'films', 'seasonId'],
   [4, 'rooms', 'live', 'roomId'], [5, 'articles', 'articles', 'id'], [6, 'users', 'users', 'mid']

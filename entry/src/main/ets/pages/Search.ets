@@ -24,6 +24,7 @@ import { SearchArticleCard } from '../components/search/SearchArticleCard';
 
 @Component
 export struct SearchPage {
+  @Prop initialKeyword: string = '';
   @State keyword: string = '';
   @State searchTab: number = 0;
   @State showFilter: boolean = false;
@@ -37,29 +38,46 @@ export struct SearchPage {
   private resultsController: SearchResultsController = new SearchResultsController();
   private discoveryController: SearchDiscoveryController = new SearchDiscoveryController();
   private lifecycle: number = 0;
+  private active: boolean = false;
+  private initialKeywordConsumed: boolean = false;
 
   async aboutToAppear(): Promise<void> {
     const lifecycle: number = ++this.lifecycle;
+    this.active = true;
+    const routeKeyword: string = !this.initialKeywordConsumed && typeof this.initialKeyword === 'string' ?
+      this.initialKeyword.trim() : '';
+    this.initialKeywordConsumed = true;
+    // Capture the compatibility entry before awaiting discovery: an older page
+    // must never consume a keyword subsequently written for another destination.
+    const storedPrefill: string | undefined = AppStorage.get<string>('searchPrefillKeyword');
+    const prefill: string = typeof storedPrefill === 'string' ? storedPrefill.trim() : '';
+    if (typeof storedPrefill === 'string' && storedPrefill.length > 0) {
+      AppStorage.setOrCreate<string>('searchPrefillKeyword', '');
+    }
+    const initial: string = routeKeyword.length > 0 ? routeKeyword : prefill;
     this.resultsController.onChange = (view: SearchResultsView): void => {
+      if (!this.active || lifecycle !== this.lifecycle) return;
       this.results = view;
       this.searchTab = view.tab;
     };
-    this.discoveryController.onChange = (view: SearchDiscoveryView): void => { this.discovery = view; };
+    this.discoveryController.onChange = (view: SearchDiscoveryView): void => {
+      if (this.active && lifecycle === this.lifecycle) this.discovery = view;
+    };
     this.discoveryController.onDefault = (keyword: string): void => {
+      if (!this.active || lifecycle !== this.lifecycle) return;
       if (this.suggestedKeyword.length === 0) AppStorage.setOrCreate<string>('searchSuggestedKeyword', keyword);
     };
     this.resultsController.activate();
     await this.discoveryController.activate();
-    if (lifecycle !== this.lifecycle) return;
-    const prefill: string = AppStorage.get<string>('searchPrefillKeyword') ?? '';
-    if (prefill.length > 0) {
-      AppStorage.setOrCreate<string>('searchPrefillKeyword', '');
-      this.keyword = prefill;
+    if (!this.active || lifecycle !== this.lifecycle) return;
+    if (initial.length > 0) {
+      this.keyword = initial;
       this.submitSearch();
     }
   }
 
   aboutToDisappear(): void {
+    this.active = false;
     this.lifecycle++;
     this.resultsController.dispose();
     this.discoveryController.dispose();
@@ -72,6 +90,7 @@ export struct SearchPage {
   }
 
   submitSearch(): void {
+    if (!this.active) return;
     if (this.keyword.trim().length === 0) this.keyword = this.suggestedKeyword;
     const keyword: string = this.keyword.trim();
     if (keyword.length === 0) return;
@@ -116,7 +135,8 @@ export struct SearchPage {
   ResultTabBar(index: number) {
     Column({ space: 3 }) {
       Text(index === 0 ? '综合' :
-        (index === 1 ? (this.results.totals[1] >= 0 ? '视频 ' + formatCount(this.results.totals[1]) : '视频') :
+        (index === 1 ? (this.results.totals[1] >= 0 ? '视频 ' +
+          (this.results.totals[1] === 1000 ? '1000+' : formatCount(this.results.totals[1])) : '视频') :
         (index === 2 ? (this.results.totals[2] >= 0 ? '番剧 ' + formatCount(this.results.totals[2]) : '番剧') :
         (index === 3 ? (this.results.totals[3] >= 0 ? '影视 ' + formatCount(this.results.totals[3]) : '影视') :
         (index === 4 ? (this.results.totals[4] >= 0 ? '直播 ' + formatCount(this.results.totals[4]) : '直播') :

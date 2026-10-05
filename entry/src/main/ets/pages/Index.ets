@@ -22,7 +22,7 @@ import { GlassHeaderBar } from '../components/GlassHeaderBar';
 import { AppNavStack, APP_ROOT_SNAPSHOT_ID, NAV_SEARCH, NAV_VIDEO_DETAIL, NAV_LOGIN, NAV_USER_SPACE, NAV_MESSAGES,
   NAV_HISTORY, NAV_FAVORITES,
   NAV_WATCH_LATER, NAV_LIVE_ROOM, NAV_IMAGE_VIEWER, NAV_DYNAMIC_DETAIL, NAV_DOWNLOAD_CENTER,
-  VideoDetailParam, UserSpaceParam, LiveRoomParam, NAV_NETWORK_PRIVACY,
+  VideoDetailParam, SearchPageParam, UserSpaceParam, LiveRoomParam, NAV_NETWORK_PRIVACY,
   ImageViewerParam, DynamicDetailParam, NAV_RELATION_LIST, RelationListParam, NAV_BANGUMI_DETAIL,
   BangumiDetailParam, NAV_RANK, NAV_ARTICLE, ArticlePageParam, NAV_BANGUMI_LIST, NAV_BANGUMI_INDEX, NAV_ZONE,
   NAV_BLACK_LIST, NAV_LIVE_ZONE, NAV_FAV_SORT, NAV_BANGUMI_TIMELINE, HERO_NAV_TRANSITION_ACTIVE_KEY,
@@ -338,6 +338,12 @@ struct Index {
     return p;
   }
 
+  private static searchKeyword(param: Object): string {
+    if (param === null || param === undefined || typeof param !== 'object') return '';
+    const p: SearchPageParam = param as SearchPageParam;
+    return typeof p.keyword === 'string' ? p.keyword.trim() : '';
+  }
+
   @Builder
   InvalidParamContent() {
     Column() {
@@ -359,7 +365,7 @@ struct Index {
       .stdDestination(() => Immersive.setBarIcons(this.isDark, this.isDark), () => this.syncBarColors())
     } else if (name === NAV_SEARCH) {
       NavDestination() {
-        SearchPage()
+        SearchPage({ initialKeyword: Index.searchKeyword(param) })
       }
       .stdDestination(() => {
         Immersive.setBarIcons(this.isDark, this.isDark);

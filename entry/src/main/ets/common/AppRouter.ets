@@ -41,6 +41,11 @@ export const HERO_NAV_TRANSITION_DURATION_KEY: string = 'heroNavTransitionDurati
 /** 页面内 hero 动画完成后递增，通知 Navigation 立即提交本次自定义转场。 */
 export const HERO_NAV_TRANSITION_FINISH_REQUEST_KEY: string = 'heroNavTransitionFinishRequest';
 
+/** 搜索页独立入口参数，避免与标签/话题的兼容预填键共享本次查询。 */
+export interface SearchPageParam {
+  keyword: string;
+}
+
 /** 视频详情页跳转参数 */
 export interface VideoDetailParam {
   bvid: string;

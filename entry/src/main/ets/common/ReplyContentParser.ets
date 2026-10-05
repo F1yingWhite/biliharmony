@@ -5,7 +5,7 @@ import { normalizeBiliWebUrl, parseBiliLink, BiliLinkTarget } from './BiliLinkPa
 // 模块级正则与结果缓存：列表重渲染会反复解析同一条评论，避免重复建正则与重复解析
 const BVID_REGEX: RegExp = /BV[0-9A-Za-z]{10}/;
 /** 普通网页链接；末尾常见中英文标点在命中后剥离，避免把句号带进浏览器。 */
-const WEB_URL_REGEX: RegExp = /(?:(?:https?:\/\/|\/\/)[^\s<>"'，。！？；、（）【】《》\[\]{}]+|\b(?:(?:(?:www|m|space|live|t)\.)?bilibili\.com|(?:www\.)?b23\.tv)\/[^\s<>"'，。！？；、（）【】《》\[\]{}]+)/i;
+const WEB_URL_REGEX: RegExp = /(?:(?:https?:\/\/|\/\/)[^\s<>"'，。！？；、（）【】《》\[\]{}]+|(?:^|[^A-Za-z0-9._@-])((?:(?:(?:www|m|space|live|t|search)\.)?bilibili\.com|(?:www\.)?b23\.tv)\/[^\s<>"'，。！？；、（）【】《》\[\]{}]+))/i;
 const URL_TRAILING_PUNCTUATION_REGEX: RegExp = /[.,;!?，。！？；：、]+$/;
 const AID_REGEX: RegExp = /(?:^|[^A-Za-z])av(\d{1,18})/i;
 const ACTION_REGEX: RegExp = /(BV[0-9A-Za-z]{10}|(?:^|\s|[（(【\[])(?:\d{1,2}:)?[0-5]?\d:[0-5]\d|(?:^|[^A-Za-z])av\d{1,18})/i;
@@ -213,9 +213,10 @@ export function parseReplyContent(item: ReplyItem): Array<ReplyRenderPart> {
     }
     const webUrlMatch: RegExpExecArray | null = WEB_URL_REGEX.exec(rest);
     if (webUrlMatch !== null && webUrlMatch.index < foundAt) {
-      const normalized: string = normalizedWebUrl(webUrlMatch[0]);
+      const rawUrl: string = webUrlMatch[1] ?? webUrlMatch[0];
+      const normalized: string = normalizedWebUrl(rawUrl);
       if (normalized.length > 0) {
-        foundAt = webUrlMatch.index;
+        foundAt = webUrlMatch.index + webUrlMatch[0].length - rawUrl.length;
         foundLength = normalized.length;
         foundEmote = null;
         foundJump = null;

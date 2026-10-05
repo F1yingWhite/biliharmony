@@ -84,6 +84,61 @@ test('whole production routing maps video, bangumi, user, dynamic, live and arti
   assert.deepEqual(f.external, []); assert.equal(f.requests.length, 0, 'direct supported links need no resolution network');
 });
 
+test('real comment search keywords retain their labels and open the app search with the decoded keyword', async () => {
+  const f = fixture();
+  const {ReplyItem} = f.load('model/Models');
+  const {parseReplyContent} = f.load('common/ReplyContentParser');
+  const jumps = Object.fromEntries(['oto', 'openutau'].map(keyword => [keyword, {
+    pc_url: '//search.bilibili.com/all?from_source=webcommentline_search&keyword=' + keyword +
+      '&seid=5391055258723124908&from_avid=116380644941208&from_comid=295782996513&search_half_screen=0',
+    app_url_schema: 'bilibili://search?from=appcommentline_search&keyword=' + keyword,
+  }]));
+  const reply = ReplyItem.from({rpid: 295782996513, oid: 116380644941208, type: 1,
+    content: {message: '修剪了一遍oto，放进openutau里一个一个地听了再修', jump_url: jumps}});
+  const parts = parseReplyContent(reply).filter(part => part.url);
+  assert.deepEqual(parts.map(part => part.text), ['oto', 'openutau']);
+  for (const part of parts) {
+    assert.equal(await f.controller.open(part.url, part.text), true);
+    assert.equal(f.external.length, 0, 'a blue comment keyword must stay in the app');
+    assert.ok(f.navigations.length > 0, 'the actual production link controller must navigate');
+    assert.equal(f.navigations.at(-1).name, 'Search');
+    assert.deepEqual(f.navigations.at(-1).param, {keyword: part.text});
+  }
+  assert.deepEqual(f.external, []);
+  assert.equal(f.requests.length, 0, 'search keywords should not need a redirect or detail lookup');
+});
+
+test('search URLs decode Chinese, spaces and literal plus once and match only the supported search host and path', async () => {
+  const f = fixture();
+  for (const [url, keyword] of [
+    ['https://search.bilibili.com/all?keyword=%E8%99%9A%E6%8B%9F%E6%AD%8C%E6%89%8B+OpenUTAU', '虚拟歌手 OpenUTAU'],
+    ['//search.bilibili.com/all/?keyword=C%2B%2B%20%252F', 'C++ %2F'],
+    ['search.bilibili.com/all?keyword=BV17x411w7KC', 'BV17x411w7KC'],
+  ]) {
+    assert.equal(await f.controller.open(url, '蓝色词'), true);
+    assert.equal(f.external.length, 0, 'search links must not invoke an external browser');
+    assert.equal(f.navigations.at(-1).name, 'Search');
+    assert.deepEqual(f.navigations.at(-1).param, {keyword});
+  }
+  const {parseBiliLink} = f.load('common/BiliLinkParser');
+  for (const url of ['https://search.bilibili.com.evil.invalid/all?keyword=oto',
+    'https://search.bilibili.com@evil.invalid/all?keyword=oto',
+    'https://example.invalid/all?keyword=oto', 'https://search.bilibili.com/unknown?keyword=oto',
+    'https://search.bilibili.com/all?keyword=', 'https://search.bilibili.com/all?keyword=%20%20',
+    'https://search.bilibili.com/all?keyword=%E8%ZZ', 'https://search.bilibili.com/all?keyword=%00oto']) {
+    assert.equal(parseBiliLink(url), null, url);
+  }
+  const searchPart = parserFixture().parse('试试 search.bilibili.com/all?keyword=oto。').find(part => part.url);
+  assert.equal(searchPart.url, 'https://search.bilibili.com/all?keyword=oto');
+  for (const prefix of ['evil.', 'x-', 'x_', 'x@']) {
+    const text = prefix + 'search.bilibili.com/all?keyword=oto';
+    const parts = parserFixture().parse(text);
+    assert.equal(parts.some(part => part.url), false, 'a bare URL must not extract a trusted domain suffix');
+    assert.equal(parts.map(part => part.text).join(''), text);
+  }
+  assert.deepEqual(f.external, []); assert.equal(f.requests.length, 0);
+});
+
 test('page/time links use actual video detail HTTP and existing CID continuation contract', async () => {
   const f = fixture();
   assert.equal(await f.controller.open('https://www.bilibili.com/video/BV17x411w7KC?p=2&t=90', '分P链接'), true);
@@ -103,6 +158,17 @@ test('b23 resolves its real redirect protocol without credentials or automatic r
   assert.equal(f.requests[0].options.maxRedirects, 0);
   assert.ok(!Object.keys(f.requests[0].options.header).some(key => /cookie|authorization/i.test(key)));
   assert.equal(f.destroyed.length, 1); assert.deepEqual(f.external, []);
+});
+
+test('a b23 redirect to a comment keyword search uses the same app search destination', async () => {
+  const f = fixture((_request, response) => Promise.resolve(response(302, {
+    Location: '//search.bilibili.com/all?keyword=openutau&from_source=webcommentline_search',
+  })));
+  assert.equal(await f.controller.open('https://b23.tv/keyword123', '关键词'), true);
+  assert.equal(f.navigations[0].name, 'Search');
+  assert.deepEqual(f.navigations[0].param, {keyword: 'openutau'});
+  assert.equal(f.requests.length, 1); assert.equal(f.destroyed.length, 1);
+  assert.deepEqual(f.external, []);
 });
 
 test('unsupported direct HTTP destinations open externally while unresolvable short links stay inside the app', async () => {
@@ -184,4 +250,13 @@ test('actual ReplyCard click routes full URLs through its production controller 
   card.destroyed = true; wrapped[0](); // The host may close the full-screen sheet before executing navigation.
   assert.equal(pushed[0][0], 'VideoDetail'); assert.equal(pushed[0][1].cid, 200); assert.equal(pushed[0][1].resumePosition, 90);
   assert.deepEqual(opened, []); assert.equal(stopped.length, 1);
+  card.destroyed = false;
+  card.openPart(parserFixture().parse('https://search.bilibili.com/all?keyword=openutau')[0]);
+  for (let i = 0; i < 5 && wrapped.length < 2; i++) await tick();
+  assert.equal(wrapped.length, 2); assert.equal(pushed.length, 1);
+  wrapped[1]();
+  assert.equal(opened.length, 0, 'the actual search click must not invoke UIAbilityContext.openLink');
+  assert.equal(pushed.length, 2, 'the search click must reach the production navigation wrapper');
+  assert.equal(pushed[1][0], 'Search'); assert.deepEqual(pushed[1][1], {keyword: 'openutau'});
+  assert.deepEqual(opened, []); assert.equal(stopped.length, 2);
 });

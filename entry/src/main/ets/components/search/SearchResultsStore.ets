@@ -68,11 +68,12 @@ function uniqueItems<T>(current: Array<T>, incoming: Array<T>, key: (item: T) =>
 }
 
 function updateSource<T>(source: BasicDataSource<T>, incoming: Array<T>, reset: boolean,
-  key: (item: T) => string, total: number): boolean {
+  key: (item: T) => string, total: number, saturatedVideoTotal: boolean = false): boolean {
   const fresh: Array<T> = uniqueItems(reset ? [] : source.getAll(), incoming, key);
   if (reset) source.reset(fresh);
   else source.append(fresh);
-  return incoming.length > 0 && source.totalCount() < total;
+  // 视频搜索的 1000 是接口饱和计数；续页是否结束应以实际新增视频为准。
+  return saturatedVideoTotal ? fresh.length > 0 : incoming.length > 0 && source.totalCount() < total;
 }
 
 /** 数据源的身份在页面生命周期内稳定，翻页只发送新增通知。 */
@@ -107,7 +108,7 @@ export class SearchResultsStore {
     if (tab === SearchCategory.All) return this.applyAll(result, reset);
     this.totals[tab] = result.total;
     if (tab === SearchCategory.Video) {
-      return updateSource(this.videos, result.videos, reset, videoKey, result.total);
+      return updateSource(this.videos, result.videos, reset, videoKey, result.total, result.total === 1000);
     }
     if (tab === SearchCategory.Bangumi || tab === SearchCategory.Film) {
       return updateSource(this.media(tab === SearchCategory.Bangumi), result.media, reset,
@@ -146,6 +147,7 @@ export class SearchResultsStore {
       sections.unshift(videoSection);
     }
     this.sections = sections;
+    if (this.totals[SearchCategory.Video] === 1000) return fresh.length > 0;
     return incoming.length > 0 && (this.totals[SearchCategory.Video] <= 0 ||
       this.allVideos.totalCount() < this.totals[SearchCategory.Video]);
   }

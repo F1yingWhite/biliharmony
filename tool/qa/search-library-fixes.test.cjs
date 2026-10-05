@@ -50,11 +50,11 @@ function environment(overrides = {}) {
     // Keep actual @State/private field defaults so newly added production state cannot be omitted by the fixture.
     const declarations = section(source, 'export struct ' + name + ' {', firstMethod)
       .replace('export struct ' + name, 'export class Harness')
-      .replace(/@(?:State|StorageProp|Watch)\s*(?:\([^)]*\))?\s*/g, '');
+      .replace(/@(?:Prop|State|StorageProp|Watch)\s*(?:\([^)]*\))?\s*/g, '');
     const methods = ranges.map(([start, end]) => section(source, start, end)).join('\n');
     return compile(declarations + methods + '\n}', file, globals).Harness;
   }
-  return { load, component };
+  return { load, component, compile };
 }
 function searchHarness(overrides = {}) {
   const calls = [];
@@ -74,14 +74,15 @@ function searchHarness(overrides = {}) {
   const { SearchQuery } = env.load('components/search/SearchQuery');
   return { controller: new SearchResultsController(), query: new SearchQuery(), calls, env };
 }
-function inputPage(controller, query) {
+function inputPage(controller, query, storage = new Map()) {
   const env = environment({ 'api/SearchApi': { SearchApi: {} } });
   const { SearchQuery } = env.load('components/search/SearchQuery');
   const { SearchResultsView } = env.load('components/search/SearchResultsController');
   const Harness = env.component('pages/Search', 'SearchPage', '  async aboutToAppear()', [
-    ['  onInput(value: string): void {', '  @Builder\n  SortRow()'],
+    ['  async aboutToAppear()', '  @Builder\n  SortRow()'],
   ], { SearchQuery, SearchResultsView, SearchDiscoveryView: class {},
     SearchResultsController: class {}, SearchDiscoveryController: class {},
+    AppStorage: { get: key => storage.get(key), setOrCreate: (key, value) => storage.set(key, value) },
     inputMethod: { getController: () => ({ hideTextInput: async () => {} }) } });
   const page = new Harness();
   page.resultsController = controller;
@@ -89,6 +90,88 @@ function inputPage(controller, query) {
   page.discoveryController = { input() {}, submit() {} };
   return page;
 }
+
+function initialSearchPage({initialKeyword = '', storage = new Map(), ready = Promise.resolve()} = {}) {
+  const search = searchHarness(), history = [];
+  const page = inputPage(search.controller, search.query, storage);
+  page.initialKeyword = initialKeyword;
+  page.discoveryController = { input() {}, activate: () => ready, dispose() {}, submit: keyword => history.push(keyword) };
+  return {...search, page, storage, history};
+}
+
+test('Index actual search destination validates and forwards only this route keyword', () => {
+  const env = environment(), source = read('pages/Index'), calls = [];
+  const helpers = section(source, '  private static asVideoDetailParam(', '  @Builder\n  InvalidParamContent()');
+  const branch = section(source, '    } else if (name === NAV_SEARCH) {', '    } else if (name === NAV_MESSAGES) {')
+    .replace('    } else if (name === NAV_SEARCH) {', '')
+    .replace('NavDestination() {', 'NavDestination(() => {')
+    .replace(/\n      }\n      \.stdDestination/, '\n      })\n      .stdDestination');
+  const chain = {stdDestination() {return this;}, backgroundColor() {return this;}};
+  const {render} = env.compile('class Index {\n' + helpers + '\n}\nexports.render = function(param) {\n' + branch + '\n};',
+    'pages/Index', {SearchPage: props => calls.push(props), NavDestination: child => {child(); return chain;},
+      Immersive: {setBarIcons() {}}});
+  for (const param of [undefined, null, {}, 42, 'not a route object', {keyword: 42}, {keyword: ''}, {keyword: '  '}]) {
+    render.call({isDark: false}, param);
+    assert.deepEqual(calls.at(-1), {initialKeyword: ''}, 'invalid or empty parameters preserve an empty search entry');
+  }
+  render.call({isDark: false}, {keyword: '  路由搜索词  '});
+  assert.deepEqual(calls.at(-1), {initialKeyword: '路由搜索词'});
+});
+
+test('search route keyword submits through the real results controller and cannot leak to the next empty entry', async () => {
+  const storage = new Map([['searchPrefillKeyword', '旧话题']]);
+  const first = initialSearchPage({initialKeyword: '  路由标题  ', storage});
+  await first.page.aboutToAppear(); await tick();
+  assert.equal(first.calls.filter(call => call.method === 'searchAll').length, 1);
+  assert.equal(first.calls[0].args[0], '路由标题');
+  assert.deepEqual(first.history, ['路由标题']);
+  assert.equal(storage.get('searchPrefillKeyword'), '');
+  first.page.aboutToDisappear();
+  const next = initialSearchPage({storage}); await next.page.aboutToAppear(); await tick();
+  assert.equal(next.calls.length, 0); assert.equal(next.page.keyword, '');
+});
+
+test('search route is consumed once while tag and topic prefill remain compatible', async () => {
+  const route = initialSearchPage({initialKeyword: 'route'}); await route.page.aboutToAppear(); await tick();
+  route.page.onInput('my edited draft'); route.page.aboutToDisappear();
+  await route.page.aboutToAppear(); await tick();
+  assert.equal(route.calls.length, 1); assert.equal(route.page.keyword, 'my edited draft');
+  const legacy = initialSearchPage({storage: new Map([['searchPrefillKeyword', '  动态话题  ']])});
+  await legacy.page.aboutToAppear(); await tick();
+  assert.equal(legacy.calls[0].args[0], '动态话题');
+  assert.equal(legacy.storage.get('searchPrefillKeyword'), '');
+});
+
+test('an ordinary empty entry still submits typed input and its suggested keyword while active', async () => {
+  const f = initialSearchPage(); await f.page.aboutToAppear();
+  f.page.onInput('  手动输入  '); f.page.submitSearch(); await tick();
+  f.page.suggestedKeyword = '默认推荐'; f.page.onInput(''); f.page.submitSearch(); await tick();
+  assert.deepEqual(f.calls.filter(call => call.method === 'searchAll').map(call => call.args[0]), ['手动输入', '默认推荐']);
+  assert.deepEqual(f.history, ['手动输入', '默认推荐']);
+});
+
+test('a departing search page cannot submit or consume a later page prefill after discovery resolves', async () => {
+  const ready = deferred(), storage = new Map([['searchPrefillKeyword', '旧标签']]);
+  const old = initialSearchPage({initialKeyword: 'old route', storage, ready: ready.promise});
+  const appear = old.page.aboutToAppear(); old.page.aboutToDisappear();
+  storage.set('searchPrefillKeyword', '下一页面的话题');
+  old.page.keyword = 'late button event'; old.page.submitSearch();
+  ready.resolve(); await appear; await tick();
+  assert.equal(old.calls.length, 0); assert.deepEqual(old.history, []);
+  assert.equal(storage.get('searchPrefillKeyword'), '下一页面的话题');
+  const next = initialSearchPage({storage}); await next.page.aboutToAppear(); await tick();
+  assert.equal(next.calls[0].args[0], '下一页面的话题');
+});
+
+test('late appearance from an earlier lifecycle cannot replace the current route or submit twice', async () => {
+  const pending = deferred(), f = initialSearchPage({initialKeyword: 'first', ready: pending.promise});
+  const old = f.page.aboutToAppear(); f.page.aboutToDisappear();
+  f.page.discoveryController.activate = async () => {};
+  f.storage.set('searchPrefillKeyword', 'second');
+  await f.page.aboutToAppear(); await tick(); pending.resolve(); await old; await tick();
+  assert.deepEqual(f.calls.filter(call => call.method === 'searchAll').map(call => call.args[0]), ['second']);
+  assert.equal(f.page.keyword, 'second');
+});
 function video(keyword, page = 1) { return { bvid: 'BV-' + keyword + '-' + page, aid: page, title: keyword }; }
 function allResult(keyword, total) {
   return { sections: [{ type: 'video', videos: [video(keyword)], users: [], pgc: [], articles: [] }], totals: new Map([['video', total]]) };

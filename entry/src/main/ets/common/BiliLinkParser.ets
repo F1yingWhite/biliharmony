@@ -9,6 +9,7 @@ export class BiliLinkTarget {
   dynId: string = '';
   roomId: number = 0;
   articleId: number = 0;
+  keyword: string = '';
   page: number = 1;
   seconds: number = 0;
   hasSeek: boolean = false;
@@ -17,7 +18,7 @@ export class BiliLinkTarget {
 export function normalizeBiliWebUrl(value: string): string {
   let link: string = value.trim();
   if (link.startsWith('//')) link = 'https:' + link;
-  else if (/^(?:(?:(?:www|m|space|live|t)\.)?bilibili\.com|(?:www\.)?b23\.tv)\//i.test(link)) link = 'https://' + link;
+  else if (/^(?:(?:(?:www|m|space|live|t|search)\.)?bilibili\.com|(?:www\.)?b23\.tv)\//i.test(link)) link = 'https://' + link;
   return /^https?:\/\/[^\s\x00-\x1F\\<>"']+$/i.test(link) ? link : '';
 }
 
@@ -34,7 +35,9 @@ function queryValue(link: string, key: string): string {
     const equal: number = pair.indexOf('=');
     if (equal < 0) continue;
     try {
-      if (decodeURIComponent(pair.substring(0, equal)) === key) return decodeURIComponent(pair.substring(equal + 1));
+      if (decodeURIComponent(pair.substring(0, equal)) === key) {
+        return decodeURIComponent(pair.substring(equal + 1).replace(/\+/g, ' '));
+      }
     } catch (e) { }
   }
   return '';
@@ -94,6 +97,11 @@ export function parseBiliLink(value: string): BiliLinkTarget | null {
   } else if (host === 'live.bilibili.com') {
     resource = /^\/(?:blanc\/)?([1-9][0-9]*)\/?$/i.exec(path);
     if (resource !== null) { target.kind = 'live'; target.roomId = positive(resource[1]); return target.roomId > 0 ? target : null; }
+  } else if (host === 'search.bilibili.com' && /^\/all\/?$/i.test(path)) {
+    // 评论蓝色关键词走 webcommentline_search；只取查询词，追踪参数不进入页面状态。
+    const keyword: string = queryValue(link, 'keyword').trim();
+    if (keyword.length === 0 || /[\x00-\x1F\x7F]/.test(keyword)) return null;
+    target.kind = 'search'; target.keyword = keyword; return target;
   }
   return null;
 }
