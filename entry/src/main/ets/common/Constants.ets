@@ -135,6 +135,9 @@ export class Api {
   static readonly replyLike: string = HttpString.apiBaseUrl + '/x/v2/reply/action';
   static readonly replyHate: string = HttpString.apiBaseUrl + '/x/v2/reply/hate';
   static readonly replyReport: string = HttpString.apiBaseUrl + '/x/v2/reply/report';
+  static readonly replyVote: string = HttpString.apiBaseUrl + '/x/v2/reply/vote/do';
+  static readonly dynamicVoteInfo: string = HttpString.apiBaseUrl + '/x/vote/vote_info';
+  static readonly dynamicVoteSubmit: string = HttpString.apiBaseUrl + '/x/vote/do_vote';
   static readonly userEmotes: string = HttpString.apiBaseUrl + '/x/emote/user/panel/web';
 
   // ===== 私信 =====

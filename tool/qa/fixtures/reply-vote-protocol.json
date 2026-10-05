@@ -1,0 +1,164 @@
+{
+  "provenance": {
+    "capturedAt": "2026-10-05T02:08:39.117Z",
+    "credentials": "Anonymous public GET only; author/profile/face fields removed.",
+    "officialComments": {
+      "url": "https://s1.hdslb.com/bfs/seed/jinkela/commentpc/bili-comments.js",
+      "version": "d05f470bdf",
+      "read": "content.vote => {id,title,cnt}; data.vote_card => {vote_id,title,count,options:[{idx,desc,count}],my_vote_option}",
+      "duelSubmit": "/x/v2/reply/vote/do, form {option,vote_id,oid,type,csrf}; only the two-option duel submits inline"
+    },
+    "officialDynamic": {
+      "url": "https://s1.hdslb.com/bfs/static/blive/bpfe-dynamic-h5/static/js/vote.addea78b.js",
+      "load": "/x/vote/vote_info?vote_id=..., data.vote_info + data.my_votes",
+      "submit": "/x/vote/do_vote?csrf=..., JSON {vote_id,votes,voter_uid,status:0,op_bit:0,dynamic_id:0}; code0 data.vote_info.my_votes",
+      "percent": "Math.round(100 * option.cnt / sum(options.cnt))"
+    },
+    "samples": [
+      {
+        "bvid": "BV16b421H7WG",
+        "aid": 1805749181,
+        "rpid": 225825672672,
+        "voteId": 11936440
+      },
+      {
+        "bvid": "BV1zrMizzERZ",
+        "aid": 114692387249977,
+        "rpid": 287900690656,
+        "voteId": 15591912
+      },
+      {
+        "bvid": "BV1r6QcBvEqt",
+        "aid": 116380644941208,
+        "voteId": 19160335
+      }
+    ]
+  },
+  "contentVote": {
+    "id": 11936440,
+    "title": "大家觉得最像雀豪的玩家是？",
+    "cnt": 1156
+  },
+  "single": {
+    "code": 0,
+    "data": {
+      "vote_info": {
+        "vote_id": 11936440,
+        "title": "大家觉得最像雀豪的玩家是？",
+        "join_num": 1156,
+        "choice_cnt": 1,
+        "end_time": 1718193630,
+        "status": 4,
+        "options": [
+          {
+            "opt_idx": 1,
+            "opt_desc": "1号",
+            "cnt": 52
+          },
+          {
+            "opt_idx": 2,
+            "opt_desc": "2号",
+            "cnt": 70
+          },
+          {
+            "opt_idx": 3,
+            "opt_desc": "3号",
+            "cnt": 406
+          },
+          {
+            "opt_idx": 4,
+            "opt_desc": "4号",
+            "cnt": 101
+          },
+          {
+            "opt_idx": 5,
+            "opt_desc": "5号",
+            "cnt": 21
+          },
+          {
+            "opt_idx": 6,
+            "opt_desc": "6号",
+            "cnt": 31
+          },
+          {
+            "opt_idx": 7,
+            "opt_desc": "7号",
+            "cnt": 477
+          }
+        ]
+      }
+    }
+  },
+  "multi": {
+    "code": 0,
+    "data": {
+      "vote_info": {
+        "vote_id": 15591912,
+        "title": "王麻子VS韩老魔，不知各位道友更喜欢谁？",
+        "join_num": 1580,
+        "choice_cnt": 2,
+        "end_time": 1753718405,
+        "status": 4,
+        "options": [
+          {
+            "opt_idx": 1,
+            "opt_desc": "王麻子",
+            "cnt": 306
+          },
+          {
+            "opt_idx": 2,
+            "opt_desc": "韩老魔",
+            "cnt": 1317
+          }
+        ]
+      }
+    }
+  },
+  "header": {
+    "code": 0,
+    "data": {
+      "vote_card": {
+        "vote_id": 19160335,
+        "title": "需不需要再额外补充设定呢",
+        "count": 108,
+        "options": [
+          {
+            "idx": 1,
+            "desc": "更多更多！",
+            "count": 83
+          },
+          {
+            "idx": 2,
+            "desc": "目前够吃啦～",
+            "count": 25
+          }
+        ]
+      }
+    }
+  },
+  "headerInfo": {
+    "code": 0,
+    "data": {
+      "vote_info": {
+        "vote_id": 19160335,
+        "title": "需不需要再额外补充设定呢",
+        "join_num": 108,
+        "choice_cnt": 1,
+        "end_time": 3923536538,
+        "status": 1,
+        "options": [
+          {
+            "opt_idx": 1,
+            "opt_desc": "更多更多！",
+            "cnt": 83
+          },
+          {
+            "opt_idx": 2,
+            "opt_desc": "目前够吃啦～",
+            "cnt": 25
+          }
+        ]
+      }
+    }
+  }
+}

@@ -22,6 +22,8 @@ export class MainRepliesController {
   private readonly video: boolean;
   private state: MainRepliesState = new MainRepliesState();
   private epoch: RequestEpoch = new RequestEpoch();
+  // 头部投票的补取独立于评论分页，自动预取下一页不能取消它。
+  private voteGeneration: number = 0;
   private subject: ReplySubject = { oid: 0, type: 0 };
   private account: number = -1;
   private localSent: Array<ReplyItem> = [];
@@ -56,7 +58,7 @@ export class MainRepliesController {
     const cursor: string = reset ? '' : this.cursor;
     const startedAt: number = Date.now();
     const before: number = this.source.totalCount();
-    if (reset) this.prefetchCount = 0;
+    if (reset) { this.prefetchCount = 0; this.voteGeneration++; }
     this.retryReset = reset;
     this.state.loading = true;
     this.state.error = '';
@@ -90,6 +92,11 @@ export class MainRepliesController {
       } else this.source.append(incoming);
       this.cursor = data.cursor;
       this.state.hasMore = data.hasMore;
+      if (reset) {
+        if (data.needsVoteCard === true) {
+          this.loadVoteCard(this.voteGeneration, subject, account).catch(() => {});
+        } else this.state.voteCard = data.voteCard?.clone() ?? null;
+      }
       loaded = true;
       this.log('done', 'aid=' + String(subject.oid) + ' reset=' + String(reset) + ' incoming=' +
         String(data.replies.length) + ' before=' + String(before) + ' total=' + String(this.source.totalCount()) +
@@ -131,6 +138,7 @@ export class MainRepliesController {
 
   dispose(): void {
     this.epoch.invalidate();
+    this.voteGeneration++;
     this.state.loading = false;
     this.publish();
   }
@@ -143,6 +151,8 @@ export class MainRepliesController {
 
   clear(): void {
     this.epoch.invalidate();
+    this.voteGeneration++;
+    this.state.voteCard = null;
     this.state.loading = false;
     this.state.error = '';
     this.state.failed = false;
@@ -181,7 +191,26 @@ export class MainRepliesController {
     state.failed = this.state.failed;
     state.moreFailed = this.state.moreFailed;
     state.version = this.clock.version;
+    state.voteCard = this.state.voteCard?.clone() ?? null;
     this.host.publish(state);
+  }
+
+  private async loadVoteCard(generation: number, subject: ReplySubject, account: number): Promise<void> {
+    try {
+      const card = await CommentApi.loadVoteCard(subject.oid, subject.type);
+      if (!this.isVoteCurrent(generation, subject, account)) return;
+      this.state.voteCard = card?.clone() ?? null;
+      this.publish();
+    } catch (e) {
+      if (this.isVoteCurrent(generation, subject, account)) {
+        CommentLog.warn('ui.replies.vote.error', CommentLog.errorText(e as Object));
+      }
+    }
+  }
+
+  private isVoteCurrent(generation: number, subject: ReplySubject, account: number): boolean {
+    return !this.host.isDestroyed() && generation === this.voteGeneration && account === AuthSession.version &&
+      sameReplySubject(subject, this.host.getSubject());
   }
 
   private isCurrent(request: number, subject: ReplySubject, account: number): boolean {

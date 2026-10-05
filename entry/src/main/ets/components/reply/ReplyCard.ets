@@ -25,6 +25,8 @@ import { RemoteAssetCache } from '../../services/cache/RemoteAssetCache';
 import { common } from '@kit.AbilityKit';
 import { ReplyLinkController } from './ReplyLinkController';
 import { BiliLinkNavigation } from '../../common/BiliLinkRouter';
+import { ReplyVoteCard, ReplyVoteSource } from '../../model/reply/ReplyVoteModels';
+import { ReplyVotePanel } from './ReplyVotePanel';
 
 /** showDialog 按钮声明（promptAction 的 Button 类型不便直接引用）。 */
 interface ReportButtonItem {
@@ -131,6 +133,8 @@ export struct ReplyCard {
   @State mirrorDisliked: boolean = false;
   @State mirrorLike: number = 0;
   @State nameplateLocal: string = '';
+  @State voteCard: ReplyVoteCard | null = null;
+  @State voteSource: ReplyVoteSource = new ReplyVoteSource();
   private destroyed: boolean = false;
   private links: ReplyLinkController = new ReplyLinkController({
     isAlive: (): boolean => !this.destroyed,
@@ -184,6 +188,7 @@ export struct ReplyCard {
       this.mirrorLike = fresh.like;
       this.mirrorRpid = fresh.rpid;
       this.mirrorRev = fresh.rev;
+      this.syncVoteFromItem(fresh);
     } else {
       this.syncMirrorFromItem();
     }
@@ -196,10 +201,22 @@ export struct ReplyCard {
     this.mirrorLike = this.item.like;
     this.mirrorRpid = this.item.rpid;
     this.mirrorRev = this.item.rev;
+    this.syncVoteFromItem(this.item);
+  }
+
+  private syncVoteFromItem(item: ReplyItem): void {
+    this.voteCard = item.vote !== null ? item.vote.clone() : null;
+    const source: ReplyVoteSource = new ReplyVoteSource();
+    source.oid = item.oid;
+    source.type = item.type;
+    source.rpid = item.rpid;
+    source.sourceKey = 'reply:' + String(item.oid) + ':' + String(item.type) + ':' + String(item.rpid);
+    this.voteSource = source;
   }
 
   private onItemChanged(): void {
     this.links.dispose();
+    this.syncVoteFromItem(this.item);
     // LazyForEach 使用稳定 rpid key 时，其 builder 闭包可能在父级 version 更新后再次
     // 传回最初的 rev=0 快照。只接受新评论，或严格更新的修订号，防止旧点赞态倒灌。
     if (this.item.rpid !== this.mirrorRpid || this.item.rev > this.mirrorRev) {
@@ -711,6 +728,15 @@ export struct ReplyCard {
           },
           onLongPress: (): void => this.copyComment(),
         })
+        if (this.voteCard !== null) {
+          ReplyVotePanel({
+            vote: this.voteCard,
+            source: this.voteSource,
+            onNavigate: (action: () => void): void => this.onNavigate(action),
+          })
+          .width('100%')
+          .margin({ top: 8, bottom: 4 })
+        }
         if (this.item.pictures.length > 0) {
           Flex({ wrap: FlexWrap.Wrap }) {
             ForEach(this.item.pictures, (picture: string, index: number) => {

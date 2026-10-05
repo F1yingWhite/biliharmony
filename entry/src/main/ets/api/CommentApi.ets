@@ -11,6 +11,8 @@ import { ActionResult, getData, postVideoAction, webGet, webGetWithPriority,
 import { EmotePackageCache } from '../common/EmotePackageCache';
 import { CommentLog } from '../common/CommentLog';
 import { DynamicApi, DynUploadResult } from './DynamicApi';
+import { ReplyVoteApi } from './ReplyVoteApi';
+import { ReplyVoteCard } from '../model/reply/ReplyVoteModels';
 
 /** 评论 pictures 字段中的 BFS 图片；尺寸和大小取上传响应，不取本地猜测值。 */
 export class ReplyUploadedPicture {
@@ -33,6 +35,10 @@ export class ReplyImageUploadResult {
 }
 
 export class CommentApi {
+  static loadVoteCard(oid: number, type: number): Promise<ReplyVoteCard | null> {
+    return ReplyVoteApi.loadHeader(oid, type);
+  }
+
   private static isTransientFailure(status: number, code: number): boolean {
     return status < 0 || status === 408 || status === 425 || status === 429 || status >= 500 || code === -500;
   }

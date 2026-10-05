@@ -48,6 +48,19 @@ UI DSL 的合法性仍由完整 `CompileArkTS` 构建验证。这些测试不能
 弹幕用例覆盖同屏数量、固定轨道、混合模式、时间与屏蔽规则，以及 protobuf 未知字段的解析。
 对齐用例覆盖综合搜索排序/筛选和图文混排、失败与空结果的区别、后台播放开关、SC 合并和选中状态。
 
+评论投票专项执行完整的 `ReplyVoteApi`、`ReplyVoteController` 与实际 ArkUI 卡片构建，覆盖
+`content.vote` 附件、`vote_card` 顶部卡、单选/多选、真实选项 ID、投后比例、重复点击、
+账号切换和卡片复用。协议夹具 `fixtures/reply-vote-protocol.json` 来自官方前端及匿名公开 GET，
+记录出处，不含账号凭证；提交测试只走受控网络边界，不会向 B 站实际投票。
+登录时旧分页接口缺少顶部投票，专项还检查补取 `/main` 元数据不能阻塞或破坏评论分页。
+可用 `BV16b421H7WG`（七选一，已结束）、`BV1zrMizzERZ`（多选，已结束）和
+`BV1r6QcBvEqt`（顶部二选一）核对真实展示；实际投票状态以服务端为准。
+
+另可运行 `node tool/qa/reply-vote-header.mutations.cjs` 与 `node tool/qa/reply-vote-api.mutations.cjs`：先通过基线，再在临时副本中分别
+破坏元数据读取、分页隔离、账号/来源守卫、投票附件保留及页面传参，要求回归产生行为断言失败。
+接口专项另破坏选项 ID、提交地址、旧接口补取标记及账号守卫。
+该验证不会改动工作区源码，不能用语法错误或装载失败代替“测试确实能抓到缺陷”的证据。
+
 其他环境可用 `node --test`，并将 `ARKTS_TEST_TYPESCRIPT` 指向已安装的 TypeScript 模块。
 
 播放器 UI 定位器另有无需设备的 Python 回归：`python tool/qa/player_layout_test.py`。它检查真实布局形状中的抽屉遮挡、同名画质标签和返回按钮归属，GitHub 发布工作流也会执行；真实播放仍需下述设备专项。

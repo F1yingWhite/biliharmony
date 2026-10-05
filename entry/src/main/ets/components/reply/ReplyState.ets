@@ -1,5 +1,6 @@
 import { ReplyItem } from '../../model/Models';
 import { CommentLog } from '../../common/CommentLog';
+import { ReplyVoteCard } from '../../model/reply/ReplyVoteModels';
 
 export interface ReplySubject {
   readonly oid: number;
@@ -20,6 +21,7 @@ export class MainRepliesState {
   failed: boolean = false;
   moreFailed: boolean = false;
   version: number = 0;
+  voteCard: ReplyVoteCard | null = null;
 }
 
 export class ThreadRepliesState {
@@ -80,7 +82,7 @@ export function sanitizeReplies(items: Array<ReplyItem>, trace: boolean): Array<
     if (item.rpid <= 0) { invalid++; continue; }
     if (seen.has(item.rpid)) { duplicate++; continue; }
     seen.add(item.rpid);
-    if (item.content.trim().length === 0 && item.pictures.length === 0) { empty++; continue; }
+    if (item.content.trim().length === 0 && item.pictures.length === 0 && !item.vote) { empty++; continue; }
     result.push(item);
   }
   if (trace) {

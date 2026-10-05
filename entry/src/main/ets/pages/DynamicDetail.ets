@@ -17,6 +17,8 @@ import { ReplyComposer } from '../components/reply/ReplyComposer';
 import { ReplyThreadPanel } from '../components/reply/ReplyThreadPanel';
 import { RepliesController } from '../components/reply/RepliesController';
 import { MainRepliesState, ReplySubject, ThreadRepliesState } from '../components/reply/ReplyState';
+import { ReplyVoteCard } from '../model/reply/ReplyVoteModels';
+import { ReplyVotePanel } from '../components/reply/ReplyVotePanel';
 import { ReplyShareController } from '../components/reply/ReplyShareController';
 import { ReplyShareCard } from '../components/reply/ReplyShareCard';
 import { ReplySortChips } from '../components/reply/ReplySortChips';
@@ -55,6 +57,7 @@ export struct DynamicDetailPage {
   @State repliesHasMore: boolean = true;
   @State replySortMode: number = 3; // 3 最热，2 最新
   @State replyVersion: number = 0;
+  @State replyVoteCard: ReplyVoteCard | null = null;
   @State replyDraft: string = '';
   @State replyImages: Array<DynDraftImage> = [];
   @State replySending: boolean = false;
@@ -129,6 +132,7 @@ export struct DynamicDetailPage {
       this.repliesCount = state.count;
       this.repliesHasMore = state.hasMore;
       this.replyVersion = state.version;
+      this.replyVoteCard = state.voteCard;
       this.repliesFailed = state.failed;
       this.repliesMoreFailed = state.moreFailed;
     },
@@ -558,6 +562,13 @@ export struct DynamicDetailPage {
             .onAreaChange((_oldArea, area) => {
               this.commentsOffset = Math.max(0, Number(area.position.y));
             })
+            if (this.replyVoteCard !== null) {
+              ReplyVotePanel({
+                vote: this.replyVoteCard,
+                source: { oid: this.item.commentId, type: this.item.commentType, rpid: 0,
+                  sourceKey: 'header:' + String(this.item.commentId) + ':' + String(this.item.commentType) },
+              })
+            }
             if (this.repliesMoreFailed && this.replies.getRepliesRetryReset() && this.repliesCount > 0) {
               Text('排序加载失败，当前保留原评论 · 点击重试')
                 .fontSize(12).fontColor(this.accent).padding(8)

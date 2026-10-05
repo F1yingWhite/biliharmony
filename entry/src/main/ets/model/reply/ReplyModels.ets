@@ -1,6 +1,7 @@
 /** reply domain models. */
 import { asObject, asNumber, asArray, asBool, str, toHttps } from '../../common/Utils';
 import { BiliEmote } from '../library/LibraryModels';
+import { ReplyVoteCard } from './ReplyVoteModels';
 
 // ===== 评论 =====
 export class ReplyJump {
@@ -48,6 +49,7 @@ export class ReplyItem {
   jumps: Array<ReplyJump> = [];
   mentions: Array<ReplyMention> = [];
   pictures: Array<string> = [];
+  vote: ReplyVoteCard | null = null;
   replies: Array<ReplyItem> = [];
   /** 本地修订号：乐观更新克隆时 +1，LazyForEach 键包含它才能让同 rpid 的卡片真正重渲染。 */
   rev: number = 0;
@@ -85,6 +87,7 @@ export class ReplyItem {
     r.jumps = this.jumps;
     r.mentions = this.mentions;
     r.pictures = this.pictures;
+    r.vote = this.vote === null ? null : this.vote.clone();
     r.replies = this.replies;
     r.rev = this.rev;
     return r;
@@ -105,6 +108,7 @@ export class ReplyItem {
     r.uname = str(member, 'uname', '');
     r.avatar = toHttps(str(member, 'avatar', ''));
     r.content = str(content, 'message', '');
+    r.vote = ReplyVoteCard.fromContent(content['vote']);
     r.like = asNumber(j['like'], 0);
     r.liked = asNumber(j['action'], 0) === 1;
     r.disliked = asNumber(j['action'], 0) === 2;
@@ -226,12 +230,16 @@ export class ReplyPageData {
 
 export class ReplyData {
   replies: Array<ReplyItem> = [];
+  voteCard: ReplyVoteCard | null = null;
+  /** Legacy comment pagination omits the poll header; first page can load it separately. */
+  needsVoteCard: boolean = false;
   cursor: string = '';
   hasMore: boolean = true;
 
   static from(o: Object): ReplyData {
     const j: Record<string, Object> = asObject(o);
     const data: ReplyData = new ReplyData();
+    data.voteCard = ReplyVoteCard.fromReplyCard(j['vote_card']);
     const topArr: Array<Object> = asArray(j['top_replies']);
     const repliesArr: Array<Object> = asArray(j['replies']);
     for (let i: number = 0; i < topArr.length; i++) {
@@ -265,6 +273,7 @@ export class ReplyData {
   static fromLegacy(o: Object, pageNumber: number): ReplyData {
     const data: ReplyData = ReplyData.from(o);
     const j: Record<string, Object> = asObject(o);
+    data.needsVoteCard = pageNumber === 1 && j['vote_card'] === undefined;
     const page: Record<string, Object> = asObject(j['page']);
     const count: number = asNumber(page['count'], data.replies.length);
     const size: number = Math.max(1, asNumber(page['size'], 20));

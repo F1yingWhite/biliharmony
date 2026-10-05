@@ -12,6 +12,8 @@ import { ReplyEmotePanel } from '../reply/ReplyEmotePanel';
 import { ReplySortChips } from '../reply/ReplySortChips';
 import { DynDraftImage } from '../../common/DynImagePreparer';
 import { ReplySubmissionController } from '../reply/ReplySubmissionController';
+import { ReplyVoteCard } from '../../model/reply/ReplyVoteModels';
+import { ReplyVotePanel } from '../reply/ReplyVotePanel';
 
 /** 「加载更多」底部块参数：对象字面量按引用传入，状态变化才能驱动 @Builder 刷新。 */
 interface LoadMoreFooterOptions {
@@ -33,6 +35,8 @@ export struct VideoReplyTab {
   @Prop errorText: string = '';
   @Prop itemCount: number = 0;
   @Prop version: number = 0;
+  @Prop voteCard: ReplyVoteCard | null = null;
+  @Prop voteOid: number = 0;
   @Prop draft: string = '';
   @Prop images: Array<DynDraftImage> = [];
   @Prop allowImages: boolean = true;
@@ -70,7 +74,7 @@ export struct VideoReplyTab {
   build() {
     Column() {
       this.sortBar()
-      if (this.itemCount === 0) {
+      if (this.itemCount === 0 && this.voteCard === null) {
         Column() {
           LoadingView({ skeleton: 'comments',
             loading: this.loading,
@@ -87,6 +91,14 @@ export struct VideoReplyTab {
         .layoutWeight(1)
       } else {
         List({ scroller: this.scroller }) {
+          if (this.voteCard !== null) {
+            ListItem() {
+              ReplyVotePanel({
+                vote: this.voteCard,
+                source: { oid: this.voteOid, type: 1, rpid: 0, sourceKey: 'header:' + String(this.voteOid) },
+              })
+            }
+          }
           LazyForEach(this.source, (item: ReplyItem) => {
             ListItem() {
               ReplyCard({
@@ -107,16 +119,26 @@ export struct VideoReplyTab {
             // 保持稳定 key，让 ReplyCard 的 @State 镜像原地更新；把 rev 放进 key 会销毁并
             // 重建整张卡片，造成闪烁，触摸尚未结束时还可能再次命中新卡。
           }, (item: ReplyItem) => String(item.rpid))
-          ListItem() {
-            this.loadMoreFooter({
-              loading: this.loading,
-              hasMore: this.hasMore || this.errorText.length > 0,
-              moreText: this.errorText.length > 0 ? '加载失败，点击重试' : '继续加载更多评论',
-              endText: '—— 评论到底啦 ——',
-              onTap: () => {
-                if ((this.hasMore || this.errorText.length > 0) && !this.loading) this.onLoadMore(false);
-              },
-            })
+          if (this.itemCount === 0) {
+            ListItem() {
+              LoadingView({ skeleton: 'comments', loading: this.loading,
+                empty: !this.loading && this.errorText.length === 0,
+                emptyText: '还没有评论，快来抢沙发～', errorText: this.errorText,
+                onRetry: () => this.onLoadMore(true),
+              })
+            }
+          } else {
+            ListItem() {
+              this.loadMoreFooter({
+                loading: this.loading,
+                hasMore: this.hasMore || this.errorText.length > 0,
+                moreText: this.errorText.length > 0 ? '加载失败，点击重试' : '继续加载更多评论',
+                endText: '—— 评论到底啦 ——',
+                onTap: () => {
+                  if ((this.hasMore || this.errorText.length > 0) && !this.loading) this.onLoadMore(false);
+                },
+              })
+            }
           }
         }
         .layoutWeight(1)

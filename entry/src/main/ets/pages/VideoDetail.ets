@@ -37,6 +37,7 @@ import { ReplyEmotePanel } from '../components/reply/ReplyEmotePanel';
 import { ReplyThreadPanel } from '../components/reply/ReplyThreadPanel';
 import { RepliesController } from '../components/reply/RepliesController';
 import { MainRepliesState, ReplySubject, ThreadRepliesState, mergeUniqueReplies } from '../components/reply/ReplyState';
+import { ReplyVoteCard } from '../model/reply/ReplyVoteModels';
 import { ReplyShareController } from '../components/reply/ReplyShareController';
 import { ReplySubmissionController, ReplySubmissionSnapshot } from '../components/reply/ReplySubmissionController';
 import { DynDraftImage } from '../common/DynImagePreparer';
@@ -115,6 +116,7 @@ export struct VideoDetailPage {
   @State replyHasMore: boolean = true;
   @State replyLoading: boolean = false;
   @State replyLoadError: string = '';
+  @State replyVoteCard: ReplyVoteCard | null = null;
   @State replyItemCount: number = 0;
   // 回复详情是视频页内的二级导航状态；放入 AppStorage 供 NavDestination
   // 的系统返回/侧滑回调优先关闭，避免直接把整个视频页弹出。
@@ -574,6 +576,7 @@ export struct VideoDetailPage {
       this.replyHasMore = state.hasMore;
       this.replyLikeVersion = state.version;
       this.replyLoadError = state.error;
+      this.replyVoteCard = state.voteCard;
     },
     publishThread: (state: ThreadRepliesState) => {
       this.replyThreadRoot = state.root;
@@ -1869,6 +1872,8 @@ export struct VideoDetailPage {
           errorText: this.replyLoadError,
           itemCount: this.replyItemCount,
           version: this.replyLikeVersion,
+          voteCard: this.replyVoteCard,
+          voteOid: this.detail.aid,
           draft: this.replyDraft,
           images: this.replyImages,
           allowImages: this.replyTargetRootRpid === 0,

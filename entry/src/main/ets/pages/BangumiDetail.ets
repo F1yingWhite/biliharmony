@@ -17,6 +17,8 @@ import { ReplyComposer } from '../components/reply/ReplyComposer';
 import { ReplyThreadPanel } from '../components/reply/ReplyThreadPanel';
 import { RepliesController } from '../components/reply/RepliesController';
 import { MainRepliesState, ReplySubject, ThreadRepliesState } from '../components/reply/ReplyState';
+import { ReplyVoteCard } from '../model/reply/ReplyVoteModels';
+import { ReplyVotePanel } from '../components/reply/ReplyVotePanel';
 import { ReplyShareController } from '../components/reply/ReplyShareController';
 import { ReplyShareCard } from '../components/reply/ReplyShareCard';
 import { ReplySortChips } from '../components/reply/ReplySortChips';
@@ -51,6 +53,7 @@ export struct BangumiDetailPage {
   @State repliesHasMore: boolean = true;
   @State replySortMode: number = 3; // 3 最热，2 最新
   @State replyVersion: number = 0;
+  @State replyVoteCard: ReplyVoteCard | null = null;
   @State replyDraft: string = '';
   @State replyImages: Array<DynDraftImage> = [];
   @State replySending: boolean = false;
@@ -120,6 +123,7 @@ export struct BangumiDetailPage {
       this.repliesCount = state.count;
       this.repliesHasMore = state.hasMore;
       this.replyVersion = state.version;
+      this.replyVoteCard = state.voteCard;
       this.repliesFailed = state.failed;
       this.repliesMoreFailed = state.moreFailed;
     },
@@ -648,6 +652,12 @@ export struct BangumiDetailPage {
       }
       .width('100%')
       .padding({ top: 16, bottom: 8 })
+      if (this.replyVoteCard !== null && this.replyOid() > 0) {
+        ReplyVotePanel({
+          vote: this.replyVoteCard,
+          source: { oid: this.replyOid(), type: 1, rpid: 0, sourceKey: 'header:' + String(this.replyOid()) },
+        })
+      }
       if (this.replyOid() <= 0) {
         Text('本集暂不支持评论')
           .fontSize(12)

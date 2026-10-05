@@ -33,9 +33,9 @@ function nativeBlocks(source) {
   return source;
 }
 
-function createNativeComponent(name, {props = {}, mocks = {}, globals: supplied = {}} = {}) {
+function createNativeComponent(name, {props = {}, mocks = {}, recordComponents = {}, globals: supplied = {}} = {}) {
   const root = process.env.ARKTS_TEST_SOURCE_ROOT || path.resolve(__dirname, '../../entry/src/main/ets');
-  const nodes = [], stack = [], globals = {};
+  const nodes = [], loops = [], stack = [], globals = {};
   function native(type, ...args) {
     const parent = stack.at(-1), item = {type, args, parent, children: [], props: {}}; nodes.push(item);
     if (parent) parent.children.push(item);
@@ -49,27 +49,47 @@ function createNativeComponent(name, {props = {}, mocks = {}, globals: supplied 
   }
   for (const type of ['Column', 'Row', 'Scroll', 'Text', 'Button', 'Image', 'Blank', 'LoadingProgress',
     'Slider', 'Toggle', 'Divider', 'Flex', 'List', 'ListItem', 'Stack', 'Progress']) globals[type] = (...args) => native(type, ...args);
-  globals.ForEach = (items, render) => items.forEach(render);
+  globals.ForEach = (items, render, key) => {
+    loops.push({keys: key ? items.map(key) : items.map((item, index) => index + '__' + JSON.stringify(item))});
+    items.forEach(render);
+  };
   globals.$r = resource => resource;
   for (const type of ['FlexAlign', 'ItemAlign', 'HorizontalAlign', 'FontWeight', 'ButtonType', 'ImageFit',
     'BarState', 'ScrollDirection', 'TextAlign', 'ToggleType', 'SliderStyle', 'ImageRenderMode', 'FlexWrap',
     'FlexDirection', 'TextOverflow', 'Alignment', 'TransitionEffect', 'Curve', 'ProgressType', 'HitTestMode']) {
     globals[type] = new Proxy({}, {get: (_target, key) => key});
   }
+  for (const type of ['VerticalAlign', 'TextCase']) globals[type] = new Proxy({}, {get: (_target, key) => key});
+  const componentMocks = {};
+  for (const [moduleName, exports] of Object.entries(recordComponents)) {
+    componentMocks[moduleName] = {};
+    for (const component of exports) componentMocks[moduleName][component] = (...args) => native(component, ...args);
+  }
   Object.assign(globals, supplied);
   const className = name.split('/').at(-1);
   let source = fs.readFileSync(path.join(root, name + '.ets'), 'utf8').replace(/\r\n/g, '\n');
-  source = source.replace('export struct ' + className, 'export class ' + className)
-    .replace(/@(?:Component|Prop|State|StorageProp|Builder)\b(?:\([^)]*\))?\s*/g, '');
+  source = source.replace(/\bstruct\s+(\w+)/g, 'class $1')
+    .replace(/@(?:Component|Reusable|Prop|State|StorageProp|StorageLink|Link|Watch|Builder)\b(?:\([^)]*\))?\s*/g, '');
+  // Native $state links bind the owning component's current property. Scan
+  // identifiers so literal resource names/comments containing '$' stay intact.
+  const scanner = ts.createScanner(ts.ScriptTarget.ES2020, true, ts.LanguageVariant.Standard, source), links = [];
+  for (let kind = scanner.scan(); kind !== ts.SyntaxKind.EndOfFileToken; kind = scanner.scan()) {
+    const identifier = scanner.getTokenText();
+    if (kind === ts.SyntaxKind.Identifier && /^\$+[A-Za-z_]\w*$/.test(identifier) && identifier !== '$r') {
+      const property = identifier.replace(/^\$+/, '');
+      links.push({start: scanner.getTokenPos(), end: scanner.getTextPos(), text: property === 'this' ? 'this' : 'this.' + property});
+    }
+  }
+  for (const edit of links.reverse()) source = source.slice(0, edit.start) + edit.text + source.slice(edit.end);
   const code = ts.transpileModule(nativeBlocks(source), {
     compilerOptions: {target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS},
   }).outputText;
-  const module = {exports: {}}, load = createArktsLoader({mocks, globals});
+  const module = {exports: {}}, load = createArktsLoader({mocks: {...componentMocks, ...mocks}, globals});
   new Function('require', 'module', 'exports', ...Object.keys(globals), code)(specifier => load(
-    path.posix.normalize(path.posix.join(path.posix.dirname(name), specifier))),
+    specifier.startsWith('.') ? path.posix.normalize(path.posix.join(path.posix.dirname(name), specifier)) : specifier),
   module, module.exports, ...Object.values(globals));
   const component = new module.exports[className](); Object.assign(component, props);
-  return {component, nodes, build() {nodes.length = 0; component.build();}};
+  return {component, nodes, loops, load, build() {nodes.length = 0; loops.length = 0; component.build();}};
 }
 
 module.exports = {createNativeComponent};
