@@ -1,6 +1,7 @@
 import { ReplyVoteCard, ReplyVoteOption, ReplyVoteSource } from '../../model/reply/ReplyVoteModels';
 import { ReplyVoteController, ReplyVoteState } from './ReplyVoteController';
 import { UserStore } from '../../services/auth/UserStore';
+import { AuthSession } from '../../services/auth/AuthSession';
 import { AppNavStack, NAV_LOGIN } from '../../common/AppRouter';
 import { formatCount } from '../../common/Utils';
 
@@ -16,6 +17,7 @@ export struct ReplyVotePanel {
   onNavigate: (action: () => void) => void = (action: () => void) => action();
   @State voteState: ReplyVoteState = new ReplyVoteState();
   private destroyed: boolean = false;
+  private actionGeneration: number = 0;
   private controller: ReplyVoteController = new ReplyVoteController({
     isDestroyed: (): boolean => this.destroyed,
     getSource: (): ReplyVoteSource => this.source,
@@ -33,6 +35,7 @@ export struct ReplyVotePanel {
 
   private bindAndLoad(): void {
     if (this.destroyed) return;
+    this.actionGeneration++;
     this.controller.bind(this.source, this.vote);
     if (this.vote !== null) this.controller.load();
   }
@@ -61,11 +64,13 @@ export struct ReplyVotePanel {
   }
 
   private onAccountChanged(): void {
+    this.actionGeneration++;
     if (!this.destroyed) this.controller.onAccountChanged();
   }
 
   aboutToDisappear(): void {
     this.destroyed = true;
+    this.actionGeneration++;
     this.controller.dispose();
   }
 
@@ -138,41 +143,64 @@ export struct ReplyVotePanel {
     this.onNavigate(() => AppNavStack.pushPathByName(NAV_LOGIN, null));
   }
 
+  private voteAction(card: ReplyVoteCard, action: () => void): () => void {
+    const generation: number = this.actionGeneration;
+    const account: number = AuthSession.version;
+    const voteId: string = card.id;
+    const kind: string = card.kind;
+    const sourceKey: string = this.source.sourceKey;
+    const oid: number = this.source.oid;
+    const type: number = this.source.type;
+    const rpid: number = this.source.rpid;
+    return (): void => {
+      const current: ReplyVoteCard | null = this.card();
+      if (this.destroyed || this.actionGeneration !== generation || AuthSession.version !== account || current === null ||
+        current.id !== voteId || current.kind !== kind || this.source.sourceKey !== sourceKey ||
+        this.source.oid !== oid || this.source.type !== type || this.source.rpid !== rpid) return;
+      action();
+    };
+  }
+
+  private optionAction(card: ReplyVoteCard, optionId: number): () => void {
+    return this.voteAction(card, (): void => this.choose(optionId));
+  }
+
   private optionKey(card: ReplyVoteCard, option: ReplyVoteOption): string {
-    // 稳定 option id 不能复用仍拿着旧卡片快照的 Builder；投后必须更新勾选和比例条。
+    // 选择、结果或选项变化时重建原生 ForEach 的选项结构。
     return this.source.sourceKey + ':' + card.kind + ':' + card.id + ':' + String(option.id) + ':' + option.text + ':' +
       String(option.count) + ':' + String(this.percentage(card, option)) + ':' + String(this.selected(card, option)) + ':' +
       String(this.showResults(card)) + ':' + String(this.voteState.loading) + ':' + String(this.voteState.submitting);
   }
 
   @Builder
-  Option(card: ReplyVoteCard, option: ReplyVoteOption) {
+  // 原生局部更新保留 Builder 入参；getter 必须读取当前状态，不能传初次卡片的快照。
+  Option(getCard: () => ReplyVoteCard, getOption: () => ReplyVoteOption) {
     Button({ type: ButtonType.Normal }) {
       Column({ space: 6 }) {
         Row({ space: 8 }) {
-          Text(this.selected(card, option) ? (card.maxSelect > 1 || this.hasVoted(card) ? '✓' : '●') :
-            (card.maxSelect > 1 ? '□' : '○'))
-            .fontSize(15).fontColor(this.selected(card, option) ? this.accent : '#9499A0')
-          if (option.imageUrl.length > 0) {
-            Image(option.imageUrl).width(48).height(36).objectFit(ImageFit.Cover).borderRadius(4)
+          Text(this.selected(getCard(), getOption()) ? (getCard().maxSelect > 1 || this.hasVoted(getCard()) ? '✓' : '●') :
+            (getCard().maxSelect > 1 ? '□' : '○'))
+            .fontSize(15).fontColor(this.selected(getCard(), getOption()) ? this.accent : '#9499A0')
+          if (getOption().imageUrl.length > 0) {
+            Image(getOption().imageUrl).width(48).height(36).objectFit(ImageFit.Cover).borderRadius(4)
           }
-          Text(option.text)
+          Text(getOption().text)
             .fontSize(13).lineHeight(18)
             .fontColor(this.isDark ? '#E6E6E6' : '#18191C').layoutWeight(1)
-          if (this.showResults(card)) {
-            Text(String(this.percentage(card, option)) + '%')
+          if (this.showResults(getCard())) {
+            Text(String(this.percentage(getCard(), getOption())) + '%')
               .fontSize(12).fontColor(this.isDark ? '#CCCCCC' : '#61666D').width(36).textAlign(TextAlign.End)
           }
         }
         .width('100%')
-        if (this.showResults(card)) {
-          Progress({ value: this.percentage(card, option), total: 100, type: ProgressType.Linear })
+        if (this.showResults(getCard())) {
+          Progress({ value: this.percentage(getCard(), getOption()), total: 100, type: ProgressType.Linear })
             .width('100%').height(4)
-            .color(this.selected(card, option) ? this.accent : '#A8ACB5')
+            .color(this.selected(getCard(), getOption()) ? this.accent : '#A8ACB5')
             .backgroundColor(this.isDark ? '#40434A' : '#E2E5EA')
             .style({ strokeWidth: 4, enableSmoothEffect: false })
             .hitTestBehavior(HitTestMode.None)
-          Text(formatCount(this.safeCount(option)) + ' 票')
+          Text(formatCount(this.safeCount(getOption())) + ' 票')
             .fontSize(10).fontColor('#9499A0').width('100%')
         }
       }
@@ -180,61 +208,62 @@ export struct ReplyVotePanel {
     }
     .width('100%').constraintSize({ minHeight: 44 })
     .padding(10).borderRadius(8)
-    .backgroundColor(this.selected(card, option) ? (this.isDark ? '#332A2028' : '#FFF0F5') :
+    .backgroundColor(this.selected(getCard(), getOption()) ? (this.isDark ? '#332A2028' : '#FFF0F5') :
       (this.isDark ? '#303238' : '#F1F2F5'))
-    .border({ width: this.selected(card, option) ? 1 : 0, color: this.accent })
-    .accessibilityText('评论投票选项' + String(option.id))
-    .accessibilityDescription(option.text)
-    .enabled(this.canChoose(card))
-    .onClick(() => this.choose(option.id))
+    .border({ width: this.selected(getCard(), getOption()) ? 1 : 0, color: this.accent })
+    .accessibilityText('评论投票选项' + String(getOption().id))
+    .accessibilityDescription(getOption().text)
+    .enabled(this.canChoose(getCard()))
+    .onClick(this.optionAction(getCard(), getOption().id))
   }
 
   @Builder
-  Card(card: ReplyVoteCard) {
+  Card(getCard: () => ReplyVoteCard) {
     Column({ space: 10 }) {
-      Text(card.title.length > 0 ? card.title : '评论投票')
+      Text(getCard().title.length > 0 ? getCard().title : '评论投票')
         .fontSize(14).fontWeight(FontWeight.Medium)
         .fontColor(this.isDark ? '#E6E6E6' : '#18191C').width('100%')
-      Text(formatCount(card.count) + ' 人参与' + (card.maxSelect > 1 ? ' · 最多选 ' + String(card.maxSelect) + ' 项' : ' · 单选'))
+      Text(formatCount(getCard().count) + ' 人参与' + (getCard().maxSelect > 1 ? ' · 最多选 ' + String(getCard().maxSelect) + ' 项' : ' · 单选'))
         .fontSize(11).fontColor('#9499A0').width('100%')
-      if (card.deleted) {
+      if (getCard().deleted) {
         Text('投票已失效').fontSize(12).fontColor('#9499A0')
       } else {
-        if (this.ended(card)) {
+        if (this.ended(getCard())) {
           Text('投票已结束').fontSize(12).fontColor('#9499A0')
-        } else if (this.ownVote(card)) {
+        } else if (this.ownVote(getCard())) {
           Text('你发布的投票').fontSize(12).fontColor('#9499A0')
-        } else if (this.hasVoted(card)) {
+        } else if (this.hasVoted(getCard())) {
           Text('已投票').fontSize(12).fontColor(this.accent)
         }
-        if (card.options.length > 0) {
+        if (getCard().options.length > 0) {
           Column({ space: 8 }) {
-            ForEach(card.options, (option: ReplyVoteOption) => this.Option(card, option),
-              (option: ReplyVoteOption) => this.optionKey(card, option))
+            ForEach(getCard().options, (option: ReplyVoteOption) => this.Option(getCard,
+              (): ReplyVoteOption => getCard().options.find((current: ReplyVoteOption): boolean => current.id === option.id) ?? new ReplyVoteOption()),
+              (option: ReplyVoteOption) => this.optionKey(getCard(), option))
           }
           .width('100%')
         }
-        if (card.loaded && !this.ended(card) && !this.hasVoted(card) && !this.ownVote(card)) {
+        if (getCard().loaded && !this.ended(getCard()) && !this.hasVoted(getCard()) && !this.ownVote(getCard())) {
           if (!UserStore.isLogin) {
             Button('登录后参与投票', { type: ButtonType.Normal })
               .width('100%').height(34).fontSize(12).fontColor(this.accent)
               .backgroundColor(this.isDark ? '#303238' : '#F1F2F5').borderRadius(8)
-              .accessibilityText('登录参与评论投票').onClick(() => this.login())
+              .accessibilityText('登录参与评论投票').onClick(this.voteAction(getCard(), (): void => this.login()))
           } else {
             Button(this.voteState.submitting ? '提交中…' : '提交投票', { type: ButtonType.Normal })
               .width('100%').height(34).fontSize(12).fontColor('#FFFFFF')
               .backgroundColor(this.accent).borderRadius(8)
               .accessibilityText('提交评论投票')
               .enabled(!this.voteState.loading && !this.voteState.submitting && this.voteState.selectedOptionIds.length > 0)
-              .onClick(() => this.submit())
+              .onClick(this.voteAction(getCard(), (): void => this.submit()))
           }
         }
-        if (card.options.length > 0) {
-          Button(this.showResults(card) ? '刷新结果' : '查看结果', { type: ButtonType.Normal })
+        if (getCard().options.length > 0) {
+          Button(this.showResults(getCard()) ? '刷新结果' : '查看结果', { type: ButtonType.Normal })
             .height(30).fontSize(12).fontColor(this.accent).backgroundColor('#00000000')
             .accessibilityText('查看评论投票结果')
             .enabled(!this.voteState.loading && !this.voteState.submitting)
-            .onClick(() => this.viewResults())
+            .onClick(this.voteAction(getCard(), (): void => this.viewResults()))
         }
       }
       if (this.voteState.loading) {
@@ -247,10 +276,10 @@ export struct ReplyVotePanel {
         Text(this.voteState.message).fontSize(12)
           .fontColor(this.isDark ? '#CCCCCC' : '#61666D').width('100%')
       }
-      if (!this.voteState.loading && !this.voteState.submitting && !card.loaded && !card.deleted) {
+      if (!this.voteState.loading && !this.voteState.submitting && !getCard().loaded && !getCard().deleted) {
         Button('重新加载投票', { type: ButtonType.Normal })
           .height(30).fontSize(12).fontColor(this.accent).backgroundColor('#00000000')
-          .accessibilityText('重新加载评论投票').onClick(() => { this.controller.load(); })
+          .accessibilityText('重新加载评论投票').onClick(this.voteAction(getCard(), (): void => { this.controller.load(); }))
       }
     }
     .width('100%').alignItems(HorizontalAlign.Start)
@@ -261,7 +290,7 @@ export struct ReplyVotePanel {
 
   build() {
     Column() {
-      if (this.card() !== null) this.Card(this.card() as ReplyVoteCard)
+      if (this.card() !== null) this.Card((): ReplyVoteCard => this.card() ?? new ReplyVoteCard())
     }
     .width('100%')
   }

@@ -9,7 +9,15 @@ function fixture(card) {
     onGrade: (...args) => callbacks.push(['grade', ...args]), onVote: (...args) => callbacks.push(['vote', ...args]),
     onLink: (...args) => callbacks.push(['link', ...args]), onDismiss: (...args) => callbacks.push(['dismiss', ...args]),
   }});
-  return {panel: ui.component, nodes: ui.nodes, callbacks, build: ui.build,
+  // ArkUI's branch creates a Builder once; retain its first argument instead of
+  // calling build() again with the latest card. This is a narrow closure regression,
+  // not a replacement for the device's native partial-update runtime.
+  const retainBuilder = name => {
+    const first = ui.component.current;
+    const callback = ui.component[name].bind(ui.component, first);
+    return () => {ui.nodes.length = 0; ui.loops.length = 0; callback();};
+  };
+  return {panel: ui.component, nodes: ui.nodes, loops: ui.loops, callbacks, build: ui.build, retainBuilder,
     button: label => ui.nodes.find(item => item.type === 'Button' && item.props.accessibilityText === label)};
 }
 const grade = () => ({id: '100000000000000001', kind: 'grade', title: '这段怎么样', maxStars: 5,
@@ -142,4 +150,39 @@ test('no command builds no interactive buttons, and unknown command kinds expose
   const f = fixture(null); f.build(); assert.equal(f.nodes.filter(node => node.type === 'Button').length, 0);
   f.panel.current = {...grade(), kind: 'unknown'}; f.build();
   assert.equal(f.nodes.filter(node => node.type === 'Button' && node.props.accessibilityText !== '关闭当前互动卡片').length, 0);
+});
+
+test('retained grade Builder updates same-ID confirmed stars and statistics without reconstructing its call', () => {
+  const f = fixture(grade()), update = f.retainBuilder('GradeContent'); update();
+  const initialKeys = f.loops[0].keys.slice();
+  f.panel.current = {...grade(), selectedStars: 4, averageScore: 9, count: 21}; update();
+  assert.deepEqual(f.nodes.filter(node => node.type === 'Button').map(node => node.args[0]), ['★', '★', '★', '★', '☆']);
+  assert.ok(f.nodes.some(node => node.type === 'Text' && node.args[0] === '已评 4 星'));
+  assert.ok(f.nodes.some(node => node.type === 'Text' && node.args[0] === '9.0 分 · 21 人评分'));
+  assert.notDeepEqual(f.loops[0].keys, initialKeys, 'native ForEach must discard initial star snapshots after confirmation');
+  assert.equal(f.button('评分5星').props.enabled, false); f.button('评分5星').props.onClick(); assert.deepEqual(f.callbacks, []);
+});
+
+test('retained vote Builder updates confirmed bars, selection and current answer text after a cloned response', () => {
+  const f = fixture(voteCard()), update = f.retainBuilder('VoteContent'); update(); const initialKeys = f.loops[0].keys.slice();
+  const latest = voteCard(9, [30, 71]); latest.options[1].text = '已刷新第二答案'; f.panel.current = latest; update();
+  assert.deepEqual(f.nodes.filter(node => node.type === 'Progress').map(node => node.args[0].value), [29, 71]);
+  assert.ok(descendants(f.button('投票选项9')).some(node => node.type === 'Text' && node.args[0] === '✓'));
+  assert.ok(f.nodes.some(node => node.type === 'Text' && node.args[0] === '已刷新第二答案'));
+  assert.notDeepEqual(f.loops[0].keys, initialKeys, 'result comparison must replace native answer snapshots');
+  assert.equal(f.button('投票选项2').props.enabled, false);
+});
+
+test('retained Card Builder follows non-null grade → vote → link windows and rejects an old window click', () => {
+  const f = fixture(grade()), update = f.retainBuilder('Card'); update();
+  const oldStar = f.button('评分4星').props.onClick, oldClose = f.button('关闭当前互动卡片').props.onClick;
+  f.panel.current = {...voteCard(), id: 'window-vote', title: '新投票窗口'}; update();
+  assert.ok(f.nodes.some(node => node.type === 'Text' && node.args[0] === '新投票窗口'));
+  assert.equal(f.button('评分4星'), undefined); assert.ok(f.button('投票选项9'));
+  oldStar(); oldClose(); assert.deepEqual(f.callbacks, []);
+  f.button('投票选项9').props.onClick(); assert.deepEqual(f.callbacks, [['vote', 'window-vote', 9]]);
+  f.panel.current = {...grade(), id: 'window-link', kind: 'link', title: '关联窗口',
+    link: {aid: 170001, bvid: 'BV17x411w7KC', epId: 0, title: '当前关联视频', cover: ''}}; update();
+  assert.equal(f.button('投票选项9'), undefined); assert.ok(f.nodes.some(node => node.type === 'Text' && node.args[0] === '当前关联视频'));
+  f.button('观看推荐视频').props.onClick(); assert.deepEqual(f.callbacks.at(-1), ['link', 'window-link']);
 });

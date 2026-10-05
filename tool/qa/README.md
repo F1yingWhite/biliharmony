@@ -39,6 +39,10 @@ $env:ARKTS_TEST_TYPESCRIPT = 'D:\DevEco Studio\tools\hvigor\hvigor\node_modules\
 加载完整生产模块，每个夹具具有独立模块缓存，只替换网络、存储、系统资源与时间边界。
 播放器使用 `player-session-fixture.cjs` 驱动真实会话和可控 AVPlayer 事件；部分 UI 适配测试仍提取页面方法。
 UI DSL 的合法性仍由完整 `CompileArkTS` 构建验证。这些测试不能替代真机播放与 UI 验收。
+`player-interaction-ui.test.cjs` 和 `reply-vote-ui.test.cjs` 还会保留首次 Builder 的入参/闭包，
+在状态变化后重放同一个生产 Builder，验证投票详情、比例和后续互动没有停在旧快照。
+这是针对原生局部更新中参数捕获问题的回归；普通的整次 `build()` 重跑会漏掉这个问题，
+该重放也没有模拟完整 ArkUI 渲染器，仍须配合下面的真实设备验收。
 生命周期用例还覆盖二维码刷新、评论切根、动态分类、稍后再看读写竞争、直播换源、AVSession 和 PixelMap 释放、下载取消。
 这些用例由审查复现转为正确行为断言；通过表示这些边界没有回归。
 `architecture.test.cjs` 检查相对导入、静态循环依赖及服务/模型/组件的依赖方向。
@@ -85,6 +89,7 @@ python3 tool/qa/run_all.py --only-audit
 - `suite_all.py`  全量 UI 回归（首页三频道/视频详情/搜索/番剧/动态/我的/深色）
 - `suite_deep.py` 深度链路回归（评论/弹幕/用户空间/排行/番剧/直播/历史收藏）
 - `suite_player.py` 播放器真机专项（高画质/高密度弹幕、拖动预览、全屏动画、播完返回、重播）
+- `suite_comment_vote.py` 评论投票真机专项（顶部第二答案、详情加载、查看/刷新比例、七选一及多选附件）
 - `performance_probe.py` 调用设备 SmartPerf，保存 FPS/CPU/GPU/PSS 原始样本与统计
 - `animation_probe.py` 分析全屏旋转连续截图的方向、重复帧和可选感知哈希
 - `audit_ui.py`   UI 重叠 / 越界 / 对齐 / 行距审计
@@ -139,6 +144,29 @@ hdc shell aa start -a EntryAbility -b com.piliplus.harmony --ps netProxy http://
 - `p02_dense_4k_smartperf.{txt,json}` 高负载播放性能原始数据与汇总
 - `p03_full_exit_*.jpeg`、`p03_full_exit_animation.json` 全屏退出动画逐帧证据
 - `SUMMARY.md` 一键汇总
+
+## 评论投票专项
+
+先安装本次构建的 HAP，再执行以下命令；脚本不会自动安装，也不会点击“提交投票”。
+它使用公开视频的真实接口和原生 UI，只选择本地草稿及读取结果，并保留截图和 UI 树。
+
+```powershell
+$env:QA_HDC = 'C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe'
+$env:QA_TARGET = '127.0.0.1:5555'
+python tool/qa/suite_comment_vote.py
+
+# 仅复现顶部投票首次详情加载和第二答案更新
+python tool/qa/suite_comment_vote.py --header-only
+```
+
+完整运行检查 `BV1r6QcBvEqt` 的两个答案可选择，查看/刷新后真实比例条和本地选择保留；
+`BV16b421H7WG` 的七个答案及 `BV1zrMizzERZ` 的多选限制、结束状态和结果正确显示。
+顶部用例需要当前账号尚未投过该投票，公开样本也依赖网络及远端内容可用。
+仅显示元数据答案或比例条不算加载成功：仍在加载、显示重新加载按钮、答案不可选都会失败。
+报告写入 `comment_vote_vm_report.md`；可用 `QA_SHOT_DIR` 指定产物目录。
+
+`suite_all.py` 的结果属于导航冒烟；跳过入口不能计作通过。投票提交、图片上传及弹幕发送
+的离线接口回归通过，也不能据此声称已在设备上完成这些账号写入操作。
 
 ## 播放器专项
 

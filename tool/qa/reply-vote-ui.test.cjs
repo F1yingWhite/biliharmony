@@ -111,6 +111,51 @@ test('single-choice real buttons replace selection, submit exact IDs once, and r
   assert.deepEqual(f.nodes.filter(node => node.type === 'Progress').map(node => node.args[0].value), [22, 78]);
 });
 
+test('retained production Card and Option builder arguments read loaded, replaced and confirmed details without a fresh outer build', async () => {
+  const f = fixture({kind: 'reply'});
+  // Native @Builder observers retain the initial argument closures. Replaying
+  // those exact arguments catches snapshots that a full build() conceals; this
+  // remains a builder contract check, not a replacement for native VM coverage.
+  f.component.vote = f.detail({counts: [108, 0]}); f.component.vote.loaded = false;
+  let cardArgs, optionArgs;
+  const cardBuilder = f.component.Card, optionBuilder = f.component.Option;
+  f.component.Card = function (...args) {cardArgs ??= args; return cardBuilder.apply(this, args);};
+  f.component.Option = function (...args) {optionArgs ??= args; return optionBuilder.apply(this, args);};
+  f.build();
+  assert.ok(cardArgs && optionArgs, 'capture actual production builder invocations from the metadata render');
+  f.component.Card = cardBuilder; f.component.Option = optionBuilder;
+  assert.equal(f.button('评论投票选项2').props.enabled, false);
+
+  const loaded = f.detail({counts: [3, 1]}); loaded.title = '服务器加载的投票';
+  loaded.options[0].text = '详情里的第一答案';
+  f.reads[0].resolve(loaded); await tick();
+  f.render(() => cardBuilder.apply(f.component, cardArgs));
+  assert.ok(f.nodes.some(node => node.type === 'Text' && node.args[0] === loaded.title));
+  assert.equal(f.button('评论投票选项2').props.enabled, true);
+  assert.equal(f.button('重新加载评论投票'), undefined);
+  assert.ok(f.button('提交评论投票'));
+
+  f.button('评论投票选项9').props.onClick();
+  f.render(() => cardBuilder.apply(f.component, cardArgs));
+  f.button('提交评论投票').props.onClick();
+  f.writes[0].resolve(new f.models.ReplyVoteResult(true, '', 0,
+    f.detail({selectedIds: [9], counts: [2, 8]})));
+  await tick();
+  f.render(() => cardBuilder.apply(f.component, cardArgs));
+  assert.equal(f.button('提交评论投票'), undefined);
+  assert.deepEqual(f.nodes.filter(node => node.type === 'Progress').map(node => node.args[0].value), [20, 80]);
+
+  const refreshed = f.detail({selectedIds: [9], counts: [4, 6], image: true});
+  refreshed.options[0].text = '刷新后的第一答案';
+  f.button('查看评论投票结果').props.onClick();
+  f.reads.at(-1).resolve(refreshed); await tick();
+  f.render(() => optionBuilder.apply(f.component, optionArgs));
+  assert.ok(f.nodes.some(node => node.type === 'Text' && node.args[0] === refreshed.options[0].text));
+  assert.ok(f.nodes.some(node => node.type === 'Image' && node.args[0] === refreshed.options[0].imageUrl));
+  assert.deepEqual(f.nodes.filter(node => node.type === 'Progress').map(node => node.args[0].value), [40]);
+  assert.equal(f.button('评论投票选项2').props.enabled, false);
+});
+
 test('multi-choice controls enforce the real selection limit and show ratios over choices, not participant count', async () => {
   const f = fixture(); await f.ready(f.detail({maxSelect: 2, counts: [5, 3, 2]}));
   for (const id of [2, 9, 17]) {f.button('评论投票选项' + id).props.onClick(); f.build();}
@@ -189,6 +234,28 @@ test('Panel recycle/reuse and delayed Prop/account watchers cannot paint an old 
   const pending = f.reads.at(-1); f.component.source = f.source(332); // Watch deliberately has not run yet.
   pending.resolve(f.detail({id: '15591912', selectedIds: [2]})); await tick();
   assert.deepEqual(f.component.voteState.detail.selectedIds, [], 'host must read live Prop identity before a delayed Watch');
+});
+
+test('retained real button events cannot select or submit after poll reuse, source ABA or an account switch', async () => {
+  const f = fixture(); await f.ready();
+  const chooseOld = f.button('评论投票选项9').props.onClick;
+  f.button('评论投票选项2').props.onClick(); f.build();
+  const submitOld = f.button('提交评论投票').props.onClick;
+  const resultsOld = f.button('查看评论投票结果').props.onClick;
+  f.component.aboutToRecycle();
+  f.component.aboutToReuse({source: f.source(221), vote: f.metadata('15591912')});
+  await f.ready(f.detail({id: '15591912'}));
+  chooseOld(); submitOld(); resultsOld();
+  assert.deepEqual(f.component.voteState.selectedOptionIds, []);
+  assert.equal(f.writes.length, 0); assert.equal(f.component.voteState.resultsVisible, false);
+
+  f.component.aboutToRecycle();
+  f.component.aboutToReuse({source: f.source(), vote: f.metadata()}); await f.ready();
+  chooseOld(); assert.deepEqual(f.component.voteState.selectedOptionIds, [], 'matching IDs after source ABA must still reject a retained old event');
+  const beforeAccount = f.button('评论投票选项9').props.onClick;
+  f.auth.advance(); f.component.onAccountChanged(); await f.ready();
+  beforeAccount(); assert.deepEqual(f.component.voteState.selectedOptionIds, []);
+  f.button('评论投票选项9').props.onClick(); assert.deepEqual(f.component.voteState.selectedOptionIds, [9]);
 });
 
 test('long answers/images and multi-answer result rebuilds retain natural comment-list height without clipped rows', async () => {

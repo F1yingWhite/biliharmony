@@ -89,7 +89,8 @@ function createNativeComponent(name, {props = {}, mocks = {}, recordComponents =
     specifier.startsWith('.') ? path.posix.normalize(path.posix.join(path.posix.dirname(name), specifier)) : specifier),
   module, module.exports, ...Object.values(globals));
   const component = new module.exports[className](); Object.assign(component, props);
-  return {component, nodes, loops, load, build() {nodes.length = 0; loops.length = 0; component.build();}};
+  function render(callback) {nodes.length = 0; loops.length = 0; callback();}
+  return {component, nodes, loops, load, render, build() {render(() => component.build());}};
 }
 
 module.exports = {createNativeComponent};
