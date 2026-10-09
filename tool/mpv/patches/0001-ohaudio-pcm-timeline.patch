@@ -1,0 +1,546 @@
+diff --git a/audio/out/ao.h b/audio/out/ao.h
+--- a/audio/out/ao.h
++++ b/audio/out/ao.h
+@@ -96,6 +96,10 @@
+ int ao_control(struct ao *ao, enum aocontrol cmd, void *arg);
+ void ao_set_gain(struct ao *ao, float gain);
+ double ao_get_delay(struct ao *ao);
++// Actual submitted PCM metadata, if the AO supports a sample-clock mapping.
++// Returns MP_NOPTS_VALUE before the first timestamped PCM submission.
++double ao_get_playing_pts(struct ao *ao);
++bool ao_get_pts_delay(struct ao *ao, double pts, double *delay);
+ void ao_reset(struct ao *ao);
+ void ao_start(struct ao *ao);
+ void ao_set_paused(struct ao *ao, bool paused, bool eof);
+diff --git a/audio/out/ao_ohaudio.c b/audio/out/ao_ohaudio.c
+--- a/audio/out/ao_ohaudio.c
++++ b/audio/out/ao_ohaudio.c
+@@ -26,7 +26,9 @@
+ #include "options/m_option.h"
+ #include "osdep/threads.h"
+ #include "osdep/timer.h"
+-
++#include "pcm_timeline.h"
++
++#include <time.h>
+ #include <ohaudio/native_audiorenderer.h>
+ #include <ohaudio/native_audiostreambuilder.h>
+ 
+@@ -38,6 +40,8 @@
+     int64_t frame_timestamp;
+     int64_t written_frames;
+     int64_t queued_frames;
++    int64_t paused_at;
++    int64_t timing_valid_after;
+     bool timestamp_valid;
+ 
+     int encoding_type;
+@@ -50,6 +54,7 @@
+     p->frame_timestamp = 0;
+     p->written_frames = 0;
+     p->queued_frames = 0;
++    p->paused_at = p->timing_valid_after = 0;
+     p->timestamp_valid = false;
+ }
+ 
+@@ -90,22 +95,42 @@
+     // The timestamp query may involve audio-service IPC. Keep it outside the
+     // per-buffer hot path except at the documented >= 200 ms interval.
+     if (!p->last_query || now - p->last_query >= MP_TIME_MS_TO_NS(250)) {
+-        int64_t position, timestamp;
++        int64_t position = 0, timestamp = 0;
+         OH_AudioStream_Result res = OH_AudioRenderer_GetAudioTimestampInfo(
+             renderer, &position, &timestamp);
++        // OHAudio timestamps are absolute CLOCK_MONOTONIC values. mpv subtracts
++        // an init offset and may use CLOCK_MONOTONIC_RAW. Pair the two clocks
++        // after the audio-service query, then translate the hardware timestamp.
++        int64_t mp_before = mp_time_ns();
++        struct timespec monotonic_time = {0};
++        bool have_monotonic = clock_gettime(CLOCK_MONOTONIC, &monotonic_time) == 0;
++        int64_t mp_after = mp_time_ns();
++        int64_t monotonic_ns = MP_TIME_S_TO_NS(monotonic_time.tv_sec) +
++                               monotonic_time.tv_nsec;
++        int64_t timestamp_mp = 0;
++        bool converted = have_monotonic && mp_pcm_timestamp_from_monotonic(
++            timestamp, monotonic_ns, mp_before, mp_after, &timestamp_mp);
++        now = mp_after; // The query can block; do not keep its pre-query time.
+         p->last_query = now;
+-        if (res == AUDIOSTREAM_SUCCESS && position >= 0 && timestamp > 0 &&
+-            timestamp <= now && now - timestamp < MP_TIME_S_TO_NS(2))
++        if (res == AUDIOSTREAM_SUCCESS && position >= 0 && converted &&
++            timestamp_mp >= p->timing_valid_after)
+         {
+             // A route change resets position while written frames remain
+             // cumulative. Start a new local epoch when that happens.
+             if (p->timestamp_valid && position < p->frame_position) {
++                ao_reset_pcm_timing(ao);
++                p->timestamp_valid = false;
+                 p->written_frames = position;
+                 written = position;
+             }
+-            p->frame_position = position;
+-            p->frame_timestamp = timestamp;
+-            p->timestamp_valid = true;
++            // Position zero can retain a fixed pre-start or pre-route timestamp.
++            // Keep recording PCM, but wait for hardware progress before mapping.
++            if (position > 0) {
++                p->frame_position = position;
++                p->frame_timestamp = timestamp_mp;
++                p->timestamp_valid = true;
++                p->timing_valid_after = 0;
++            }
+         }
+     }
+ 
+@@ -123,7 +148,13 @@
+ 
+     int64_t end_time = now +
+         MP_TIME_S_TO_NS(samples + p->queued_frames) / ao->samplerate;
++    if (!p->timestamp_valid)
++        ao_set_pcm_timing_ready(ao, false);
+     ao_read_data(ao, &audioData, samples, end_time, NULL, true, true);
++    // Publish readiness only after this callback has installed the real
++    // hardware anchor and its PCM segments under the buffer mutex.
++    if (p->timestamp_valid)
++        ao_set_pcm_timing_ready(ao, true);
+     p->written_frames += samples;
+ 
+     return AUDIO_DATA_CALLBACK_RESULT_VALID;
+@@ -238,7 +269,13 @@
+ 
+     if (paused) {
+         OH_AudioRenderer_Pause(p->renderer);
++        p->paused_at = mp_time_ns();
+     } else {
++        int64_t now = mp_time_ns();
++        if (p->paused_at && p->timestamp_valid)
++            p->frame_timestamp += now - p->paused_at;
++        p->paused_at = 0;
++        p->timing_valid_after = now;
+         p->last_query = 0;
+         OH_AudioRenderer_Start(p->renderer);
+     }
+diff --git a/audio/out/buffer.c b/audio/out/buffer.c
+--- a/audio/out/buffer.c
++++ b/audio/out/buffer.c
+@@ -20,9 +20,11 @@
+ #include <math.h>
+ #include <errno.h>
+ #include <assert.h>
++#include <string.h>
+ 
+ #include "ao.h"
+ #include "internal.h"
++#include "pcm_timeline.h"
+ #include "audio/aframe.h"
+ #include "audio/format.h"
+ 
+@@ -55,6 +57,9 @@
+     struct mp_filter *filter_root;
+     struct mp_filter *input;    // connected to queue
+     struct mp_aframe *pending;  // last, not fully consumed output
++    bool track_pcm_timing;      // OHAudio supplies future hardware sample times
++    bool pcm_timing_ready;      // hardware timestamp, rather than startup estimate
++    struct mp_pcm_timeline pcm_timing;
+ 
+     bool streaming;             // AO streaming active
+     bool playing;               // logically playing audio from buffer
+@@ -117,7 +122,7 @@
+ 
+ // Special behavior with data==NULL: caller uses p->pending.
+ static int read_buffer(struct ao *ao, void **data, int samples, bool *eof,
+-                       bool pad_silence)
++                       bool pad_silence, bool track_timing)
+ {
+     struct buffer_state *p = ao->buffer_state;
+     int pos = 0;
+@@ -144,6 +149,11 @@
+         int copy = mp_aframe_get_size(p->pending);
+         uint8_t **fdata = mp_aframe_get_data_ro(p->pending);
+         copy = MPMIN(copy, samples - pos);
++        if (track_timing) {
++            mp_pcm_timeline_add(&p->pcm_timing, pos, copy,
++                               mp_aframe_get_pts(p->pending),
++                               mp_aframe_get_effective_rate(p->pending));
++        }
+         for (int n = 0; n < ao->num_planes; n++) {
+             memcpy((char *)data[n] + pos * ao->sstride,
+                    fdata[n], copy * ao->sstride);
+@@ -181,7 +191,10 @@
+     struct buffer_state *p = ao->buffer_state;
+     mp_assert(!ao->driver->write);
+ 
+-    int pos = read_buffer(ao, data, samples, eof, pad_silence);
++    if (p->track_pcm_timing)
++        mp_pcm_timeline_begin(&p->pcm_timing, ao->samplerate, samples,
++                              out_time_ns, mp_time_ns());
++    int pos = read_buffer(ao, data, samples, eof, pad_silence, p->track_pcm_timing);
+ 
+     if (pos > 0)
+         p->end_time_ns = out_time_ns;
+@@ -317,6 +330,45 @@
+     return driver_delay + pending / (double)ao->samplerate;
+ }
+ 
++double ao_get_playing_pts(struct ao *ao)
++{
++    struct buffer_state *p = ao->buffer_state;
++    double pts = MP_NOPTS_VALUE;
++    mp_mutex_lock(&p->lock);
++    if (p->track_pcm_timing && p->pcm_timing_ready &&
++        !mp_pcm_timeline_pts(&p->pcm_timing, mp_time_ns(), &pts))
++        pts = MP_NOPTS_VALUE;
++    mp_mutex_unlock(&p->lock);
++    return pts;
++}
++
++bool ao_get_pts_delay(struct ao *ao, double pts, double *delay)
++{
++    struct buffer_state *p = ao->buffer_state;
++    mp_mutex_lock(&p->lock);
++    bool valid = p->track_pcm_timing && p->pcm_timing_ready &&
++        mp_pcm_timeline_deadline(&p->pcm_timing, pts, mp_time_ns(), delay);
++    mp_mutex_unlock(&p->lock);
++    return valid;
++}
++
++void ao_reset_pcm_timing(struct ao *ao)
++{
++    struct buffer_state *p = ao->buffer_state;
++    mp_mutex_lock(&p->lock);
++    mp_pcm_timeline_reset(&p->pcm_timing);
++    p->pcm_timing_ready = false;
++    mp_mutex_unlock(&p->lock);
++}
++
++void ao_set_pcm_timing_ready(struct ao *ao, bool ready)
++{
++    struct buffer_state *p = ao->buffer_state;
++    mp_mutex_lock(&p->lock);
++    p->pcm_timing_ready = ready;
++    mp_mutex_unlock(&p->lock);
++}
++
+ // Fully stop playback; clear buffers, including queue.
+ void ao_reset(struct ao *ao)
+ {
+@@ -326,6 +378,8 @@
+ 
+     mp_mutex_lock(&p->lock);
+ 
++    mp_pcm_timeline_reset(&p->pcm_timing);
++    p->pcm_timing_ready = false;
+     TA_FREEP(&p->pending);
+     mp_async_queue_reset(p->queue);
+     mp_filter_reset(p->filter_root);
+@@ -431,6 +485,8 @@
+         }
+         wakeup = true;
+     }
++    if (p->track_pcm_timing)
++        mp_pcm_timeline_pause(&p->pcm_timing, paused, mp_time_ns());
+     p->paused = paused;
+ 
+     mp_mutex_unlock(&p->lock);
+@@ -563,6 +619,9 @@
+     mp_mutex_init(&p->pt_lock);
+     mp_cond_init(&p->pt_wakeup);
+ 
++    p->track_pcm_timing = !ao->driver->write && strcmp(ao->driver->name, "ohaudio") == 0;
++    mp_pcm_timeline_reset(&p->pcm_timing);
++
+     p->queue = mp_async_queue_create();
+     p->filter_root = mp_filter_create_root(ao->global);
+     p->input = mp_async_queue_create_filter(p->filter_root, MP_PIN_OUT, p->queue);
+@@ -645,7 +704,7 @@
+     bool got_eof = false;
+     if (ao->driver->write_frames) {
+         TA_FREEP(&p->pending);
+-        samples = read_buffer(ao, NULL, 1, &got_eof, false);
++        samples = read_buffer(ao, NULL, 1, &got_eof, false, false);
+         planes = (void **)&p->pending;
+     } else {
+         if (!realloc_buf(ao, space)) {
+@@ -662,7 +721,7 @@
+         }
+ 
+         if (!samples) {
+-            samples = read_buffer(ao, planes, space, &got_eof, true);
++            samples = read_buffer(ao, planes, space, &got_eof, true, false);
+             if (p->paused || (ao->stream_silence && !p->playing))
+                 samples = space; // read_buffer() sets remainder to silent
+         }
+diff --git a/audio/out/internal.h b/audio/out/internal.h
+--- a/audio/out/internal.h
++++ b/audio/out/internal.h
+@@ -201,6 +201,12 @@
+ // These functions can be called by AOs.
+ 
+ int ao_read_data(struct ao *ao, void **data, int samples, int64_t out_time_ns, bool *eof, bool pad_silence, bool blocking);
++// Invalidate the hardware sample epoch after a device clock/route reset.
++// Does not flush, pause, or change any queued PCM.
++void ao_reset_pcm_timing(struct ao *ao);
++// Keep PCM segments while the AO clock starts, but query their mapping only
++// once the driver has a usable hardware timestamp. Never calls the audio API.
++void ao_set_pcm_timing_ready(struct ao *ao, bool ready);
+ 
+ bool ao_chmap_sel_adjust(struct ao *ao, const struct mp_chmap_sel *s,
+                          struct mp_chmap *map);
+diff --git a/audio/out/pcm_timeline.c b/audio/out/pcm_timeline.c
+new file mode 100644
+--- /dev/null
++++ b/audio/out/pcm_timeline.c
+@@ -0,0 +1,157 @@
++// Use each aframe's effective rate before it becomes bare PCM. A later speed
++// command cannot change the PTS or sample duration of PCM already queued.
++#include "pcm_timeline.h"
++#include <stddef.h>
++
++static double abs_double(double v) { return v < 0 ? -v : v; }
++static bool valid_pts(double v)
++{
++    return v != MP_PCM_TIMELINE_NOPTS && v > -1e20 && v < 1e20;
++}
++
++bool mp_pcm_timestamp_from_monotonic(int64_t hardware_ns, int64_t monotonic_ns,
++                                     int64_t mp_before_ns, int64_t mp_after_ns,
++                                     int64_t *timestamp_ns)
++{
++    *timestamp_ns = 0;
++    if (hardware_ns <= 0 || monotonic_ns <= 0 || hardware_ns > monotonic_ns ||
++        mp_before_ns <= 0 || mp_after_ns < mp_before_ns)
++        return false;
++    int64_t age = monotonic_ns - hardware_ns;
++    if (age >= INT64_C(2000000000))
++        return false;
++    int64_t midpoint = mp_before_ns + (mp_after_ns - mp_before_ns) / 2;
++    int64_t timestamp = midpoint - age;
++    if (timestamp <= 0)
++        return false;
++    *timestamp_ns = timestamp;
++    return true;
++}
++
++void mp_pcm_timeline_reset(struct mp_pcm_timeline *t)
++{
++    t->count = t->rate = 0;
++    t->sent = t->callback_first = t->clock_sample = t->clock_ns = t->pause_ns = 0;
++    t->clock_valid = t->paused = t->disabled = false;
++}
++
++static double sample_at(const struct mp_pcm_timeline *t, int64_t now_ns)
++{
++    if (t->paused) now_ns = t->pause_ns;
++    return t->clock_sample + (double)(now_ns - t->clock_ns) * t->rate / 1e9;
++}
++
++void mp_pcm_timeline_begin(struct mp_pcm_timeline *t, int rate, int samples,
++                           int64_t output_end_ns, int64_t now_ns)
++{
++    if (t->disabled || rate <= 0 || samples < 0 || output_end_ns <= 0) return;
++    if (t->rate != rate) mp_pcm_timeline_reset(t);
++    t->rate = rate;
++    t->callback_first = t->sent;
++    t->sent += samples; // Includes silence: the hardware consumes those samples.
++    t->clock_sample = t->sent;
++    t->clock_ns = output_end_ns;
++    t->clock_valid = true;
++    // Keep the preceding segment through a silent gap, so the media clock
++    // stops at its last valid sample rather than advancing through silence.
++    double played = sample_at(t, now_ns);
++    int remove = 0;
++    while (remove + 1 < t->count && t->segments[remove + 1].first <= played)
++        remove++;
++    for (int n = remove; n < t->count; n++) t->segments[n - remove] = t->segments[n];
++    t->count -= remove;
++}
++
++void mp_pcm_timeline_add(struct mp_pcm_timeline *t, int offset, int samples,
++                         double pts, double effective_rate)
++{
++    if (!t->clock_valid || samples <= 0 || offset < 0 ||
++        t->callback_first + offset + samples > t->sent)
++        return;
++    bool valid = valid_pts(pts) && effective_rate > 0 && effective_rate < 1e20;
++    struct mp_pcm_segment next = {
++        .first = t->callback_first + offset,
++        .last = t->callback_first + offset + samples,
++        .pts = valid ? pts : MP_PCM_TIMELINE_NOPTS,
++        .end_pts = valid ? pts + samples / effective_rate : MP_PCM_TIMELINE_NOPTS,
++    };
++    if (valid && t->count) {
++        struct mp_pcm_segment *last = &t->segments[t->count - 1];
++        double a = (last->end_pts - last->pts) / (last->last - last->first);
++        double b = 1.0 / effective_rate;
++        if (valid_pts(last->pts) && last->last == next.first &&
++            abs_double(last->end_pts - next.pts) < 1e-9 &&
++            abs_double(a - b) < 1e-12) {
++            last->last = next.last;
++            last->end_pts = next.end_pts;
++            return;
++        }
++    }
++    // Never overwrite a segment which has not reached the speakers. In an
++    // exceptional overflow, disable the mapping and use the legacy fallback.
++    if (t->count == MP_PCM_TIMELINE_CAPACITY) {
++        t->count = 0;
++        t->clock_valid = false;
++        t->disabled = true;
++        return;
++    }
++    t->segments[t->count++] = next;
++}
++
++void mp_pcm_timeline_pause(struct mp_pcm_timeline *t, bool paused, int64_t now_ns)
++{
++    if (paused == t->paused) return;
++    if (paused) t->pause_ns = now_ns;
++    else if (t->clock_valid) t->clock_ns += now_ns - t->pause_ns;
++    t->paused = paused;
++}
++
++bool mp_pcm_timeline_pts(const struct mp_pcm_timeline *t, int64_t now_ns, double *pts)
++{
++    *pts = MP_PCM_TIMELINE_NOPTS;
++    if (!t->clock_valid || !t->count) return false;
++    double played = sample_at(t, now_ns);
++    double value = t->segments[0].pts;
++    for (int n = 0; n < t->count; n++) {
++        const struct mp_pcm_segment *s = &t->segments[n];
++        if (played < s->first) {
++            if (!valid_pts(value)) return false;
++            *pts = value;
++            return true;
++        }
++        if (played < s->last) {
++            if (!valid_pts(s->pts)) return false;
++            *pts = s->pts + (played - s->first) * (s->end_pts - s->pts) / (s->last - s->first);
++            return true;
++        }
++        value = s->end_pts;
++    }
++    if (!valid_pts(value)) return false;
++    *pts = value;
++    return true;
++}
++
++bool mp_pcm_timeline_deadline(const struct mp_pcm_timeline *t, double pts,
++                              int64_t now_ns, double *seconds)
++{
++    if (!t->clock_valid || !t->count || !valid_pts(pts)) return false;
++    const struct mp_pcm_segment *s = NULL;
++    for (int n = 0; n < t->count; n++) {
++        const struct mp_pcm_segment *candidate = &t->segments[n];
++        if (valid_pts(candidate->pts) && pts >= candidate->pts && pts <= candidate->end_pts) {
++            s = candidate;
++            break;
++        }
++    }
++    if (!s && pts < t->segments[0].pts) s = &t->segments[0];
++    if (!s && pts > t->segments[t->count - 1].end_pts) s = &t->segments[t->count - 1];
++    if (!s || !valid_pts(s->pts)) return false;
++    double duration = s->end_pts - s->pts;
++    if (!(duration > 0)) return false;
++    double sample = s->first + (pts - s->pts) * (s->last - s->first) / duration;
++    // Extrapolate only with the adjoining PCM segment's actual rate; never
++    // use the latest requested speed to reinterpret the queue.
++    if (t->paused) now_ns = t->pause_ns;
++    *seconds = (sample - t->clock_sample) / t->rate + (t->clock_ns - now_ns) / 1e9;
++    return true;
++}
+diff --git a/audio/out/pcm_timeline.h b/audio/out/pcm_timeline.h
+new file mode 100644
+--- /dev/null
++++ b/audio/out/pcm_timeline.h
+@@ -0,0 +1,38 @@
++// PCM sample-clock to media-PTS mapping. Does not change or own audio data.
++#pragma once
++#include <stdbool.h>
++#include <stdint.h>
++
++#define MP_PCM_TIMELINE_CAPACITY 512
++// Same value as MP_NOPTS_VALUE in common/common.h. Keep this module usable
++// without mpv/FFmpeg headers for freestanding clock tests.
++#define MP_PCM_TIMELINE_NOPTS (-0x1p+63)
++
++struct mp_pcm_segment {
++    int64_t first, last;
++    double pts, end_pts;
++};
++
++struct mp_pcm_timeline {
++    struct mp_pcm_segment segments[MP_PCM_TIMELINE_CAPACITY];
++    int count, rate;
++    int64_t sent, callback_first, clock_sample, clock_ns, pause_ns;
++    bool clock_valid, paused, disabled;
++};
++
++// Bridge OHAudio's absolute CLOCK_MONOTONIC timestamp to mpv's relative clock.
++// The mpv clock may use CLOCK_MONOTONIC_RAW, so its raw-time offset is not enough.
++bool mp_pcm_timestamp_from_monotonic(int64_t hardware_ns, int64_t monotonic_ns,
++                                     int64_t mp_before_ns, int64_t mp_after_ns,
++                                     int64_t *timestamp_ns);
++
++void mp_pcm_timeline_reset(struct mp_pcm_timeline *t);
++void mp_pcm_timeline_begin(struct mp_pcm_timeline *t, int rate, int samples,
++                           int64_t output_end_ns, int64_t now_ns);
++void mp_pcm_timeline_add(struct mp_pcm_timeline *t, int offset, int samples,
++                         double pts, double effective_rate);
++void mp_pcm_timeline_pause(struct mp_pcm_timeline *t, bool paused, int64_t now_ns);
++bool mp_pcm_timeline_pts(const struct mp_pcm_timeline *t, int64_t now_ns,
++                         double *pts);
++bool mp_pcm_timeline_deadline(const struct mp_pcm_timeline *t, double pts,
++                              int64_t now_ns, double *seconds);
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -74,6 +74,7 @@
+     'audio/out/ao_null.c',
+     'audio/out/ao_pcm.c',
+     'audio/out/buffer.c',
++    'audio/out/pcm_timeline.c',
+ 
+     ## Core
+     'common/av_common.c',
+diff --git a/player/audio.c b/player/audio.c
+--- a/player/audio.c
++++ b/player/audio.c
+@@ -626,6 +626,9 @@
+     double pts = written_audio_pts(mpctx);
+     if (pts == MP_NOPTS_VALUE || !mpctx->ao)
+         return pts;
++    double playing = ao_get_playing_pts(mpctx->ao);
++    if (playing != MP_NOPTS_VALUE)
++        return playing;
+     return pts - mpctx->audio_speed * ao_get_delay(mpctx->ao);
+ }
+ 
+@@ -731,7 +734,7 @@
+         }
+ 
+         mpctx->shown_aframes += samples;
+-        double real_samplerate = mp_aframe_get_rate(af) / mpctx->audio_speed;
++        double real_samplerate = mp_aframe_get_effective_rate(af);
+         if (mpctx->video_status != STATUS_EOF)
+             mpctx->delay += samples / real_samplerate;
+         ao_c->last_out_pts = mp_aframe_end_pts(af);
+diff --git a/player/video.c b/player/video.c
+--- a/player/video.c
++++ b/player/video.c
+@@ -600,6 +600,16 @@
+                mpctx->video_status == STATUS_PLAYING &&
+                !ao_untimed(mpctx->ao))
+     {
++        // Use the same submitted-PCM timeline as playing_audio_pts(). The
++        // target media PTS may be in an old-speed segment still in hardware;
++        // dividing its whole queue by the newest video_speed causes a stop
++        // or a catch-up burst even though no audible PTS discontinuity exists.
++        double target_delay;
++        if (ao_get_pts_delay(mpctx->ao, written_audio_pts(mpctx) - mpctx->delay,
++                             &target_delay)) {
++            mpctx->time_frame = target_delay;
++            return;
++        }
+         double buffered_audio = ao_get_delay(mpctx->ao);
+ 
+         double predicted = mpctx->delay / mpctx->video_speed +

@@ -9,6 +9,8 @@ export interface MpvEvent {
 /** Values observed from libmpv, with no application-side clock extrapolation. */
 export interface MpvState {
   position: number;
+  /** Observed audio-pts in seconds; -1 means currently unavailable. */
+  audioPts: number;
   duration: number;
   width: number;
   height: number;
@@ -19,6 +21,13 @@ export interface MpvState {
   speed: number;
   volume: number;
   hwdec: string;
+  /** Source and renderer-target color observations; unknown means unavailable. */
+  sourcePrimaries: string;
+  sourceTransfer: string;
+  sourceFormat: string;
+  targetPrimaries: string;
+  targetTransfer: string;
+  vo: string;
   avSync: number;
   droppedFrames: number;
   decoderDroppedFrames: number;

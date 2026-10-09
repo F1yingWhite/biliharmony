@@ -1,0 +1,4 @@
+#pragma once
+#include <window_manager/oh_display_info.h>
+NativeDisplayManager_ErrorCode OH_NativeDisplayManager_CreatePrimaryDisplay(NativeDisplayManager_DisplayInfo **);
+void OH_NativeDisplayManager_DestroyDisplay(NativeDisplayManager_DisplayInfo *);

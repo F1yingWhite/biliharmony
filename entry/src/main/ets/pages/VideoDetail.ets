@@ -2152,29 +2152,30 @@ export struct VideoDetailPage {
             .height(12)
             .backgroundColor('#000000')
             .margin({ bottom: -12 })
-          if (this.loading) {
-            LoadingView({ skeleton: 'detail', loading: true })
-          } else if (this.errorText.length > 0) {
-            LoadingView({ skeleton: 'detail',
-              loading: false,
-              empty: false,
-              errorText: this.errorText,
-              onRetry: () => {
-                this.init();
-              },
-            })
-          } else {
-            Column() {
+          // 所有内容状态共用面板背景，避免骨架卡片露在黑色衬底条上形成凸起。
+          Column() {
+            if (this.loading) {
+              LoadingView({ skeleton: 'detail', loading: true })
+            } else if (this.errorText.length > 0) {
+              LoadingView({ skeleton: 'detail',
+                loading: false,
+                empty: false,
+                errorText: this.errorText,
+                onRetry: () => {
+                  this.init();
+                },
+              })
+            } else {
               this.DetailToolbar()
               this.DetailTabs()
             }
-            .width('100%')
-            .layoutWeight(1)
-            // 小圆角上沿：面板顶部与播放区底边齐平，圆角缝只露出上方黑色衬底条。
-            .borderRadius({ topLeft: 12, topRight: 12 })
-            .clip(true)
-            .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
           }
+          .width('100%')
+          .layoutWeight(1)
+          // 小圆角上沿：面板顶部与播放区底边齐平，圆角缝只露出上方黑色衬底条。
+          .borderRadius({ topLeft: 12, topRight: 12 })
+          .clip(true)
+          .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
         }
       }
       .width('100%')

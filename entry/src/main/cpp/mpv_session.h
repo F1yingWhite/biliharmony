@@ -24,6 +24,7 @@ struct Event {
 
 struct Snapshot {
     double position = 0;
+    double audioPts = -1;
     double duration = 0;
     int64_t width = 0;
     int64_t height = 0;
@@ -34,6 +35,12 @@ struct Snapshot {
     double speed = 1;
     double volume = 1;
     std::string hwdec;
+    std::string sourcePrimaries = "unknown";
+    std::string sourceTransfer = "unknown";
+    std::string sourceFormat = "unknown";
+    std::string targetPrimaries = "unknown";
+    std::string targetTransfer = "unknown";
+    std::string vo = "unknown";
     double avSync = 0;
     int64_t droppedFrames = 0;
     int64_t decoderDroppedFrames = 0;

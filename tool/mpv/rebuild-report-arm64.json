@@ -1,0 +1,236 @@
+{
+  "mpv_sha": "6edeee00a07b9b76f197aa71eee3d029fb090de4",
+  "recipe_sha": "1bab837e662ffa47ce51efd0720d3ed7c4988944",
+  "pcm_patch_sha256": "8638719f964243aa4f738226c97ad13170cba6c0f499d14b168ce6176f5fda76",
+  "inputs": {
+    "mpv_sha": "6edeee00a07b9b76f197aa71eee3d029fb090de4",
+    "recipe_sha": "1bab837e662ffa47ce51efd0720d3ed7c4988944",
+    "ffmpeg_sha": "140fd653aed8cad774f991ba083e2d01e86420c7",
+    "libplacebo_tag_sha": "719cc95244a1f1d648dd72459822e026e6530f22",
+    "libplacebo_sha": "cee9b076f2c63104ccfd497fa79c39a867293ec4",
+    "original_core": {
+      "url": "https://github.com/mpv-ohos/libmpv-ohos-build/releases/download/20260715/libmpv_aarch64.zip",
+      "archive_sha256": "ac8b176dc4c86f4772d62ff530762ec187c3c46383bf2d476870d17dad806e5b",
+      "sha256": "672e98d497199a89e20893979ecec686dee1113bbe1b609c9a9266aa1679bd32",
+      "bytes": 35491168
+    },
+    "archives": {
+      "mpv": {
+        "url": "https://codeload.github.com/ErBWs/mpv/tar.gz/6edeee00a07b9b76f197aa71eee3d029fb090de4",
+        "sha256": "d18bcd60fa61c40bf935930c00bb90e6fb69bf32c653db6b8744846778cee1cc"
+      },
+      "ffmpeg": {
+        "url": "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/140fd653aed8cad774f991ba083e2d01e86420c7",
+        "sha256": "5c4a9e51e706b8deba835f02ea70e1e1101187f601adae72b36ec2b17b6f15be"
+      },
+      "libplacebo": {
+        "url": "https://codeload.github.com/haasn/libplacebo/tar.gz/refs/tags/v7.360.1",
+        "sha256": "d05fdf90bea2f629eaa2d115e909fd356388ac639e54f77b87a018a6d76224bd"
+      },
+      "libass": {
+        "url": "https://codeload.github.com/libass/libass/tar.gz/refs/tags/0.17.4",
+        "sha256": "c287d180d93dc9c9021872574b618ac49027e84cc90e1289318b1ee68bb42251"
+      },
+      "lcms": {
+        "url": "https://codeload.github.com/mm2/Little-CMS/tar.gz/refs/tags/lcms2.17",
+        "sha256": "6e6f6411db50e85ae8ff7777f01b2da0614aac13b7b9fcbea66dc56a1bc71418"
+      },
+      "lua": {
+        "url": "https://www.lua.org/ftp/lua-5.2.4.tar.gz",
+        "sha256": "b9e2e4aad6789b3b63a056d442f7b39f0ecfca3ae0f1fc0ae4e9614401b69f4b"
+      }
+    },
+    "patches": [
+      {
+        "component": "ffmpeg",
+        "name": "support-av3a-audio-vivid.patch",
+        "url": "https://raw.githubusercontent.com/mpv-ohos/libmpv-ohos-build/1bab837e662ffa47ce51efd0720d3ed7c4988944/patches/ffmpeg/support-av3a-audio-vivid.patch",
+        "sha256_lf": "79e970caeaf121c0c866265f70aae92f3a4328724fe061c0a8c4e76e2935f23b"
+      },
+      {
+        "component": "ffmpeg",
+        "name": "support-zero-copy-hardware-decode.patch",
+        "url": "https://raw.githubusercontent.com/mpv-ohos/libmpv-ohos-build/1bab837e662ffa47ce51efd0720d3ed7c4988944/patches/ffmpeg/support-zero-copy-hardware-decode.patch",
+        "sha256_lf": "c15790cf227aaaa4727fe28f85f4d1e403a1d8f9485aea78e328efe552ef6720"
+      },
+      {
+        "component": "libplacebo",
+        "name": "remove-unnecessary-atomic-test.patch",
+        "url": "https://raw.githubusercontent.com/mpv-ohos/libmpv-ohos-build/1bab837e662ffa47ce51efd0720d3ed7c4988944/patches/libplacebo/remove-unnecessary-atomic-test.patch",
+        "sha256_lf": "8081754fc65641696871f0b7f7cf887380919b54e443e639ac88f2ec10d4a8be"
+      },
+      {
+        "component": "libplacebo",
+        "name": "support-external-yuv-zero-copy.patch",
+        "url": "https://raw.githubusercontent.com/mpv-ohos/libmpv-ohos-build/1bab837e662ffa47ce51efd0720d3ed7c4988944/patches/libplacebo/support-external-yuv-zero-copy.patch",
+        "sha256_lf": "6aab3a5cd3253f992876eb11c20b05125e28e0b80e81603d2401ba8bc6e6ad30"
+      }
+    ]
+  },
+  "local_patches_in_order": [
+    {
+      "path": "tool\\mpv\\patches\\0001-ohaudio-pcm-timeline.patch",
+      "sha256": "8638719f964243aa4f738226c97ad13170cba6c0f499d14b168ce6176f5fda76"
+    },
+    {
+      "path": "tool\\mpv\\patches\\0002-ohcodec-init-failure.patch",
+      "sha256": "5d8ce119bb9297c713b2e394520ec4bec8ed2f2cf0cecb0bee54187d42d658a9"
+    },
+    {
+      "path": "tool\\mpv\\patches\\0003-ohos-hdr-output.patch",
+      "sha256": "8735cfbf347e81173797e771c0155be806175f72c93e897aeddf13ec9899e091"
+    }
+  ],
+  "patched_source_sha256_before_build_overrides": {
+    "audio/out/ao.h": "cf3c629c6751699481a2d0c36141f7369943202af8e46ef1c818601ffd2590f3",
+    "audio/out/ao_ohaudio.c": "149339cdf15d6fdf1d51b6167911d7d6cf85fcab8eb93bff2bd8bced470aba84",
+    "audio/out/buffer.c": "5df91a893bfc3e231b95dff6276ca3d4855f7d1c006333e3573a0b2e5fe93fa2",
+    "audio/out/internal.h": "78981978a52cf749a2f579a04aa3edd9425712ba36fcd9a3458c14f8857a7d0f",
+    "audio/out/pcm_timeline.c": "174f47ad112b80670499fbfd4f2b3e9d1a1dfd6e80ff6b77a362ec638b83ef4d",
+    "audio/out/pcm_timeline.h": "2c946a69a82ac791eb48a8c0f12777242807fde1780da550b288c0be4b05b472",
+    "meson.build": "d85a7cc6a16db9580f36335026ddfe9b2c98e522202c091e6eb8696320a9c57c",
+    "player/audio.c": "febaffcbc1165fff45b344e5f0a4ec0de5969345086714b537967aefae605422",
+    "player/video.c": "ecc0d051ada1ad312758a94d99b233a09ed54b218935f5e2b2413794b2576369",
+    "video/out/hwdec/hwdec_ohcodec.c": "82d021e9fb67aa5c96670aee6f6bdd1926dc6ce5e64d02cc8642a89392d9bd31",
+    "video/out/gpu/video.c": "9c958f4624240122bbf7474b2d09e0a3d8fca30051954eb144b0b73149514256",
+    "video/out/gpu/video.h": "d4a15b3b175c8f844791221594b750ad0e429ac67030f7f67755056bcb3dfb44",
+    "video/out/ohos_common.c": "04888009ba11a2ea495c44931c66b04cf14f2bcb3989bd683e8e6cd422839209",
+    "video/out/ohos_common.h": "96ed24dbcaf738e20163a20799ea3cedb5bfaea29ded22f3c3b4ca54dd753d1f",
+    "video/out/opengl/context_ohos.c": "6ef0b386aa643065ad490f0c4350a52b5568da5d64b93b201bd03eca8fcb829d",
+    "video/out/opengl/egl_helpers.c": "e49ee9ff8e8d5314c00b10872ca8567f59eb027c353aa91651a98243607ee3cc",
+    "video/out/opengl/egl_helpers.h": "befc9084a8b433e774366513b35077b3181da05a2ad970499a3bc39c096d2b3d",
+    "video/out/vo_gpu.c": "ec3008f068f5712bbd70c740d24e81fedd20d965873d05e373474270b20b8bbf"
+  },
+  "sdk": "C:\\Program Files\\Huawei\\DevEco Studio\\sdk\\default\\openharmony\\native",
+  "python": "C:\\Users\\f1yin\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe",
+  "meson_options": [
+    "--auto-features=disabled",
+    "-Dlibmpv=true",
+    "-Dcplayer=false",
+    "-Dgpl=false",
+    "-Dbuild-date=false",
+    "-Dohos=enabled",
+    "-Degl-ohos=enabled",
+    "-Dgl=enabled",
+    "-Dvulkan=disabled",
+    "-Dshaderc=disabled",
+    "-Dlua=lua52",
+    "-Dlcms2=enabled",
+    "-Diconv=enabled",
+    "-Dvector=enabled",
+    "-Dcplugins=enabled",
+    "-Dzlib=enabled",
+    "-Dbuildtype=release",
+    "-Db_lundef=true"
+  ],
+  "carrier_soname_offset": 1788092,
+  "original_sha256": "672e98d497199a89e20893979ecec686dee1113bbe1b609c9a9266aa1679bd32",
+  "carrier_sha256": "098e628f73f1a709bdff16de7eb5fad7d104a0d5bce68c23435b6214d57a35e0",
+  "core_version": "v0.41.0 (source archive; pinned SHA above)",
+  "feature_changes": [
+    "shaderc disabled",
+    "vulkan disabled"
+  ],
+  "runtime_validated": false,
+  "elf_validation": {
+    "api_exports": [
+      "mpv_abort_async_command",
+      "mpv_client_api_version",
+      "mpv_client_id",
+      "mpv_client_name",
+      "mpv_command",
+      "mpv_command_async",
+      "mpv_command_node",
+      "mpv_command_node_async",
+      "mpv_command_ret",
+      "mpv_command_string",
+      "mpv_create",
+      "mpv_create_client",
+      "mpv_create_weak_client",
+      "mpv_del_property",
+      "mpv_destroy",
+      "mpv_error_string",
+      "mpv_event_name",
+      "mpv_event_to_node",
+      "mpv_free",
+      "mpv_free_node_contents",
+      "mpv_get_property",
+      "mpv_get_property_async",
+      "mpv_get_property_osd_string",
+      "mpv_get_property_string",
+      "mpv_get_time_ns",
+      "mpv_get_time_us",
+      "mpv_get_wakeup_pipe",
+      "mpv_hook_add",
+      "mpv_hook_continue",
+      "mpv_initialize",
+      "mpv_load_config_file",
+      "mpv_observe_property",
+      "mpv_render_context_create",
+      "mpv_render_context_free",
+      "mpv_render_context_get_info",
+      "mpv_render_context_render",
+      "mpv_render_context_report_swap",
+      "mpv_render_context_set_parameter",
+      "mpv_render_context_set_update_callback",
+      "mpv_render_context_update",
+      "mpv_request_event",
+      "mpv_request_log_messages",
+      "mpv_set_option",
+      "mpv_set_option_string",
+      "mpv_set_property",
+      "mpv_set_property_async",
+      "mpv_set_property_string",
+      "mpv_set_wakeup_callback",
+      "mpv_stream_cb_add_ro",
+      "mpv_terminate_destroy",
+      "mpv_unobserve_property",
+      "mpv_wait_async_requests",
+      "mpv_wait_event",
+      "mpv_wakeup"
+    ],
+    "imports": 711,
+    "strong_unresolved": [],
+    "weak_unresolved": [
+      "__at_fini",
+      "__deregister_frame_info",
+      "__register_frame_info"
+    ],
+    "needed": [
+      "libdep.so",
+      "libohaudio.so",
+      "libnative_image.so",
+      "libnative_display_manager.so",
+      "libnative_window.so",
+      "libz.so",
+      "libEGL.so",
+      "libc.so"
+    ],
+    "carrier_needed": [
+      "libc++_shared.so",
+      "libz.so",
+      "libnative_media_vdec.so",
+      "libnative_media_acodec.so",
+      "libnative_media_codecbase.so",
+      "libnative_media_core.so",
+      "libnative_window.so",
+      "libvulkan.so",
+      "libc.so",
+      "libohaudio.so",
+      "libnative_buffer.so",
+      "libnative_image.so",
+      "libEGL.so"
+    ],
+    "carrier_exports": 19620,
+    "machine": "AArch64",
+    "carrier_imports": 693,
+    "carrier_strong_unresolved": [],
+    "carrier_weak_unresolved": [
+      "__at_fini",
+      "__deregister_frame_info",
+      "__register_frame_info"
+    ]
+  },
+  "core_sha256": "f904d78b7c227c659f53131e65033218be8b77d5ce49d18acad5be6f5d4597b3",
+  "core_bytes": 2628832
+}

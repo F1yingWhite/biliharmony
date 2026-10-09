@@ -32,6 +32,7 @@ export class PlayerPlaybackSession {
   private seekRecoveryAttempts: number = 0;
   private nativeBuffering: boolean = false;
   private nativeRate: number = 1;
+  private notifiedRate: number = 1;
   private pendingPause: Promise<void> | null = null;
   private pendingPauseEngine: PlayerEngine | null = null;
   private playRequest: number = 0;
@@ -193,7 +194,7 @@ export class PlayerPlaybackSession {
       case 'error': this.recoverSource(false, event.message); break;
       case 'audio-error': this.recoverSource(true, event.message); break;
       case 'interruption': this.pause(); break;
-      case 'rate': if (Math.abs(event.value - this.nativeRate) < 0.001) this.event('rate', event.value); break;
+      case 'rate': if (Math.abs(event.value - this.nativeRate) < 0.001) this.notifyRate(event.value); break;
       case 'frame': this.revealFirstFrame(); break;
       case 'time': this.onTime(event.value); break;
       case 'duration': this.state.duration = event.value / 1000; this.publish(); this.event('duration'); break;
@@ -443,7 +444,7 @@ export class PlayerPlaybackSession {
   setSpeed(rate: number): void {
     const engine: PlayerEngine | null = this.core.engine;
     let accepted: number = rate;
-    if (engine !== null && this.core.prepared) {
+    if (engine !== null && this.core.prepared && !(Math.abs(rate - this.nativeRate) < 0.001)) {
       try { engine.setPlaybackRate(rate); this.nativeRate = rate; }
       catch (e) {
         accepted = 1;
@@ -451,14 +452,26 @@ export class PlayerPlaybackSession {
       }
     }
     this.state.playbackRate = accepted;
-    if (!this.state.holdSpeedActive) this.event('rate', accepted);
+    if (!this.state.holdSpeedActive) this.notifyRate(accepted);
     this.publish();
   }
 
   private applyTemporarySpeed(rate: number): void {
     const engine: PlayerEngine | null = this.core.engine;
     if (engine === null || !this.core.prepared) return;
-    try { engine.setPlaybackRate(rate); this.nativeRate = rate; this.event('rate', rate); } catch (e) {}
+    try {
+      if (!(Math.abs(rate - this.nativeRate) < 0.001)) {
+        engine.setPlaybackRate(rate); this.nativeRate = rate;
+      }
+      this.notifyRate(rate);
+    } catch (e) {}
+  }
+
+  /** 原生确认可能迟于即时切速通知；同一倍速只更新一次弹幕等消费者。 */
+  private notifyRate(rate: number): void {
+    if (!this.active || Math.abs(rate - this.notifiedRate) < 0.001) return;
+    this.notifiedRate = rate;
+    this.event('rate', rate);
   }
 
   beginHold(): void { if (this.state.playing && this.core.prepared) this.speed.beginHold(this.state.playbackRate); }

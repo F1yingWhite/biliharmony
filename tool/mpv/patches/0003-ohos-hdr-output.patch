@@ -1,0 +1,970 @@
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -486,6 +486,7 @@
+                      cc.find_library('native_media_vdec'),
+                      cc.find_library('native_buffer'),
+                      cc.find_library('native_image'),
++                     cc.find_library('native_display_manager'),
+                      cc.find_library('native_window')]
+     sources += files('audio/out/ao_ohaudio.c',
+                      'video/out/ohos_common.c',
+diff --git a/video/out/gpu/video.c b/video/out/gpu/video.c
+--- a/video/out/gpu/video.c
++++ b/video/out/gpu/video.c
+@@ -2641,14 +2641,17 @@
+     // unless specific transfer function, primaries or target peak
+     // is set. If values are set to _AUTO, the most likely intended
+     // values are guesstimated later in this function.
++    bool fixed = flags & RENDER_COLORSPACE_FIXED;
+     struct pl_color_space dst = {
+-        .transfer = p->opts.target_trc == PL_COLOR_TRC_UNKNOWN ?
++        .transfer = fixed || p->opts.target_trc == PL_COLOR_TRC_UNKNOWN ?
+                         fbo_csp->transfer : p->opts.target_trc,
+-        .primaries = p->opts.target_prim == PL_COLOR_PRIM_UNKNOWN ?
++        .primaries = fixed || p->opts.target_prim == PL_COLOR_PRIM_UNKNOWN ?
+                      fbo_csp->primaries : p->opts.target_prim,
+-        .hdr.max_luma = !p->opts.target_peak ?
++        .hdr.max_luma = fixed || !p->opts.target_peak ?
+                         fbo_csp->hdr.max_luma : p->opts.target_peak,
+     };
++    if (fixed)
++        dst.hdr = fbo_csp->hdr;
+ 
+     if (!p->colorspace_override_warned &&
+         ((fbo_csp->transfer && dst.transfer != fbo_csp->transfer) ||
+@@ -2669,7 +2672,7 @@
+     enum mp_csp_light dst_light = dst.transfer == PL_COLOR_TRC_HLG ?
+                                     MP_CSP_LIGHT_SCENE_HLG : MP_CSP_LIGHT_DISPLAY;
+ 
+-    if (p->use_lut_3d && (flags & RENDER_SCREEN_COLOR)) {
++    if (!fixed && p->use_lut_3d && (flags & RENDER_SCREEN_COLOR)) {
+         // The 3DLUT is always generated against the video's original source
+         // space, *not* the reference space. (To avoid having to regenerate
+         // the 3DLUT for the OSD on every frame)
+@@ -2815,7 +2818,7 @@
+         };
+     }
+ 
+-    if (p->use_lut_3d && (flags & RENDER_SCREEN_COLOR)) {
++    if (!fixed && p->use_lut_3d && (flags & RENDER_SCREEN_COLOR)) {
+         gl_sc_uniform_texture(p->sc, "lut_3d", p->lut_3d_texture);
+         GLSL(vec3 cpos;)
+         for (int i = 0; i < 3; i++)
+@@ -2827,6 +2830,37 @@
+ void gl_video_set_fb_depth(struct gl_video *p, int fb_depth)
+ {
+     p->fb_depth = fb_depth;
++}
++
++struct pl_color_space gl_video_get_output_color(struct gl_video *p,
++                                                struct pl_color_space source)
++{
++    gl_video_update_options(p);
++    struct pl_color_space color = source.transfer == PL_COLOR_TRC_PQ ||
++                                  source.transfer == PL_COLOR_TRC_HLG
++        ? source : pl_color_space_srgb;
++    if (color.transfer == PL_COLOR_TRC_PQ || color.transfer == PL_COLOR_TRC_HLG)
++        color.primaries = PL_COLOR_PRIM_BT_2020;
++    if (p->opts.target_trc != PL_COLOR_TRC_UNKNOWN &&
++        p->opts.target_trc != color.transfer) {
++        color.transfer = p->opts.target_trc;
++        color.hdr = (struct pl_hdr_metadata){0};
++    }
++    if (p->opts.target_prim != PL_COLOR_PRIM_UNKNOWN &&
++        p->opts.target_prim != color.primaries) {
++        color.primaries = p->opts.target_prim;
++        color.hdr.prim = (struct pl_raw_primaries){0};
++    }
++    if (p->opts.target_peak && p->opts.target_peak != color.hdr.max_luma) {
++        color.hdr.max_luma = p->opts.target_peak;
++        color.hdr.max_cll = color.hdr.max_fall = 0;
++    }
++    // ICC LUTs have no declared platform output encoding. Keep this automatic
++    // HDR path SDR instead of labelling the LUT's gamma-2.2 result as PQ/HLG.
++    if (p->use_lut_3d)
++        color = pl_color_space_srgb;
++    pl_color_space_infer(&color);
++    return color;
+ }
+ 
+ static void pass_dither(struct gl_video *p, const struct ra_fbo *fbo)
+diff --git a/video/out/gpu/video.h b/video/out/gpu/video.h
+--- a/video/out/gpu/video.h
++++ b/video/out/gpu/video.h
+@@ -191,6 +191,8 @@
+     RENDER_FRAME_OSD = 1 << 1,
+     RENDER_FRAME_VF_SUBS = 1 << 2,
+     RENDER_SCREEN_COLOR = 1 << 3, // 3D LUT and dithering
++    // The platform has negotiated a mandatory encoding for this framebuffer.
++    RENDER_COLORSPACE_FIXED = 1 << 4,
+     RENDER_FRAME_DEF = RENDER_FRAME_SUBS | RENDER_FRAME_OSD | RENDER_SCREEN_COLOR,
+ };
+ 
+@@ -206,6 +208,8 @@
+                      struct mp_rect *src, struct mp_rect *dst,
+                      struct mp_osd_res *osd);
+ void gl_video_set_fb_depth(struct gl_video *p, int fb_depth);
++struct pl_color_space gl_video_get_output_color(struct gl_video *p,
++                                                struct pl_color_space source);
+ void gl_video_perfdata(struct gl_video *p, struct voctrl_performance_data *out);
+ void gl_video_set_clear_color(struct gl_video *p, struct m_color color);
+ void gl_video_set_osd_pts(struct gl_video *p, double pts);
+diff --git a/video/out/ohos_common.c b/video/out/ohos_common.c
+--- a/video/out/ohos_common.c
++++ b/video/out/ohos_common.c
+@@ -15,19 +15,34 @@
+  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
++#include <string.h>
++#include <window_manager/oh_display_manager.h>
++
+ #include "ohos_common.h"
+ #include "common/msg.h"
+ #include "video/mp_image.h"
+ #include "vo.h"
+ 
++#ifdef MP_OHOS_HDR_DIAGNOSTICS
++#include <hilog/log.h>
++#define HDR_DIAG(ctx, ...) OH_LOG_Print(LOG_APP, LOG_INFO, 0, "BiliHdrOutput", __VA_ARGS__)
++#else
++#define HDR_DIAG(ctx, ...) ((void)0)
++#endif
++
+ struct vo_ohos_state {
+     struct mp_log *log;
+     OHNativeWindow *native_window;
++    bool capabilities_known, display_pq, display_hlg;
++    bool disabled_pq, disabled_hlg;
++    bool ten_bit, output_ready;
++    uint64_t color_generation;
+     bool color_space_valid;
+     OH_NativeBuffer_ColorSpace color_space;
+     bool metadata_type_valid;
+     OH_NativeBuffer_MetadataType metadata_type;
+     bool static_metadata_valid;
++    OH_NativeBuffer_StaticMetadata static_metadata;
+     bool hdr_brightness_valid;
+     float hdr_brightness;
+ };
+@@ -36,6 +51,27 @@
+ {
+     return color->transfer == PL_COLOR_TRC_PQ ||
+            color->transfer == PL_COLOR_TRC_HLG;
++}
++
++static void query_display_capabilities(struct vo_ohos_state *ctx)
++{
++    NativeDisplayManager_DisplayInfo *info = NULL;
++    int ret = OH_NativeDisplayManager_CreatePrimaryDisplay(&info);
++    ctx->capabilities_known = ret == 0 && info && info->hdrFormat &&
++        (!info->hdrFormat->hdrFormatLength || info->hdrFormat->hdrFormats);
++    ctx->display_pq = ctx->display_hlg = false;
++    if (ctx->capabilities_known) {
++        // Display HDRFormat values, not OH_NativeBuffer_MetadataType values.
++        // @ohos.graphics.hdrCapability: VIDEO_HLG=1, VIDEO_HDR10=2.
++        for (uint32_t n = 0; n < info->hdrFormat->hdrFormatLength; n++) {
++            ctx->display_hlg |= info->hdrFormat->hdrFormats[n] == 1;
++            ctx->display_pq |= info->hdrFormat->hdrFormats[n] == 2;
++        }
++    }
++    if (info)
++        OH_NativeDisplayManager_DestroyDisplay(info);
++    HDR_DIAG(ctx, "capabilities ret=%{public}d known=%{public}d pq=%{public}d hlg=%{public}d",
++             ret, ctx->capabilities_known, ctx->display_pq, ctx->display_hlg);
+ }
+ 
+ static OH_NativeBuffer_ColorSpace get_color_space(
+@@ -59,7 +95,6 @@
+             container = pl_raw_primaries_get(PL_COLOR_PRIM_BT_2020);
+         prim = *container;
+     }
+-
+     return (OH_NativeBuffer_StaticMetadata){
+         .smpte2086 = {
+             .displayPrimaryRed = {prim.red.x, prim.red.y},
+@@ -76,89 +111,89 @@
+     };
+ }
+ 
+-static void set_output_color(struct vo_ohos_state *ctx,
+-                             struct pl_color_space color)
++static void invalidate_color(struct vo_ohos_state *ctx)
++{
++    ctx->color_space_valid = ctx->metadata_type_valid = false;
++    ctx->static_metadata_valid = ctx->hdr_brightness_valid = false;
++    ctx->output_ready = false;
++}
++
++static bool set_output_color(struct vo_ohos_state *ctx,
++                              struct pl_color_space color)
+ {
+     pl_color_space_infer(&color);
+-
+     bool hdr = is_hdr(&color);
+     OH_NativeBuffer_ColorSpace color_space = get_color_space(&color);
+     OH_NativeBuffer_MetadataType metadata_type = hdr
+-        ? (color.transfer == PL_COLOR_TRC_HLG ? OH_VIDEO_HDR_HLG
+-                                              : OH_VIDEO_HDR_HDR10)
++        ? (color.transfer == PL_COLOR_TRC_HLG ? OH_VIDEO_HDR_HLG : OH_VIDEO_HDR_HDR10)
+         : OH_VIDEO_NONE;
++    OH_NativeBuffer_StaticMetadata metadata = hdr
++        ? get_static_metadata(&color) : (OH_NativeBuffer_StaticMetadata){0};
+     float hdr_brightness = hdr ? 1.0f : 0.0f;
+-
++    bool changed = false;
++    int ret = 0;
+     if (!ctx->color_space_valid || ctx->color_space != color_space) {
+-        int ret = OH_NativeWindow_SetColorSpace(ctx->native_window, color_space);
+-        if (ret == 0) {
+-            ctx->color_space = color_space;
+-            ctx->color_space_valid = true;
+-            MP_VERBOSE(ctx, "NativeWindow output switched to %s\n",
+-                       hdr ? (color.transfer == PL_COLOR_TRC_HLG
+-                                  ? "BT.2020 HLG" : "BT.2020 PQ")
+-                           : "sRGB");
+-        } else {
+-            MP_WARN(ctx, "Failed to set NativeWindow color space: %d\n", ret);
+-        }
+-    }
+-
+-    bool metadata_type_changed = !ctx->metadata_type_valid ||
+-                                 ctx->metadata_type != metadata_type;
+-    if (metadata_type_changed) {
+-        int ret = OH_NativeWindow_SetMetadataValue(
+-            ctx->native_window, OH_HDR_METADATA_TYPE, sizeof(metadata_type),
+-            (uint8_t *)&metadata_type);
+-        if (ret == 0) {
+-            ctx->metadata_type = metadata_type;
+-            ctx->metadata_type_valid = true;
+-        } else {
+-            MP_WARN(ctx, "Failed to set NativeWindow HDR metadata type: %d\n",
+-                    ret);
+-        }
+-    }
+-
+-    if (hdr && (metadata_type_changed || !ctx->static_metadata_valid)) {
+-        OH_NativeBuffer_StaticMetadata metadata = get_static_metadata(&color);
+-        int ret = OH_NativeWindow_SetMetadataValue(
+-            ctx->native_window, OH_HDR_STATIC_METADATA, sizeof(metadata),
+-            (uint8_t *)&metadata);
+-        if (ret == 0) {
+-            ctx->static_metadata_valid = true;
+-        } else {
+-            MP_WARN(ctx, "Failed to set NativeWindow HDR static metadata: %d\n",
+-                    ret);
+-        }
+-    } else if (!hdr) {
+-        ctx->static_metadata_valid = false;
+-    }
+-
++        ret = OH_NativeWindow_SetColorSpace(ctx->native_window, color_space);
++        if (ret)
++            goto fail;
++        ctx->color_space = color_space;
++        ctx->color_space_valid = true;
++        changed = true;
++    }
++    if (!ctx->metadata_type_valid || ctx->metadata_type != metadata_type) {
++        ret = OH_NativeWindow_SetMetadataValue(ctx->native_window,
++            OH_HDR_METADATA_TYPE, sizeof(metadata_type), (uint8_t *)&metadata_type);
++        if (ret)
++            goto fail;
++        ctx->metadata_type = metadata_type;
++        ctx->metadata_type_valid = true;
++        changed = true;
++    }
++    if (!ctx->static_metadata_valid ||
++        memcmp(&ctx->static_metadata, &metadata, sizeof(metadata))) {
++        ret = OH_NativeWindow_SetMetadataValue(ctx->native_window,
++            OH_HDR_STATIC_METADATA, sizeof(metadata), (uint8_t *)&metadata);
++        if (ret)
++            goto fail;
++        ctx->static_metadata = metadata;
++        ctx->static_metadata_valid = true;
++        changed = true;
++    }
++    // This HDR10/HLG path never writes dynamic HDR metadata. NONE deactivates
++    // inherited metadata; SetMetadataValue rejects empty/NULL erase requests.
+     if (!ctx->hdr_brightness_valid || ctx->hdr_brightness != hdr_brightness) {
+-        int ret = OH_NativeWindow_NativeWindowHandleOpt(
+-            ctx->native_window, SET_HDR_WHITE_POINT_BRIGHTNESS, hdr_brightness);
+-        if (ret == 0) {
+-            ctx->hdr_brightness = hdr_brightness;
+-            ctx->hdr_brightness_valid = true;
+-        } else {
+-            MP_WARN(ctx, "Failed to set NativeWindow HDR brightness: %d\n", ret);
+-        }
+-    }
++        ret = OH_NativeWindow_NativeWindowHandleOpt(ctx->native_window,
++            SET_HDR_WHITE_POINT_BRIGHTNESS, hdr_brightness);
++        if (ret)
++            goto fail;
++        ctx->hdr_brightness = hdr_brightness;
++        ctx->hdr_brightness_valid = true;
++        changed = true;
++    }
++    ctx->output_ready = true;
++    if (changed) {
++        ctx->color_generation++;
++        HDR_DIAG(ctx, "accepted trc=%{public}d color=%{public}d metadata=%{public}d tenBit=%{public}d generation=%{public}llu",
++                 color.transfer, color_space, metadata_type, ctx->ten_bit,
++                 (unsigned long long)ctx->color_generation);
++    }
++    return true;
++fail:
++    HDR_DIAG(ctx, "rejected trc=%{public}d ret=%{public}d", color.transfer, ret);
++    MP_WARN(ctx, "NativeWindow color/metadata negotiation failed: %d\n", ret);
++    invalidate_color(ctx);
++    return false;
+ }
+ 
+ bool vo_ohos_init(struct vo *vo)
+ {
+     vo->ohos = talloc_zero(vo, struct vo_ohos_state);
+     struct vo_ohos_state *ctx = vo->ohos;
+-
+-    *ctx = (struct vo_ohos_state){
+-        .log = mp_log_new(ctx, vo->log, "ohos"),
+-    };
+-
++    ctx->log = mp_log_new(ctx, vo->log, "ohos");
+     if (vo->opts->WinID == 0 || vo->opts->WinID == -1) {
+         MP_FATAL(ctx, "Missing surface pointer\n");
+         goto fail;
+     }
+-
+     uint64_t surface = 0;
+     memcpy(&surface, &vo->opts->WinID, sizeof(vo->opts->WinID));
+     OH_NativeWindow_CreateNativeWindowFromSurfaceId(surface, &ctx->native_window);
+@@ -166,7 +201,7 @@
+         MP_FATAL(ctx, "Failed to create OHNativeWindow\n");
+         goto fail;
+     }
+-
++    query_display_capabilities(ctx);
+     return true;
+ fail:
+     talloc_free(ctx);
+@@ -179,29 +214,26 @@
+     struct vo_ohos_state *ctx = vo->ohos;
+     if (!ctx)
+         return;
+-
+-    if (ctx->native_window)
++    if (ctx->native_window) {
++        set_output_color(ctx, pl_color_space_srgb);
+         OH_NativeWindow_DestroyNativeWindow(ctx->native_window);
+-
++    }
+     talloc_free(ctx);
+     vo->ohos = NULL;
+ }
+ 
+ OHNativeWindow *vo_ohos_native_window(struct vo *vo)
+ {
+-    struct vo_ohos_state *ctx = vo->ohos;
+-    return ctx->native_window;
++    return vo->ohos->native_window;
+ }
+ 
+ bool vo_ohos_surface_size(struct vo *vo, int *out_w, int *out_h)
+ {
+     struct vo_ohos_state *ctx = vo->ohos;
+-
+-    int w = vo->opts->ohos_surface_size.w,
+-        h = vo->opts->ohos_surface_size.h;
++    int w = vo->opts->ohos_surface_size.w, h = vo->opts->ohos_surface_size.h;
+     if (!w || !h)
+-        OH_NativeWindow_NativeWindowHandleOpt(ctx->native_window, GET_BUFFER_GEOMETRY, &h, &w);
+-
++        OH_NativeWindow_NativeWindowHandleOpt(ctx->native_window,
++                                              GET_BUFFER_GEOMETRY, &h, &w);
+     if (w <= 0 || h <= 0) {
+         MP_ERR(ctx, "Failed to get height and width.\n");
+         return false;
+@@ -211,48 +243,89 @@
+     return true;
+ }
+ 
++bool vo_ohos_has_hdr_display(struct vo *vo)
++{
++    struct vo_ohos_state *ctx = vo->ohos;
++    return ctx->capabilities_known && (ctx->display_pq || ctx->display_hlg);
++}
++
++void vo_ohos_set_output_depth(struct vo *vo, int r, int g, int b, int a,
++                               int native_format, int framebuffer_depth)
++{
++    struct vo_ohos_state *ctx = vo->ohos;
++    ctx->ten_bit = r == 10 && g == 10 && b == 10 && a == 2 &&
++        native_format == NATIVEBUFFER_PIXEL_FMT_RGBA_1010102 && framebuffer_depth >= 10;
++    HDR_DIAG(ctx, "surface r=%{public}d g=%{public}d b=%{public}d a=%{public}d format=%{public}d framebufferDepth=%{public}d tenBit=%{public}d",
++             r, g, b, a, native_format, framebuffer_depth, ctx->ten_bit);
++}
++
++bool vo_ohos_output_ready(struct vo *vo)
++{
++    return vo->ohos->output_ready;
++}
++
++bool vo_ohos_verify_color(struct vo *vo)
++{
++    struct vo_ohos_state *ctx = vo->ohos;
++    OH_NativeBuffer_ColorSpace actual;
++    int ret = OH_NativeWindow_GetColorSpace(ctx->native_window, &actual);
++    bool valid = ctx->output_ready && !ret && actual == ctx->color_space;
++    if (!valid)
++        ctx->output_ready = false;
++    HDR_DIAG(ctx, "surfaceColor ret=%{public}d matches=%{public}d", ret, valid);
++    return valid;
++}
++
++uint64_t vo_ohos_color_generation(struct vo *vo)
++{
++    return vo->ohos->color_generation;
++}
++
++void vo_ohos_disable_hdr(struct vo *vo)
++{
++    vo->ohos->disabled_pq = vo->ohos->disabled_hlg = true;
++    invalidate_color(vo->ohos);
++}
++
++static struct pl_color_space supported_color(struct vo_ohos_state *ctx,
++                                               struct pl_color_space color)
++{
++    bool supported = ctx->capabilities_known && ctx->ten_bit &&
++        color.primaries == PL_COLOR_PRIM_BT_2020 &&
++        ((color.transfer == PL_COLOR_TRC_PQ && ctx->display_pq && !ctx->disabled_pq) ||
++         (color.transfer == PL_COLOR_TRC_HLG && ctx->display_hlg && !ctx->disabled_hlg));
++    if (!supported)
++        return pl_color_space_srgb;
++    pl_color_space_infer(&color);
++    return color;
++}
++
+ struct pl_color_space vo_ohos_preferred_csp(struct vo *vo)
+ {
+-    const struct pl_color_space color = vo_get_current_params(vo).color;
+-
+-    if (color.transfer == PL_COLOR_TRC_PQ)
+-        return pl_color_space_hdr10;
+-    if (color.transfer == PL_COLOR_TRC_HLG)
+-        return pl_color_space_bt2020_hlg;
+-    return pl_color_space_srgb;
++    return supported_color(vo->ohos, vo_get_current_params(vo).color);
+ }
+ 
+ bool vo_ohos_set_color(struct vo *vo, struct mp_image_params *params)
+ {
+-    struct pl_color_space color = params ? params->color
+-                                         : pl_color_space_srgb;
+-
+-    if (is_hdr(&color)) {
+-        color.primaries = PL_COLOR_PRIM_BT_2020;
+-        pl_color_space_infer(&color);
+-    } else {
++    struct vo_ohos_state *ctx = vo->ohos;
++    struct pl_color_space color = params ? params->color : pl_color_space_srgb;
++    color = supported_color(ctx, color);
++    bool success = set_output_color(ctx, color);
++    if (!success && is_hdr(&color)) {
++        if (color.transfer == PL_COLOR_TRC_PQ)
++            ctx->disabled_pq = true;
++        else
++            ctx->disabled_hlg = true;
+         color = pl_color_space_srgb;
+-    }
+-
++        success = set_output_color(ctx, color);
++    }
+     if (params)
+         params->color = color;
+-
+-    struct pl_color_space window_color = color;
+-    if (is_hdr(&color)) {
+-        struct pl_color_space source = vo_get_current_params(vo).color;
+-        if (source.transfer == color.transfer)
+-            window_color.hdr = source.hdr;
+-    }
+-    set_output_color(vo->ohos, window_color);
+-    return true;
++    return success;
+ }
+ 
+ void vo_ohos_invalidate_color(struct vo *vo)
+ {
+-    struct vo_ohos_state *ctx = vo->ohos;
+-
+-    ctx->color_space_valid = false;
+-    ctx->metadata_type_valid = false;
+-    ctx->static_metadata_valid = false;
+-    ctx->hdr_brightness_valid = false;
+-}
++    invalidate_color(vo->ohos);
++    query_display_capabilities(vo->ohos);
++}
+diff --git a/video/out/ohos_common.h b/video/out/ohos_common.h
+--- a/video/out/ohos_common.h
++++ b/video/out/ohos_common.h
+@@ -30,6 +30,13 @@
+ void vo_ohos_uninit(struct vo *vo);
+ OHNativeWindow *vo_ohos_native_window(struct vo *vo);
+ bool vo_ohos_surface_size(struct vo *vo, int *w, int *h);
++bool vo_ohos_has_hdr_display(struct vo *vo);
++void vo_ohos_set_output_depth(struct vo *vo, int r, int g, int b, int a,
++                               int native_format, int framebuffer_depth);
++bool vo_ohos_output_ready(struct vo *vo);
++bool vo_ohos_verify_color(struct vo *vo);
++uint64_t vo_ohos_color_generation(struct vo *vo);
++void vo_ohos_disable_hdr(struct vo *vo);
+ struct pl_color_space vo_ohos_preferred_csp(struct vo *vo);
+ bool vo_ohos_set_color(struct vo *vo, struct mp_image_params *params);
+ void vo_ohos_invalidate_color(struct vo *vo);
+diff --git a/video/out/opengl/context_ohos.c b/video/out/opengl/context_ohos.c
+--- a/video/out/opengl/context_ohos.c
++++ b/video/out/opengl/context_ohos.c
+@@ -22,89 +22,261 @@
+ #include "egl_helpers.h"
+ #include "common/common.h"
+ #include "context.h"
++#include "input/input.h"
++
++#ifdef MP_OHOS_HDR_DIAGNOSTICS
++#include <hilog/log.h>
++#define HDR_DIAG(ctx, ...) OH_LOG_Print(LOG_APP, LOG_INFO, 0, "BiliHdrOutput", __VA_ARGS__)
++#else
++#define HDR_DIAG(ctx, ...) ((void)0)
++#endif
+ 
+ struct priv {
+     struct GL gl;
+     EGLDisplay egl_display;
+     EGLContext egl_context;
+     EGLSurface egl_surface;
++    EGLConfig egl_config;
++    int r, g, b, a, native_format;
++    uint64_t color_generation;
++    int transition_failures;
++    int swap_failures;
++    bool stop_requested;
++    bool output_surface_valid;
+ };
+ 
++static bool ohos_check_visible(struct ra_ctx *ctx)
++{
++    struct priv *p = ctx->priv;
++    return p->output_surface_valid && p->egl_surface && vo_ohos_output_ready(ctx->vo);
++}
++
+ static pl_color_space_t ohos_preferred_csp(struct ra_ctx *ctx)
+ {
+     return vo_ohos_preferred_csp(ctx->vo);
+ }
+ 
++static void destroy_surface(struct ra_ctx *ctx)
++{
++    struct priv *p = ctx->priv;
++    p->output_surface_valid = false;
++    if (p->egl_surface) {
++        eglMakeCurrent(p->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++        eglDestroySurface(p->egl_display, p->egl_surface);
++        p->egl_surface = EGL_NO_SURFACE;
++    }
++}
++
++static bool create_surface(struct ra_ctx *ctx)
++{
++    struct priv *p = ctx->priv;
++    OHNativeWindow *window = vo_ohos_native_window(ctx->vo);
++    p->egl_surface = eglCreateWindowSurface(p->egl_display, p->egl_config,
++                                            (EGLNativeWindowType)window, NULL);
++    if (p->egl_surface == EGL_NO_SURFACE)
++    {
++        HDR_DIAG(ctx, "createSurface failed error=%{public}d", eglGetError());
++        return false;
++    }
++    if (!eglMakeCurrent(p->egl_display, p->egl_surface, p->egl_surface, p->egl_context) ||
++        !vo_ohos_verify_color(ctx->vo)) {
++        destroy_surface(ctx);
++        return false;
++    }
++    p->color_generation = vo_ohos_color_generation(ctx->vo);
++    p->output_surface_valid = true;
++    HDR_DIAG(ctx, "surfaceReady generation=%{public}llu", (unsigned long long)p->color_generation);
++    return true;
++}
++
++static bool replace_surface(struct ra_ctx *ctx)
++{
++    // NativeWindow color/metadata user-data is copied at RequestBuffer, not
++    // FlushBuffer. Discard a possibly prefetched backbuffer before rendering
++    // a different encoding. Keep the EGLConfig/context and all GL resources.
++    destroy_surface(ctx);
++    if (!create_surface(ctx))
++        return false;
++    int w, h;
++    if (!vo_ohos_surface_size(ctx->vo, &w, &h)) {
++        destroy_surface(ctx);
++        return false;
++    }
++    ra_gl_ctx_resize(ctx->swapchain, w, h, 0);
++    return true;
++}
++
++static bool bind_for_cleanup(struct ra_ctx *ctx)
++{
++    struct priv *p = ctx->priv;
++    if (!p->egl_context)
++        return false;
++    if (eglGetCurrentContext() == p->egl_context)
++        return true;
++    // A cleanup-only surface is never submitted and need not pass color
++    // negotiation. Keep GL deletion valid even after a terminal tag failure.
++    OHNativeWindow *window = vo_ohos_native_window(ctx->vo);
++    p->egl_surface = eglCreateWindowSurface(p->egl_display, p->egl_config,
++                                            (EGLNativeWindowType)window, NULL);
++    if (p->egl_surface && eglMakeCurrent(p->egl_display, p->egl_surface,
++                                        p->egl_surface, p->egl_context))
++        return true;
++    destroy_surface(ctx);
++    return eglMakeCurrent(p->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
++                           p->egl_context);
++}
++
+ static void ohos_set_color(struct ra_ctx *ctx, struct mp_image_params *params)
+ {
+-    vo_ohos_set_color(ctx->vo, params);
++    struct priv *p = ctx->priv;
++    bool ok = vo_ohos_set_color(ctx->vo, params);
++    if (ok && (!p->output_surface_valid || !p->egl_surface ||
++               p->color_generation != vo_ohos_color_generation(ctx->vo))) {
++        ok = replace_surface(ctx);
++        if (!ok) {
++            vo_ohos_disable_hdr(ctx->vo);
++            ok = vo_ohos_set_color(ctx->vo, params) && replace_surface(ctx);
++        }
++    }
++    if (ok) {
++        p->transition_failures = 0;
++    } else {
++        p->output_surface_valid = false;
++        bind_for_cleanup(ctx);
++        if (++p->transition_failures >= 3 && !p->stop_requested) {
++            p->stop_requested = true;
++            MP_ERR(ctx, "Cannot restore a valid SDR output surface. Stopping playback.\n");
++            mp_input_run_cmd(ctx->vo->input_ctx, (const char *[]){"stop", NULL});
++        }
++    }
+ }
+ 
+ static void ohos_swap_buffers(struct ra_ctx *ctx)
+ {
+     struct priv *p = ctx->priv;
+-    eglSwapBuffers(p->egl_display, p->egl_surface);
++    if (!ohos_check_visible(ctx))
++        return;
++    if (eglSwapBuffers(p->egl_display, p->egl_surface)) {
++        p->swap_failures = 0;
++        return;
++    }
++    // Creation can succeed before the first actual buffer allocation fails.
++    // Retry an acknowledged SDR surface; never retain a false HDR report.
++    p->output_surface_valid = false;
++    vo_ohos_disable_hdr(ctx->vo);
++    mp_mutex_lock(&ctx->vo->params_mutex);
++    ctx->vo->target_params = NULL;
++    mp_mutex_unlock(&ctx->vo->params_mutex);
++    if (++p->swap_failures >= 3 && !p->stop_requested) {
++        p->stop_requested = true;
++        MP_ERR(ctx, "Cannot present a valid SDR output surface. Stopping playback.\n");
++        mp_input_run_cmd(ctx->vo->input_ctx, (const char *[]){"stop", NULL});
++    }
+ }
+ 
+ static void ohos_uninit(struct ra_ctx *ctx)
+ {
+     struct priv *p = ctx->priv;
++    // Cleanup needs the original context even after a failed transition.
++    bind_for_cleanup(ctx);
+     ra_gl_ctx_uninit(ctx);
+-
+-    if (p->egl_surface) {
+-        eglMakeCurrent(p->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+-                       EGL_NO_CONTEXT);
+-        eglDestroySurface(p->egl_display, p->egl_surface);
+-    }
++    destroy_surface(ctx);
+     if (p->egl_context)
+         eglDestroyContext(p->egl_display, p->egl_context);
+-
+     vo_ohos_uninit(ctx->vo);
+ }
+ 
++static bool try_context(struct ra_ctx *ctx, bool ten_bit)
++{
++    struct priv *p = ctx->priv;
++    struct mpegl_cb cb = ten_bit
++        ? (struct mpegl_cb){.auto_r=10, .auto_g=10, .auto_b=10, .auto_a=2}
++        : (struct mpegl_cb){.auto_r=8, .auto_g=8, .auto_b=8, .auto_a=8};
++    if (!mpegl_create_context_cb(ctx, p->egl_display, cb,
++                                &p->egl_context, &p->egl_config)) {
++        HDR_DIAG(ctx, "createContext request10=%{public}d failed", ten_bit);
++        return false;
++    }
++    int visual = 0;
++    if (!eglGetConfigAttrib(p->egl_display, p->egl_config, EGL_RED_SIZE, &p->r) ||
++        !eglGetConfigAttrib(p->egl_display, p->egl_config, EGL_GREEN_SIZE, &p->g) ||
++        !eglGetConfigAttrib(p->egl_display, p->egl_config, EGL_BLUE_SIZE, &p->b) ||
++        !eglGetConfigAttrib(p->egl_display, p->egl_config, EGL_ALPHA_SIZE, &p->a) ||
++        !eglGetConfigAttrib(p->egl_display, p->egl_config, EGL_NATIVE_VISUAL_ID, &visual))
++        return false;
++    int bits = ten_bit ? 10 : 8;
++    int alpha = ten_bit ? 2 : 8;
++    int format = ten_bit ? NATIVEBUFFER_PIXEL_FMT_RGBA_1010102
++                         : NATIVEBUFFER_PIXEL_FMT_RGBA_8888;
++    HDR_DIAG(ctx, "eglConfig request10=%{public}d r=%{public}d g=%{public}d b=%{public}d a=%{public}d visual=%{public}d",
++             ten_bit, p->r, p->g, p->b, p->a, visual);
++    if (p->r != bits || p->g != bits || p->b != bits || p->a != alpha || visual != format)
++        return false;
++    OHNativeWindow *window = vo_ohos_native_window(ctx->vo);
++    if (OH_NativeWindow_NativeWindowHandleOpt(window, SET_FORMAT, visual) ||
++        OH_NativeWindow_NativeWindowHandleOpt(window, GET_FORMAT, &p->native_format) ||
++        p->native_format != visual)
++        return false;
++    // Tag SDR before EGL can request the first backbuffer.
++    return vo_ohos_set_color(ctx->vo, NULL) && create_surface(ctx);
++}
++
+ static bool ohos_init(struct ra_ctx *ctx)
+ {
+     struct priv *p = ctx->priv = talloc_zero(ctx, struct priv);
+-
+     if (!vo_ohos_init(ctx->vo))
+         goto fail;
+-
+     p->egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+-    if (!eglInitialize(p->egl_display, NULL, NULL)) {
+-        MP_FATAL(ctx, "EGL failed to initialize.\n");
+-        goto fail;
+-    }
+-
+-    EGLConfig config;
+-    if (!mpegl_create_context(ctx, p->egl_display, &p->egl_context, &config))
+-        goto fail;
+-
+-    OHNativeWindow *native_window = vo_ohos_native_window(ctx->vo);
+-    p->egl_surface = eglCreateWindowSurface(p->egl_display, config,
+-                                    (EGLNativeWindowType)native_window, NULL);
+-
+-    if (p->egl_surface == EGL_NO_SURFACE) {
+-        MP_FATAL(ctx, "Could not create EGL surface!\n");
+-        goto fail;
+-    }
+-
+-    if (!eglMakeCurrent(p->egl_display, p->egl_surface, p->egl_surface,
+-                        p->egl_context)) {
+-        MP_FATAL(ctx, "Failed to set context!\n");
+-        goto fail;
+-    }
+-
++    if (!eglInitialize(p->egl_display, NULL, NULL))
++        goto fail;
++    bool hdr = vo_ohos_has_hdr_display(ctx->vo);
++    bool ok = hdr && try_context(ctx, true);
++    if (!ok) {
++        destroy_surface(ctx);
++        if (p->egl_context)
++            eglDestroyContext(p->egl_display, p->egl_context);
++        p->egl_context = EGL_NO_CONTEXT;
++        vo_ohos_disable_hdr(ctx->vo);
++        ok = try_context(ctx, false);
++    }
++    if (!ok)
++        goto fail;
+     mpegl_load_functions(&p->gl, ctx->log);
+-
+     struct ra_ctx_params params = {
++        .check_visible = ohos_check_visible,
+         .preferred_csp = ohos_preferred_csp,
+         .set_color = ohos_set_color,
+         .swap_buffers = ohos_swap_buffers,
+     };
+-
+     if (!ra_gl_ctx_init(ctx, &p->gl, params))
+         goto fail;
+-
++    int w, h;
++    if (!vo_ohos_surface_size(ctx->vo, &w, &h))
++        goto fail;
++    ra_gl_ctx_resize(ctx->swapchain, w, h, 0);
++    int actual_depth = ra_gl_ctx_color_depth(ctx->swapchain);
++    vo_ohos_set_output_depth(ctx->vo, p->r, p->g, p->b, p->a,
++                               p->native_format, actual_depth);
++    if (p->r == 10 && actual_depth < 10) {
++        // The real framebuffer is authoritative. Restore the proven RGBA8
++        // path before a renderer or hardware-decoder owns any GL resources.
++        ra_gl_ctx_uninit(ctx);
++        destroy_surface(ctx);
++        eglDestroyContext(p->egl_display, p->egl_context);
++        p->egl_context = EGL_NO_CONTEXT;
++        vo_ohos_disable_hdr(ctx->vo);
++        if (!try_context(ctx, false))
++            goto fail;
++        mpegl_load_functions(&p->gl, ctx->log);
++        if (!ra_gl_ctx_init(ctx, &p->gl, params))
++            goto fail;
++        ra_gl_ctx_resize(ctx->swapchain, w, h, 0);
++        actual_depth = ra_gl_ctx_color_depth(ctx->swapchain);
++        vo_ohos_set_output_depth(ctx->vo, p->r, p->g, p->b, p->a,
++                                   p->native_format, actual_depth);
++    }
++    MP_VERBOSE(ctx, "OHOS EGL output %d/%d/%d/%d format=%d framebuffer-depth=%d\n",
++               p->r, p->g, p->b, p->a, p->native_format, actual_depth);
+     return true;
+ fail:
+     ohos_uninit(ctx);
+@@ -116,11 +288,15 @@
+     int w, h;
+     if (!vo_ohos_surface_size(ctx->vo, &w, &h))
+         return false;
+-
+     ctx->vo->dwidth = w;
+     ctx->vo->dheight = h;
+     ra_gl_ctx_resize(ctx->swapchain, w, h, 0);
+     vo_ohos_invalidate_color(ctx->vo);
++    return true;
++}
++
++static bool ohos_pass_colorspace(struct ra_ctx *ctx)
++{
+     return true;
+ }
+ 
+@@ -134,6 +310,7 @@
+     .name           = "ohos",
+     .description    = "HarmonyOS/EGL",
+     .reconfig       = ohos_reconfig,
++    .pass_colorspace = ohos_pass_colorspace,
+     .control        = ohos_control,
+     .init           = ohos_init,
+     .uninit         = ohos_uninit,
+diff --git a/video/out/opengl/egl_helpers.c b/video/out/opengl/egl_helpers.c
+--- a/video/out/opengl/egl_helpers.c
++++ b/video/out/opengl/egl_helpers.c
+@@ -318,6 +318,10 @@
+ 
+     void *tmp = talloc_new(NULL);
+     struct egl_opts *opts = mp_get_config_group(tmp, ctx->global, &egl_conf);
++    if (!opts->output_format && !opts->config_id && cb.auto_r) {
++        opts->output_format = RGBA_FORMAT(cb.auto_r, cb.auto_g,
++                                         cb.auto_b, cb.auto_a);
++    }
+ 
+     bool r = false;
+     if (!r && (mode == GLES_NO || mode == GLES_AUTO))
+diff --git a/video/out/opengl/egl_helpers.h b/video/out/opengl/egl_helpers.h
+--- a/video/out/opengl/egl_helpers.h
++++ b/video/out/opengl/egl_helpers.h
+@@ -14,6 +14,9 @@
+                           EGLContext *out_context, EGLConfig *out_config);
+ 
+ struct mpegl_cb {
++    // For auto output-format only, request an exact non-floating RGBA format.
++    // Explicit user output-format/config-id selections remain authoritative.
++    int auto_r, auto_g, auto_b, auto_a;
+     // if set, pick the desired config from the given list and return its index
+     // defaults to 0 (they are sorted by eglChooseConfig). return a negative
+     // number to indicate an error condition or that no suitable configs could
+diff --git a/video/out/vo_gpu.c b/video/out/vo_gpu.c
+--- a/video/out/vo_gpu.c
++++ b/video/out/vo_gpu.c
+@@ -48,6 +48,9 @@
+     struct gl_video *renderer;
+ 
+     int events;
++    bool present_ready;
++    bool output_color_valid;
++    struct pl_color_space output_color;
+ };
+ static void resize(struct vo *vo)
+ {
+@@ -70,26 +73,61 @@
+     vo->want_redraw = true;
+ }
+ 
++static bool failed_frame(struct vo *vo)
++{
++    mp_mutex_lock(&vo->params_mutex);
++    vo->target_params = NULL;
++    mp_mutex_unlock(&vo->params_mutex);
++    return VO_FALSE;
++}
++
+ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+ {
+     struct gpu_priv *p = vo->priv;
+     struct ra_swapchain *sw = p->ctx->swapchain;
++
++    p->present_ready = false;
++    // OHOS acknowledges the required buffer encoding through mutable params.
++    // Other contexts' pass_colorspace hooks have different negotiation rules.
++    bool color_managed = strcmp(p->ctx->fns->name, "ohos") == 0 &&
++                         sw->fns->set_color;
++    struct mp_image_params output = frame->current ? frame->current->params
++                                                   : (struct mp_image_params){0};
++    if (color_managed) {
++        output.color = frame->current
++            ? gl_video_get_output_color(p->renderer, output.color)
++            : pl_color_space_srgb;
++        sw->fns->set_color(sw, &output);
++    }
+ 
+     struct ra_fbo fbo;
+     if (!sw->fns->start_frame(sw, &fbo))
+-        return VO_FALSE;
+-
+-    gl_video_render_frame(p->renderer, frame, &fbo, RENDER_FRAME_DEF);
++        return failed_frame(vo);
++
++    int flags = RENDER_FRAME_DEF;
++    if (color_managed) {
++        fbo.color_space = output.color;
++        flags |= RENDER_COLORSPACE_FIXED;
++        if (!p->output_color_valid ||
++            !pl_color_space_equal(&p->output_color, &output.color)) {
++            // Repeated/paused frames can reuse a cached, already encoded FBO.
++            gl_video_reset(p->renderer);
++            p->output_color = output.color;
++            p->output_color_valid = true;
++        }
++    }
++    gl_video_render_frame(p->renderer, frame, &fbo, flags);
+     if (!sw->fns->submit_frame(sw, frame)) {
+         MP_ERR(vo, "Failed presenting frame!\n");
+-        return VO_FALSE;
++        return failed_frame(vo);
+     }
+ 
+     struct mp_image_params *params = gl_video_get_target_params_ptr(p->renderer);
+     mp_mutex_lock(&vo->params_mutex);
+-    vo->target_params = params;
++    vo->target_params = frame->current ? params : NULL;
+     mp_mutex_unlock(&vo->params_mutex);
+ 
++    p->present_ready = true;
+     return VO_TRUE;
+ }
+ 
+@@ -97,6 +135,9 @@
+ {
+     struct gpu_priv *p = vo->priv;
+     struct ra_swapchain *sw = p->ctx->swapchain;
++    if (!p->present_ready)
++        return;
++    p->present_ready = false;
+     sw->fns->swap_buffers(sw);
+ }
+ 

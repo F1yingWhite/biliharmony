@@ -3,11 +3,31 @@
   "release_url": "https://github.com/mpv-ohos/libmpv-ohos-build/releases/tag/20260715",
   "recipe_commit": "1bab837e662ffa47ce51efd0720d3ed7c4988944",
   "recipe_source_archive": "https://github.com/mpv-ohos/libmpv-ohos-build/archive/1bab837e662ffa47ce51efd0720d3ed7c4988944.tar.gz",
-  "binary": {
+  "original_binary": {
     "name": "libmpv.so",
     "sha256": "672e98d497199a89e20893979ecec686dee1113bbe1b609c9a9266aa1679bd32",
     "bytes": 35491168,
     "architecture": "aarch64"
+  },
+  "binary": {
+    "name": "libmpv.so",
+    "sha256": "5a8279b527ff889ab273f93aded9ca96006f2d11e4abc391456c5c6bd725c9ce",
+    "bytes": 2261536,
+    "architecture": "aarch64",
+    "input_sha256": "f904d78b7c227c659f53131e65033218be8b77d5ce49d18acad5be6f5d4597b3",
+    "input_bytes": 2628832,
+    "packaging_transform": "OHOS SDK llvm-strip --strip-all",
+    "soname": "libmpv.so"
+  },
+  "dependency_carrier": {
+    "name": "libdep.so",
+    "sha256": "098e628f73f1a709bdff16de7eb5fad7d104a0d5bce68c23435b6214d57a35e0",
+    "bytes": 35491168,
+    "architecture": "aarch64",
+    "input_sha256": "098e628f73f1a709bdff16de7eb5fad7d104a0d5bce68c23435b6214d57a35e0",
+    "input_bytes": 35491168,
+    "packaging_transform": "OHOS SDK llvm-strip --strip-all",
+    "soname": "libdep.so"
   },
   "components": [
     {
@@ -315,5 +335,53 @@
         }
       ]
     }
-  ]
+  ],
+  "local_patches": [
+    {
+      "path": "tool/mpv/patches/0001-ohaudio-pcm-timeline.patch",
+      "sha256": "8638719f964243aa4f738226c97ad13170cba6c0f499d14b168ce6176f5fda76"
+    },
+    {
+      "path": "tool/mpv/patches/0002-ohcodec-init-failure.patch",
+      "sha256": "5d8ce119bb9297c713b2e394520ec4bec8ed2f2cf0cecb0bee54187d42d658a9"
+    },
+    {
+      "path": "tool/mpv/patches/0003-ohos-hdr-output.patch",
+      "sha256": "8735cfbf347e81173797e771c0155be806175f72c93e897aeddf13ec9899e091"
+    }
+  ],
+  "rebuild_report": {
+    "path": "tool/mpv/rebuild-report-arm64.json",
+    "sha256": "3fe8d74f2930e0638ccfc5bf59acd879a8d9ac3441529785a4ace48990f25bb8"
+  },
+  "derivation": {
+    "kind": "local core-only rebuild plus original dependency carrier",
+    "source_sha": "6edeee00a07b9b76f197aa71eee3d029fb090de4",
+    "meson_options": [
+      "--auto-features=disabled",
+      "-Dlibmpv=true",
+      "-Dcplayer=false",
+      "-Dgpl=false",
+      "-Dbuild-date=false",
+      "-Dohos=enabled",
+      "-Degl-ohos=enabled",
+      "-Dgl=enabled",
+      "-Dvulkan=disabled",
+      "-Dshaderc=disabled",
+      "-Dlua=lua52",
+      "-Dlcms2=enabled",
+      "-Diconv=enabled",
+      "-Dvector=enabled",
+      "-Dcplugins=enabled",
+      "-Dzlib=enabled",
+      "-Dbuildtype=release",
+      "-Db_lundef=true"
+    ],
+    "feature_changes": [
+      "shaderc disabled",
+      "vulkan disabled"
+    ],
+    "carrier_modification": "Only DT_SONAME libmpv.so -> libdep.so",
+    "arm_runtime_validated": false
+  }
 }

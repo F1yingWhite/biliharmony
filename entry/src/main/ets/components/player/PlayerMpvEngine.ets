@@ -7,6 +7,8 @@ import { PlayerEngine, PlayerEngineEvent, PlayerSeekMode, PlayerBuffering } from
 
 const STATE_POLL_MS: number = 150;
 const DIAGNOSTICS_INTERVAL_MS: number = 5000;
+const RATE_DIAGNOSTICS_POLL_MS: number = 30;
+const RATE_DIAGNOSTICS_DURATION_MS: number = 1200;
 
 /** libmpv 适配器只翻译命令和原生事件，不下载媒体、不计算音画偏差或预测播放时钟。 */
 export class PlayerMpvEngine implements PlayerEngine {
@@ -25,6 +27,10 @@ export class PlayerMpvEngine implements PlayerEngine {
   private height: number = 0;
   private rate: number = 1;
   private diagnosticsAt: number = 0;
+  private colorDiagnosticsAt: number = 0;
+  private timeEmittedAt: number = 0;
+  private rateDiagnosticsRequestedAt: number = 0;
+  private rateDiagnosticsUntil: number = 0;
   private playIntent: number = 0;
   private viewportWidth: number = 0;
   private viewportHeight: number = 0;
@@ -66,7 +72,9 @@ export class PlayerMpvEngine implements PlayerEngine {
     try { this.consume(mpv.poll(this.handle)); }
     catch (e) { this.error('播放内核发生错误'); return; }
     if (generation === this.generation && this.handle !== 0 && this.state !== 'error') {
-      this.timer = setTimeout((): void => { this.timer = -1; this.poll(generation); }, STATE_POLL_MS);
+      const interval: number = DEBUG && Date.now() < this.rateDiagnosticsUntil ?
+        RATE_DIAGNOSTICS_POLL_MS : STATE_POLL_MS;
+      this.timer = setTimeout((): void => { this.timer = -1; this.poll(generation); }, interval);
     }
   }
 
@@ -92,12 +100,33 @@ export class PlayerMpvEngine implements PlayerEngine {
     if (Number.isFinite(value.speed) && value.speed > 0 && Math.abs(value.speed - this.rate) > 0.001) {
       this.rate = value.speed; this.emit('rate', value.speed);
     }
-    this.emit('time', this.currentTime);
-    if (DEBUG && Date.now() - this.diagnosticsAt >= DIAGNOSTICS_INTERVAL_MS) {
-      this.diagnosticsAt = Date.now();
-      hilog.info(0x0000, 'BiliPlayback',
-        'mpv.clock=%{public}d hwdec=%{public}s avsync=%{public}s dropped=%{public}d decoderDropped=%{public}d',
-        Math.round(this.currentTime), value.hwdec, value.avSync.toFixed(4), value.droppedFrames, value.decoderDroppedFrames);
+    const now: number = DEBUG ? Date.now() : 0;
+    // Diagnostic sampling must not increase the UI playback-clock cadence.
+    if (!DEBUG || now >= this.rateDiagnosticsUntil || now - this.timeEmittedAt >= STATE_POLL_MS) {
+      this.timeEmittedAt = now;
+      this.emit('time', this.currentTime);
+    }
+    if (DEBUG) {
+      if (now - this.colorDiagnosticsAt >= DIAGNOSTICS_INTERVAL_MS) {
+        this.colorDiagnosticsAt = now;
+        hilog.info(0x0000, 'BiliPlayback',
+          'mpv.color sourcePrimaries=%{public}s sourceTransfer=%{public}s sourceFormat=%{public}s targetPrimaries=%{public}s targetTransfer=%{public}s vo=%{public}s',
+          value.sourcePrimaries, value.sourceTransfer, value.sourceFormat,
+          value.targetPrimaries, value.targetTransfer, value.vo);
+      }
+      if (now < this.rateDiagnosticsUntil) {
+        this.diagnosticsAt = now;
+        hilog.info(0x0000, 'BiliPlayback',
+          'mpv.rateSample elapsed=%{public}d speed=%{public}s clock=%{public}d audioPts=%{public}d avsync=%{public}s dropped=%{public}d decoderDropped=%{public}d',
+          now - this.rateDiagnosticsRequestedAt, value.speed.toFixed(3), Math.round(this.currentTime),
+          Number.isFinite(value.audioPts) && value.audioPts >= 0 ? Math.round(value.audioPts * 1000) : -1,
+          value.avSync.toFixed(4), value.droppedFrames, value.decoderDroppedFrames);
+      } else if (now - this.diagnosticsAt >= DIAGNOSTICS_INTERVAL_MS) {
+        this.diagnosticsAt = now;
+        hilog.info(0x0000, 'BiliPlayback',
+          'mpv.clock=%{public}d hwdec=%{public}s avsync=%{public}s dropped=%{public}d decoderDropped=%{public}d',
+          Math.round(this.currentTime), value.hwdec, value.avSync.toFixed(4), value.droppedFrames, value.decoderDroppedFrames);
+      }
     }
   }
 
@@ -144,7 +173,19 @@ export class PlayerMpvEngine implements PlayerEngine {
   }
 
   setPlaybackRate(rate: number): void {
-    if (this.handle !== 0) mpv.rate(this.handle, rate);
+    if (this.handle === 0) return;
+    mpv.rate(this.handle, rate);
+    if (DEBUG) {
+      this.rateDiagnosticsRequestedAt = Date.now();
+      this.rateDiagnosticsUntil = this.rateDiagnosticsRequestedAt + RATE_DIAGNOSTICS_DURATION_MS;
+      hilog.info(0x0000, 'BiliPlayback', 'mpv.rateRequest at=%{public}s rate=%{public}s',
+        this.rateDiagnosticsRequestedAt.toString(), rate.toFixed(3));
+      if (this.timer >= 0) {
+        clearTimeout(this.timer);
+        const generation: number = this.generation;
+        this.timer = setTimeout((): void => { this.timer = -1; this.poll(generation); }, RATE_DIAGNOSTICS_POLL_MS);
+      }
+    }
   }
 
   setVolume(volume: number): void {

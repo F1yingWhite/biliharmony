@@ -2,12 +2,14 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {createArktsLoader, deferred, tick} = require('./arkts-module.cjs');
 
-function fixture() {
+function fixture({debug = false} = {}) {
   const calls = [], events = [], logs = [], timers = new Map(), states = new Map(), focuses = [];
   const createQueue = [], openQueue = [], releaseQueue = [];
-  let sequence = 0, timerId = 0;
-  const state = () => ({position: 0, duration: 10, width: 1280, height: 720, paused: true,
+  let sequence = 0, timerId = 0, now = 10000;
+  const state = () => ({position: 0, audioPts: -1, duration: 10, width: 1280, height: 720, paused: true,
     buffering: false, eof: false, loaded: false, speed: 1, volume: 100, hwdec: 'ohcodec',
+    sourcePrimaries: 'unknown', sourceTransfer: 'unknown', sourceFormat: 'unknown',
+    targetPrimaries: 'unknown', targetTransfer: 'unknown', vo: 'unknown',
     avSync: 0, droppedFrames: 0, decoderDroppedFrames: 0, events: []});
   const mpv = {
     async create(surface, caFile) {const id = ++sequence; calls.push(['create', id, surface, caFile]); states.set(id, state()); return createQueue.shift() || id;},
@@ -24,24 +26,34 @@ function fixture() {
     async release() {this.releases++;}
   }
   const load = createArktsLoader({globals: {
-    setTimeout(fn, ms) {const id = ++timerId; timers.set(id, {fn, ms}); return id;},
+    Date: class extends Date {static now() {return now;}},
+    setTimeout(fn, ms) {const id = ++timerId; timers.set(id, {fn, ms, at: now + ms}); return id;},
     clearTimeout(id) {timers.delete(id);},
   }, mocks: {
     'libbilimpv.so': {default: mpv},
     'components/player/PlayerAudioFocus': {PlayerAudioFocus: Focus},
     'components/player/PlayerMpvResources': {PlayerMpvResources: {async caFile() {return '/app/ca.pem';}}},
     '@kit.PerformanceAnalysisKit': {hilog: {info(...args) {logs.push(args);}, error(...args) {logs.push(args);}}},
-    BuildProfile: {DEBUG: false},
+    BuildProfile: {DEBUG: debug},
   }});
   const {PlayerEngineController} = load('components/player/PlayerEngineController');
   const owner = new PlayerEngineController(event => events.push(event));
   function poll(patch = {}, nativeEvents = [], id = 1) {
     const value = states.get(id); Object.assign(value, patch); value.events.push(...nativeEvents);
-    const [timer, work] = timers.entries().next().value; timers.delete(timer); work.fn();
+    const [timer, work] = timers.entries().next().value; timers.delete(timer); now = work.at; work.fn();
+  }
+  function advance(ms) {
+    const end = now + ms;
+    for (;;) {
+      const next = [...timers.entries()].filter(([, work]) => work.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next) break;
+      timers.delete(next[0]); now = next[1].at; next[1].fn();
+    }
+    now = end;
   }
   const event = (kind, patch = {}) => ({kind, request: -1, position: 0, errorCode: 0, ...patch});
   function loaded() {poll({loaded: true}, [event('file-loaded')]);}
-  return {owner, calls, events, timers, focuses, states, logs, createQueue, openQueue, releaseQueue, poll, event, loaded};
+  return {owner, calls, events, timers, focuses, states, logs, createQueue, openQueue, releaseQueue, poll, advance, event, loaded};
 }
 
 test('libmpv: MP4 and split tracks use one engine and exact remote URLs, without MPD or byte proxy', async () => {
@@ -158,6 +170,66 @@ test('libmpv: surface resize and user rate/volume reach existing instance withou
     [['resize', 1, 1920, 1080], ['rate', 1, 2], ['volume', 1, 0]]);
   assert.equal(f.calls.filter(x => x[0] === 'create').length, 1); assert.equal(f.calls.filter(x => x[0] === 'seek').length, 0);
   await f.owner.release();
+});
+
+test('libmpv: DEBUG rate diagnostics poll every 30 ms for 1200 ms without changing playback controls', async () => {
+  const f = fixture({debug: true}); await f.owner.open('https://cdn/video?token=private', 'audio', 'surface'); f.loaded();
+  const normalLogs = () => f.logs.filter(log => log[2].startsWith('mpv.clock='));
+  const samples = () => f.logs.filter(log => log[2].startsWith('mpv.rateSample'));
+  const requests = () => f.logs.filter(log => log[2].startsWith('mpv.rateRequest'));
+  const initialLogs = normalLogs().length, initialCalls = f.calls.length;
+  const initialTimes = f.events.filter(event => event.kind === 'time').length;
+  Object.assign(f.states.get(1), {position: 1.3, audioPts: 1.25, speed: 2, avSync: -0.05, droppedFrames: 7, decoderDroppedFrames: 3});
+  f.owner.engine.setPlaybackRate(2);
+  assert.equal(f.timers.size, 1); assert.equal([...f.timers.values()][0].ms, 30);
+  assert.deepEqual(requests()[0].slice(3), ['10150', '2.000']);
+  f.advance(1199);
+  assert.equal(samples().length, 39);
+  assert.deepEqual(samples()[0].slice(3), [30, '2.000', 1300, 1250, '-0.0500', 7, 3]);
+  assert.equal(samples().at(-1)[3], 1170);
+  assert.equal(f.events.filter(event => event.kind === 'time').length - initialTimes, 7);
+  f.advance(1);
+  assert.equal(samples().length, 39); assert.equal([...f.timers.values()][0].ms, 150);
+  assert.equal(f.events.filter(event => event.kind === 'time').length - initialTimes, 8);
+  f.advance(4800); assert.equal(normalLogs().length, initialLogs);
+  f.advance(400); assert.equal(normalLogs().length, initialLogs + 1);
+  f.owner.engine.setPlaybackRate(1); f.advance(60);
+  assert.equal(requests().length, 2); assert.equal(samples().at(-1)[3], 60);
+  assert.deepEqual(f.calls.slice(initialCalls).filter(call => call[0] !== 'poll'), [['rate', 1, 2], ['rate', 1, 1]]);
+  assert.doesNotMatch(JSON.stringify(f.logs), /http|token|private/);
+  await f.owner.release(); assert.equal(f.timers.size, 0);
+});
+
+test('libmpv: release builds keep normal polling and emit no rate diagnostics', async () => {
+  const f = fixture(); await f.owner.open('video', 'audio', 'surface'); f.loaded();
+  const initialCalls = f.calls.length;
+  const initialTimes = f.events.filter(event => event.kind === 'time').length;
+  f.owner.engine.setPlaybackRate(2); f.advance(1200); f.owner.engine.setPlaybackRate(1);
+  assert.equal([...f.timers.values()][0].ms, 150); assert.equal(f.logs.length, 0);
+  assert.equal(f.events.filter(event => event.kind === 'time').length - initialTimes, 8);
+  assert.deepEqual(f.calls.slice(initialCalls).filter(call => call[0] !== 'poll'), [['rate', 1, 2], ['rate', 1, 1]]);
+  await f.owner.release();
+});
+
+test('libmpv: DEBUG color diagnostics report observed source and target every five seconds even during a rate burst', async () => {
+  const f = fixture({debug: true}); await f.owner.open('https://cdn/video?token=private', 'audio', 'surface'); f.loaded();
+  const colors = () => f.logs.filter(log => log[2].startsWith('mpv.color '));
+  assert.deepEqual(colors()[0].slice(3), ['unknown', 'unknown', 'unknown', 'unknown', 'unknown', 'unknown']);
+  const initialCalls = f.calls.length;
+  Object.assign(f.states.get(1), {sourcePrimaries: 'bt.2020', sourceTransfer: 'pq', sourceFormat: 'p010',
+    targetPrimaries: 'bt.709', targetTransfer: 'gamma2.2', vo: 'gpu'});
+  f.advance(4999); assert.equal(colors().length, 1);
+  f.advance(101); assert.equal(colors().length, 2);
+  assert.deepEqual(colors()[1].slice(3), ['bt.2020', 'pq', 'p010', 'bt.709', 'gamma2.2', 'gpu']);
+  assert.match(colors()[1][2], /sourcePrimaries=.*sourceTransfer=.*sourceFormat=.*targetPrimaries=.*targetTransfer=.*vo=/);
+  f.advance(4800);
+  Object.assign(f.states.get(1), {targetPrimaries: 'unknown', targetTransfer: 'unknown'});
+  f.owner.engine.setPlaybackRate(2); f.advance(240);
+  assert.equal(colors().length, 3);
+  assert.deepEqual(colors()[2].slice(3), ['bt.2020', 'pq', 'p010', 'unknown', 'unknown', 'gpu']);
+  assert.deepEqual(f.calls.slice(initialCalls).filter(call => call[0] !== 'poll'), [['rate', 1, 2]]);
+  assert.doesNotMatch(JSON.stringify(f.logs), /http|token|private/);
+  await f.owner.release(); assert.equal(f.timers.size, 0);
 });
 
 test('libmpv: EOF comes from native timeline and replay may seek on the same retained instance', async () => {

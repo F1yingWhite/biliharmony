@@ -155,8 +155,43 @@ test('session: sponsor mute survives restoration and rejected playback speed fal
 test('session: hold speed changes a shared rate once and resumes the selected rate without seeking', async () => {
   const f = fixture(); const {engine} = await f.boot(); f.playing(); f.session.setSpeed(1.5); engine.calls.length = 0;
   f.session.beginHold(); assert.equal(f.state().holdSpeedActive, true); assert.equal(f.state().playbackRate, 1.5);
+  f.session.beginHold();
   f.session.endHold(); assert.equal(f.state().holdSpeedActive, false);
-  assert.deepEqual(f.calls(engine, 'rate'), [['rate', 2], ['rate', 1.5]]); assert.equal(f.calls(engine, 'seek').length, 0); f.session.deactivate();
+  f.session.endHold();
+  assert.deepEqual(engine.calls, [['rate', 2], ['rate', 1.5]]); assert.equal(f.opens.length, 1); f.session.deactivate();
+});
+
+test('session: holding an already selected 2x speed changes only the hint without native commands', async () => {
+  const f = fixture(); const {engine} = await f.boot(); f.playing(); f.session.setSpeed(2);
+  engine.calls.length = 0; f.events.length = 0; f.states.length = 0;
+  f.session.setSpeed(2); f.session.beginHold(); f.session.beginHold();
+  assert.equal(f.state().holdSpeedActive, true);
+  f.session.endHold(); f.session.endHold(); assert.equal(f.state().holdSpeedActive, false);
+  assert.equal(f.state().playbackRate, 2); assert.deepEqual(engine.calls, []); assert.equal(f.opens.length, 1);
+  assert.deepEqual(f.events.filter(e => e.kind === 'rate'), []); f.session.deactivate();
+});
+
+test('session: immediate speed changes and matching native acknowledgements notify consumers only once', async () => {
+  const f = fixture(); const {engine} = await f.boot(); f.playing(); f.events.length = 0;
+  f.session.setSpeed(1.5); engine.emit('rate', 1.5); engine.emit('rate', 1.5);
+  f.session.beginHold(); engine.emit('rate', 2); engine.emit('rate', 2);
+  f.session.endHold(); engine.emit('rate', 1.5); engine.emit('rate', 1.5);
+  assert.deepEqual(f.events.filter(e => e.kind === 'rate').map(e => e.value), [1.5, 2, 1.5]); f.session.deactivate();
+});
+
+test('session: fast hold release ignores the late 2x acknowledgement and retains the restored speed', async () => {
+  const f = fixture(); const {engine} = await f.boot(); f.playing(); f.session.setSpeed(1.5);
+  engine.calls.length = 0; f.events.length = 0;
+  f.session.beginHold(); f.session.endHold(); engine.emit('rate', 2); engine.emit('rate', 1.5);
+  assert.deepEqual(engine.calls, [['rate', 2], ['rate', 1.5]]);
+  assert.deepEqual(f.events.filter(e => e.kind === 'rate').map(e => e.value), [2, 1.5]);
+  assert.equal(f.state().holdSpeedActive, false); assert.equal(f.state().playbackRate, 1.5); f.session.deactivate();
+});
+
+test('session: a newly prepared engine still receives the selected speed even when the old target matches', async () => {
+  const f = fixture(); await f.boot(); f.playing(); f.session.setSpeed(2);
+  await f.session.replaceSource(f.source({cid: 2})); f.prepared();
+  assert.deepEqual(f.calls(f.session.core.engine, 'rate'), [['rate', 2]]); f.session.deactivate();
 });
 
 test('session: focus interruption cancels temporary speed, pending autoplay and seek resume', async () => {

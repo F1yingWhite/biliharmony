@@ -18,29 +18,115 @@
 | NAPI 边界 | `bilimpv.cpp` | 参数校验、状态封送、异步创建/打开/释放的完成通知 |
 | 原生会话 | `mpv_session.h`、`mpv_session.cpp` | libmpv 句柄、命令队列、事件线程、媒体状态观测和销毁屏障 |
 
-渲染固定为 `vo=gpu`、`gpu-context=ohos`、`gpu-api=opengl`、`opengl-es=yes`、`egl-output-format=rgba8`，
-使 EGL 输出格式与 XComponent 的 RGBA Surface 匹配，避免自动选择格式造成 `EGL_BAD_MATCH` 黑屏。
+渲染使用 `vo=gpu`、`gpu-context=ohos`、`gpu-api=opengl`、`opengl-es=yes`、`egl-output-format=auto`。
+0003 先查询显示器对 HDR10 / HLG 的能力，再协商精确的 EGL `10/10/10/2` 与 NativeWindow
+`RGBA_1010102`，并确认默认 framebuffer 的实际位深至少 10。能力缺失、查询失败或格式协商失败时，
+回退到匹配的 EGL `8/8/8/8` 与 NativeWindow `RGBA8888`，由 GPU 完成 HDR 到 SDR 的色调映射。
+EGL 配置、NativeWindow 像素格式和实际 framebuffer 都经过检查，避免仅改变位深请求造成 `EGL_BAD_MATCH` 黑屏。
 原生层在 `FILE_LOADED` 时检查选中的视频轨和 `current-vo=gpu`；缺失时报告视频输出错误，
 分离流还检查选中的外部音轨。输出初始化成功仅表示渲染路径已建立，首帧实际呈现仍需画面与设备日志确认。
 
+音频变速滤镜 `af=scaletempo2` 在内核创建时一次配置，普通速度下也保留实例。
+固定版本的 [自动变速实现](https://github.com/ErBWs/mpv/blob/6edeee00a07b9b76f197aa71eee3d029fb090de4/filters/f_auto_filters.c)
+会在 1 倍速与其他倍速之间切换时排空并添加/移除滤镜；常驻滤镜让长按开始和松手只更新速度参数，保留音调校正并避免这次重建。
+会话同时合并相同倍速命令和确认事件，已选 2 倍速时长按不会重复提交变速，也不会重复更新弹幕速度。
+这些配置和命令边界由原生/会话回归检查；鸿蒙虚拟机的实际切换与持续倍速结果见
+[倍速运行验证](player-hold-transition-validation.md)。
+
 ## 固定的鸿蒙二进制
 
-| 项目 | 固定值 |
-| --- | --- |
-| 上游发布 | [mpv-ohos/libmpv-ohos-build 20260715](https://github.com/mpv-ohos/libmpv-ohos-build/releases/tag/20260715) |
-| 构建脚本提交 | `1bab837e662ffa47ce51efd0720d3ed7c4988944` |
-| 原生库 | `libmpv.so`，arm64，35,491,168 字节，OHOS API 15+ |
-| SHA-256 | `672e98d497199a89e20893979ecec686dee1113bbe1b609c9a9266aa1679bd32` |
-| 内嵌 mpv 版本 | `mpv v0.41.0-dev-g6edeee00a` |
-| mpv 对应源码 | [ErBWs/mpv 6edeee00a07b9b76f197aa71eee3d029fb090de4](https://github.com/ErBWs/mpv/tree/6edeee00a07b9b76f197aa71eee3d029fb090de4) |
-| 内嵌 FFmpeg 版本 | `n8.0`，带 OHCodec 适配 |
-| FFmpeg 对应源码 | [FFmpeg/FFmpeg 140fd653aed8cad774f991ba083e2d01e86420c7](https://github.com/FFmpeg/FFmpeg/tree/140fd653aed8cad774f991ba083e2d01e86420c7)，`n8.0` 标签对应提交 |
+播放器使用共享库 `libmpv.so` 和依赖载体 `libdep.so`。新内核来自固定源码
+`6edeee00a07b9b76f197aa71eee3d029fb090de4`，依次应用本仓库 `tool/mpv/patches/0001`、`0002` 与 `0003`。
+依赖载体来自原始 OHOS 20260715 发布，只有 ELF SONAME 从 libmpv.so 改为 libdep.so。
+原发布及全部组件、版权和许可证信息仍保留在 sources.json 与 licenses.txt。
 
-以发布标签中的下载脚本、补丁和版本表为重建依据。
-[发布版本表](https://github.com/mpv-ohos/libmpv-ohos-build/blob/1bab837e662ffa47ce51efd0720d3ed7c4988944/download/deps-version.sh)
-中的 FFmpeg 引用为 `n8.0`，下载自 FFmpeg 上游；mpv 引用为 `feat-ohos-0.41.0`。
-当前 `main` 已在发布后改动，不能把最新脚本当成此二进制的准确构建来源。
-更换二进制时同步更新版本、哈希、源码引用、依赖许可证和验证结果。
+| 产物 | 原始构建输入 SHA-256 | 实际 HAP 中剥离后的 SHA-256 |
+| --- | --- | --- |
+| 新 libmpv.so | `f904d78b7c227c659f53131e65033218be8b77d5ce49d18acad5be6f5d4597b3` | `5a8279b527ff889ab273f93aded9ca96006f2d11e4abc391456c5c6bd725c9ce` |
+| libdep.so | `098e628f73f1a709bdff16de7eb5fad7d104a0d5bce68c23435b6214d57a35e0` | `098e628f73f1a709bdff16de7eb5fad7d104a0d5bce68c23435b6214d57a35e0` |
+
+新内核剥离后 2,261,536 字节；载体剥离后 35,491,168 字节。
+HAP 的散列对应 SDK `llvm-strip --strip-all` 后的产物，构建输入散列不能冒充包内散列。
+完整固定输入、补丁校验值、构建选项与 ELF 检查在 `tool/mpv/rebuild-report-arm64.json`。
+可复现命令见 [内核重建说明](../tool/mpv/README.md)。两库必须一起分发和替换。
+
+0001 在 PCM 变成裸字节前记录每段的真实 PTS 与 effective rate，按硬件时间映射音频播放点
+与视频显示期限；OHAudio 的 CLOCK_MONOTONIC 时间通过成对取时转换到 mpv 的进程时基。
+0002 保护 OHCodec interop 初始化失败后的清理，让解码器继续走原有回退流程。
+0003 接通 `vo=gpu` 的目标颜色协商：绘制前设置平台颜色和元数据，把实际接受的目标写入
+`ra_fbo.color_space`，并固定 GPU shader 的输出编码，避免 SDR 像素被标为 PQ / HLG。
+标准 HDR10 传递 ST 2086、MaxCLL / MaxFALL，HLG 使用对应的平台类型；同一 PQ 的元数据变化也更新。
+HDR 到 SDR 切换恢复 sRGB、`NONE`、零静态元数据与零 HDR 白点亮度。
+输出颜色或元数据变化时重建 EGL window surface，让新申请的缓冲携带新标签，保留 EGL context 和 GL 资源；
+普通帧及倍速切换不触发这次重建。协商或提交失败时回退 SDR，无法恢复则停止输出并报告错误。
+虚拟机使用的 GLES 格式探测兼容保护不属于 ARM 补丁。
+
+这次核心重建使用 OpenGL，关闭新核心的 Vulkan/shaderc；相关组件仍留在原始载体中。
+新核心的 `gpl=false` 不会消除载体中静态 FFmpeg 的 LGPL-3.0-or-later 分发要求。
+ARM 构建报告的 runtime_validated 保持其实际值；虚拟机运行结果另见
+[倍速运行验证](player-hold-transition-validation.md) 与 [HDR 输出验证](player-hdr-validation.md)，
+不能把 x86_64 验证当作 ARM 验收。
+替换产物时同时更新来源清单、包检查器、离线 notice 和本表，并重新检查真实 HAP。
+
+## HDR 选源与输出验证
+
+画质菜单中的 HDR/HDR Vivid 表示请求和选择对应的 B 站片源，不代表当前视频已经按 HDR 输出到屏幕。
+视频标题、菜单标签、截图亮度、BT.2020 色域或像素位深都不能单独证明 HDR 输出。
+当前业务层按 `dash.video` 的画质 ID、编解码器和 URL 选流，没有用片源颜色字段判断实际渲染输出。
+
+当前 0003 实现标准 HDR10（BT.2020 / PQ）和 HLG，保留 `vo=gpu`。
+它按片源参数生成目标，再以显示能力、实际 10 位缓冲及平台接受的颜色共同决定最终编码；
+不满足条件时选择 SDR。画质菜单中的 HDR Vivid 仍只是选源请求，这条路径没有实现其动态元数据透传，
+也不宣称支持 Dolby Vision 动态元数据。
+原生策略与完整 EGL 上下文 fixture 已执行 13 项测试，涵盖能力缺失、10 位协商失败、元数据变化、
+缓冲标签时序及失败回退。虚拟机实际不具备 HDR 显示能力，验证了 PQ / HLG 输入与 SDR 输出回退；
+实际测试素材、系统缓冲结果和物理屏幕未验证的项目见 [HDR 输出验证](player-hdr-validation.md)。
+
+### 0003 前的历史观察
+
+以下日志来自 2026-10-09 19:15、应用 0003 之前的真机验证。片源为 `BV1R1e4zKEh1`，
+在用户选择 HDR 后连续观测到：
+
+```text
+mpv.color sourcePrimaries=bt.2020 sourceTransfer=pq sourceFormat=ohcodec targetPrimaries=bt.709 targetTransfer=gamma2.2 vo=gpu
+```
+
+片源参数确认输入为 BT.2020/PQ HDR；GPU 目标参数确认当时的应用把它映射为 BT.709/Gamma 2.2 SDR 输出。
+原始观测保存在本次设备验收的 `.qa/hold-transition/baseline-rates-complete.txt`。
+此结果只证实补丁前的输出路径没有输出 HDR，不能据此认定手机面板不支持 HDR，也不能用它判断当前补丁的输出。
+`ohcodec` 是硬解图像格式名称，本条日志没有直接给出解码缓冲区的位深。
+
+未应用 0003 的固定 mpv 源码说明了这次历史观测的原因：
+
+- [OHOS OpenGL 上下文](https://github.com/ErBWs/mpv/blob/6edeee00a07b9b76f197aa71eee3d029fb090de4/video/out/opengl/context_ohos.c#L100) 注册 `preferred_csp` 和 `set_color`，但补丁前的 [vo=gpu 绘制路径](https://github.com/ErBWs/mpv/blob/6edeee00a07b9b76f197aa71eee3d029fb090de4/video/out/vo_gpu.c#L79) 没有调用它们。
+  [OpenGL start_frame](https://github.com/ErBWs/mpv/blob/6edeee00a07b9b76f197aa71eee3d029fb090de4/video/out/opengl/context.c#L220) 也没有填入目标色彩空间；[GPU 色彩转换](https://github.com/ErBWs/mpv/blob/6edeee00a07b9b76f197aa71eee3d029fb090de4/video/out/gpu/video.c#L2693) 因而默认 BT.709，并把 HDR 源的目标传递函数设为 Gamma 2.2，再执行色彩映射。
+- 原有 [OHOS 输出实现](https://github.com/ErBWs/mpv/blob/6edeee00a07b9b76f197aa71eee3d029fb090de4/video/out/ohos_common.c#L79) 已包含 NativeWindow 的 PQ/HLG 标签与元数据设置。
+  0003 将目标协商接入现有 `vo=gpu`，补足显示能力、实际位深、失败检查、元数据更新和新缓冲申请时序。
+
+### 当前诊断与验收边界
+
+诊断属性由固定版本的 [图像参数属性实现](https://github.com/ErBWs/mpv/blob/6edeee00a07b9b76f197aa71eee3d029fb090de4/player/command.c#L2410) 提供：
+
+| 属性 | 含义和读取边界 |
+| --- | --- |
+| `video-params` | 解码后、进入视频滤镜前的图像参数；首帧解码前可能只有宽高，颜色字段不可用 |
+| `video-out-params` | 滤镜后交给 VO 的图像参数，不能当作屏幕目标输出 |
+| `video-target-params` | VO 发布的 GPU 目标图像参数；目标建立且实际渲染后读取，用于判断本次色彩映射结果 |
+| 上述三组的 `/primaries`、`/gamma`、`/colormatrix`、`/pixelformat`、`/sig-peak` | 均由同一属性实现提供；传递函数返回 `pq`/`hlg`/`gamma2.2` 等名称，硬解可另读 `/hw-pixelformat`。`sig-peak` 是参数中的 `max_luma / 203`，不是屏幕实测亮度 |
+| `current-vo`、`current-gpu-context` | 实际采用的视频输出和 GPU 上下文；不能只记录请求配置 |
+
+属性尚不可用时保留不可用状态，不把缺失值或未知颜色推断成 SDR。HDR 验收还需关联正在播放的视频 Surface 与系统输出：
+
+- RenderService 树的 `colorSpace`、`uifirstColorGamut`、`NodeColorSpace` 使用 [GraphicColorGamut](https://github.com/openharmony/graphic_graphic_surface/blob/d04831dfb91e4c710daea9e241353c699b06bf7c/interfaces/inner_api/surface/surface_type.h#L412)，其中 `4` 为 sRGB、`6` 为 Display P3；节点色域不包含传递函数，背景色的 Display P3 声明也不是视频缓冲区的 HDR 证据。
+- [BufferQueue dump](https://github.com/openharmony/graphic_graphic_surface/blob/d04831dfb91e4c710daea9e241353c699b06bf7c/surface/src/buffer_queue.cpp#L2404) 中，`config` 后的裸数为缓冲区 `CM_ColorSpaceType`，如 `2294273` 为 sRGB；`metadataType` 为 [HDI 元数据类型](https://github.com/openharmony/drivers_interface/blob/74caef74888bc73eecd3719e59f09b7e4b4e9d6f/display/graphic/common/v1_0/CMColorSpace.idl#L123)，`0/1/2/3` 分别为无元数据/HLG/HDR10/HDR Vivid。
+  同行的 `HDR` 字段是旧元数据接口状态，不是实际 HDR 输出的布尔值。应同时检查视频缓冲区色彩空间、静态/动态元数据以及合成后的输出，不能把屏幕或圆角装饰层的缓冲区当作视频 Surface。
+- 上述历史验证的 `screen` dump 仅提供刷新模式、分辨率和背光等信息，没有给出面板 HDR 能力；背光数值、Surface 的默认 `displayNit` 和白点比例不能当作实测峰值亮度。
+
+[官方 NativeWindow 使用示例](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/hdr-vivid-transcoding-sdr) 分别设置输出色彩空间、元数据类型和像素格式。
+当前的 `auto` 由 0003 执行能力与格式协商；位深本身不能判定 HDR/SDR。
+虚拟机上的 RGBA8 / sRGB / `NONE` 是能力不足时的实际回退结果。
+物理设备的 HDR 输出仍需验证真实 10 位视频缓冲、PQ/HLG 标签、元数据、合成输出与面板表现；
+不能只凭配置请求或虚拟机回退测试宣称已经完成物理 HDR 验收。
 
 ## 可以独立重复的真实媒体验证
 
@@ -66,9 +152,11 @@ mpv 将外部音频加载失败视为可忽略的附加文件错误。仅凭 `FI
 测试调用本机安装的 mpv，以软件解码验证分离流协议。本次宿主版本为 mpv 0.41.0 / FFmpeg 9.0.2；
 HAP 固定的是上表中的 OHOS mpv 开发版 / FFmpeg 8.0，二者不是同一个二进制。
 ArkTS 适配与业务会话由 Node 替身回归验证，NAPI 与原生会话另由 C++ 边界回归和 OHOS 构建验证；
-XComponent、OHCodec 及实际音画同步需要真机验收。各层验证结果分别记录。
+XComponent、OHCodec 及实际音画同步需要鸿蒙运行环境验收。虚拟机的播放时序与
+物理设备的硬解、HDR 输出分别记录，不能互相替代。
 
-真机验收应使用同一条曾出现问题的视频，包含连续拖动、定位时暂停、恢复、倍速、切清晰度、
+真机验收应使用同一条曾出现问题的视频，包含连续拖动、定位时暂停、恢复、长按启动/持续/松手、快速反复长按、
+从 1.5 倍速长按后还原及已选 2 倍速时长按、切清晰度、
 全屏与后台返回，并检查原生解码器、丢帧、缓存、内核 A/V 误差及实际声音/画面。
 高码率网络不足、设备不支持所选硬解格式等问题需要相应的降画质或错误处理，换内核本身不构成验收。
 

@@ -34,6 +34,7 @@
 !/tool/release-notes.sh
 !/tool/publish-release.cjs
 !/tool/qa/
+!/tool/mpv/
 /tool/qa/*.sh.orig
 /tool/qa/.tmp/
 /dist/

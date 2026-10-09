@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the actual HAP's pinned player core, native linkage and offline notices."""
+"""Check the reviewed ARM core/carrier pair inside an actual HAP."""
 import argparse
 import hashlib
 import json
@@ -8,11 +8,7 @@ import struct
 import sys
 import zipfile
 
-
-CORE_SHA256 = '672e98d497199a89e20893979ecec686dee1113bbe1b609c9a9266aa1679bd32'
-CA_SHA256 = 'a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505'
-CORE_BYTES = 35491168
-RECIPE_COMMIT = '1bab837e662ffa47ce51efd0720d3ed7c4988944'
+PINNED = {'core': {'input_sha256': 'f904d78b7c227c659f53131e65033218be8b77d5ce49d18acad5be6f5d4597b3', 'input_bytes': 2628832, 'packaged_sha256': '5a8279b527ff889ab273f93aded9ca96006f2d11e4abc391456c5c6bd725c9ce', 'packaged_bytes': 2261536}, 'carrier': {'input_sha256': '098e628f73f1a709bdff16de7eb5fad7d104a0d5bce68c23435b6214d57a35e0', 'input_bytes': 35491168, 'packaged_sha256': '098e628f73f1a709bdff16de7eb5fad7d104a0d5bce68c23435b6214d57a35e0', 'packaged_bytes': 35491168}, 'original_sha256': '672e98d497199a89e20893979ecec686dee1113bbe1b609c9a9266aa1679bd32', 'recipe_commit': '1bab837e662ffa47ce51efd0720d3ed7c4988944', 'local_patches': [{'path': 'tool/mpv/patches/0001-ohaudio-pcm-timeline.patch', 'sha256': '8638719f964243aa4f738226c97ad13170cba6c0f499d14b168ce6176f5fda76'}, {'path': 'tool/mpv/patches/0002-ohcodec-init-failure.patch', 'sha256': '5d8ce119bb9297c713b2e394520ec4bec8ed2f2cf0cecb0bee54187d42d658a9'}, {'path': 'tool/mpv/patches/0003-ohos-hdr-output.patch', 'sha256': '8735cfbf347e81173797e771c0155be806175f72c93e897aeddf13ec9899e091'}], 'rebuild_report_sha256': '3fe8d74f2930e0638ccfc5bf59acd879a8d9ac3441529785a4ace48990f25bb8', 'ca_sha256': 'a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505', 'licenses_sha256': '9ba94e22bf32cd52fdab838888d8e236ed2519e50262fb02af9c995699433348'}
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -21,36 +17,44 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def elf_dependencies(data, label):
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def elf_metadata(data, label):
     require(data[:6] == b'\x7fELF\x02\x01', label + ': expected little-endian ELF64')
     header = struct.unpack_from('<16sHHIQQQIHHHHHH', data)
-    require(header[2] == 183, label + ': expected AArch64 machine')
-    require(header[1] == 3, label + ': expected a shared object (ET_DYN)')
-    program_offset, program_size, program_count = header[5], header[9], header[10]
-    programs = [struct.unpack_from('<IIQQQQQQ', data, program_offset + i * program_size)
-                for i in range(program_count)]
-    dynamic = next((program for program in programs if program[0] == 2), None)
+    require(header[2] == 183 and header[1] == 3, label + ': expected AArch64 ET_DYN')
+    programs = [struct.unpack_from('<IIQQQQQQ', data, header[5] + n * header[9])
+                for n in range(header[10])]
+    dynamic = next((p for p in programs if p[0] == 2), None)
     require(dynamic is not None, label + ': missing PT_DYNAMIC')
-    needed_offsets, string_address = [], None
+    needed, strings, soname, flags = [], None, None, 0
     for offset in range(dynamic[2], dynamic[2] + dynamic[5], 16):
         tag, value = struct.unpack_from('<qQ', data, offset)
         if tag == 0:
             break
         if tag == 1:
-            needed_offsets.append(value)
+            needed.append(value)
         elif tag == 5:
-            string_address = value
-    require(string_address is not None, label + ': missing dynamic string table')
-    segment = next((program for program in programs if program[0] == 1 and
-                    program[3] <= string_address < program[3] + program[5]), None)
-    require(segment is not None, label + ': string table has no file-backed segment')
-    string_offset = segment[2] + string_address - segment[3]
-    result = []
-    for relative in needed_offsets:
-        start = string_offset + relative
-        result.append(data[start:data.index(b'\0', start)].decode('ascii'))
-    require(result, label + ': expected native shared-library dependencies')
-    return result
+            strings = value
+        elif tag == 14:
+            soname = value
+        elif tag == 30:
+            flags = value
+    require(strings is not None, label + ': missing DT_STRTAB')
+    segment = next((p for p in programs if p[0] == 1 and
+                    p[3] <= strings < p[3] + p[5]), None)
+    require(segment is not None, label + ': string table is not file-backed')
+    base = segment[2] + strings - segment[3]
+
+    def string(relative):
+        start = base + relative
+        return data[start:data.index(b'\0', start)].decode('ascii')
+
+    return {'needed': [string(n) for n in needed],
+            'soname': string(soname) if soname is not None else None,
+            'symbolic': bool(flags & 2)}
 
 
 def inspect_hap(hap):
@@ -58,62 +62,98 @@ def inspect_hap(hap):
         names = archive.namelist()
 
         def read_suffix(suffix):
-            matches = [name for name in names if name == suffix or name.endswith('/' + suffix)]
+            matches = [n for n in names if n == suffix or n.endswith('/' + suffix)]
             require(len(matches) == 1, 'HAP must contain one ' + suffix)
             return archive.read(matches[0])
 
+        app = json.loads(read_suffix('module.json'))['app']
         expected_app = json.loads((ROOT / 'AppScope/app.json5').read_text())['app']
-        packaged_app = json.loads(read_suffix('module.json'))['app']
         for key in ['bundleName', 'versionName', 'versionCode']:
-            require(packaged_app.get(key) == expected_app[key],
-                    'HAP ' + key + ' differs from AppScope/app.json5')
+            require(app.get(key) == expected_app[key], 'HAP app identity differs: ' + key)
 
-        core = read_suffix('libs/arm64-v8a/libmpv.so')
-        bridge = read_suffix('libs/arm64-v8a/libbilimpv.so')
-        runtime = read_suffix('libs/arm64-v8a/libc++_shared.so')
-        require(len(core) == CORE_BYTES, 'HAP libmpv.so size differs from the pinned core')
-        require(hashlib.sha256(core).hexdigest() == CORE_SHA256, 'HAP libmpv.so SHA-256 mismatch')
-        core_needed = elf_dependencies(core, 'libmpv.so')
-        bridge_needed = elf_dependencies(bridge, 'libbilimpv.so')
-        runtime_needed = elf_dependencies(runtime, 'libc++_shared.so')
-        require('libmpv.so' in bridge_needed, 'bridge does not dynamically link libmpv.so')
-        require('libace_napi.z.so' in bridge_needed, 'bridge has no OHOS NAPI dependency')
-        require('libnative_media_vdec.so' in core_needed, 'core has no OHOS video-decoder dependency')
-        require(not any('avcodec' in item or 'avformat' in item for item in core_needed),
-                'pinned core should include FFmpeg rather than require unpackaged shared FFmpeg')
+        native_names = {n for n in names if n.endswith('.so')}
+        require(native_names == {'libs/arm64-v8a/' + n for n in
+                ('libmpv.so', 'libdep.so', 'libbilimpv.so', 'libc++_shared.so')},
+                'HAP must package exactly the four reviewed ARM libraries')
+        libraries, metadata = {}, {}
+        for name in ('libmpv.so', 'libdep.so', 'libbilimpv.so', 'libc++_shared.so'):
+            libraries[name] = read_suffix('libs/arm64-v8a/' + name)
+            metadata[name] = elf_metadata(libraries[name], name)
+        for name, role in [('libmpv.so', 'core'), ('libdep.so', 'carrier')]:
+            expected = PINNED[role]
+            data = libraries[name]
+            require(len(data) == expected['packaged_bytes'] and
+                    digest(data) == expected['packaged_sha256'],
+                    name + ': packaged bytes do not match the reviewed stripped input')
+            require(metadata[name]['soname'] == name, name + ': incorrect DT_SONAME')
+            require(metadata[name]['symbolic'], name + ': missing SYMBOLIC binding')
+        core_needed = metadata['libmpv.so']['needed']
+        require(b'BiliPcmTiming' not in libraries['libmpv.so'] and
+                b'BiliHdrOutput' not in libraries['libmpv.so'] and
+                b'QA ONLY forcedCapabilities' not in libraries['libmpv.so'],
+                'production core contains QA timing/HDR probes')
+        require('libnative_display_manager.so' in core_needed,
+                'HDR core must query the native display capabilities')
+        carrier_needed = metadata['libdep.so']['needed']
+        bridge_needed = metadata['libbilimpv.so']['needed']
+        require('libmpv.so' in bridge_needed and 'libace_napi.z.so' in bridge_needed,
+                'bridge must dynamically use the new mpv API and OHOS NAPI')
+        require('libdep.so' in core_needed, 'new core does not load its dependency carrier')
+        require('libmpv.so' not in core_needed + carrier_needed,
+                'core/carrier dependency graph contains an mpv back edge')
+        require('libnative_media_vdec.so' in carrier_needed,
+                'carrier has no OHOS video-decoder dependency')
+        require('libc++_shared.so' in carrier_needed, 'carrier has no C++ runtime dependency')
+        require(not any('avcodec' in n or 'avformat' in n for n in core_needed + carrier_needed),
+                'FFmpeg must stay inside the carrier instead of an unpackaged shared library')
 
         prefix = 'resources/rawfile/mpv/'
-        ca = read_suffix(prefix + 'cacert.pem')
-        require(hashlib.sha256(ca).hexdigest() == CA_SHA256, 'HAP TLS CA bundle SHA-256 mismatch')
-        require(ca.count(b'-----BEGIN CERTIFICATE-----') > 100, 'TLS CA bundle is not complete')
-        notice = read_suffix(prefix + 'notice.txt').decode('utf8')
-        licenses = read_suffix(prefix + 'licenses.txt').decode('utf8')
-        sources = json.loads(read_suffix(prefix + 'sources.json'))
+        resources = {name: read_suffix(prefix + name) for name in
+                     ('cacert.pem', 'notice.txt', 'licenses.txt', 'sources.json')}
+        for name, data in resources.items():
+            require(data == (ROOT / 'entry/src/main/resources/rawfile/mpv' / name).read_bytes(),
+                    'HAP contains stale resource: ' + name)
+        require(digest(resources['cacert.pem']) == PINNED['ca_sha256'] and
+                resources['cacert.pem'].count(b'-----BEGIN CERTIFICATE-----') > 100,
+                'CA bundle is not the pinned complete certificate set')
+        require(digest(resources['licenses.txt']) == PINNED['licenses_sha256'],
+                'original complete license text changed')
+        notice = resources['notice.txt'].decode('utf8')
+        licenses = resources['licenses.txt'].decode('utf8')
         require('LGPL-3.0-or-later' in notice and 'MPL-2.0' in notice,
-                'player or CA license notice is missing')
-        require('Version 3, 29 June 2007' in licenses and
+                'player/CA license notice is missing')
+        require(len(licenses) > 100000 and 'Version 3, 29 June 2007' in licenses and
                 'Mozilla Public License Version 2.0' in licenses and
                 'The FreeType Project LICENSE' in licenses,
-                'complete LGPL3/MPL2/dependency license texts are missing')
-        require(len(licenses) > 100000, 'aggregate third-party license file is unexpectedly small')
-        require(sources['binary']['sha256'] == CORE_SHA256, 'source manifest identifies a different core')
-        require(sources['recipe_commit'] == RECIPE_COMMIT, 'source manifest recipe is not pinned')
-        components = {component['name']: component for component in sources['components']}
+                'complete third-party license texts are missing')
+        sources = json.loads(resources['sources.json'])
+        require(sources['recipe_commit'] == PINNED['recipe_commit'], 'recipe commit is not pinned')
+        for field, role in [('binary', 'core'), ('dependency_carrier', 'carrier')]:
+            expected = PINNED[role]
+            value = sources[field]
+            require(value['sha256'] == expected['packaged_sha256'] and
+                    value['bytes'] == expected['packaged_bytes'] and
+                    value['input_sha256'] == expected['input_sha256'] and
+                    value['input_bytes'] == expected['input_bytes'] and
+                    value['architecture'] == 'aarch64', 'manifest does not identify ' + role)
+        require(sources['original_binary']['sha256'] == PINNED['original_sha256'],
+                'original dependency-carrier provenance is missing')
+        require(sources['local_patches'] == PINNED['local_patches'],
+                'manifest local patch order/hash differs')
+        for patch in PINNED['local_patches']:
+            require(digest((ROOT / patch['path']).read_bytes()) == patch['sha256'],
+                    'delivered patch differs: ' + patch['path'])
+        require(digest((ROOT / sources['rebuild_report']['path']).read_bytes()) ==
+                PINNED['rebuild_report_sha256'], 'delivered rebuild report differs')
+        components = {c['name']: c for c in sources['components']}
         require({'mpv', 'FFmpeg', 'Mbed TLS', 'libplacebo', 'Mozilla CA certificate data'} <= components.keys(),
-                'source manifest is missing bundled components')
+                'bundled component manifest is incomplete')
         require(components['FFmpeg']['license'] == 'LGPL-3.0-or-later',
-                'manifest incorrectly labels static FFmpeg licensing')
-        # Resources must be byte-identical to the reviewed workspace files.
-        for name in ['cacert.pem', 'notice.txt', 'licenses.txt', 'sources.json']:
-            packaged = read_suffix(prefix + name)
-            local = ROOT / 'entry/src/main/resources/rawfile/mpv' / name
-            require(packaged == local.read_bytes(), 'HAP contains stale rawfile/mpv/' + name)
-    return {'hap': str(hap.resolve()), 'version_name': packaged_app['versionName'],
-            'version_code': packaged_app['versionCode'], 'core_sha256': CORE_SHA256,
-            'bridge_needed': bridge_needed, 'core_needed': core_needed,
-            'cpp_runtime_needed': runtime_needed,
-            'certificate_count': ca.count(b'-----BEGIN CERTIFICATE-----'),
-            'license_components': len(components), 'status': 'passed'}
+                'static FFmpeg licensing is mislabeled')
+    return {'hap': str(hap.resolve()), 'status': 'passed', 'version': app['versionName'],
+            'hap_sha256': digest(hap.read_bytes()), 'core': PINNED['core'],
+            'carrier': PINNED['carrier'], 'linkage': metadata,
+            'scope': 'Actual HAP bytes/linkage/resources; runtime playback is separate'}
 
 
 def main():
@@ -123,7 +163,7 @@ def main():
     args = parser.parse_args()
     try:
         print(json.dumps(inspect_hap(args.hap), ensure_ascii=False, indent=2))
-    except (OSError, ValueError, KeyError, struct.error, zipfile.BadZipFile) as error:
+    except (OSError, ValueError, KeyError, TypeError, struct.error, zipfile.BadZipFile) as error:
         print('Player package check failed: ' + str(error), file=sys.stderr)
         return 1
     return 0

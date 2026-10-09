@@ -349,6 +349,7 @@ napi_value Poll(napi_env env, napi_callback_info info)
     napi_value result;
     napi_create_object(env, &result);
     PutNumber(env, result, "position", state.position);
+    PutNumber(env, result, "audioPts", state.audioPts);
     PutNumber(env, result, "duration", state.duration);
     PutNumber(env, result, "width", static_cast<double>(state.width));
     PutNumber(env, result, "height", static_cast<double>(state.height));
@@ -359,6 +360,12 @@ napi_value Poll(napi_env env, napi_callback_info info)
     PutNumber(env, result, "speed", state.speed);
     PutNumber(env, result, "volume", state.volume);
     PutString(env, result, "hwdec", state.hwdec);
+    PutString(env, result, "sourcePrimaries", state.sourcePrimaries);
+    PutString(env, result, "sourceTransfer", state.sourceTransfer);
+    PutString(env, result, "sourceFormat", state.sourceFormat);
+    PutString(env, result, "targetPrimaries", state.targetPrimaries);
+    PutString(env, result, "targetTransfer", state.targetTransfer);
+    PutString(env, result, "vo", state.vo);
     PutNumber(env, result, "avSync", state.avSync);
     PutNumber(env, result, "droppedFrames", static_cast<double>(state.droppedFrames));
     PutNumber(env, result, "decoderDroppedFrames", static_cast<double>(state.decoderDroppedFrames));

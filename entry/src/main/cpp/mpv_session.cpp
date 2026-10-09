@@ -33,13 +33,33 @@ void PushEvent(Session &s, Event event)
 
 void ProcessProperty(Session &s, const mpv_event_property &property)
 {
-    if (!property.data || property.format == MPV_FORMAT_NONE || !property.name) return;
+    if (!property.name) return;
     std::lock_guard<std::mutex> lock(s.stateMutex);
     const std::string name(property.name);
+    std::string *color = nullptr;
+    if (name == "video-params/primaries") color = &s.state.sourcePrimaries;
+    else if (name == "video-params/gamma") color = &s.state.sourceTransfer;
+    else if (name == "video-params/pixelformat") color = &s.state.sourceFormat;
+    else if (name == "video-target-params/primaries") color = &s.state.targetPrimaries;
+    else if (name == "video-target-params/gamma") color = &s.state.targetTransfer;
+    else if (name == "current-vo") color = &s.state.vo;
+    if (color) {
+        const char *value = property.data && property.format == MPV_FORMAT_STRING ?
+            *static_cast<char **>(property.data) : nullptr;
+        *color = value && value[0] ? value : "unknown";
+        return;
+    }
+    if (name == "audio-pts" &&
+        (!property.data || property.format == MPV_FORMAT_NONE)) {
+        s.state.audioPts = -1;
+        return;
+    }
+    if (!property.data || property.format == MPV_FORMAT_NONE) return;
     if (property.format == MPV_FORMAT_DOUBLE) {
         const double value = *static_cast<double *>(property.data);
         if (!std::isfinite(value)) return;
         if (name == "time-pos") s.state.position = std::max(0.0, value);
+        else if (name == "audio-pts") s.state.audioPts = value;
         else if (name == "duration") s.state.duration = std::max(0.0, value);
         else if (name == "speed") s.state.speed = value;
         else if (name == "volume") s.state.volume = value / 100.0;
@@ -116,6 +136,13 @@ void ProcessEvent(Session &s, const mpv_event &event)
         {
             std::lock_guard<std::mutex> lock(s.stateMutex);
             s.state.position = 0;
+            s.state.audioPts = -1;
+            s.state.sourcePrimaries = "unknown";
+            s.state.sourceTransfer = "unknown";
+            s.state.sourceFormat = "unknown";
+            s.state.targetPrimaries = "unknown";
+            s.state.targetTransfer = "unknown";
+            s.state.vo = "unknown";
             s.state.loaded = false;
             s.state.eof = false;
             s.state.buffering = false;
@@ -195,6 +222,12 @@ void ProcessEvent(Session &s, const mpv_event &event)
         }
         if (end->reason == MPV_END_FILE_REASON_ERROR) PushEvent(s, {"error", -1, 0, end->error});
         else if (end->reason == MPV_END_FILE_REASON_EOF) PushEvent(s, {"end-file"});
+        else if (end->reason == MPV_END_FILE_REASON_STOP && !s.closing.load()) {
+            // Each session opens one source and exposes no stop command. The
+            // OHOS output stops after bounded, unrecoverable surface failures;
+            // report that failure instead of leaving the UI looking paused.
+            PushEvent(s, {"error", -1, 0, MPV_ERROR_VO_INIT_FAILED});
+        }
         // stop/quit caused by release have no user-facing failure/completion.
         s.activeSeek = -1;
         s.activeSeekAccepted = false;
@@ -382,11 +415,15 @@ std::shared_ptr<Session> BuildSession(uint64_t surface, const std::string &caFil
         SetOption(handle, "vo", "gpu");
         SetOption(handle, "gpu-context", "ohos");
         SetOption(handle, "gpu-api", "opengl");
-        // XComponent exports an RGBA8888 surface. EGL's automatic alpha=0
-        // selection can choose RGBX and fail eglCreateWindowSurface on phones.
+        // The OHOS context negotiates matching EGL/NativeWindow formats:
+        // 10-bit for capable HDR displays, otherwise explicit RGBA8888 SDR.
+        // Keep this context for its lifetime, including hold-rate changes.
         SetOption(handle, "opengl-es", "yes");
-        SetOption(handle, "egl-output-format", "rgba8");
+        SetOption(handle, "egl-output-format", "auto");
         SetOption(handle, "ao", "ohaudio");
+        // Keep pitch correction resident at 1x. mpv's automatic speed filter
+        // otherwise drains and rebuilds the audio chain on each hold/release.
+        SetOption(handle, "af", "scaletempo2");
         // ohcodec is in this fork's auto-safe whitelist. If unavailable or
         // decoding fails, libmpv's decoder fallback handles software decoding.
         SetOption(handle, "hwdec", "auto-safe");
@@ -405,10 +442,14 @@ std::shared_ptr<Session> BuildSession(uint64_t surface, const std::string &caFil
         CheckMpv(mpv_initialize(handle));
         const std::pair<const char *, mpv_format> properties[] = {
             {"time-pos", MPV_FORMAT_DOUBLE}, {"duration", MPV_FORMAT_DOUBLE},
+            {"audio-pts", MPV_FORMAT_DOUBLE},
             {"video-params/w", MPV_FORMAT_INT64}, {"video-params/h", MPV_FORMAT_INT64},
             {"pause", MPV_FORMAT_FLAG}, {"paused-for-cache", MPV_FORMAT_FLAG},
             {"eof-reached", MPV_FORMAT_FLAG}, {"speed", MPV_FORMAT_DOUBLE},
             {"volume", MPV_FORMAT_DOUBLE}, {"hwdec-current", MPV_FORMAT_STRING},
+            {"video-params/primaries", MPV_FORMAT_STRING}, {"video-params/gamma", MPV_FORMAT_STRING},
+            {"video-params/pixelformat", MPV_FORMAT_STRING}, {"video-target-params/primaries", MPV_FORMAT_STRING},
+            {"video-target-params/gamma", MPV_FORMAT_STRING}, {"current-vo", MPV_FORMAT_STRING},
             {"avsync", MPV_FORMAT_DOUBLE}, {"frame-drop-count", MPV_FORMAT_INT64},
             {"decoder-frame-drop-count", MPV_FORMAT_INT64},
         };

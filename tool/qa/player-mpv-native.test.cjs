@@ -49,6 +49,9 @@ const cases = [
   ['async-work scheduling failure resolves release only after TSFN delivers real destruction', 'async-release-fallback'],
   ['release notification failure rejects and retains ownership instead of reporting completion', 'release-fallback-unavailable'],
   ['native source loading preserves URL punctuation and exact typed headers with verified TLS', 'exact-source-options'],
+  ['native hold-speed start and release only write speed without pause, seek or reload', 'hold-speed-controls'],
+  ['native audio-pts snapshots preserve the observed clock and clear unavailable data', 'audio-pts-snapshot'],
+  ['native color snapshots marshal observed source and target strings and clear unavailable data', 'color-snapshot'],
   ['file-loaded accepts a required selected external audio track', 'selected-external-audio'],
   ['missing external audio emits audio-error without preparing a silent video', 'missing-external-audio'],
   ['unselected external audio cannot be substituted by a selected main audio track', 'unselected-external-audio'],
@@ -56,6 +59,8 @@ const cases = [
   ['failed or incompatible video output cannot prepare an audio-only playback', 'failed-video-output'],
   ['an initialized output cannot substitute for an unselected video track', 'unselected-video-track'],
   ['seek completion reads the actual native landing before delayed position notifications', 'actual-seek-landing'],
+  ['unrecoverable native output stop reaches the player as an error', 'output-stopped'],
+  ['normal native shutdown suppresses its stop event', 'release-stopped'],
 ];
 for (const [title, name] of cases) {
   test(title, {skip}, () => {

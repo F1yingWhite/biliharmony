@@ -1,2 +1,11 @@
 # Keep upstream license text verbatim, including its original whitespace.
-entry/src/main/resources/rawfile/mpv/licenses.txt -whitespace
+entry/src/main/resources/rawfile/mpv/licenses.txt text eol=crlf -whitespace
+
+# Preserve the pinned CA bundle's bytes when checking out on Windows.
+entry/src/main/resources/rawfile/mpv/cacert.pem text eol=lf
+
+# Patch and rebuild report hashes must remain stable on Windows checkouts.
+tool/mpv/** text eol=lf
+
+# Unified diff blank context lines contain an intentional leading space.
+tool/mpv/patches/*.patch -whitespace

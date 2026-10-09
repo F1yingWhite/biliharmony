@@ -136,6 +136,8 @@ struct FakeMedia {
     std::unordered_map<std::string, std::string> options;
     std::unordered_map<std::string, std::vector<std::string>> lists;
     std::vector<std::vector<std::string>> commands;
+    struct PropertyWrite { std::string name; mpv_format format; double number; };
+    std::vector<PropertyWrite> propertyWrites;
     std::vector<std::pair<std::string, mpv_format>> observed;
     struct Track { std::string type; bool external; bool selected; };
     std::vector<Track> tracks;
@@ -175,7 +177,14 @@ extern "C" int mpv_set_property(mpv_handle *h, const char *name, mpv_format form
     }
     return 0;
 }
-extern "C" int mpv_set_property_async(mpv_handle *, uint64_t, const char *, mpv_format, void *) { return 0; }
+extern "C" int mpv_set_property_async(mpv_handle *h, uint64_t, const char *name, mpv_format format, void *data)
+{
+    double number = 0;
+    if (format == MPV_FORMAT_DOUBLE) number = *static_cast<double *>(data);
+    else if (format == MPV_FORMAT_FLAG) number = *static_cast<int *>(data);
+    auto &media = Media(h); std::lock_guard<std::mutex> lock(media.mutex);
+    media.propertyWrites.push_back({name, format, number}); return 0;
+}
 char *OwnedString(const std::string &value)
 { auto *copy = new char[value.size() + 1]; std::memcpy(copy, value.c_str(), value.size() + 1); return copy; }
 extern "C" int mpv_get_property(mpv_handle *h, const char *name, mpv_format format, void *data)
@@ -229,7 +238,7 @@ extern "C" int mpv_command(mpv_handle *h, const char **args)
     for (size_t i = 0; args[i]; ++i) exact.emplace_back(args[i]);
     auto &media = Media(h); std::lock_guard<std::mutex> lock(media.mutex); media.commands.push_back(std::move(exact)); return 0;
 }
-extern "C" int mpv_command_async(mpv_handle *, uint64_t, const char **) { return 0; }
+extern "C" int mpv_command_async(mpv_handle *h, uint64_t, const char **args) { return mpv_command(h, args); }
 extern "C" int mpv_observe_property(mpv_handle *h, uint64_t, const char *name, mpv_format format)
 { Media(h).observed.emplace_back(name, format); return 0; }
 extern "C" mpv_event *mpv_wait_event(mpv_handle *, double timeout)
@@ -351,8 +360,11 @@ void ExactSourceOptions()
     assert(media.options.at("wid") == "123" && media.options.at("tls-verify") == "yes");
     assert(media.options.at("tls-ca-file") == "/private/cache/mozilla-ca.pem" && media.options.at("hwdec") == "auto-safe");
     assert(media.options.at("vo") == "gpu" && media.options.at("gpu-context") == "ohos" && media.options.at("ao") == "ohaudio");
-    assert(media.options.at("egl-output-format") == "rgba8" && media.options.at("opengl-es") == "yes");
+    assert(media.options.at("egl-output-format") == "auto" && media.options.at("opengl-es") == "yes");
     assert(media.options.at("keep-open") == "yes" && media.options.at("video-sync") == "audio");
+    assert(media.options.at("af") == "scaletempo2");
+    assert(media.options.find("audio-buffer") == media.options.end());
+    assert(media.options.find("autosync") == media.options.end());
     const std::string video = "https://cdn.example/video:a,b.m4s?token=x%2Fy,a:b&v=1";
     const std::string audio = "https://cdn.example/audio:c,d.m4s?token=audio,a:b";
     OpenNative(session, video, audio, {"User-Agent: Bili,Player:1", "Referer: https://www.bilibili.com/", "X-Test: v,a:b"});
@@ -362,7 +374,89 @@ void ExactSourceOptions()
     assert(media.options.at("user-agent") == "Bili,Player:1");
     assert((media.commands.back() == std::vector<std::string>{"loadfile", video, "replace", "-1"}));
     assert(std::find(media.observed.begin(), media.observed.end(), std::make_pair(std::string("time-pos"), MPV_FORMAT_DOUBLE)) != media.observed.end());
+    assert(std::find(media.observed.begin(), media.observed.end(), std::make_pair(std::string("audio-pts"), MPV_FORMAT_DOUBLE)) != media.observed.end());
+    for (const char *name : {"video-params/primaries", "video-params/gamma", "video-params/pixelformat",
+                            "video-target-params/primaries", "video-target-params/gamma", "current-vo"}) {
+        assert(std::find(media.observed.begin(), media.observed.end(), std::make_pair(std::string(name), MPV_FORMAT_STRING)) != media.observed.end());
+    }
     CloseNative(session);
+}
+
+void AudioPtsSnapshot()
+{
+    FakeEnv env; napi_value exports; napi_create_object(&env, &exports); Init(&env, exports);
+    auto runtime = GetRuntime(&env); auto session = BareSession(); runtime->sessions.emplace(1, session);
+    napi_value id; napi_create_uint32(&env, 1, &id); FakeArgs args{{id}};
+    assert(Poll(&env, &args)->properties.at("audioPts")->number == -1);
+    double pts = 3.125; mpv_event_property property{"audio-pts", MPV_FORMAT_DOUBLE, &pts};
+    ProcessProperty(*session, property);
+    Position(*session, 3.25);
+    const napi_value snapshot = Poll(&env, &args);
+    assert(snapshot->properties.at("audioPts")->number == 3.125);
+    assert(snapshot->properties.at("position")->number == 3.25);
+    property.format = MPV_FORMAT_NONE; property.data = nullptr; ProcessProperty(*session, property);
+    assert(Poll(&env, &args)->properties.at("audioPts")->number == -1);
+    CloseNative(session); Cleanup(&env);
+}
+
+void ColorSnapshot()
+{
+    FakeEnv env; napi_value exports; napi_create_object(&env, &exports); Init(&env, exports);
+    auto runtime = GetRuntime(&env); auto session = BareSession(); runtime->sessions.emplace(1, session);
+    napi_value id; napi_create_uint32(&env, 1, &id); FakeArgs args{{id}};
+    const struct { const char *property; const char *field; const char *value; } colors[] = {
+        {"video-params/primaries", "sourcePrimaries", "bt.2020"},
+        {"video-params/gamma", "sourceTransfer", "pq"},
+        {"video-params/pixelformat", "sourceFormat", "p010"},
+        {"video-target-params/primaries", "targetPrimaries", "bt.709"},
+        {"video-target-params/gamma", "targetTransfer", "gamma2.2"},
+        {"current-vo", "vo", "gpu"},
+    };
+    for (const auto &color : colors) {
+        assert(Poll(&env, &args)->properties.at(color.field)->text == "unknown");
+        char *value = const_cast<char *>(color.value);
+        mpv_event_property property{color.property, MPV_FORMAT_STRING, &value};
+        ProcessProperty(*session, property);
+        assert(Poll(&env, &args)->properties.at(color.field)->text == color.value);
+        property.format = MPV_FORMAT_NONE; property.data = nullptr;
+        ProcessProperty(*session, property);
+        assert(Poll(&env, &args)->properties.at(color.field)->text == "unknown");
+        property.format = MPV_FORMAT_STRING; property.data = &value;
+        ProcessProperty(*session, property);
+        value = nullptr; ProcessProperty(*session, property);
+        assert(Poll(&env, &args)->properties.at(color.field)->text == "unknown");
+        value = const_cast<char *>(color.value); ProcessProperty(*session, property);
+        value = const_cast<char *>(""); ProcessProperty(*session, property);
+        assert(Poll(&env, &args)->properties.at(color.field)->text == "unknown");
+        value = const_cast<char *>(color.value); ProcessProperty(*session, property);
+    }
+    EventFor(*session, MPV_EVENT_START_FILE);
+    const napi_value snapshot = Poll(&env, &args);
+    for (const auto &color : colors) assert(snapshot->properties.at(color.field)->text == "unknown");
+    CloseNative(session); Cleanup(&env);
+}
+
+void HoldSpeedControls()
+{
+    FakeEnv env; napi_value exports; napi_create_object(&env, &exports); Init(&env, exports);
+    auto runtime = GetRuntime(&env); auto session = BareSession(); runtime->sessions.emplace(1, session);
+    session->state.loaded = true; session->state.paused = false; Position(*session, 12.5);
+    napi_value id, speed; napi_create_uint32(&env, 1, &id); napi_create_double(&env, 2, &speed);
+    FakeArgs args{{id, speed}}; Rate(&env, &args);
+    speed->number = 1; Rate(&env, &args);
+    assert(session->controls.size() == 2);
+    for (const auto &control : session->controls) ProcessControl(*session, control);
+    session->controls.clear();
+    EventFor(*session, MPV_EVENT_SET_PROPERTY_REPLY, 1);
+    EventFor(*session, MPV_EVENT_SET_PROPERTY_REPLY, 2);
+    const auto &media = Media(session->handle);
+    assert(media.propertyWrites.size() == 2 && media.commands.empty());
+    assert(media.propertyWrites[0].name == "speed" && media.propertyWrites[0].format == MPV_FORMAT_DOUBLE && media.propertyWrites[0].number == 2);
+    assert(media.propertyWrites[1].name == "speed" && media.propertyWrites[1].format == MPV_FORMAT_DOUBLE && media.propertyWrites[1].number == 1);
+    assert(session->state.loaded && !session->state.paused && session->state.position == 12.5);
+    assert(session->activeSeek == -1 && session->events.empty() && session->replies.empty());
+    CloseNative(session);
+    Cleanup(&env);
 }
 
 void ExternalAudio(bool present, bool selected)
@@ -416,6 +510,23 @@ void ActualSeekLanding()
     CloseNative(session);
 }
 
+void OutputStopped(bool closing)
+{
+    auto session = BareSession();
+    session->state.loaded = true; session->state.buffering = true;
+    session->closing.store(closing);
+    mpv_event_end_file end{}; end.reason = MPV_END_FILE_REASON_STOP;
+    mpv_event event{}; event.event_id = MPV_EVENT_END_FILE; event.data = &end;
+    ProcessEvent(*session, event);
+    assert(!session->state.loaded && !session->state.buffering && !session->state.eof);
+    if (closing) assert(session->events.empty());
+    else {
+        assert(session->events.size() == 1 && session->events.back().kind == "error");
+        assert(session->events.back().errorCode == MPV_ERROR_VO_INIT_FAILED);
+    }
+    CloseNative(session);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2); const std::string name = argv[1];
@@ -427,6 +538,9 @@ int main(int argc, char **argv)
     else if (name == "async-release-fallback") ReleaseFallback(true);
     else if (name == "release-fallback-unavailable") ReleaseFallback(false);
     else if (name == "exact-source-options") ExactSourceOptions();
+    else if (name == "hold-speed-controls") HoldSpeedControls();
+    else if (name == "audio-pts-snapshot") AudioPtsSnapshot();
+    else if (name == "color-snapshot") ColorSnapshot();
     else if (name == "selected-external-audio") ExternalAudio(true, true);
     else if (name == "missing-external-audio") ExternalAudio(false, false);
     else if (name == "unselected-external-audio") ExternalAudio(true, false);
@@ -438,6 +552,8 @@ int main(int argc, char **argv)
     }
     else if (name == "unselected-video-track") VideoOutput(false, "gpu");
     else if (name == "actual-seek-landing") ActualSeekLanding();
+    else if (name == "output-stopped") OutputStopped(false);
+    else if (name == "release-stopped") OutputStopped(true);
     else assert(false && "unknown native fixture case");
     std::cout << "PASS " << name << '\n';
 }

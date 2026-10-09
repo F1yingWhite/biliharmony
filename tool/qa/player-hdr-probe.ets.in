@@ -1,0 +1,64 @@
+import { common } from '@kit.AbilityKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
+import { display } from '@kit.ArkUI';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+import { PlayerView } from '../components/player/PlayerView';
+
+/** Isolated VM fixture page, excluded from the production app. */
+@Entry
+@Component
+struct HdrProbe {
+  @State private source: string = '';
+  @State private revision: number = 0;
+  @State private selected: string = '';
+  private generation: number = 0;
+
+  aboutToAppear(): void {
+    try {
+      const screen: display.Display = display.getDefaultDisplaySync();
+      hilog.info(0x0000, 'BiliHdrProbe', 'display id=%{public}d hdrFormats=%{public}s',
+        screen.id, JSON.stringify(screen.hdrFormats));
+    } catch (_) {
+      hilog.info(0x0000, 'BiliHdrProbe', 'display capability unavailable');
+    }
+    this.select('pq');
+  }
+
+  private async select(name: string): Promise<void> {
+    const token: number = ++this.generation;
+    const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+    const bytes: Uint8Array = await context.resourceManager.getRawFileContent('hdr-fixtures/' + name + '.mp4');
+    const path: string = context.filesDir + '/hdr-probe-' + name + '.mp4';
+    const file: fs.File = await fs.open(path, fs.OpenMode.CREATE | fs.OpenMode.TRUNC | fs.OpenMode.READ_WRITE);
+    try {
+      let offset: number = 0;
+      while (offset < bytes.byteLength) {
+        const written: number = await fs.write(file.fd,
+          bytes.buffer.slice(bytes.byteOffset + offset, bytes.byteOffset + bytes.byteLength));
+        if (written <= 0) throw new Error('Fixture write failed');
+        offset += written;
+      }
+    } finally { await fs.close(file); }
+    if (token !== this.generation) return;
+    this.source = path;
+    this.selected = name;
+    this.revision++;
+    hilog.info(0x0000, 'BiliHdrProbe', 'fixture=%{public}s revision=%{public}d', name, this.revision);
+  }
+
+  build() {
+    Column({ space: 12 }) {
+      Text('HDR fixture: ' + this.selected).fontColor(Color.White).margin({ top: 48 })
+      if (this.source.length > 0) {
+        PlayerView({ videoUrl: this.source, sourceVersion: this.revision,
+          videoTitle: 'HDR fixture ' + this.selected, externalDanmakuOn: false })
+          .height(360).width('100%')
+      }
+      Row({ space: 16 }) {
+        Button('PQ').id('hdr_probe_pq').onClick(() => this.select('pq'))
+        Button('HLG').id('hdr_probe_hlg').onClick(() => this.select('hlg'))
+        Button('SDR').id('hdr_probe_sdr').onClick(() => this.select('sdr'))
+      }
+    }.width('100%').height('100%').backgroundColor(Color.Black)
+  }
+}

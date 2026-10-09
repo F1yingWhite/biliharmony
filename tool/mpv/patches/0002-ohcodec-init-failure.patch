@@ -1,0 +1,20 @@
+From: BiliHarmony maintainers
+Subject: [PATCH 2/2] ohcodec: tolerate failed interop initialization during cleanup
+
+ra_hwdec loading calls uninit() even when init() failed. An unsupported
+GL/Vulkan interop leaves p->interop unset, so cleanup must not dereference it.
+Successful initialization follows the existing owner_uninit path unchanged.
+
+diff --git a/video/out/hwdec/hwdec_ohcodec.c b/video/out/hwdec/hwdec_ohcodec.c
+--- a/video/out/hwdec/hwdec_ohcodec.c
++++ b/video/out/hwdec/hwdec_ohcodec.c
+@@ -147,7 +147,8 @@
+     hwdec_devices_remove(hw->devs, &p->hwctx);
+     // Decoder and device disappear before listener/NativeImage/GPU objects.
+     av_buffer_unref(&p->hwctx.av_device_ref);
+-    p->interop->owner_uninit(hw);
++    if (p->interop)
++        p->interop->owner_uninit(hw);
+ }
+ 
+ static int mapper_init(struct ra_hwdec_mapper *mapper)

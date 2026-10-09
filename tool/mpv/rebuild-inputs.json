@@ -1,0 +1,65 @@
+{
+  "mpv_sha": "6edeee00a07b9b76f197aa71eee3d029fb090de4",
+  "recipe_sha": "1bab837e662ffa47ce51efd0720d3ed7c4988944",
+  "ffmpeg_sha": "140fd653aed8cad774f991ba083e2d01e86420c7",
+  "libplacebo_tag_sha": "719cc95244a1f1d648dd72459822e026e6530f22",
+  "libplacebo_sha": "cee9b076f2c63104ccfd497fa79c39a867293ec4",
+  "original_core": {
+    "url": "https://github.com/mpv-ohos/libmpv-ohos-build/releases/download/20260715/libmpv_aarch64.zip",
+    "archive_sha256": "ac8b176dc4c86f4772d62ff530762ec187c3c46383bf2d476870d17dad806e5b",
+    "sha256": "672e98d497199a89e20893979ecec686dee1113bbe1b609c9a9266aa1679bd32",
+    "bytes": 35491168
+  },
+  "archives": {
+    "mpv": {
+      "url": "https://codeload.github.com/ErBWs/mpv/tar.gz/6edeee00a07b9b76f197aa71eee3d029fb090de4",
+      "sha256": "d18bcd60fa61c40bf935930c00bb90e6fb69bf32c653db6b8744846778cee1cc"
+    },
+    "ffmpeg": {
+      "url": "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/140fd653aed8cad774f991ba083e2d01e86420c7",
+      "sha256": "5c4a9e51e706b8deba835f02ea70e1e1101187f601adae72b36ec2b17b6f15be"
+    },
+    "libplacebo": {
+      "url": "https://codeload.github.com/haasn/libplacebo/tar.gz/refs/tags/v7.360.1",
+      "sha256": "d05fdf90bea2f629eaa2d115e909fd356388ac639e54f77b87a018a6d76224bd"
+    },
+    "libass": {
+      "url": "https://codeload.github.com/libass/libass/tar.gz/refs/tags/0.17.4",
+      "sha256": "c287d180d93dc9c9021872574b618ac49027e84cc90e1289318b1ee68bb42251"
+    },
+    "lcms": {
+      "url": "https://codeload.github.com/mm2/Little-CMS/tar.gz/refs/tags/lcms2.17",
+      "sha256": "6e6f6411db50e85ae8ff7777f01b2da0614aac13b7b9fcbea66dc56a1bc71418"
+    },
+    "lua": {
+      "url": "https://www.lua.org/ftp/lua-5.2.4.tar.gz",
+      "sha256": "b9e2e4aad6789b3b63a056d442f7b39f0ecfca3ae0f1fc0ae4e9614401b69f4b"
+    }
+  },
+  "patches": [
+    {
+      "component": "ffmpeg",
+      "name": "support-av3a-audio-vivid.patch",
+      "url": "https://raw.githubusercontent.com/mpv-ohos/libmpv-ohos-build/1bab837e662ffa47ce51efd0720d3ed7c4988944/patches/ffmpeg/support-av3a-audio-vivid.patch",
+      "sha256_lf": "79e970caeaf121c0c866265f70aae92f3a4328724fe061c0a8c4e76e2935f23b"
+    },
+    {
+      "component": "ffmpeg",
+      "name": "support-zero-copy-hardware-decode.patch",
+      "url": "https://raw.githubusercontent.com/mpv-ohos/libmpv-ohos-build/1bab837e662ffa47ce51efd0720d3ed7c4988944/patches/ffmpeg/support-zero-copy-hardware-decode.patch",
+      "sha256_lf": "c15790cf227aaaa4727fe28f85f4d1e403a1d8f9485aea78e328efe552ef6720"
+    },
+    {
+      "component": "libplacebo",
+      "name": "remove-unnecessary-atomic-test.patch",
+      "url": "https://raw.githubusercontent.com/mpv-ohos/libmpv-ohos-build/1bab837e662ffa47ce51efd0720d3ed7c4988944/patches/libplacebo/remove-unnecessary-atomic-test.patch",
+      "sha256_lf": "8081754fc65641696871f0b7f7cf887380919b54e443e639ac88f2ec10d4a8be"
+    },
+    {
+      "component": "libplacebo",
+      "name": "support-external-yuv-zero-copy.patch",
+      "url": "https://raw.githubusercontent.com/mpv-ohos/libmpv-ohos-build/1bab837e662ffa47ce51efd0720d3ed7c4988944/patches/libplacebo/support-external-yuv-zero-copy.patch",
+      "sha256_lf": "6aab3a5cd3253f992876eb11c20b05125e28e0b80e81603d2401ba8bc6e6ad30"
+    }
+  ]
+}
