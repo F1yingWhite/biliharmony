@@ -122,8 +122,8 @@ function pausedCanvasFixture() {
   view.dmClock = clock;
   const playback = playbackFixture();
   playback.session.activate(playback.source());
-  playback.session.pair.video = {state: 'playing', setVolume() {}, pause() {pauseRequests++; return Promise.resolve();}};
-  playback.session.pair.prepared = true;
+  playback.session.core.engine = {state: 'playing', setVolume() {}, pause() {pauseRequests++; return Promise.resolve();}};
+  playback.session.core.prepared = true;
   playback.session.state.prepared = true;
   playback.session.state.playing = true;
   playback.session.observer.state = state => {view.playing = state.playing;};
@@ -162,7 +162,7 @@ test('first user pause freezes and restores visible danmaku before the native pa
   const positions = f.positions(), pixels = f.pixels.slice(), pinned = f.e.pinned, cursor = f.e.cursor;
   assert.equal(pixels.length, 5);
   f.ctx.clearRect();
-  f.view.togglePlay(); // The fake player submits pause but emits no stateChange yet.
+  f.view.togglePlay(); // The fake engine submits pause but emits no state acknowledgement yet.
   assert.equal(f.pauseRequests(), 1);
   assert.equal(f.view.playing, false);
   assert.equal(f.clock.isRunning(), false, 'stop the frame source at the user action');

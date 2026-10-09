@@ -21,7 +21,7 @@ function fixture(mode = 2) {
     getSponsorSkipEnabled: () => true, getPlayhead: () => now, applyNotice: value => {notice = value;},
     onFullLabel() {}, seekTo: seconds => seeks.push(seconds),
     muteImmediately: () => volumes.push(0), restoreUserVolume: () => volumes.push(1),
-    isFirstFrameMuteArmed: () => false, toast() {}, getBvid: () => 'BV1', getCid: () => 1,
+    toast() {}, getBvid: () => 'BV1', getCid: () => 1,
   });
   const segment = (patch = {}) => ({start: 10, end: 30, category: 'sponsor',
     actionType: 'mute', uuid: 'mute-a', ...patch});

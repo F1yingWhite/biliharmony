@@ -8,11 +8,17 @@ import { HttpClient } from '../../services/network/HttpClient';
 export class PlayerSeekPreviewController {
   private shots: VideoShotData | null = null;
   private shotsLoading: boolean = false;
+  private shotsResolved: boolean = false;
+  private allowNativeFrame: boolean = true;
   private extractor: media.AVMetadataExtractor | null = null;
   private extractorSource: string = '';
   private timer: number = -1;
   private pendingTime: number = -1;
-  private fetchingGeneration: number = -1;
+  private fetchingToken: number = -1;
+  private nextFetchToken: number = 0;
+  private previewGeneration: number = 0;
+  // 网络抽帧会创建另一套原生解码资源；旧抽帧及 release 完成前禁止新建。
+  private extractorQueue: Promise<void> = Promise.resolve();
   private generation: number = 0;
   private frame: image.PixelMap | null = null;
   private aid: number = 0;
@@ -25,14 +31,14 @@ export class PlayerSeekPreviewController {
 
   preload(aid: number, bvid: string, cid: number): void {
     this.adoptIdentity(aid, bvid, cid);
-    if (cid <= 0 || this.shotsLoading || this.shots !== null) return;
+    if (cid <= 0 || this.shotsLoading || this.shotsResolved) return;
     this.loadShots(this.generation, aid, bvid, cid).catch(() => {});
   }
 
   request(seconds: number, aid: number, bvid: string, cid: number, source: string,
     headers: Record<string, string>,
     onSprite: (url: string, cell: number, xLen: number, yLen: number) => void,
-    onFrame: (frame: image.PixelMap | null) => void): void {
+    onFrame: (frame: image.PixelMap | null) => void, allowNativeFrame: boolean = true): void {
     if (!Number.isFinite(seconds) || seconds < 0) return;
     this.adoptIdentity(aid, bvid, cid);
     // 同一视频切 CDN/画质时废弃旧抽帧器，已取得的分镜仍属于当前视频，可以复用。
@@ -42,11 +48,19 @@ export class PlayerSeekPreviewController {
     this.headers = this.copyHeaders(headers);
     this.onSprite = onSprite;
     this.onFrame = onFrame;
+    this.allowNativeFrame = allowNativeFrame;
+    if (!allowNativeFrame) this.cancelNativeFrame();
     if (this.updateShot(seconds)) return;
-    if (!this.shotsLoading && this.shots === null && cid > 0) {
+    if (!this.shotsLoading && !this.shotsResolved && cid > 0) {
       this.loadShots(this.generation, aid, bvid, cid).catch(() => {});
     }
-    if (this.timer >= 0 || this.fetchingGeneration === this.generation) return;
+    this.scheduleFrame();
+  }
+
+  private scheduleFrame(): void {
+    // 分镜请求仍在路上时保留封面，不抢先启动第二个网络解码器与播放/seek 争资源。
+    if (!this.allowNativeFrame || this.pendingTime < 0 || this.shotsLoading || (this.cid > 0 && !this.shotsResolved) ||
+      this.timer >= 0 || this.fetchingToken >= 0 || this.updateShot(this.pendingTime)) return;
     this.timer = setTimeout(() => {
       this.timer = -1;
       this.fetchFrame().catch(() => {});
@@ -55,10 +69,17 @@ export class PlayerSeekPreviewController {
 
   close(): void {
     this.pendingTime = -1;
+    this.cancelNativeFrame();
+  }
+
+  private cancelNativeFrame(): void {
+    this.previewGeneration++;
+    this.fetchingToken = -1;
     if (this.timer >= 0) {
       clearTimeout(this.timer);
       this.timer = -1;
     }
+    this.retireExtractor();
   }
 
   release(): void {
@@ -88,9 +109,8 @@ export class PlayerSeekPreviewController {
   private reset(keepShots: boolean): void {
     this.generation++;
     this.close();
-    if (!keepShots) this.shots = null;
+    if (!keepShots) { this.shots = null; this.shotsResolved = false; }
     this.shotsLoading = false;
-    this.fetchingGeneration = -1;
     this.source = '';
     this.headers = {};
     this.onSprite('', -1, 10, 10);
@@ -98,10 +118,6 @@ export class PlayerSeekPreviewController {
     this.frame = null;
     this.onFrame(null);
     if (frame !== null) frame.release().catch(() => {});
-    const extractor: media.AVMetadataExtractor | null = this.extractor;
-    this.extractor = null;
-    this.extractorSource = '';
-    if (extractor !== null) extractor.release().catch(() => {});
   }
 
   private async loadShots(generation: number, aid: number, bvid: string, cid: number): Promise<void> {
@@ -116,6 +132,8 @@ export class PlayerSeekPreviewController {
     } finally {
       if (this.matches(generation, aid, bvid, cid)) {
         this.shotsLoading = false;
+        this.shotsResolved = true;
+        this.scheduleFrame();
       }
     }
   }
@@ -205,17 +223,38 @@ export class PlayerSeekPreviewController {
       clearTimeout(this.timer);
       this.timer = -1;
     }
+    if (this.extractor !== null || this.fetchingToken >= 0) {
+      this.previewGeneration++;
+      this.fetchingToken = -1;
+      this.retireExtractor();
+    }
     return true;
   }
 
-  private async fetchFrame(): Promise<void> {
-    if (this.fetchingGeneration === this.generation || this.pendingTime < 0) return;
-    const target: number = this.pendingTime;
+  private fetchFrame(): Promise<void> {
+    if (!this.allowNativeFrame || this.fetchingToken >= 0 || this.pendingTime < 0 || this.shotsLoading || this.updateShot(this.pendingTime)) {
+      return Promise.resolve();
+    }
     const generation: number = this.generation;
-    this.fetchingGeneration = generation;
+    const previewGeneration: number = this.previewGeneration;
+    const token: number = ++this.nextFetchToken;
+    this.fetchingToken = token;
+    const pending: Promise<void> = this.extractorQueue.then(() => this.extractFrame(generation, previewGeneration, token));
+    this.extractorQueue = pending.catch(() => {});
+    return pending;
+  }
+
+  private previewMatches(generation: number, previewGeneration: number): boolean {
+    return generation === this.generation && previewGeneration === this.previewGeneration && this.pendingTime >= 0;
+  }
+
+  private async extractFrame(generation: number, previewGeneration: number, token: number): Promise<void> {
+    // 排队期间仍允许更新目标；只有拿到原生资源所有权时才锁定本次抽帧时刻。
+    const target: number = this.pendingTime;
     try {
-      const extractor: media.AVMetadataExtractor | null = await this.ensureExtractor(generation);
-      if (extractor === null || generation !== this.generation || this.pendingTime < 0) return;
+      if (!this.previewMatches(generation, previewGeneration)) return;
+      const extractor: media.AVMetadataExtractor | null = await this.ensureExtractor(generation, previewGeneration);
+      if (extractor === null || !this.previewMatches(generation, previewGeneration)) return;
       const frame: image.PixelMap | undefined = await extractor.fetchFrameByTimeWithTimeout(
         Math.max(0, Math.round(target * 1000000)),
         media.AVImageQueryOptions.AV_IMAGE_QUERY_CLOSEST_SYNC,
@@ -223,7 +262,7 @@ export class PlayerSeekPreviewController {
         3000,
       );
       if (frame === undefined) return;
-      if (generation !== this.generation || this.pendingTime < 0 || Math.abs(this.pendingTime - target) > 0.25) {
+      if (!this.previewMatches(generation, previewGeneration) || Math.abs(this.pendingTime - target) > 0.25) {
         frame.release().catch(() => {});
         return;
       }
@@ -235,18 +274,27 @@ export class PlayerSeekPreviewController {
     } catch (e) {
       if (DEBUG) hilog.warn(0x0000, 'BiliPlayback', 'seekPreview.error %{public}s', String(e));
     } finally {
-      // 旧源的 finally 不能解除新源的抽帧门闩，也不能阻止新源自行排队。
-      if (this.fetchingGeneration === generation) this.fetchingGeneration = -1;
-      if (generation === this.generation && this.pendingTime >= 0 &&
+      // 同一视频关闭后再拖动也拥有新 token；旧 finally 不能解开新抽帧门闩。
+      if (this.fetchingToken === token) this.fetchingToken = -1;
+      if (this.previewMatches(generation, previewGeneration) &&
         Math.abs(this.pendingTime - target) > 0.25) {
-        this.request(this.pendingTime, this.aid, this.bvid, this.cid, this.source, this.headers,
-          this.onSprite, this.onFrame);
+        this.scheduleFrame();
       }
     }
   }
 
-  private async ensureExtractor(generation: number): Promise<media.AVMetadataExtractor | null> {
-    if (generation !== this.generation || this.source.length === 0 || this.pendingTime < 0) return null;
+  private retireExtractor(): void {
+    const extractor: media.AVMetadataExtractor | null = this.extractor;
+    this.extractor = null;
+    this.extractorSource = '';
+    if (extractor === null) return;
+    this.extractorQueue = this.extractorQueue.then(async (): Promise<void> => {
+      try { await extractor.release(); } catch (e) {}
+    });
+  }
+
+  private async ensureExtractor(generation: number, previewGeneration: number): Promise<media.AVMetadataExtractor | null> {
+    if (!this.previewMatches(generation, previewGeneration) || this.source.length === 0) return null;
     const source: string = this.source;
     const headers: Record<string, string> = this.copyHeaders(this.headers);
     if (this.extractor !== null && this.extractorSource === source) return this.extractor;
@@ -259,11 +307,11 @@ export class PlayerSeekPreviewController {
       } catch (e) {
       }
     }
-    if (generation !== this.generation || this.pendingTime < 0) return null;
+    if (!this.previewMatches(generation, previewGeneration)) return null;
     const extractor: media.AVMetadataExtractor = await media.createAVMetadataExtractor();
     let adopted: boolean = false;
     try {
-      if (generation !== this.generation || this.pendingTime < 0) return null;
+      if (!this.previewMatches(generation, previewGeneration)) return null;
       extractor.setUrlSource(source, headers);
       this.extractor = extractor;
       this.extractorSource = source;

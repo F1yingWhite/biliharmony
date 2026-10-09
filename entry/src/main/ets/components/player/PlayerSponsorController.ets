@@ -30,8 +30,6 @@ export interface PlayerSponsorAccess {
   seekTo: (seconds: number, precise: boolean) => void;
   muteImmediately: () => void;
   restoreUserVolume: () => void;
-  /** 首帧静音武装期间不恢复音量，避免与起播静音互踩。 */
-  isFirstFrameMuteArmed: () => boolean;
   toast: (message: string) => void;
   getBvid: () => string;
   getCid: () => number;
@@ -147,7 +145,7 @@ export class PlayerSponsorController {
     if (this.muted === muted) return;
     this.muted = muted;
     if (muted) this.access.muteImmediately();
-    else if (!this.access.isFirstFrameMuteArmed()) this.access.restoreUserVolume();
+    else this.access.restoreUserVolume();
   }
 
   isMuted(): boolean {

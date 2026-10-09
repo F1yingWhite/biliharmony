@@ -186,7 +186,7 @@ export class BiliApi {
 
     // ≤1080P 补发 MP4 单流请求（fnval=1）换用单轨地址：单 AVPlayer 内部音画同步、
     // seek 只需单文件 Range 请求。菜单/字幕/续播位仍取自上面的 DASH 响应（其画质列表是全量的）；
-    // 高画质（>80，仅 DASH 提供）不换，保持双轨。
+    // 高画质（>80，仅 DASH 提供）不换，交由libmpv 统一播放分离音视频。
     if (info.isDash && info.quality <= 80 && info.url.length > 0) {
       try {
         // 通常上面已并行发出；只有 qn>80 被服务端降级时才会在这里补一次串行请求。
@@ -203,13 +203,13 @@ export class BiliApi {
           info.audioUrls = [];
         }
       } catch (e) {
-        // MP4 换源失败保持 DASH 双轨播放，不影响可用。
+        // MP4 换源失败保持libmpv 分离音视频 播放，不影响可用。
       }
     }
     return info;
   }
 
-  /** ≤1080P 的 MP4 单流请求（fnval=1）：失败返回 null，调用方保留 DASH 双轨。 */
+  /** ≤1080P 的 MP4 单流请求（fnval=1）：失败返回 null，调用方保留libmpv 分离音视频。 */
   private static async requestMp4Stream(aid: number, bvid: string, cid: number, qn: number,
     headers: Record<string, string>): Promise<PlayUrlInfo | null> {
     const mp4Params: Record<string, string> = {

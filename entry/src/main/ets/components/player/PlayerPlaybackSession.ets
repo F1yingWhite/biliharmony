@@ -1,21 +1,19 @@
-import { media } from '@kit.MediaKit';
+import { PlayerEngine, PlayerEngineEvent, PlayerBuffering } from './PlayerEngine';
 import { BiliApi } from '../../api/BiliApi';
 import { PlayUrlInfo, VideoQualityOption } from '../../model/Models';
 import { PlayerQualityPreference } from '../../common/PlayerQualityPreference';
 import { PlayerPlaybackSource, PlayerPlaybackState, PlayerPlaybackPolicy, PlayerPlaybackEvent,
   PlayerPlaybackObserver } from './PlayerPlaybackState';
-import { PlayerTrackPair, PlayerTrackEvent } from './PlayerTrackPair';
-import { PlayerAudioSync } from './PlayerAudioSync';
+import { PlayerEngineController } from './PlayerEngineController';
 import { PlayerSeekController } from './PlayerSeekController';
 import { PlayerSpeedController } from './PlayerSpeedController';
 import { PlayerPlaybackConfig } from './PlayerPlaybackConfig';
 
-/** 双轨播放会话：UI 只提交命令与策略，原生资源不会越过此边界。 */
+/** 单原生播放会话：音视频共享解码时间线，UI 只提交命令与策略。 */
 export class PlayerPlaybackSession {
   private readonly observer: PlayerPlaybackObserver;
   private readonly state: PlayerPlaybackState = new PlayerPlaybackState();
-  private readonly pair: PlayerTrackPair;
-  private readonly audioSync: PlayerAudioSync;
+  private readonly core: PlayerEngineController;
   private readonly seek: PlayerSeekController;
   private readonly speed: PlayerSpeedController;
   private source: PlayerPlaybackSource = new PlayerPlaybackSource();
@@ -24,63 +22,46 @@ export class PlayerPlaybackSession {
   private generation: number = 0;
   private sourceRequest: number = 0;
   private surface: string = '';
+  private surfaceWidth: number = 0;
+  private surfaceHeight: number = 0;
   private sourceIndex: number = 0;
   private audioSourceIndex: number = 0;
   private retryingSource: boolean = false;
   private resumeAfterPrepare: number = -1;
   private shouldPlayAfterPrepare: boolean = true;
-  private backgroundVideoResumePending: boolean = false;
   private seekRecoveryAttempts: number = 0;
-  private volumeRestoreTimer: number = -1;
+  private nativeBuffering: boolean = false;
+  private nativeRate: number = 1;
+  private pendingPause: Promise<void> | null = null;
+  private pendingPauseEngine: PlayerEngine | null = null;
+  private playRequest: number = 0;
+  private pendingPauseEvents: number = 0;
 
   constructor(observer: PlayerPlaybackObserver) {
     this.observer = observer;
-    this.pair = new PlayerTrackPair((event: PlayerTrackEvent) => this.onTrackEvent(event));
-    this.audioSync = new PlayerAudioSync(this.pair, this.state, {
-      canPlay: (): boolean => this.canPlay(),
-      muted: (): boolean => this.observer.policy().muted,
-      isSeeking: (): boolean => this.seek.seekInFlight,
-      changed: (): void => this.publish(),
-      clock: (action: string): void => this.event('clock.' + action),
-      rate: (rate: number): void => this.event('rate', rate),
-      resync: (targetMs: number): void => {
-        if (this.state.playing && this.canPlay() && !this.state.seekLocked && !this.state.backgroundAudioOnly) {
-          this.seekTo(targetMs / 1000, true, false);
-        }
-      },
-      error: (audio: media.AVPlayer, message: string): void => {
-        if (this.pair.audio === audio) this.recoverSource(true, message);
-      },
-    });
+    this.core = new PlayerEngineController((event: PlayerEngineEvent) => this.onEngineEvent(event));
     this.seek = new PlayerSeekController(
-      (): media.AVPlayer | null => this.pair.video,
-      (): media.AVPlayer | null => this.pair.audio,
-      (): boolean => this.pair.prepared,
-      (): boolean => this.pair.audioPrepared,
-      (target: number, resume: boolean): void => {
-        this.audioSync.beforeSeek(target, resume);
+      (): PlayerEngine | null => this.core.engine,
+      (): boolean => this.core.prepared,
+      (target: number): void => {
         this.event('seek.dispatch', target);
         this.event('clock.stop');
-        this.publish();
       },
       (on: boolean): void => {
-        this.state.buffering = on;
-        if (on) this.state.seekRecoveryCoverVisible = true;
+        this.state.buffering = on || this.nativeBuffering;
+        this.state.seekRecoveryCoverVisible = on;
         this.publish();
       },
       (resume: boolean, target: number): void => this.finishSeek(resume, target),
-      (video: media.AVPlayer | null, target: number): void => {
-        if (video !== null && video === this.pair.video) this.recoverSeek(target);
+      (engine: PlayerEngine | null, target: number): void => {
+        if (engine !== null && engine === this.core.engine) this.recoverSeek(target);
       },
-      (): Promise<void> | null => this.audioSync.pendingAudioPausePlayer === this.pair.audio ?
-        this.audioSync.pendingAudioPause : null,
     );
-    this.speed = new PlayerSpeedController((rate: number): void => this.audioSync.applyTemporarySpeed(rate),
+    this.speed = new PlayerSpeedController((rate: number): void => this.applyTemporarySpeed(rate),
       (active: boolean): void => { this.state.holdSpeedActive = active; this.publish(); });
   }
 
-  get ready(): boolean { return this.pair.prepared; }
-  get isFrameMuted(): boolean { return this.audioSync.firstFrameMuteArmed; }
+  get ready(): boolean { return this.core.prepared; }
   get hasSurface(): boolean { return this.surface.length > 0; }
   get sourceUrl(): string { return PlayerPlaybackConfig.sourceUrl(this.source.urls, this.sourceIndex); }
 
@@ -98,7 +79,7 @@ export class PlayerPlaybackSession {
     }
     this.publish();
     // 页面返回已有 Surface 时恢复当前位置并保持暂停。
-    if (this.surface.length > 0 && !this.pair.exists) {
+    if (this.surface.length > 0 && !this.core.exists) {
       this.shouldPlayAfterPrepare = !sameSource;
       this.state.buffering = true;
       this.start();
@@ -108,14 +89,14 @@ export class PlayerPlaybackSession {
   async setSurface(surface: string): Promise<void> {
     const changed: boolean = this.surface.length > 0 && this.surface !== surface;
     this.surface = surface;
-    if (changed && this.pair.exists) {
+    if (changed && this.core.exists) {
       this.resumeAfterPrepare = this.state.position;
       this.shouldPlayAfterPrepare = this.resumeIntent();
-      const generation: number = this.resetTracks();
+      const generation: number = this.resetEngine();
       this.state.buffering = true;
       this.publish();
       this.event('clock.pause');
-      await this.pair.release();
+      if (!(await this.releaseCore())) return;
       if (this.current(generation)) await this.start();
       return;
     }
@@ -125,18 +106,19 @@ export class PlayerPlaybackSession {
   async replaceSource(source: PlayerPlaybackSource): Promise<void> {
     if (!this.active) return;
     ++this.sourceRequest;
-    const generation: number = this.resetTracks();
+    const generation: number = this.resetEngine();
     this.adoptSource(source);
-    this.resumeAfterPrepare = -1;
+    const initial: number = Number.isFinite(source.initialSeek) ? Math.max(0, source.initialSeek) : 0;
+    this.resumeAfterPrepare = initial > 0 ? initial : -1;
     this.shouldPlayAfterPrepare = true;
-    this.state.position = 0;
+    this.state.position = initial;
     this.state.duration = 0;
     this.state.qualityLoading = false;
     this.state.errorText = '';
     this.state.buffering = true;
     this.publish();
     this.event('source');
-    await this.pair.release();
+    if (!(await this.releaseCore())) return;
     if (this.current(generation)) await this.start();
   }
 
@@ -173,15 +155,17 @@ export class PlayerPlaybackSession {
       PlayerQualityPreference.remember(qn);
       this.resumeAfterPrepare = this.state.position;
       this.shouldPlayAfterPrepare = this.resumeIntent();
-      const generation: number = this.resetTracks();
+      const generation: number = this.resetEngine();
       source.urls = info.urls.slice(); source.audioUrls = info.audioUrls.slice();
       this.sourceIndex = 0; this.audioSourceIndex = 0;
-      this.state.preview = info.isPreview;
-      if (info.qualities.length > 0) this.state.qualities = info.qualities.slice();
-      this.state.activeQuality = info.quality;
+      source.preview = info.isPreview; source.quality = info.quality;
+      if (info.qualities.length > 0) source.qualities = info.qualities.slice();
+      this.state.preview = source.preview;
+      this.state.qualities = source.qualities.slice();
+      this.state.activeQuality = source.quality;
       this.state.buffering = true;
       this.event('closePanels'); this.event('clock.stop'); this.publish();
-      await this.pair.release();
+      if (!(await this.releaseCore())) return;
       if (this.current(generation) && request === this.sourceRequest) await this.start();
     } catch (e) {
       if (this.active && request === this.sourceRequest) this.state.errorText = '切换清晰度失败，请重试';
@@ -192,102 +176,106 @@ export class PlayerPlaybackSession {
 
   private async start(): Promise<void> {
     if (!this.active || this.surface.length === 0) return;
-    await this.pair.open(PlayerPlaybackConfig.sourceUrl(this.source.urls, this.sourceIndex),
-      PlayerPlaybackConfig.sourceUrl(this.source.audioUrls, this.audioSourceIndex), this.surface,
-      this.resumeAfterPrepare <= 0 && this.source.initialSeek <= 0);
+    await this.core.open(PlayerPlaybackConfig.sourceUrl(this.source.urls, this.sourceIndex),
+      PlayerPlaybackConfig.sourceUrl(this.source.audioUrls, this.audioSourceIndex), this.surface);
+    if (this.core.engine !== null) this.core.engine.resize(this.surfaceWidth, this.surfaceHeight);
   }
 
-  private onTrackEvent(event: PlayerTrackEvent): void {
+  resize(width: number, height: number): void {
+    this.surfaceWidth = width; this.surfaceHeight = height;
+    if (this.core.engine !== null) this.core.engine.resize(width, height);
+  }
+
+  private onEngineEvent(event: PlayerEngineEvent): void {
     if (!this.active) return;
     switch (event.kind) {
-      case 'state': this.onTrackState(event.audio, event.state); break;
-      case 'error': this.recoverSource(event.audio, event.message); break;
-      case 'frame': this.revealFirstFrame(); this.audioSync.tryStartGatedAudio(); break;
-      case 'time': this.onTime(event.value, event.audio); break;
+      case 'state': this.onEngineState(event.state); break;
+      case 'error': this.recoverSource(false, event.message); break;
+      case 'audio-error': this.recoverSource(true, event.message); break;
+      case 'interruption': this.pause(); break;
+      case 'rate': if (Math.abs(event.value - this.nativeRate) < 0.001) this.event('rate', event.value); break;
+      case 'frame': this.revealFirstFrame(); break;
+      case 'time': this.onTime(event.value); break;
       case 'duration': this.state.duration = event.value / 1000; this.publish(); this.event('duration'); break;
       case 'size': this.event('size', event.value, event.second); break;
-      case 'buffer': this.audioSync.onBuffer(event.value); break;
+      case 'buffer': this.onBuffer(event.value); break;
       case 'seek': {
-        if (event.audio) {
-          const audio: media.AVPlayer | null = this.pair.audio;
-          if (audio !== null) this.seek.onAudioSeekDone(audio, event.value);
-        } else if (this.pair.video !== null) this.seek.onVideoSeekDone(this.pair.video, event.value);
+        if (this.core.engine !== null) this.seek.onSeekDone(this.core.engine, event.value, event.second);
         break;
       }
     }
   }
 
-  private onTrackState(audio: boolean, state: string): void {
-    const player: media.AVPlayer | null = audio ? this.pair.audio : this.pair.video;
-    if (player === null) return;
+  private onEngineState(state: string): void {
+    const engine: PlayerEngine | null = this.core.engine;
+    if (engine === null) return;
+    const ownPause: boolean = state === 'paused' && this.pendingPauseEvents > 0;
+    if (ownPause) this.pendingPauseEvents--;
     if (state === 'prepared') {
-      this.state.prepared = this.pair.prepared;
+      this.state.prepared = this.core.prepared;
       this.state.errorText = '';
-      try { player.setPlaybackRate(this.state.playbackRate); player.setVolume(this.observer.policy().muted ? 0 : 1); }
-      catch (e) {}
+      try { engine.setPlaybackRate(this.state.playbackRate); this.nativeRate = this.state.playbackRate; } catch (e) {}
+      this.restoreVolume();
       this.publish(); this.startPrepared(); return;
     }
+    // 异步 play 完成时再检查当前意图，离页/禁用后台后的迟到回调不能恢复播放。
     if (state === 'playing' && (!this.canPlay() || !this.shouldPlayAfterPrepare)) {
       this.shouldPlayAfterPrepare = false;
-      this.audioSync.cancelAudioGate();
-      try { player.pause().catch(() => {}); } catch (e) {}
-      if (!audio) {
-        this.state.playing = false; this.state.buffering = false;
-        this.audioSync.cancelFirstFrameMute(true);
-        const sound: media.AVPlayer | null = this.pair.audio;
-        if (sound !== null && this.pair.audioPrepared && sound.state === 'playing') {
-          try { sound.pause().catch(() => {}); } catch (e) {}
-        }
-        this.publish(); this.event('paused'); this.event('clock.pause');
-      }
-      return;
-    }
-    if (audio) {
-      if (state === 'completed' && this.state.backgroundAudioOnly) this.complete();
+      this.pauseEngine(engine);
+      this.state.playing = false; this.state.buffering = false;
+      this.publish(); this.event('paused'); this.event('clock.pause');
       return;
     }
     if (state === 'playing') {
-      this.backgroundVideoResumePending = false;
-      this.state.playing = true; this.state.buffering = false;
-      this.publish(); this.event('started'); this.revealFirstFrame(); this.event('clock.start');
-    } else if (state === 'paused' && (this.state.backgroundAudioOnly || this.backgroundVideoResumePending ||
-      this.seek.seekInFlight || this.audioSync.seekRecoveryActive)) {
+      this.state.playing = true;
+      this.state.backgroundAudioOnly = this.isBackgroundPlayback();
+      this.publish(); this.event('started'); this.revealFirstFrame();
+      if (!this.observer.policy().background && !this.state.seekLocked && !this.state.buffering) this.event('clock.start');
+    } else if (state === 'paused' && ownPause && this.shouldPlayAfterPrepare) {
+      // 用户在异步 pause 完成前又按了播放；旧 paused 回调不能撤销新的播放意图。
       this.event('clock.pause');
     } else if (state === 'paused' || state === 'completed') {
+      this.state.buffering = false; this.nativeBuffering = false;
       this.shouldPlayAfterPrepare = false;
       this.seek.seekResumePlaying = false;
       this.state.playing = false; this.publish(); this.event('paused'); this.event('clock.pause');
-      if (state === 'completed') this.event('ended');
+      if (state === 'completed') this.event('ended', this.state.backgroundAudioOnly ? 1 : 0);
     }
   }
 
-  private complete(): void {
-    this.shouldPlayAfterPrepare = false;
-    this.state.playing = false; this.publish(); this.event('paused'); this.event('ended', 1);
+  private onBuffer(kind: PlayerBuffering): void {
+    if (kind === PlayerBuffering.START) {
+      this.nativeBuffering = true; this.state.buffering = true;
+      this.event('clock.pause'); this.publish();
+    } else if (kind === PlayerBuffering.END) {
+      this.nativeBuffering = false;
+      if (this.state.seekLocked) return;
+      this.state.buffering = false;
+      if (this.state.playing && !this.observer.policy().background) this.event('clock.start');
+      this.publish();
+    }
+    // libmpv 同时门控两轨；这里不得暂停、定位或微调某一音轨。
   }
 
-  private onTime(time: number, audio: boolean): void {
-    if (audio !== this.state.backgroundAudioOnly || this.state.seekLocked) return;
-    if (!audio && this.audioSync.canReleaseFrameMute(time)) this.audioSync.disarmFirstFrameMute();
+  private onTime(time: number): void {
+    if (this.state.seekLocked) return;
     const seconds: number = time / 1000;
     const changed: boolean = Math.floor(seconds) !== Math.floor(this.state.position);
     this.state.position = seconds;
-    if (!audio && this.audioSync.audioStartPending && seconds > 0.05) this.audioSync.tryStartGatedAudio();
     if (changed) this.publish();
-    if (this.observer.progress(seconds, audio)) return;
-    if (!audio) this.audioSync.checkAudioSync(time);
+    this.observer.progress(seconds, this.observer.policy().background);
   }
 
   private revealFirstFrame(): void {
-    if (this.state.firstFrameShown || !this.state.playing || !this.pair.firstRenderReady) return;
+    if (this.state.firstFrameShown || !this.state.playing || !this.core.firstRenderReady) return;
     this.state.firstFrameShown = true; this.publish(); this.event('firstFrame');
   }
 
   private startPrepared(): void {
-    const video: media.AVPlayer | null = this.pair.video;
-    if (video === null || !this.pair.ready) return;
+    const engine: PlayerEngine | null = this.core.engine;
+    if (engine === null || !this.core.prepared) return;
+    this.state.buffering = false; this.nativeBuffering = false;
     if (!this.canPlay()) this.shouldPlayAfterPrepare = false;
-    this.audioSync.disarmFirstFrameMute();
     if (this.resumeAfterPrepare > 0) {
       const target: number = this.resumeAfterPrepare;
       const resume: boolean = this.shouldPlayAfterPrepare;
@@ -298,85 +286,71 @@ export class PlayerPlaybackSession {
       return;
     }
     this.resumeAfterPrepare = -1;
+    this.publish();
     if (this.shouldPlayAfterPrepare) {
-      this.audioSync.armFirstFrameMute();
-      this.playTrack(video, false);
-      this.audioSync.gateAudioStart();
+      this.state.buffering = false;
+      this.state.backgroundAudioOnly = this.isBackgroundPlayback();
+      this.playEngine(engine);
     }
   }
 
   toggle(): void {
-    const video: media.AVPlayer | null = this.pair.video;
-    if (video === null || !this.pair.prepared) return;
+    const engine: PlayerEngine | null = this.core.engine;
+    if (engine === null || !this.core.prepared) return;
     if (this.state.playing) { this.pause(); return; }
     if (!this.canPlay()) return;
     this.shouldPlayAfterPrepare = true;
-    // 自动同步/用户跳转尚未完成时只更新意图，不能提前启动任一播放头。
+    // 定位尚未完成时只更新播放意图，等待当前原生定位回调。
     if (this.state.seekLocked) {
       this.seek.seekResumePlaying = true;
       this.state.playing = true;
       this.publish(); this.event('playing');
       return;
     }
-    const policy: PlayerPlaybackPolicy = this.observer.policy();
-    if (policy.background && !policy.pipVisible && this.pair.audio !== null && this.pair.audioPrepared) {
-      this.state.backgroundAudioOnly = true;
-      this.playTrack(this.pair.audio, true);
-      this.state.playing = true; this.publish(); this.event('playing'); return;
-    }
+    this.state.backgroundAudioOnly = this.isBackgroundPlayback();
     this.event('resume');
-    this.audioSync.armFirstFrameMute(Math.max(0, video.currentTime), 1200);
-    this.playTrack(video, false); this.audioSync.gateAudioStart();
+    this.playEngine(engine);
     this.state.playing = true; this.publish(); this.event('playing');
   }
 
   pause(): void {
+    this.speed.endHold();
+    this.playRequest++;
+    this.state.buffering = false; this.nativeBuffering = false;
     this.shouldPlayAfterPrepare = false;
     this.seek.seekResumePlaying = false;
-    this.audioSync.seekRecoveryActive = false;
-    this.audioSync.cancelAudioGate(); this.audioSync.cancelFirstFrameMute(true);
     try {
-      if (this.pair.video !== null && this.pair.prepared && !this.state.backgroundAudioOnly) this.pair.video.pause().catch(() => {});
-      if (this.pair.audio !== null && this.pair.audioPrepared) this.pair.audio.pause().catch(() => {});
+      if (this.core.engine !== null && this.core.prepared) this.pauseEngine(this.core.engine);
     } catch (e) {}
     this.state.playing = false; this.publish(); this.event('clock.pause'); this.event('paused');
   }
 
   stopForNavigation(): void {
-    const video: media.AVPlayer | null = this.pair.video;
-    const audio: media.AVPlayer | null = this.pair.audio;
+    this.speed.endHold(); this.playRequest++; this.nativeBuffering = false;
     this.shouldPlayAfterPrepare = false; this.seek.seekResumePlaying = false;
     this.seek.cancel();
     if (this.state.seekLocked) this.event('seek.finished');
     this.state.seekLocked = false; this.state.buffering = false;
-    this.audioSync.muteImmediately(); this.audioSync.reset();
+    this.state.seekRecoveryCoverVisible = false;
+    this.mute();
     try {
-      if (video !== null && this.pair.prepared) video.pause().catch(() => {});
-      if (audio !== null && this.pair.audioPrepared) audio.pause().catch(() => {});
+      if (this.core.engine !== null && this.core.prepared) this.pauseEngine(this.core.engine);
     } catch (e) {}
     this.state.playing = false; this.publish(); this.event('paused'); this.event('clock.pause');
-    if (this.volumeRestoreTimer >= 0) clearTimeout(this.volumeRestoreTimer);
-    const generation: number = this.generation;
-    this.volumeRestoreTimer = setTimeout(() => {
-      if (!this.current(generation)) return;
-      this.volumeRestoreTimer = -1;
-      if (this.current(generation) && video === this.pair.video && audio === this.pair.audio) this.audioSync.restoreUserVolume();
-    }, 100);
   }
 
   seekTo(position: number, precise: boolean = true, resetRecovery: boolean = true): void {
-    if (!this.active || this.pair.video === null || !this.pair.prepared) return;
+    if (!this.active || this.core.engine === null || !this.core.prepared) return;
     const raw: number = Math.max(0, Math.min(this.state.duration > 0 ? this.state.duration : position, position));
     const target: number = this.state.duration > 0 && raw >= this.state.duration ? Math.max(0, this.state.duration - 0.5) : raw;
     this.state.position = target; this.state.seekLocked = true;
-    this.audioSync.lastAudioSyncAtMs = -1;
     if (resetRecovery) this.seekRecoveryAttempts = 0;
     this.publish(); this.event('seek', target);
     this.seek.request(Math.round(target * 1000), precise, this.state.playing);
   }
 
   replay(): void {
-    if (!this.pair.prepared) return;
+    if (!this.core.prepared) return;
     this.event('resume');
     this.seek.seekResumePlaying = true;
     this.seekTo(0);
@@ -384,58 +358,61 @@ export class PlayerPlaybackSession {
 
   private finishSeek(resume: boolean, target: number): void {
     this.seekRecoveryAttempts = 0;
-    const video: media.AVPlayer | null = this.pair.video;
+    const engine: PlayerEngine | null = this.core.engine;
     const allowed: boolean = resume && this.canPlay();
     this.shouldPlayAfterPrepare = allowed;
-    if (allowed && video !== null && this.pair.prepared) {
-      this.audioSync.armFirstFrameMute(video.currentTime >= 0 ? video.currentTime : target, 1800);
-      if (video.state !== 'playing') this.playTrack(video, false);
-      if (this.pair.audio !== null && this.pair.audioPrepared) this.playTrack(this.pair.audio, true);
-    } else {
-      this.audioSync.seekRecoveryActive = false;
-      this.state.seekRecoveryCoverVisible = false; this.state.buffering = false;
-      this.audioSync.restoreUserVolume();
-    }
-    this.state.seekLocked = false; this.publish(); this.event('seek.finished');
+    const landed: number = Math.max(0, target / 1000);
+    const changedLanding: boolean = Math.abs(this.state.position - landed) > 0.001;
+    this.state.position = landed;
+    this.state.seekRecoveryCoverVisible = false; this.state.buffering = this.nativeBuffering;
+    this.state.seekLocked = false;
+    if (allowed && engine !== null && this.core.prepared && (engine.state !== 'playing' || this.pendingPauseEngine === engine)) this.playEngine(engine);
+    if (allowed && !this.nativeBuffering && !this.observer.policy().background) this.event('clock.start');
+    this.publish();
+    if (changedLanding) this.event('seek', landed);
+    this.event('seek.finished');
   }
 
   private async recoverSeek(target: number): Promise<void> {
-    const video: media.AVPlayer | null = this.pair.video;
-    if (video === null) return;
+    const engine: PlayerEngine | null = this.core.engine;
+    if (engine === null) return;
     const resume: boolean = this.seek.seekResumePlaying && this.canPlay();
     this.shouldPlayAfterPrepare = resume;
     if (this.seekRecoveryAttempts >= 1) {
-      this.seek.cancel(); this.audioSync.reset(); this.audioSync.restoreUserVolume();
-      this.state.seekLocked = false; this.state.buffering = false; this.seekRecoveryAttempts = 0;
-      this.publish(); this.event('seek.finished');
-      if (resume && this.pair.prepared) { if (video.state !== 'playing') this.playTrack(video, false); this.audioSync.gateAudioStart(); }
+      this.seek.cancel();
+      this.state.seekLocked = false; this.state.seekRecoveryCoverVisible = false;
+      this.state.buffering = false; this.nativeBuffering = false; this.seekRecoveryAttempts = 0;
+      this.state.errorText = '定位超时，请重新播放或切换清晰度';
+      this.pause(); this.publish(); this.event('seek.finished');
       return;
     }
     this.seekRecoveryAttempts++;
-    const generation: number = this.resetTracks();
+    const generation: number = this.resetEngine();
     this.resumeAfterPrepare = Math.max(0, target / 1000); this.shouldPlayAfterPrepare = resume;
     this.state.buffering = true; this.publish(); this.event('seek.finished');
-    await this.pair.release();
+    if (!(await this.releaseCore())) return;
     if (this.current(generation)) await this.start();
   }
 
   private async recoverSource(audio: boolean, message: string): Promise<void> {
     if (!this.active || this.retryingSource) return;
-    const hasBackup: boolean = audio ? this.audioSourceIndex + 1 < this.source.audioUrls.length :
-      this.sourceIndex + 1 < this.source.urls.length;
+    const hasBackup: boolean = this.sourceIndex + 1 < this.source.urls.length ||
+      this.audioSourceIndex + 1 < Math.max(1, this.source.audioUrls.length);
     if (!hasBackup) {
       this.state.errorText = (audio ? '音频播放出错：' : '播放出错：') + message.substring(0, 120);
       this.state.buffering = false;
       this.release(); this.event('fatal'); return;
     }
     this.resumeAfterPrepare = this.state.position; this.shouldPlayAfterPrepare = this.resumeIntent();
-    const generation: number = this.resetTracks();
+    const generation: number = this.resetEngine();
     this.retryingSource = true;
-    this.state.buffering = audio;
+    this.state.buffering = true;
     this.state.errorText = '当前线路不可用，正在切换备用 CDN…'; this.publish();
-    await this.pair.release();
+    if (!(await this.releaseCore())) return;
     if (!this.current(generation)) return;
-    if (audio) this.audioSourceIndex++; else this.sourceIndex++;
+    if (audio && this.audioSourceIndex + 1 < this.source.audioUrls.length) this.audioSourceIndex++;
+    else if (this.sourceIndex + 1 < this.source.urls.length) this.sourceIndex++;
+    else { this.sourceIndex = 0; this.audioSourceIndex++; }
     this.retryingSource = false; await this.start();
   }
 
@@ -444,60 +421,87 @@ export class PlayerPlaybackSession {
     const policy: PlayerPlaybackPolicy = this.observer.policy();
     if (policy.background) {
       this.event('clock.pause');
-      if (policy.pipKeepsAlive) return;
-      if (policy.allowBackground) this.enterBackgroundAudio();
-      else { this.shouldPlayAfterPrepare = false; this.seek.seekResumePlaying = false;
-        if (this.state.playing) this.pause(); else this.audioSync.cancelAudioGate(); }
-    } else this.leaveBackgroundAudio();
+      if (!policy.allowBackground && !policy.pipKeepsAlive) {
+        this.shouldPlayAfterPrepare = false; this.seek.seekResumePlaying = false;
+        this.pause();
+      }
+      this.state.backgroundAudioOnly = this.isBackgroundPlayback();
+      if (this.state.backgroundAudioOnly) this.event('backgroundAudio');
+    } else {
+      this.state.backgroundAudioOnly = false;
+      if (this.state.playing && !this.state.buffering && !this.state.seekLocked) this.event('clock.start');
+    }
+    // 后台和前台共享同一原生时间线，返回无需暂停/重建/补一次 seek。
+    this.publish();
   }
 
-  private enterBackgroundAudio(): void {
-    const video: media.AVPlayer | null = this.pair.video, audio: media.AVPlayer | null = this.pair.audio;
-    if (!this.state.playing || !this.pair.ready || video === null || audio === null) return;
-    this.state.backgroundAudioOnly = true; this.backgroundVideoResumePending = false;
-    this.audioSync.cancelAudioGate(); this.audioSync.disarmFirstFrameMute();
-    try { video.pause().catch(() => {}); this.playTrack(audio, true); }
-    catch (e) { this.state.backgroundAudioOnly = false; }
-    this.publish(); this.event('backgroundAudio');
+  private isBackgroundPlayback(): boolean {
+    const policy: PlayerPlaybackPolicy = this.observer.policy();
+    return policy.background && policy.allowBackground && !policy.pipKeepsAlive;
   }
 
-  private leaveBackgroundAudio(): void {
-    if (!this.state.backgroundAudioOnly) return;
-    const resume: boolean = this.state.playing;
-    const target: number = this.pair.audio !== null ? this.pair.audio.currentTime : this.state.position * 1000;
-    this.state.backgroundAudioOnly = false; this.backgroundVideoResumePending = resume;
-    if (this.pair.video === null || !this.pair.prepared) { this.backgroundVideoResumePending = false; this.publish(); return; }
-    this.state.position = Math.max(0, target / 1000); this.state.seekLocked = true; this.state.playing = false;
-    this.audioSync.lastAudioSyncAtMs = -1;
-    this.publish(); this.event('foregroundSeek', this.state.position);
-    this.seek.request(target, true, resume);
+  setSpeed(rate: number): void {
+    const engine: PlayerEngine | null = this.core.engine;
+    let accepted: number = rate;
+    if (engine !== null && this.core.prepared) {
+      try { engine.setPlaybackRate(rate); this.nativeRate = rate; }
+      catch (e) {
+        accepted = 1;
+        try { engine.setPlaybackRate(1); this.nativeRate = 1; } catch (e) {}
+      }
+    }
+    this.state.playbackRate = accepted;
+    if (!this.state.holdSpeedActive) this.event('rate', accepted);
+    this.publish();
   }
 
-  setSpeed(rate: number): void { this.audioSync.setPlaybackSpeed(rate); this.publish(); }
-  beginHold(): void { if (this.state.playing && this.pair.prepared) this.speed.beginHold(this.state.playbackRate); }
+  private applyTemporarySpeed(rate: number): void {
+    const engine: PlayerEngine | null = this.core.engine;
+    if (engine === null || !this.core.prepared) return;
+    try { engine.setPlaybackRate(rate); this.nativeRate = rate; this.event('rate', rate); } catch (e) {}
+  }
+
+  beginHold(): void { if (this.state.playing && this.core.prepared) this.speed.beginHold(this.state.playbackRate); }
   endHold(): void { this.speed.endHold(); }
-  mute(): void { this.audioSync.muteImmediately(); }
-  restoreVolume(): void { this.audioSync.restoreUserVolume(); }
+  mute(): void {
+    try { if (this.core.engine !== null && this.core.prepared) this.core.engine.setVolume(0); } catch (e) {}
+  }
+  restoreVolume(): void {
+    try {
+      if (this.core.engine !== null && this.core.prepared) this.core.engine.setVolume(this.observer.policy().muted ? 0 : 1);
+    } catch (e) {}
+  }
 
   deactivate(): void {
     this.resumeAfterPrepare = this.state.position; this.shouldPlayAfterPrepare = false;
-    this.audioSync.muteImmediately(); this.active = false; this.release();
+    this.mute(); this.active = false; this.release();
   }
 
   release(): void {
     ++this.sourceRequest;
-    this.resetTracks();
+    this.resetEngine();
     this.state.qualityLoading = false;
-    this.pair.release();
+    this.releaseCore();
     this.publish();
   }
 
-  private resetTracks(): number {
-    ++this.generation; this.retryingSource = false;
-    this.seek.cancel(); this.audioSync.reset(); this.speed.endHold();
-    if (this.volumeRestoreTimer >= 0) clearTimeout(this.volumeRestoreTimer);
-    this.volumeRestoreTimer = -1;
-    this.backgroundVideoResumePending = false;
+  private async releaseCore(): Promise<boolean> {
+    try { await this.core.release(); return true; }
+    catch (e) {
+      this.shouldPlayAfterPrepare = false;
+      this.state.playing = false; this.state.prepared = false; this.state.buffering = false;
+      this.nativeBuffering = false;
+      this.state.errorText = '播放资源未能安全释放，请退出视频后重试';
+      this.publish(); this.event('fatal');
+      return false;
+    }
+  }
+
+  private resetEngine(): number {
+    ++this.generation; this.retryingSource = false; this.playRequest++; this.nativeBuffering = false;
+    this.pendingPause = null; this.pendingPauseEngine = null; this.pendingPauseEvents = 0;
+    this.seek.cancel(); this.speed.endHold();
+    this.state.seekRecoveryCoverVisible = false;
     this.state.backgroundAudioOnly = false;
     if (this.state.seekLocked) this.event('seek.finished');
     this.state.seekLocked = false; this.state.prepared = false; this.state.playing = false;
@@ -505,13 +509,38 @@ export class PlayerPlaybackSession {
     return this.generation;
   }
 
-  private playTrack(player: media.AVPlayer, audio: boolean): void {
+  private pauseEngine(engine: PlayerEngine): void {
+    if (this.pendingPauseEngine === engine && this.pendingPause !== null) return;
+    // prepared/paused 也可能正在等待音频焦点；暂停必须撤销这段时间的起播意图。
+    if (engine.state === 'released' || engine.state === 'error' || engine.state === 'idle') return;
+    let pending: Promise<void>;
+    this.pendingPauseEvents++;
     const generation: number = this.generation;
-    try {
-      player.play().catch(() => {
-        if (this.current(generation) && (audio ? this.pair.audio : this.pair.video) === player) this.recoverSource(audio, '播放器启动失败');
-      });
-    } catch (e) { if (this.current(generation)) this.recoverSource(audio, '播放器启动失败'); }
+    const failed: () => void = (): void => {
+      if (generation === this.generation) this.pendingPauseEvents = Math.max(0, this.pendingPauseEvents - 1);
+    };
+    try { pending = engine.pause().catch(failed); } catch (e) { failed(); return; }
+    this.pendingPause = pending; this.pendingPauseEngine = engine;
+    pending.then(() => {
+      if (this.pendingPause === pending) { this.pendingPause = null; this.pendingPauseEngine = null; }
+    });
+  }
+
+  private playEngine(engine: PlayerEngine): void {
+    const generation: number = this.generation;
+    const request: number = ++this.playRequest;
+    const play: () => void = (): void => {
+      if (!this.current(generation) || request !== this.playRequest || this.core.engine !== engine ||
+        !this.shouldPlayAfterPrepare || !this.canPlay()) return;
+      try {
+        this.restoreVolume();
+        engine.play().catch(() => {
+          if (this.current(generation) && request === this.playRequest && this.shouldPlayAfterPrepare && this.core.engine === engine) this.recoverSource(false, '播放器启动失败');
+        });
+      } catch (e) { if (this.current(generation) && request === this.playRequest && this.shouldPlayAfterPrepare) this.recoverSource(false, '播放器启动失败'); }
+    };
+    if (this.pendingPauseEngine === engine && this.pendingPause !== null) this.pendingPause.then(play);
+    else play();
   }
 
   private canPlay(): boolean {

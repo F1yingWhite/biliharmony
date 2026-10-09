@@ -59,10 +59,11 @@ function fixture(hooks = {}) {
     clearTimeout: id => timers.delete(id)
   } });
   const controller = new (load('components/player/PlayerSeekPreviewController').PlayerSeekPreviewController)();
-  const request = (seconds, id = 10, url = 'video-' + id, headers = { Referer: 'source-' + id }) => controller.request(
+  const request = (seconds, id = 10, url = 'video-' + id, headers = { Referer: 'source-' + id }, allowNativeFrame = true) => controller.request(
     seconds, id, 'BV' + id, id, url, headers,
-    (...args) => calls.sprites.push(args), frame => calls.frames.push(frame));
+    (...args) => calls.sprites.push(args), frame => calls.frames.push(frame), allowNativeFrame);
   const fire = async () => {
+    await tick();
     const pending = [...timers.values()]; timers.clear(); pending.forEach(callback => callback()); await tick();
   };
   return { controller, request, fire, calls, timers, makePixel };
@@ -143,6 +144,8 @@ test('preload and request adopt new video identities before checking old cached/
 test('preview keeps 180 ms coalescing and uses the most recent target before starting extraction', async () => {
   const f = fixture({ shots: async () => null });
   f.request(1); f.request(2); f.request(3);
+  assert.equal(f.timers.size, 0, 'metadata has priority over native extraction');
+  await tick();
   assert.equal(f.timers.size, 1); assert.equal(f.calls.extractors.length, 0);
   await f.fire();
   assert.equal(f.calls.extractors.length, 1);
@@ -152,19 +155,80 @@ test('preview keeps 180 ms coalescing and uses the most recent target before sta
   assert.equal(f.calls.pixels[0].releases, 1); assert.equal(f.calls.extractors[0].releases, 1);
 });
 
-test('old in-flight extraction does not block a new source or unlock its active extraction', async () => {
+test('source changes wait for old native extraction and release before creating the replacement', async () => {
   const old = deferred(), latest = deferred();
   const f = fixture({ shots: async () => null,
     fetch: extractor => extractor.name === 'extractor-0' ? old.promise : latest.promise });
   f.request(1, 10); await f.fire();
   f.request(2, 20); await f.fire();
-  assert.equal(f.calls.extractors.length, 2);
+  assert.equal(f.calls.extractors.length, 1, 'only one preview decoder may own native work');
+  assert.equal(f.calls.extractors[0].releases, 0, 'release must wait for the active fetch');
   const oldFrame = f.makePixel('old'); old.resolve(oldFrame); await tick();
+  assert.equal(f.calls.extractors[0].releases, 1);
+  assert.equal(f.calls.extractors.length, 2);
   f.request(3, 20); assert.equal(f.timers.size, 0, 'old finally must not clear new extraction lock');
   const superseded = f.makePixel('superseded'); latest.resolve(superseded); await tick();
   assert.equal(oldFrame.releases, 1); assert.equal(superseded.releases, 1);
   assert.equal(f.timers.size, 1, 'latest target is retried through the same throttle');
   assert.ok(f.calls.frames.every(frame => frame === null));
+});
+
+test('slow sprite metadata keeps repeated drags off the native decoder and renders the latest sprite', async () => {
+  const metadata = deferred();
+  const f = fixture({ shots: () => metadata.promise });
+  f.controller.preload(10, 'BV10', 10);
+  f.request(1); f.request(20); f.request(40); await f.fire();
+  assert.equal(f.calls.shots.length, 1);
+  assert.equal(f.timers.size, 0); assert.equal(f.calls.extractors.length, 0);
+  metadata.resolve(shots('loaded')); await tick(); await f.fire();
+  assert.equal(f.calls.sprites.at(-1)[0], 'loaded-1');
+  assert.equal(f.calls.sprites.at(-1)[1], 0);
+  assert.equal(f.calls.extractors.length, 0);
+});
+
+test('unavailable sprite metadata is remembered across drag movements and falls back once settled', async () => {
+  const metadata = deferred();
+  const f = fixture({ shots: () => metadata.promise });
+  f.request(1); f.request(2); await f.fire();
+  assert.equal(f.calls.extractors.length, 0);
+  metadata.resolve(null); await tick(); await f.fire();
+  f.request(3); await f.fire(); f.request(4); await f.fire();
+  assert.equal(f.calls.shots.length, 1, 'an unavailable preview API must not be polled on every movement');
+  assert.equal(f.calls.extractors.length, 1);
+  assert.deepEqual(f.calls.extractors[0].fetches.map(args => args[0]), [2000000, 3000000, 4000000]);
+});
+
+for (const result of ['missing', 'sprite']) {
+  test(`production preview never starts a native decoder while slow metadata resolves to ${result}`, async () => {
+    const metadata = deferred();
+    const f = fixture({ shots: () => metadata.promise });
+    f.request(1, 10, 'video-10', {}, false); f.request(40, 10, 'video-10', {}, false); await f.fire();
+    assert.equal(f.timers.size, 0); assert.equal(f.calls.extractors.length, 0);
+    metadata.resolve(result === 'sprite' ? shots('service') : null); await tick(); await f.fire();
+    f.request(41, 10, 'video-10', {}, false); await f.fire();
+    assert.equal(f.timers.size, 0); assert.equal(f.calls.extractors.length, 0);
+    assert.ok(f.calls.frames.every(frame => frame === null));
+    if (result === 'sprite') assert.equal(f.calls.sprites.at(-1)[0], 'service-1');
+    assert.equal(f.calls.shots.length, 1); f.controller.release();
+  });
+}
+
+test('closing and reopening the same video invalidates old extraction and waits for its release', async () => {
+  const old = deferred(), released = deferred();
+  const f = fixture({ shots: async () => null,
+    fetch: extractor => extractor.name === 'extractor-0' ? old.promise : f.makePixel('latest'),
+    releaseExtractor: extractor => extractor.name === 'extractor-0' ? released.promise : Promise.resolve() });
+  f.request(5); await f.fire(); f.controller.close(); f.request(5); await f.fire();
+  assert.equal(f.calls.extractors.length, 1);
+  const stale = f.makePixel('stale'); old.resolve(stale); await tick();
+  assert.equal(stale.releases, 1, 'same target does not make an old gesture result current');
+  assert.equal(f.calls.extractors[0].releases, 1);
+  assert.equal(f.calls.extractors.length, 1, 'native release is part of the ownership barrier');
+  released.resolve(); await tick();
+  assert.equal(f.calls.extractors.length, 2);
+  assert.equal(f.calls.frames.at(-1).name, 'latest');
+  f.controller.close(); await tick();
+  assert.equal(f.calls.extractors[1].releases, 1);
 });
 
 test('extractor created after a source switch is released without configuring it from the new source', async () => {

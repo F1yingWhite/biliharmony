@@ -1,0 +1,319 @@
+{
+  "release": "20260715",
+  "release_url": "https://github.com/mpv-ohos/libmpv-ohos-build/releases/tag/20260715",
+  "recipe_commit": "1bab837e662ffa47ce51efd0720d3ed7c4988944",
+  "recipe_source_archive": "https://github.com/mpv-ohos/libmpv-ohos-build/archive/1bab837e662ffa47ce51efd0720d3ed7c4988944.tar.gz",
+  "binary": {
+    "name": "libmpv.so",
+    "sha256": "672e98d497199a89e20893979ecec686dee1113bbe1b609c9a9266aa1679bd32",
+    "bytes": 35491168,
+    "architecture": "aarch64"
+  },
+  "components": [
+    {
+      "name": "mpv",
+      "version": "0.41.0-dev-g6edeee00a",
+      "license": "LGPL-2.1-or-later",
+      "source": "https://github.com/ErBWs/mpv/tree/6edeee00a07b9b76f197aa71eee3d029fb090de4",
+      "notices": [
+        {
+          "notice": "mpv-lgpl",
+          "sha256": "72b672113d642cbb8ef5dcc76938db801983c56e50b1400ab930f1a64d6dc8d9",
+          "original_license_url": "https://github.com/ErBWs/mpv/tree/6edeee00a07b9b76f197aa71eee3d029fb090de4"
+        },
+        {
+          "notice": "mpv-copyright",
+          "sha256": "bfe9ee4cceabcb8ecbfadf208d04156f73d801e6a57369a5606bb8341e204a23",
+          "original_license_url": "https://github.com/ErBWs/mpv/tree/6edeee00a07b9b76f197aa71eee3d029fb090de4"
+        },
+        {
+          "notice": "mpv-core-copyright",
+          "sha256": "19dfd9176ab83b14e8f31a6f8c10e4637679cc4e9e89fbdb281ad84f0789a975",
+          "original_license_url": "https://github.com/ErBWs/mpv/tree/6edeee00a07b9b76f197aa71eee3d029fb090de4"
+        }
+      ]
+    },
+    {
+      "name": "FFmpeg",
+      "version": "n8.0 / 140fd653aed8cad774f991ba083e2d01e86420c7",
+      "license": "LGPL-3.0-or-later",
+      "source": "https://github.com/FFmpeg/FFmpeg/tree/140fd653aed8cad774f991ba083e2d01e86420c7",
+      "notices": [
+        {
+          "notice": "FFmpeg-LGPL3",
+          "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
+          "original_license_url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/140fd653aed8cad774f991ba083e2d01e86420c7/COPYING.LGPLv3"
+        },
+        {
+          "notice": "FFmpeg-GPL3",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+          "original_license_url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/140fd653aed8cad774f991ba083e2d01e86420c7/COPYING.GPLv3"
+        },
+        {
+          "notice": "FFmpeg-license",
+          "sha256": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af",
+          "original_license_url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/140fd653aed8cad774f991ba083e2d01e86420c7/LICENSE.md"
+        },
+        {
+          "notice": "FFmpeg-core-copyright",
+          "sha256": "4dd0d385ca46ede0c59da0efb1e1be76800d7948ad7469a97a22addce0ea2e92",
+          "original_license_url": "https://github.com/FFmpeg/FFmpeg/tree/140fd653aed8cad774f991ba083e2d01e86420c7"
+        }
+      ]
+    },
+    {
+      "name": "Mbed TLS",
+      "version": "3.6.4",
+      "license": "Apache-2.0 (selected from dual license)",
+      "source": "https://github.com/Mbed-TLS/mbedtls/tree/mbedtls-3.6.4",
+      "notices": [
+        {
+          "notice": "mbedtls",
+          "sha256": "9b405ef4c89342f5eae1dd828882f931747f71001cfba7d114801039b52ad09b",
+          "original_license_url": "https://raw.githubusercontent.com/Mbed-TLS/mbedtls/mbedtls-3.6.4/LICENSE"
+        }
+      ]
+    },
+    {
+      "name": "dav1d",
+      "version": "1.5.1",
+      "license": "BSD-2-Clause",
+      "source": "https://code.videolan.org/videolan/dav1d/-/tree/1.5.1",
+      "notices": [
+        {
+          "notice": "dav1d",
+          "sha256": "b327887de263238deaa80c34cdd2ff3e0ba1d35db585ce14a37ce3e74ee389e9",
+          "original_license_url": "https://raw.githubusercontent.com/videolan/dav1d/1.5.1/COPYING"
+        }
+      ]
+    },
+    {
+      "name": "libxml2",
+      "version": "2.15.1",
+      "license": "MIT",
+      "source": "https://gitlab.gnome.org/GNOME/libxml2/-/tree/v2.15.1",
+      "notices": [
+        {
+          "notice": "libxml2",
+          "sha256": "5d4873884a890122a4b9b20ad56ac6f7da1d796a5bfcf04a427970ac96217626",
+          "original_license_url": "https://raw.githubusercontent.com/GNOME/libxml2/v2.15.1/Copyright"
+        }
+      ]
+    },
+    {
+      "name": "FriBidi",
+      "version": "1.0.16",
+      "license": "LGPL-2.1-or-later",
+      "source": "https://github.com/fribidi/fribidi/tree/v1.0.16",
+      "notices": [
+        {
+          "notice": "fribidi",
+          "sha256": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b",
+          "original_license_url": "https://raw.githubusercontent.com/fribidi/fribidi/v1.0.16/COPYING"
+        },
+        {
+          "notice": "fribidi-copyright",
+          "sha256": "1fd8eca04c4f65fa9585fb7c1656104e65edb3b912ccba850f19689c6024f178",
+          "original_license_url": "https://github.com/fribidi/fribidi/tree/v1.0.16"
+        }
+      ]
+    },
+    {
+      "name": "FreeType",
+      "version": "2.13.3",
+      "license": "FTL (selected from dual license)",
+      "source": "https://gitlab.freedesktop.org/freetype/freetype/-/tree/VER-2-13-3",
+      "notices": [
+        {
+          "notice": "freetype-FTL",
+          "sha256": "08c135755dd589039470f1fdbb400daaabaaa50d0b366d19cebff4d22986baa1",
+          "original_license_url": "https://raw.githubusercontent.com/freetype/freetype/VER-2-13-3/docs/FTL.TXT"
+        },
+        {
+          "notice": "freetype-license",
+          "sha256": "2e3bbb7d7c5c396368dd0853a790ec29ce5b8647163dde42a0493fb0d6556b2b",
+          "original_license_url": "https://raw.githubusercontent.com/freetype/freetype/VER-2-13-3/LICENSE.TXT"
+        }
+      ]
+    },
+    {
+      "name": "HarfBuzz",
+      "version": "11.4.5",
+      "license": "MIT",
+      "source": "https://github.com/harfbuzz/harfbuzz/tree/11.4.5",
+      "notices": [
+        {
+          "notice": "harfbuzz",
+          "sha256": "ba8f810f2455c2f08e2d56bb49b72f37fcf68f1f4fade38977cfd7372050ad64",
+          "original_license_url": "https://raw.githubusercontent.com/harfbuzz/harfbuzz/11.4.5/COPYING"
+        }
+      ]
+    },
+    {
+      "name": "Fontconfig",
+      "version": "2.17.1",
+      "license": "MIT and per-file notices",
+      "source": "https://gitlab.freedesktop.org/fontconfig/fontconfig/-/tree/2.17.1",
+      "notices": [
+        {
+          "notice": "fontconfig",
+          "sha256": "51a51aa9823704fd90bccc616cdd17ebabb5b2b3e9cbde886ca02c7002288067",
+          "original_license_url": "https://gitlab.freedesktop.org/fontconfig/fontconfig/-/raw/2.17.1/COPYING"
+        }
+      ]
+    },
+    {
+      "name": "dolby_vision",
+      "version": "2.3.1",
+      "license": "MIT",
+      "source": "https://github.com/quietvoid/dovi_tool/tree/2.3.1",
+      "notices": [
+        {
+          "notice": "dovi",
+          "sha256": "f35d4515dd8d81c7996af2b20e9605561d1af0c21bc12ba7cc4fa4c60aed2178",
+          "original_license_url": "https://raw.githubusercontent.com/quietvoid/dovi_tool/2.3.1/dolby_vision/LICENSE"
+        }
+      ]
+    },
+    {
+      "name": "Little CMS",
+      "version": "2.17",
+      "license": "MIT",
+      "source": "https://github.com/mm2/Little-CMS/tree/lcms2.17",
+      "notices": [
+        {
+          "notice": "lcms",
+          "sha256": "6dbd60437f8ef91d8de1f08ad75882547fd4931bfcc3566a0735f28db1484d31",
+          "original_license_url": "https://raw.githubusercontent.com/mm2/Little-CMS/lcms2.17/LICENSE"
+        }
+      ]
+    },
+    {
+      "name": "Shaderc",
+      "version": "2025.4",
+      "license": "Apache-2.0",
+      "source": "https://github.com/google/shaderc/tree/v2025.4",
+      "notices": [
+        {
+          "notice": "shaderc",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "original_license_url": "https://raw.githubusercontent.com/google/shaderc/v2025.4/LICENSE"
+        },
+        {
+          "notice": "shaderc-copyright",
+          "sha256": "dfd82c746373419732146e1d1a6cfe0971e8e44d076a00ff68edecd8f3ab8b66",
+          "original_license_url": "https://github.com/google/shaderc/tree/v2025.4"
+        }
+      ]
+    },
+    {
+      "name": "glslang",
+      "version": "d213562e35573012b6348b2d584457c3704ac09b",
+      "license": "BSD/Apache-2.0/MIT and included notices",
+      "source": "https://github.com/KhronosGroup/glslang/tree/d213562e35573012b6348b2d584457c3704ac09b",
+      "notices": [
+        {
+          "notice": "glslang",
+          "sha256": "adb783e734e906d1f46db5df29991dbde84bdb0ceab502ac2febb44fe3c2b5f4",
+          "original_license_url": "https://raw.githubusercontent.com/KhronosGroup/glslang/d213562e35573012b6348b2d584457c3704ac09b/LICENSE.txt"
+        }
+      ]
+    },
+    {
+      "name": "SPIRV-Tools",
+      "version": "19042c8921f35f7bec56b9e5c96c5f5691588ca8",
+      "license": "Apache-2.0",
+      "source": "https://github.com/KhronosGroup/SPIRV-Tools/tree/19042c8921f35f7bec56b9e5c96c5f5691588ca8",
+      "notices": [
+        {
+          "notice": "SPIRV-Tools",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "original_license_url": "https://raw.githubusercontent.com/KhronosGroup/SPIRV-Tools/19042c8921f35f7bec56b9e5c96c5f5691588ca8/LICENSE"
+        }
+      ]
+    },
+    {
+      "name": "SPIRV-Headers",
+      "version": "01e0577914a75a2569c846778c2f93aa8e6feddd",
+      "license": "MIT and included notices",
+      "source": "https://github.com/KhronosGroup/SPIRV-Headers/tree/01e0577914a75a2569c846778c2f93aa8e6feddd",
+      "notices": [
+        {
+          "notice": "SPIRV-Headers",
+          "sha256": "ea43b1de38a6f90c488800d66dec1ed671e68cda530266bc96951fb5b6307613",
+          "original_license_url": "https://raw.githubusercontent.com/KhronosGroup/SPIRV-Headers/01e0577914a75a2569c846778c2f93aa8e6feddd/LICENSE"
+        }
+      ]
+    },
+    {
+      "name": "libass",
+      "version": "0.17.4",
+      "license": "ISC",
+      "source": "https://github.com/libass/libass/tree/0.17.4",
+      "notices": [
+        {
+          "notice": "libass",
+          "sha256": "f7e30699d02798351e7f839e3d3bfeb29ce65e44efa7735c225464c4fd7dfe9c",
+          "original_license_url": "https://raw.githubusercontent.com/libass/libass/0.17.4/COPYING"
+        }
+      ]
+    },
+    {
+      "name": "libplacebo",
+      "version": "7.360.1",
+      "license": "LGPL-2.1-or-later",
+      "source": "https://code.videolan.org/videolan/libplacebo/-/tree/v7.360.1",
+      "notices": [
+        {
+          "notice": "libplacebo",
+          "sha256": "b3aa400aca6d2ba1f0bd03bd98d03d1fe7489a3bbb26969d72016360af8a5c9d",
+          "original_license_url": "https://raw.githubusercontent.com/haasn/libplacebo/v7.360.1/LICENSE"
+        },
+        {
+          "notice": "libplacebo-copyright",
+          "sha256": "7c1bda7ce07d071f367c1084983f64d190f277e48ed8e7f704f35d5400f3feba",
+          "original_license_url": "https://code.videolan.org/videolan/libplacebo/-/tree/v7.360.1"
+        }
+      ]
+    },
+    {
+      "name": "Lua",
+      "version": "5.2.4",
+      "license": "MIT",
+      "source": "https://www.lua.org/ftp/lua-5.2.4.tar.gz",
+      "notices": [
+        {
+          "notice": "Lua",
+          "sha256": "702a58603c96be3283a6b1d7d95b20fbd056196124752db1510c220cb6a8bde5",
+          "original_license_url": "https://www.lua.org/ftp/lua-5.2.4.tar.gz"
+        }
+      ]
+    },
+    {
+      "name": "Mozilla CA certificate data",
+      "version": "2026-09-25",
+      "license": "MPL-2.0",
+      "source": "https://curl.se/docs/caextract.html",
+      "notices": [
+        {
+          "notice": "cacert-MPL2",
+          "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+          "original_license_url": "https://www.mozilla.org/media/MPL/2.0/index.txt"
+        }
+      ]
+    },
+    {
+      "name": "OHOS build scripts",
+      "version": "1bab837e662ffa47ce51efd0720d3ed7c4988944",
+      "license": "MIT",
+      "source": "https://github.com/mpv-ohos/libmpv-ohos-build/tree/1bab837e662ffa47ce51efd0720d3ed7c4988944",
+      "notices": [
+        {
+          "notice": "build-script-license",
+          "sha256": "8a12fb02a9ac435099cc37a5a97a08a684b0a84e554f134c73e72d0c32575c2c",
+          "original_license_url": "https://github.com/mpv-ohos/libmpv-ohos-build/tree/1bab837e662ffa47ce51efd0720d3ed7c4988944"
+        }
+      ]
+    }
+  ]
+}

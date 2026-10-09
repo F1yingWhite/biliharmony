@@ -37,8 +37,41 @@ $env:ARKTS_TEST_TYPESCRIPT = 'D:\DevEco Studio\tools\hvigor\hvigor\node_modules\
 测试直接转译并执行 ArkTS 服务源码，平台网络/文件接口使用可控替身；覆盖凭证隔离、账号切换、
 播放与搜索乱序响应、历史分页失败、缓存流式写入与并发限制。新增领域测试通过 `arkts-module.cjs`
 加载完整生产模块，每个夹具具有独立模块缓存，只替换网络、存储、系统资源与时间边界。
-播放器使用 `player-session-fixture.cjs` 驱动真实会话和可控 AVPlayer 事件；部分 UI 适配测试仍提取页面方法。
+播放器使用 `player-session-fixture.cjs` 驱动真实会话和可控内核事件；部分 UI 适配测试仍提取页面方法。
 UI DSL 的合法性仍由完整 `CompileArkTS` 构建验证。这些测试不能替代真机播放与 UI 验收。
+
+视频播放由一个原生 libmpv 会话管理音视频时间线。合流视频直接打开；分离 DASH 的视频 URL 和音频 URL
+通过原生 `audio-files` 数组接入同一个内核，请求头同样直接传给内核。下载、缓冲、解码、定位和同步由
+mpv 处理。完整的固定版本、构建来源和设备验收边界见 [播放内核复用说明](../../docs/player-core-reuse.md)。
+
+| 播放器回归 | 验证范围 |
+| --- | --- |
+| `player-session.test.cjs`、`player-seek.test.cjs` | 单内核会话、定位请求合并与旧回调隔离、资源退出屏障、画质/CDN 替换和播放意图 |
+| `player-clock.test.cjs`、`player-live-clock.test.cjs` | 一个内核时钟、缓冲/定位状态协调、事件时间线和实际落点回退 |
+| `player-native.test.cjs` | ArkTS libmpv 适配器的命令/事件转换、播放意图与异步生命周期 |
+| `player-audio-focus.test.cjs` | 平台音频焦点申请、系统中断与资源释放边界 |
+| `player-mpv-native.test.cjs` | 编译完整生产 C++ 桥接文件，仅模拟 NAPI/mpv 边界，检查 seek/暂停顺序、真实销毁屏障、外部音轨缺失，以及 GLES/RGBA 配置和视频轨/输出初始化失败 |
+| `player-mpv-resources.test.cjs` | CA 资源写入、局部缓冲区与部分写入、失败重试和文件释放 |
+| `player-mpv-integration.test.cjs` | 宿主 mpv 实际解码分离的 HTTP AVC/AAC 文件，验证单会话轨道、原生头/Range、URL 完整性、精确定位、暂停、倍速、A/V 误差、EOF，以及外部音频 404 的无声状态检测与备用地址恢复 |
+
+宿主 mpv 集成可独立运行：
+
+```bash
+node --test --test-timeout=20000 tool/qa/player-mpv-integration.test.cjs
+```
+
+宿主集成需要 macOS/Linux 的 `mpv`、`ffmpeg`；可用 `QA_MPV`、`QA_FFMPEG` 指定程序路径。
+缺少工具或在 Windows 上运行时明确 SKIP。它关闭画面窗口和扬声器输出，验证本机 mpv 的软件解码；
+本次宿主 mpv 0.41.0 与 HAP 中固定的 OHOS 开发版应分别记录。
+原生桥接回归编译 `bilimpv.cpp` 与 `mpv_session.cpp`，需要 `clang++` 或 `c++`；
+可用 `CXX` 指定编译器，缺少编译器时明确 SKIP。
+HarmonyOS 库加载、XComponent、硬解及真机音画同步按下文播放器专项验收。
+视频轨和 `current-vo=gpu` 检查只验证输出初始化；首帧实际呈现须在设备上确认。
+
+打包完成后运行 `python3 tool/qa/player-mpv-package-check.py`。它读取实际签名 HAP，检查包名、版本名与版本码和 AppScope 一致、固定 core SHA、
+ARM64 原生桥接的动态依赖，以及完整 CA、版权与准确版本来源原文确实随包携带；可传入其他 HAP 路径。
+包检查不读取签名凭据，不能代替运行时内核加载、硬解选择或设备验收。
+
 `player-interaction-ui.test.cjs` 和 `reply-vote-ui.test.cjs` 还会保留首次 Builder 的入参/闭包，
 在状态变化后重放同一个生产 Builder，验证投票详情、比例和后续互动没有停在旧快照。
 这是针对原生局部更新中参数捕获问题的回归；普通的整次 `build()` 重跑会漏掉这个问题，

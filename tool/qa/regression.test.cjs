@@ -493,7 +493,7 @@ test('Playback: stale quality response must not release the new video player', a
   const f = playbackFixture(); await f.boot();
   const request = f.session.changeQuality(64);
   await f.session.replaceSource(f.source({version: 2, cid: 20}));
-  const player = f.session.pair.video;
+  const player = f.session.core.engine;
   const newer = f.session.changeQuality(120);
   f.apiCalls[0].resolve({ urls: ['old-quality'], audioUrls: [], qualities: [], quality: 64 });
   await request;
@@ -504,17 +504,17 @@ test('Playback: stale quality response must not release the new video player', a
 
 test('Playback: a source change during release prevents obsolete player recreation', async () => {
   const release = deferred();
-  const f = playbackFixture(); const {video, audio} = await f.boot();
-  video.release = () => release.promise;
+  const f = playbackFixture(); const {engine} = await f.boot();
+  engine.release = () => release.promise;
   const request = f.session.changeQuality(64);
   f.apiCalls[0].resolve({urls: ['quality'], audioUrls: [], qualities: [], quality: 64});
   await tick();
   const replacing = f.session.replaceSource(f.source({version: 2, urls: ['latest']}));
   release.resolve();
   await Promise.all([request, replacing]); await tick();
-  assert.equal(f.calls(audio, 'release').length, 1, 'detached audio still belongs to the old operation and must be released');
-  assert.equal(f.creations.length, 4, 'only the latest source creates a new pair');
-  assert.equal(f.session.pair.video.source.url, 'latest'); f.session.deactivate();
+  assert.equal(f.opens.length, 2, 'replacement waits for the detached native decoder and creates only the latest source');
+  assert.equal(f.session.core.engine === engine, false);
+  assert.equal(f.session.core.engine.videoUrl, 'latest'); f.session.deactivate();
 });
 
 test('Search: new query starts immediately; old completion cannot replace results or clear loading', async () => {
@@ -1437,42 +1437,27 @@ test('emote disk cache survives a fresh service instance and deduplicates simult
   }
 });
 
-test('automatic audio alignment freezes both clocks and cancels stale pause completion', async () => {
-  const f = playbackFixture(); const {video, audio} = await f.boot(); f.playing();
-  const view = f.session.audioSync;
-  const pause = deferred();
-  video.currentTime = 5000; audio.currentTime = 4500; audio.state = 'playing'; audio.pause = () => pause.promise;
-  const plays = f.calls(audio, 'play').length;
-  view.gateAudioStart();
-  view.tryStartGatedAudio();
-  f.advance(60); await tick();
-  assert.equal(video.state, 'paused');
+test('native audio/video alignment never creates a second clock or performs drift seeks after resume', async () => {
+  const f = playbackFixture(); const {engine} = await f.boot(); f.playing();
+  engine.currentTime = 5000;
   f.session.stopForNavigation();
-  pause.resolve();
   await tick();
-  assert.equal(f.calls(audio, 'seek').length, 0);
-  audio.state = 'paused';
   f.session.toggle();
-  view.gateAudioStart();
-  view.tryStartGatedAudio();
-  f.advance(60);
-  await tick();
-  assert.equal(f.calls(audio, 'seek').length, 1);
-  assert.equal(f.calls(video, 'seek').length, 1);
-  video.currentTime = audio.currentTime = 5000;
-  video.emit('seekDone', 5000); audio.emit('seekDone', 5000);
-  assert.equal(f.calls(audio, 'play').length, plays + 1);
+  engine.emit('state', 'playing');
+  for (let i = 0; i < 20; i++) {engine.currentTime = 5000 + i * 250; engine.emit('time', engine.currentTime);}
+  assert.equal(f.opens.length, 1);
+  assert.equal(f.calls(engine, 'seek').length, 0);
+  assert.equal(f.calls(engine, 'rate').length, 1, 'resume does not continuously reconfigure the decoder rate');
+  assert.equal(f.state().playing, true);
   f.session.deactivate();
 });
 
-test('temporary speed changes write each player once without restoring an intermediate rate', async () => {
-  const f = playbackFixture(); const {video, audio} = await f.boot(); f.prepared();
-  const h = f.session.audioSync; h.audioSyncRate = 0.97;
-  video.calls.length = audio.calls.length = 0;
-  h.applyTemporarySpeed(2);
-  h.applyTemporarySpeed(1);
-  assert.deepEqual(f.calls(video, 'rate').map(call => call[1]), [2, 1]);
-  assert.deepEqual(f.calls(audio, 'rate').map(call => call[1]), [2, 1]);
-  assert.ok(h.speedTransitionUntilMs > f.globals.Date.now());
+test('temporary speed changes configure the single engine once without an intermediate rate', async () => {
+  const f = playbackFixture(); const {engine} = await f.boot(); f.playing();
+  engine.calls.length = 0;
+  f.session.beginHold();
+  f.session.endHold();
+  assert.deepEqual(f.calls(engine, 'rate').map(call => call[1]), [2, 1]);
+  assert.equal(f.opens.length, 1);
   f.session.deactivate();
 });

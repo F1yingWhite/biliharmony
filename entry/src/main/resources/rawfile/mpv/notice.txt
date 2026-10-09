@@ -1,0 +1,29 @@
+BiliHarmony uses libmpv for video/audio decoding, buffering and synchronization.
+
+Pinned OHOS release: mpv-ohos/libmpv-ohos-build, 20260715.
+libmpv.so SHA-256:
+672e98d497199a89e20893979ecec686dee1113bbe1b609c9a9266aa1679bd32
+
+mpv is built with -Dgpl=false and is LGPL-2.1-or-later. Its statically linked
+FFmpeg is built with --enable-version3 and reports LGPL-3.0-or-later.
+The bundled library must therefore also be distributed under the applicable
+LGPL-3.0-or-later terms. Full original license/copyright texts are in licenses.txt;
+fixed component versions and source URLs are in sources.json.
+Mbed TLS is used under Apache-2.0; FreeType is used under the FreeType License.
+The choices preserve the original dual-license texts in licenses.txt.
+
+Mozilla CA data in cacert.pem is from 2026-09-25, converted by curl's
+mk-ca-bundle, and is distributed under MPL-2.0. Its full license is included.
+Source and extraction information: https://curl.se/docs/caextract.html
+
+Corresponding source and build recipe:
+https://github.com/mpv-ohos/libmpv-ohos-build/tree/1bab837e662ffa47ce51efd0720d3ed7c4988944
+https://github.com/ErBWs/mpv/tree/6edeee00a07b9b76f197aa71eee3d029fb090de4
+https://github.com/FFmpeg/FFmpeg/tree/140fd653aed8cad774f991ba083e2d01e86420c7
+
+The native adapter sources are in entry/src/main/cpp. Rebuild instructions and
+replacement-library/source distribution requirements are in docs/player-core-reuse.md.
+libmpv remains a shared library; the adapter does not statically incorporate it.
+For distribution, provide the complete corresponding sources and OHOS patches
+alongside the binaries using the license-permitted source delivery mechanism.
+Copyright ownership remains with the respective original authors.

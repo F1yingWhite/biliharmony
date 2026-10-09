@@ -3,7 +3,7 @@ import { SponsorBlockSegment, sponsorBlockCategory } from '../../common/SponsorB
 
 /**
  * 播放器进度条与视频分段刻度。
- * 只负责展示/拖动，不拥有 seek 状态，避免与 AVPlayer 的串行 seek 状态机耦合。
+ * 只负责展示/拖动，不拥有 seek 状态，避免与 播放内核的串行 seek 状态机耦合。
  */
 @Component
 export struct PlayerProgressBar {

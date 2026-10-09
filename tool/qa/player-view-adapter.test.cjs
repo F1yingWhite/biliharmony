@@ -12,7 +12,7 @@ function between(a, b) {
 }
 
 // Only ArkUI adapters need extraction. They receive events from the whole real
-// session/pair/seek/sync graph; AVPlayer and window/Canvas effects remain fake.
+// session/core/seek graph; PlayerEngine and window/Canvas effects remain fake.
 function viewFixture() {
   const f = fixture(), effects = [];
   const stateBody = between('    state: (state: PlayerPlaybackState): void => {', '    event: (event: PlayerPlaybackEvent)')
@@ -51,17 +51,17 @@ function viewFixture() {
   f.session.observer = {policy: original.policy,
     state(value) {original.state(value); page.publish(value);},
     event(value) {original.event(value); page.onPlaybackEvent(value);},
-    progress(seconds, background) {return page.onPlaybackProgress(seconds, background);}};
+    progress(seconds, background) {page.onPlaybackProgress(seconds, background);}};
   return {...f, page, effects};
 }
 
 test('player UI adapter: native first frame, size, play and pause update cover, AVSession and clock', async () => {
-  const f = viewFixture(); const {video} = await f.boot(); f.prepared();
+  const f = viewFixture(); const {engine} = await f.boot(); f.prepared();
   assert.equal(f.page.prepared, true); assert.equal(f.page.firstFrameShown, false);
   assert.deepEqual(f.effects.find(e => e[0] === 'size'), ['size', 1920, 1080]);
-  video.emit('stateChange', 'playing'); assert.equal(f.page.playing, true);
+  engine.emit('state', 'playing'); assert.equal(f.page.playing, true);
   assert.equal(f.effects.filter(e => e[0] === 'firstFrame').length, 0);
-  video.emit('startRenderFrame'); assert.equal(f.page.firstFrameShown, true);
+  engine.emit('frame'); assert.equal(f.page.firstFrameShown, true);
   assert.equal(f.effects.filter(e => e[0] === 'firstFrame').length, 1);
   assert.equal(f.effects.filter(e => e[0] === 'deferred').length, 1);
   f.session.pause(); assert.equal(f.page.playing, false); assert.equal(f.page.showControls, true);
@@ -70,41 +70,43 @@ test('player UI adapter: native first frame, size, play and pause update cover, 
 });
 
 test('player UI adapter: timeline reaches subtitles, danmaku, prefetch and continue-watching', async () => {
-  const f = viewFixture(); const {video} = await f.boot(); f.playing();
-  video.emit('durationUpdate', 100000); video.currentTime = 5050; video.emit('timeUpdate', 5050);
+  const f = viewFixture(); const {engine} = await f.boot(); f.playing();
+  engine.emit('duration', 100000); engine.currentTime = 5050; engine.emit('time', 5050);
   assert.equal(f.page.duration, 100); assert.equal(f.page.curTime, 5.05); assert.equal(f.page.playheadSec, 5.05);
   for (const kind of ['subtitle', 'dm.spawn', 'prefetch', 'continue', 'interaction.time']) assert.ok(f.effects.some(e => e[0] === kind && e[1] === 5.05));
-  video.emit('timeUpdate', 5200); assert.equal(f.page.curTime, 5.05, 'reactive time remains second-granular');
+  engine.currentTime = 5200; engine.emit('time', 5200); assert.equal(f.page.curTime, 5.05, 'reactive time remains second-granular');
   assert.equal(f.page.playheadSec, 5.2); f.session.deactivate();
 });
 
 test('player UI adapter: replay retains loaded danmaku while the core performs the seek', async () => {
-  const f = viewFixture(); const {video, audio} = await f.boot(); f.playing(); f.page.endReplay();
+  const f = viewFixture(); const {engine} = await f.boot(); f.playing(); f.page.endReplay();
   f.advance(60); await tick();
   assert.deepEqual(f.page.dmEngine.list, ['loaded']); assert.equal(f.page.endScreenOpen, false);
-  assert.equal(f.calls(video, 'seek').at(-1)[1], 0); assert.equal(f.calls(audio, 'seek').at(-1)[1], 0);
+  assert.equal(f.calls(engine, 'seek').at(-1)[1], 0); assert.equal(f.opens.length, 1);
   assert.ok(f.effects.some(e => e[0] === 'sponsor.replay')); assert.ok(f.effects.some(e => e[0] === 'dm.reset' && e[1] === 0));
   assert.ok(f.effects.some(e => e[0] === 'interaction.replay'), 'replay restores dismissed UP interaction cards');
   f.session.deactivate();
 });
 
 test('player UI adapter: seek dispatch clears unrelated preview and completion clears the target overlay', async () => {
-  const f = viewFixture(); const {video, audio} = await f.boot(); f.playing(); f.session.seekTo(12);
+  const f = viewFixture(); const {engine} = await f.boot(); f.playing(); f.session.seekTo(12);
   f.advance(60); await tick(); assert.equal(f.page.seekPreviewFrame, null); assert.equal(f.page.curTime, 12);
   assert.ok(f.effects.some(e => e[0] === 'prefetch' && e[1] === 12), 'paused/active seek should request the target danmaku segment');
   assert.ok(f.effects.some(e => e[0] === 'interaction.time' && e[1] === 12), 'seek updates command-card visibility while paused');
-  video.currentTime = audio.currentTime = 12000; video.emit('seekDone', 12000); audio.emit('seekDone', 12000);
+  engine.currentTime = 12000; engine.emit('seek', 12000);
   assert.ok(f.effects.some(e => e[0] === 'seek.target' && e[1] === -1)); f.session.deactivate();
 });
 
 test('player UI adapter: seek previews use the actual quality and CDN source with playback headers', async () => {
-  const f = viewFixture(); const {video} = await f.boot(); const requests = [];
+  const f = viewFixture(); const {engine} = await f.boot(); const requests = [];
   f.page.seekPreviewCtl = {request: (...args) => requests.push(args)};
   f.page.requestSeekPreview(3); assert.equal(requests.at(-1)[4], 'video-primary');
-  video.emit('error', {message: 'retry'}); await tick(); await tick();
+  engine.emit('error', 'retry'); await tick(); await tick();
   f.page.requestSeekPreview(3); assert.equal(requests.at(-1)[4], 'video-backup');
   const quality = f.session.changeQuality(64);
   f.apiCalls[0].resolve({urls: ['quality'], audioUrls: [], qualities: [], quality: 64}); await quality;
   f.page.requestSeekPreview(3); assert.equal(requests.at(-1)[4], 'quality');
-  assert.equal(requests.at(-1)[5].Referer, 'https://www.bilibili.com/'); f.session.deactivate();
+  assert.equal(requests.at(-1)[5].Referer, 'https://www.bilibili.com/');
+  assert.ok(requests.every(request => request[8] === false), 'production previews never create a second native decoder');
+  f.session.deactivate();
 });

@@ -1,0 +1,6 @@
+{
+  "name": "libbilimpv.so",
+  "version": "1.0.0",
+  "description": "Thin asynchronous OHOS libmpv bridge",
+  "types": "./index.d.ts"
+}

@@ -20,7 +20,6 @@ export interface PlayerPlaybackPolicy {
   background: boolean;
   allowBackground: boolean;
   pipKeepsAlive: boolean;
-  pipVisible: boolean;
   muted: boolean;
 }
 
@@ -80,6 +79,5 @@ export interface PlayerPlaybackObserver {
   policy: () => PlayerPlaybackPolicy;
   state: (state: PlayerPlaybackState) => void;
   event: (event: PlayerPlaybackEvent) => void;
-  /** 返回 true 表示业务已发起跳段，本次原生进度不再执行音轨漂移校准。 */
-  progress: (seconds: number, background: boolean) => boolean;
+  progress: (seconds: number, background: boolean) => void;
 }

@@ -1,4 +1,5 @@
 import { PlayerPlaybackSession } from './PlayerPlaybackSession';
+import { PlayerMpvResources } from './PlayerMpvResources';
 import { PlayerPlaybackConfig } from './PlayerPlaybackConfig';
 import { PlayerQualityPreference } from '../../common/PlayerQualityPreference';
 import { PlayerPlaybackSource, PlayerPlaybackState, PlayerPlaybackEvent, PlayerPlaybackPolicy } from './PlayerPlaybackState';
@@ -9,7 +10,7 @@ import { SystemMediaVolume } from './SystemMediaVolume';
 import { PlayerChapterBar } from './PlayerChapterBar';
 import { chapterTitleAt } from './PlayerChapterSupport';
 /**
- * 播放器组件：AVPlayer + XComponent 渲染 + Canvas 弹幕引擎 + 手势控制
+ * 播放器组件：libmpv + XComponent 渲染 + Canvas 弹幕引擎 + 手势控制
  */
 import { PlayerPictureInPicture, PlayerVideoSize } from './PlayerPictureInPicture';
 import { PlayerAuxiliaryController } from './PlayerAuxiliaryController';
@@ -108,7 +109,7 @@ export struct PlayerView {
   @Prop @Watch('onCompactModeChanged') compactMode: boolean = false;
   onBack: () => void = () => {};
   onHome: () => void = () => {};
-  /** AVPlayer 回报的真实画幅：全屏时判断竖屏视频保持竖屏。 */
+  /** 播放内核回报的真实画幅：全屏时判断竖屏视频保持竖屏。 */
   private realVideoWidth: number = 0;
   private realVideoHeight: number = 0;
   /** 当前全屏是否为竖屏全屏（竖屏视频）：决定顶栏让出状态栏高度。 */
@@ -123,7 +124,7 @@ export struct PlayerView {
   onDanmakuChange: (enabled: boolean) => void = () => {};
   /** 全视频空降标签（如「商业推广」）：交给页面显示在标题前，避免长期盖住画面。 */
   onSponsorFullLabel: (label: string, color: string) => void = () => {};
-  /** AVPlayer 解码后的真实视频尺寸，详情页据此重算高度，避免竖屏长视频被裁切。 */
+  /** 播放内核解码后的真实视频尺寸，详情页据此重算高度，避免竖屏长视频被裁切。 */
   onVideoSizeChange: (width: number, height: number) => void = () => {};
   /** 横屏底栏弹幕输入：草稿与发送由业务页（VideoDetail）持有 */
   @Prop dmDraft: string = '';
@@ -361,7 +362,6 @@ export struct PlayerView {
     seekTo: (seconds: number, precise: boolean): void => this.seekTo(seconds, precise),
     muteImmediately: (): void => this.playback.mute(),
     restoreUserVolume: (): void => this.playback.restoreVolume(),
-    isFirstFrameMuteArmed: (): boolean => this.playback.isFrameMuted,
     toast: (message: string): void => this.toast(message),
     getBvid: (): string => this.bvid,
     getCid: (): number => this.cid,
@@ -372,11 +372,11 @@ export struct PlayerView {
   private dmFilterRuleSource: BasicDataSource<DmFilterRule> = new BasicDataSource<DmFilterRule>();
   private runtimeQualityOptions: Array<VideoQualityOption> = [];
   private gestureCtl: PlayerGestureController | null = null;
-  // UI 异步回调的生命周期；原生双轨生命周期由 PlayerPlaybackSession 管理。
+  // UI 异步回调的生命周期；播放内核生命周期由 PlayerPlaybackSession 管理。
   private destroyed: boolean = false;
   // 高精度播放头（秒）：弹幕引擎与恢复定位使用；@State curTime 只做秒级 UI 刷新。
   private playheadSec: number = 0;
-  // seek 目标锁：seek 发起后到 seekDone 前，忽略 AVPlayer 上报的旧位置回写，
+  // seek 目标锁：seek 发起后到 seekDone 前，忽略 播放内核上报的旧位置回写，
   // 避免进度条从目标值弹回（快速拖动/双击快进时最明显）。
   private seekLocked: boolean = false;
   // 拖动进度条期间滑块以拖动值为准，避免 timeUpdate 回写 curTime 把滑块拽回。
@@ -397,7 +397,7 @@ export struct PlayerView {
   private playbackSourceGeneration: number = 0;
   private playback: PlayerPlaybackSession = new PlayerPlaybackSession({
     policy: (): PlayerPlaybackPolicy => ({ background: this.appInBackground, allowBackground: this.backgroundPlaybackEnabled,
-      pipKeepsAlive: this.pictureInPicture.keepsPlaybackAlive(), pipVisible: this.pictureInPicture.isVisibleOrStarting(),
+      pipKeepsAlive: this.pictureInPicture.keepsPlaybackAlive(),
       muted: this.sponsorCtl.isMuted() }),
     state: (state: PlayerPlaybackState): void => {
       this.playing = state.playing;
@@ -418,7 +418,7 @@ export struct PlayerView {
       this.holdSpeedActive = state.holdSpeedActive;
     },
     event: (event: PlayerPlaybackEvent): void => this.onPlaybackEvent(event),
-    progress: (seconds: number, background: boolean): boolean => this.onPlaybackProgress(seconds, background),
+    progress: (seconds: number, background: boolean): void => this.onPlaybackProgress(seconds, background),
   });
 
   private playbackSource(): PlayerPlaybackSource {
@@ -500,7 +500,7 @@ export struct PlayerView {
     }
   }
 
-  private onPlaybackProgress(seconds: number, background: boolean): boolean {
+  private onPlaybackProgress(seconds: number, background: boolean): void {
     this.playheadSec = seconds;
     this.interactionCtl.update(seconds);
     if (!background) {
@@ -525,7 +525,7 @@ export struct PlayerView {
       this.spawnDanmaku(seconds);
       this.auxiliary.prefetch(seconds);
     }
-    return this.sponsorCtl.maybeSkipSponsor(seconds);
+    this.sponsorCtl.maybeSkipSponsor(seconds);
   }
 
   private auxiliary: PlayerAuxiliaryController = new PlayerAuxiliaryController({
@@ -602,6 +602,8 @@ export struct PlayerView {
   }
 
   aboutToAppear(): void {
+    const playbackContext: common.Context | undefined = this.getUIContext().getHostContext();
+    if (playbackContext !== undefined) PlayerMpvResources.configure(playbackContext);
     PersistentStorage.persistProp<number>('subtitleScale', 1.0);
     PersistentStorage.persistProp<number>('pgcSkipIntroSeconds', 0);
     const persistedScale: number = AppStorage.get<number>('subtitleScale') ?? 1.0;
@@ -1333,7 +1335,7 @@ export struct PlayerView {
     return percent.toFixed(2) + '%';
   }
 
-  /** 连续拖动只解码最新位置，避免网络取帧任务排队拖慢播放器。 */
+  /** 仅用服务端分镜预览；缺失时保留封面和时间，不启动第二个解码器与播放/seek 争资源。 */
   private requestSeekPreview(seconds: number): void {
     if (seconds < 0 || this.destroyed) return;
     this.seekPreviewSeconds = seconds;
@@ -1347,7 +1349,7 @@ export struct PlayerView {
       },
       (frame: image.PixelMap | null): void => {
         this.seekPreviewFrame = frame;
-      });
+      }, false);
   }
 
   private closeSeekPreview(): void {
@@ -1410,7 +1412,7 @@ export struct PlayerView {
 
   togglePlay(): void { this.playback.toggle(); }
 
-  /** UI 的结束画面与空降状态由页面重置，双轨重播走同一 seek 状态机。 */
+  /** UI 的结束画面与空降状态由页面重置，重播走同一 seek 状态机。 */
   endReplay(): void {
     this.clearSeekPreviewInteraction();
     this.endScreenOpen = false;
@@ -1437,7 +1439,7 @@ export struct PlayerView {
       this.dmEngine.fullscreen = true;
       this.restartDmLoopForViewport();
       AppStorage.setOrCreate<boolean>('videoPlayerFullscreen', true);
-      // 先让详情页播放器占满窗口，再旋转；整个过程中不会重新创建 AVPlayer。
+      // 先让详情页播放器占满窗口，再旋转；整个过程中不会重新创建播放内核。
       this.onFullscreenChange(true);
       // 竖屏视频全屏保持竖屏：转横屏只会让画面瘦成中间一条，体验更差。
       this.fullscreenPortrait = this.realVideoHeight > this.realVideoWidth && this.realVideoWidth > 0;
@@ -1947,6 +1949,10 @@ export struct PlayerView {
           .id('qa_player_surface')
           .width('100%')
           .height('100%')
+          .onSizeChange((_previous: SizeOptions, current: SizeOptions) => {
+            this.playback.resize(this.getUIContext().vp2px(Number(current.width ?? 0)),
+              this.getUIContext().vp2px(Number(current.height ?? 0)));
+          })
           .onLoad(() => {
             this.onSurfaceReady();
           })

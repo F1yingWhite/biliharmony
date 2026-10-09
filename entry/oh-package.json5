@@ -5,6 +5,8 @@
   "main": "",
   "author": "",
   "license": "",
-  "dependencies": {}
+  "dependencies": {
+    "libbilimpv.so": "file:./src/main/cpp/types/libbilimpv"
+  }
 }
 

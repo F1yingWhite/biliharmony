@@ -130,17 +130,16 @@ function backgroundHarness(enabled,playing,recordActions=true) {
   const view=Object.assign(new Harness(),{appInBackground:true,backgroundPlaybackEnabled:enabled,playing,
     dmClock:{pause(){},release(){}},resetDanmakuAt(){},spawnDanmaku(){},
     pictureInPicture:{phase:'closed',keepsPlaybackAlive(){return this.phase!=='closed';},
-      isVisibleOrStarting(){return this.phase==='active'||this.phase==='starting';},
       release(){actions.push('stopPiP');this.phase='closed';}},
   });
   const f=playbackFixture();f.session.activate(f.source());
   const player=()=>({state:playing?'playing':'paused',currentTime:0,setVolume(){},
     pause(){this.state='paused';return Promise.resolve();},play(){this.state='playing';return Promise.resolve();}});
-  f.session.pair.video=player();f.session.pair.audio=player();
-  f.session.pair.prepared=f.session.pair.audioPrepared=true;
+  f.session.core.engine=player();
+  f.session.core.prepared=true;
   f.session.state.prepared=true;f.session.state.playing=playing;f.session.shouldPlayAfterPrepare=playing;
   f.session.observer.policy=()=>({background:view.appInBackground,allowBackground:view.backgroundPlaybackEnabled,
-    pipKeepsAlive:view.pictureInPicture.keepsPlaybackAlive(),pipVisible:view.pictureInPicture.isVisibleOrStarting(),muted:false});
+    pipKeepsAlive:view.pictureInPicture.keepsPlaybackAlive(),muted:false});
   f.session.observer.state=state=>{view.playing=state.playing;view.seekLocked=state.seekLocked;};
   f.session.observer.event=event=>{
     if(event.kind==='clock.pause')view.dmClock.pause();
@@ -152,10 +151,11 @@ function backgroundHarness(enabled,playing,recordActions=true) {
   view.restoreForegroundDanmaku=function(){if(recordActions)actions.push('foreground');restore.call(this);};
   return {view,actions,session:f.session};
 }
-test('disabled background playback pauses active playback and leaves already-paused playback alone',()=>{
+test('disabled background playback cancels pending native play even when the visible state is already paused',()=>{
   for (const playing of [true,false]) {
     const {view,actions}=backgroundHarness(false,playing);view.onAppBackgroundChanged();
-    assert.deepEqual(actions,playing?['pause']:[]);
+    assert.deepEqual(actions,['pause']);
+    assert.equal(view.playback.shouldPlayAfterPrepare, false);
   }
 });
 test('enabled background playback enters audio mode and restores video on foreground',()=>{
@@ -638,7 +638,7 @@ function fakePipController() {
 }
 test('PiP handles playback controls, restoration and background close without losing state', async () => {
   const controller=fakePipController();const {view,actions}=pipHarness(async()=>controller);
-  await view.pictureInPicture.start();assert.equal(view.pictureInPicture.isVisibleOrStarting(),true);
+  await view.pictureInPicture.start();assert.equal(view.pictureInPicture.keepsPlaybackAlive(),true);
   controller.callbacks.controlEvent({controlType:0,status:0});assert.equal(view.playing,false);
   controller.callbacks.controlEvent({controlType:0,status:0});assert.equal(actions.length,1);
   controller.callbacks.controlEvent({controlType:0,status:1});assert.equal(view.playing,true);
@@ -680,7 +680,7 @@ test('PiP failed start re-applies background policy and allows retry', async () 
   await view.pictureInPicture.start();assert.equal(view.pictureInPicture.keepsPlaybackAlive(),false);
   assert.deepEqual(actions,['background']);assert.equal(events.length,1);
   controller.startPiP=async()=>{controller.callbacks.stateChange(2);};
-  await view.pictureInPicture.start();assert.equal(view.pictureInPicture.isVisibleOrStarting(),true);
+  await view.pictureInPicture.start();assert.equal(view.pictureInPicture.keepsPlaybackAlive(),true);
   view.pictureInPicture.release();
 });
 

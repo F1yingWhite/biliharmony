@@ -37,10 +37,6 @@ export class PlayerPictureInPicture {
     return this.active || this.starting || this.restoring;
   }
 
-  isVisibleOrStarting(): boolean {
-    return this.active || this.starting;
-  }
-
   async start(): Promise<void> {
     if (this.starting || this.active || this.host.isDestroyed()) return;
     if (!this.host.isReady()) {
