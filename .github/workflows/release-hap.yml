@@ -1,7 +1,7 @@
 name: Build release HAP
 
 # 每次 push 到 main（或手动触发）：GitHub 官方 ubuntu 机器构建未签名 release HAP，
-# 全量 QA 通过后发布到滚动 Release（tag=latest，每次刷新覆盖）。
+# 全量 QA 通过后保留 CI artifact；只有新 versionName 才发布不可变版本 Release。
 on:
   push:
     branches: [main]
@@ -12,7 +12,8 @@ permissions:
 
 concurrency:
   group: release-hap-${{ github.ref }}
-  cancel-in-progress: true
+  # 发布/上传期间不中断前一个 main run，避免产生半成品版本。
+  cancel-in-progress: false
 
 jobs:
   build-release-hap:
@@ -22,7 +23,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
         with:
-          # 需要完整历史与 latest 标签：生成「上次构建 → 本次」的更新日志。
+          # 上一个已发布编号版本是本版更新日志的历史边界。
           fetch-depth: 0
           persist-credentials: false
 
@@ -32,14 +33,14 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Node 20
+      - name: Set up Node 24
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       # hvigor 的纹理压缩工具链在 Linux 上需要 mesa GL。
       - name: Install Linux build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev clang g++ mpv ffmpeg
 
       # 下载 HarmonyOS command-line-tools + API 26 SDK（与 compileSdkVersion 26.0.0 对应），
       # 设置 HOS_SDK_HOME 并把 hvigorw/ohpm 加入 PATH。
@@ -94,7 +95,8 @@ jobs:
 
       - name: Run service regression tests
         run: |
-          node --test --test-timeout=10000 tool/qa/*.test.cjs
+          # Bash 展开仓库的所有测试文件；无须依赖 Node 对 glob 的版本差异。
+          node --test --test-timeout=20000 tool/qa/*.test.cjs
 
       - name: Test UI selectors and navigation assertions without a device
         run: |
@@ -105,6 +107,7 @@ jobs:
         run: hvigorw clean assembleHap --mode module -p product=default -p buildMode=release
 
       - name: Verify release artifacts
+        id: artifacts
         run: |
           set -euo pipefail
           generated_profile="entry/build/default/generated/profile/default/BuildProfile.ets"
@@ -112,51 +115,24 @@ jobs:
           grep -Fq "DEBUG = false" "$generated_profile"
           hap="entry/build/default/outputs/default/entry-default-unsigned.hap"
           test -f "$hap"
-          ( cd entry/build/default/outputs/default && sha256sum -- *.hap > hap.sha256 )
-          cat "$OUT_DIR/hap.sha256"
-        env:
-          OUT_DIR: entry/build/default/outputs/default
+          python3 tool/qa/player-mpv-package-check.py "$hap"
+          node tool/publish-release.cjs --prepare-artifact
+          ( cd entry/build/default/outputs/default/publish && sha256sum --check hap.sha256 )
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: biliharmony-release-${{ github.run_number }}-${{ github.sha }}
+          name: biliharmony-${{ steps.artifacts.outputs.tag }}-${{ github.run_number }}-${{ github.sha }}
           path: |
-            entry/build/default/outputs/default/*.hap
-            entry/build/default/outputs/default/hap.sha256
+            entry/build/default/outputs/default/publish/*.hap
+            entry/build/default/outputs/default/publish/hap.sha256
           if-no-files-found: error
           retention-days: 30
 
-      # 滚动 Release：tag=latest，每次推送刷新（删除重建）；未签名 HAP 需自行签名后安装。
-      - name: Generate standardized release notes
-        run: |
-          set -euo pipefail
-          # PREV：latest 标签指向的上一次构建提交；首次发布时为空（脚本只取最近 20 条）。
-          prev="$(git rev-parse -q --verify refs/tags/latest 2>/dev/null || true)"
-          bash tool/release-notes.sh "$prev" "$GITHUB_SHA" > release_notes.md
-          echo "---- release notes ----"
-          cat release_notes.md
-
-      - name: Publish to rolling release
+      # 新版本只创建一次；同版本后续提交仍可在本次 Actions artifact 下载。
+      - name: Publish immutable version release
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          OUT=entry/build/default/outputs/default
-          TITLE="最新构建（未签名 HAP）"
-          # latest 标签随本次构建移动（给下一次发布划更新范围的边界）。
-          if git rev-parse -q --verify refs/tags/latest >/dev/null 2>&1; then
-            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/latest" \
-              -f sha="$GITHUB_SHA" -F force=true >/dev/null
-          else
-            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f ref="refs/tags/latest" -f sha="$GITHUB_SHA" >/dev/null
-          fi
-          if gh release view latest >/dev/null 2>&1; then
-            gh release edit latest --title "$TITLE" --prerelease --notes-file release_notes.md
-            gh release upload latest --clobber "$OUT/entry-default-unsigned.hap" "$OUT/hap.sha256"
-          else
-            gh release create latest --target "$GITHUB_SHA" \
-              --title "$TITLE" --prerelease --notes-file release_notes.md \
-              "$OUT/entry-default-unsigned.hap" "$OUT/hap.sha256"
-          fi
+          node tool/publish-release.cjs

@@ -4,11 +4,11 @@
 
 **HarmonyOS NEXT 原生第三方哔哩哔哩客户端**
 
-以 [PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus) 的功能与协议实现为参考，使用 ArkTS / ArkUI 构建鸿蒙原生界面，接入系统 AVPlayer、Canvas 弹幕、画中画和后台音频能力。
+以 [PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus) 的功能与协议实现为参考，使用 ArkTS / ArkUI 构建鸿蒙原生界面，接入 libmpv 视频内核、Canvas 弹幕、画中画和后台音频能力。
 
-`HarmonyOS API 26` · `ArkTS + ArkUI` · `应用运行依赖为系统 Kit`
+`HarmonyOS API 26` · `ArkTS + ArkUI + C++` · `libmpv / OHCodec`
 
-**[下载最新构建](https://github.com/F1yingWhite/biliharmony/releases/tag/latest)** · [更新日志](CHANGELOG.md) · [测试说明](tool/qa/README.md)
+**[下载最新版本](https://github.com/F1yingWhite/biliharmony/releases/latest)** · [历史版本与安装包](https://github.com/F1yingWhite/biliharmony/releases) · [更新日志](CHANGELOG.md) · [测试说明](tool/qa/README.md)
 
 <img src="docs/screenshots/home.jpg" width="260" alt="首页信息流"/>
 <img src="docs/screenshots/detail.jpg" width="260" alt="视频详情与弹幕播放器"/>
@@ -48,7 +48,7 @@ YouTube 浏览为实验功能，提供搜索、相关推荐、本地历史与稍
 
 工程的编译、兼容和目标 SDK 均为 **HarmonyOS API 26**，目标设备为手机和平板。请使用兼容此 SDK 的 HarmonyOS NEXT 设备或模拟器。
 
-1. 从 [最新构建](https://github.com/F1yingWhite/biliharmony/releases/tag/latest) 获取 HAP，并查看该次发布的签名说明。
+1. 从 [最新版本](https://github.com/F1yingWhite/biliharmony/releases/latest) 获取 HAP，并查看该版更新日志与签名说明。[历史版本](https://github.com/F1yingWhite/biliharmony/releases) 保留各版安装包和校验和。
 2. 当前仓库的 GitHub Actions 发布 **未签名 release HAP**。真机安装需使用针对目标设备配置签名的 HAP，可在 DevEco Studio 中配置自动签名后构建、运行。
 3. 使用 `hdc list targets` 确认设备 ID，再安装对应的已签名产物。多设备连接时用 `-t` 指定目标。
 
@@ -69,7 +69,7 @@ $hdc = "$devEco\sdk\default\openharmony\toolchains\hdc.exe"
 
 安装 DevEco Studio 和 HarmonyOS API 26 SDK，打开仓库根目录，完成工程同步与依赖安装。连接设备，在工程签名设置中配置自动签名，然后执行 Run。
 
-应用模块位于 `entry/`，应用包名为 `com.piliplus.harmony`。应用侧没有声明第三方 OHPM 运行依赖；构建仍需 DevEco / hvigor 工具链。
+应用模块位于 `entry/`，应用包名为 `com.piliplus.harmony`。视频内核通过本地 NAPI 模块动态链接固定的 ARM64 libmpv；构建需 DevEco / hvigor 与 SDK 内的 C++ 工具链。来源、许可证和包检查见 [播放内核说明](docs/player-core-reuse.md)。
 
 ### Windows 命令行
 
@@ -101,7 +101,11 @@ bash tool/build.sh clean release
 
 ### GitHub Actions 发布
 
-[release-hap.yml](.github/workflows/release-hap.yml) 在推送到 `main` 或手动触发时执行服务回归、构建 release HAP、校验发布模式并生成 SHA-256 文件，随后更新 `latest` 滚动预发布。产物为未签名 HAP，更新说明由提交记录生成。
+[release-hap.yml](.github/workflows/release-hap.yml) 在推送到 `main` 或手动触发时执行回归、构建 release HAP、检查实际包内容并生成 SHA-256 文件。每次成功构建都有 Actions artifact；首次发布某个应用版本时创建对应的 `v<versionName>` 标签与正式 Release，例如 `v1.4.0`，安装包名也包含版本号。
+
+版本号以 [AppScope/app.json5](AppScope/app.json5) 为准。准备新版本时同时递增 `versionName`、`versionCode`，并在 [CHANGELOG.md](CHANGELOG.md) 记录变化。Release 包含该版日志、提交范围和构建提交。已发布的标签、安装包和说明不会被后续推送覆盖；同版本的后续开发提交只生成 Actions artifact，发布前需升版本号。
+
+在应用「我的」中可以查看已安装版本、打开「历史版本」与「更新日志」。GitHub 的 [最新版本链接](https://github.com/F1yingWhite/biliharmony/releases/latest) 指向最新编号发布；原来的 `latest` 标签只保留旧链接兼容，现存旧包归档为 `v1.3.2`。此前被滚动发布覆盖的更早安装包无法恢复，早期功能记录仍保留在 CHANGELOG。
 
 本机签名证书、Profile 和密码应保留在本机，不能随源码提交。
 
@@ -150,7 +154,7 @@ entry/src/main/ets/
 ├── pages/                  # 路由页面、响应式状态发布、布局与导航
 ├── views/                  # 首页、动态、我的等主视图
 ├── components/
-│   ├── player/             # 双轨播放会话、资源所有者、弹幕与播放器视图
+│   ├── player/             # 单内核播放会话、生命周期、弹幕与播放器视图
 │   ├── video/              # 视频详情初始化、互动、选集播放与推荐
 │   ├── bangumi/            # 番剧选集目录、选集布局与追番控制器
 │   ├── live/               # 直播连接会话、有界弹幕缓存与播放器
@@ -180,7 +184,7 @@ docs/                       # 设计、接口、审查和验证记录
 
 HTTP 文本请求共用凭证检查、传输、Cookie 合并和解析流程；`HttpResponse` 管理响应与解析缓存。`common/MessageCursor.ets` 使用十进制字符串保存和比较消息序号，避免 int64 精度丢失影响分页、去重或已读确认。账号相关请求同时验证目标、请求代际与账号会话，旧账号的结果不能回写新页面。
 
-`PlayerPlaybackSession` 协调双轨播放，`PlayerTrackPair` 独占 AVPlayer 创建、原生回调和释放，`PlayerAudioSync` 管理音轨同步与起播静音。`PlayerView` 接收播放状态和事件；画中画、章节与弹幕请求、截图预览、下载导出各自管理异步资源。保存操作先固定源、画质与字幕轨，取消选择器不会提示保存成功。
+`PlayerPlaybackSession` 管理播放意图、画质与 CDN 重试，`PlayerEngineController` 持有一个内核并隔离旧事件，`PlayerMpvEngine` 将原生状态交给业务层。libmpv 在同一会话中管理 DASH 音视频解码、缓冲、时间戳同步和精确定位；`entry/src/main/cpp/` 提供异步 NAPI 桥接。`PlayerView` 接收播放状态和事件；画中画、章节与弹幕请求、截图预览、下载导出各自管理异步资源。保存操作先固定源、画质与字幕轨，取消选择器不会提示保存成功。
 
 全面重构的范围与验收记录见 [2026-10-02 重构计划](docs/refactor-plan-2026-10-02.md)。Node 回归与静态依赖检查约束模块边界，原生播放效果仍需完整构建和设备验证。
 

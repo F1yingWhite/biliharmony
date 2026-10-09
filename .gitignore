@@ -32,6 +32,7 @@
 # 本地测试临时目录
 /tool/*
 !/tool/release-notes.sh
+!/tool/publish-release.cjs
 !/tool/qa/
 /tool/qa/*.sh.orig
 /tool/qa/.tmp/

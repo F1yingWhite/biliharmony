@@ -65,6 +65,15 @@ export struct MineView {
     }
   }
 
+  private async openProjectLink(url: string): Promise<void> {
+    try {
+      const context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      await context.openLink(url);
+    } catch (e) {
+      this.toast('网页打开失败，请稍后重试');
+    }
+  }
+
   async init(): Promise<void> {
     this.loading = true;
     try {
@@ -349,7 +358,7 @@ export struct MineView {
         })
       }.width('100%').borderRadius(16).backgroundColor(this.groupBg()).clip(true)
 
-      // ===== 组3：关于 / 清空缓存 / 退出登录 =====
+      // ===== 组3：关于与版本 / 清空缓存 / 退出登录 =====
       Column() {
         this.NavRow('关于', { value: this.appVersion }, () => {
           this.getUIContext().getPromptAction().showDialog({
@@ -357,6 +366,18 @@ export struct MineView {
             message: '基于开源项目 PiliPlus 移植的鸿蒙原生哔哩哔哩第三方客户端（API 26）。\n支持沉浸式全屏、封面取色动态主题、环境光自适应。\n仅供学习交流使用。',
             buttons: [{ text: '知道了', color: this.accent }],
           });
+        })
+
+        this.GroupDivider()
+
+        this.NavRow('历史版本', { value: '每版日志 · 安装包' }, () => {
+          this.openProjectLink('https://github.com/F1yingWhite/biliharmony/releases');
+        })
+
+        this.GroupDivider()
+
+        this.NavRow('更新日志', { value: '按版本查看' }, () => {
+          this.openProjectLink('https://github.com/F1yingWhite/biliharmony/blob/main/CHANGELOG.md');
         })
 
         this.GroupDivider()

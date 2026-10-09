@@ -72,6 +72,10 @@ HarmonyOS 库加载、XComponent、硬解及真机音画同步按下文播放器
 ARM64 原生桥接的动态依赖，以及完整 CA、版权与准确版本来源原文确实随包携带；可传入其他 HAP 路径。
 包检查不读取签名凭据，不能代替运行时内核加载、硬解选择或设备验收。
 
+`release-publishing.test.cjs` 在临时 Git 仓库中执行真实发布脚本，仅替换 GitHub 远端边界。
+它验证版本化 HAP 与校验和、每版日志范围、重复运行与同版本新提交不覆盖历史、标签冲突、
+接口失败和版本降级拒绝。测试不会创建真实 GitHub 标签或 Release。
+
 `player-interaction-ui.test.cjs` 和 `reply-vote-ui.test.cjs` 还会保留首次 Builder 的入参/闭包，
 在状态变化后重放同一个生产 Builder，验证投票详情、比例和后续互动没有停在旧快照。
 这是针对原生局部更新中参数捕获问题的回归；普通的整次 `build()` 重跑会漏掉这个问题，
