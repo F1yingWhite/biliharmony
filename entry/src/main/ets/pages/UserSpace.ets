@@ -1,10 +1,11 @@
 import { MotionTokens } from '../common/MotionTokens';
 /**
- * 用户空间页（P3）：banner 氛围头部 + 资料卡 + 投稿 Tab（排序 chips + 双列流分页）
+ * 用户空间页：装扮头图 + 流式资料区 + 投稿 Tab（排序 chips + 视频流分页）
  * 入口：搜索用户卡片 / 视频详情 UP 主条
  */
 import { AppTheme } from '../common/AppTheme';
 import { Immersive } from '../common/Immersive';
+import { UserSpaceChrome } from '../common/UserSpaceChrome';
 import { AppNavStack, ImageViewerParam, LiveRoomParam, NAV_IMAGE_VIEWER, NAV_LIVE_ROOM, NAV_LOGIN,
   NAV_RELATION_LIST, NAV_SEARCH, RelationListParam, UserSpaceParam } from '../common/AppRouter';
 import { VideoItem, UserSpaceHeaderItem, UserSpaceInfo, UserStat, FollowTagItem } from '../model/Models';
@@ -61,10 +62,14 @@ export struct UserSpacePage {
   @State activeHeaderVideoSource: string = '';
   @State viewportWidth: number = 360;
   @State viewportHeight: number = 780;
+  @State statusBarSurfaceVisible: boolean = false;
+  @StorageProp(Immersive.STATUS_BAR_HEIGHT_KEY) @Watch('syncStatusBarSurface') statusBarInset: number = 0;
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
   private tabsController: TabsController = new TabsController();
+  private outerScroller: Scroller = new Scroller();
+  private outerScrollOffset: number = 0;
   private feed: UserSpaceFeedController = new UserSpaceFeedController((state: UserSpaceFeedState) => {
     this.feedState = state;
   });
@@ -78,6 +83,9 @@ export struct UserSpacePage {
 
   aboutToAppear(): void {
     this.destroyed = false;
+    this.outerScrollOffset = 0;
+    this.statusBarSurfaceVisible = false;
+    UserSpaceChrome.setCovered(this.param, false);
     this.lifecycleGeneration++;
     this.followLoading = false;
     this.feed.activate(this.param.mid);
@@ -352,9 +360,21 @@ export struct UserSpacePage {
   private adaptiveHeaderHeight(): number {
     const statusHeight: number = Immersive.statusBarHeight();
     const width: number = Math.max(1, this.viewportWidth);
-    const minHeight: number = statusHeight + 160;
-    const maxHeight: number = Math.max(minHeight, Math.min(360, this.viewportHeight * 0.42));
-    return Math.max(minHeight, Math.min(width / 1.55, maxHeight));
+    const minHeight: number = statusHeight + 140;
+    const maxHeight: number = Math.max(minHeight, Math.min(320, this.viewportHeight * 0.34));
+    return Math.max(minHeight, Math.min(width / 1.8, maxHeight));
+  }
+
+  private syncStatusBarSurface(): void {
+    if (this.destroyed) return;
+    const statusHeight: number = this.statusBarInset > 0 ? this.statusBarInset : Immersive.statusBarHeight();
+    const covered: boolean = !this.loading && this.errorText.length === 0 && statusHeight > 0 &&
+      this.outerScrollOffset >= this.adaptiveHeaderHeight() - statusHeight;
+    UserSpaceChrome.setCovered(this.param, covered);
+    if (covered !== this.statusBarSurfaceVisible) {
+      this.statusBarSurfaceVisible = covered;
+      Immersive.setBarIcons(UserSpaceChrome.statusIconLight(this.param, this.isDark), this.isDark);
+    }
   }
 
   private headerMediaWidth(item: UserSpaceHeaderItem): number {
@@ -495,7 +515,7 @@ export struct UserSpacePage {
           colors: [['#59000000', 0.0], ['#00000000', 0.38], ['#33000000', 1.0]],
         })
         .hitTestBehavior(HitTestMode.None)
-      Row() {
+      Row({ space: 8 }) {
         BackButton({ variant: BackButtonVariant.GLASS })
         Blank()
         Stack({ alignContent: Alignment.Center }) {
@@ -521,17 +541,35 @@ export struct UserSpacePage {
     .height(this.adaptiveHeaderHeight())
   }
 
+  /** 大面积资料区使用中性色，主题色只用于关注、等级和当前标签等强调元素。 */
+  private pageSurface(): string {
+    return this.isDark ? '#18191C' : '#FFFFFF';
+  }
+
+  private controlSurface(): string {
+    return this.isDark ? '#24272E' : '#F5F6F8';
+  }
+
+  private secondaryText(): string {
+    return this.isDark ? '#A5AAB5' : '#7D8490';
+  }
+
   @Builder
   StatCell(value: number, label: string, mode: string) {
-    Column({ space: 2 }) {
+    Column({ space: 4 }) {
       Text(formatCount(value))
-        .fontSize(15)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(this.isDark ? '#F2F2F4' : '#18191C')
-      Text(label).fontSize(11).fontColor('#9499A0')
+        .fontSize(17)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(AppTheme.onSurface())
+        .maxLines(1)
+      Text(label).fontSize(11).fontColor(this.secondaryText())
     }
-    .width(this.viewportWidth < 360 ? 60 : 70)
+    .layoutWeight(1)
+    .padding({ top: 10, bottom: 10 })
+    .constraintSize({ minHeight: 60 })
     .alignItems(HorizontalAlign.Center)
+    .justifyContent(FlexAlign.Center)
+    .accessibilityText(label + ' ' + formatCount(value))
     .onClick(() => {
       if (mode.length === 0) return;
       const param: RelationListParam = { mid: this.param.mid, mode: mode };
@@ -539,111 +577,141 @@ export struct UserSpacePage {
     })
   }
 
-  // ===== 头像压住头图下缘；统计、资料和关注操作放在纯色内容区 =====
+  // ===== 资料按内容自然排布；头像轻微跨过头图，长姓名与统计不会互相挤压 =====
   @Builder
   ProfileSummary() {
-    Stack({ alignContent: Alignment.TopStart }) {
-      Stack({ alignContent: Alignment.Bottom }) {
-        DecoratedAvatar({
-          face: this.info.face,
-          pendant: this.info.pendant,
-          avatarSize: 78,
-          containerSize: 108,
-          pendantScale: 1.38,
-          avatarBorderWidth: this.info.pendant.length > 0 ? 0 : 3,
-          avatarBorderColor: this.isDark ? '#18191C' : '#FFFFFF',
-        })
-        if (this.info.liveStatus === 1 && this.info.liveRoomId > 0) {
-          Text('直播中')
-            .width(52).height(20).textAlign(TextAlign.Center)
-            .fontSize(10).fontWeight(FontWeight.Medium).fontColor('#FFFFFF')
-            .backgroundColor(this.accent).borderRadius(10)
-        }
-      }
-      .width(108).height(108)
-      .position({ x: 14, y: -48 })
-      .onClick(() => this.openLiveRoom())
-      Row() {
-        this.StatCell(this.statFollower >= 0 ? this.statFollower : this.stat.follower, '粉丝', 'follower')
-        this.StatCell(this.statFollowing >= 0 ? this.statFollowing : this.stat.following, '关注', 'following')
-        this.StatCell(this.statLikeNum >= 0 ? this.statLikeNum : this.stat.likeNum, '获赞', '')
-      }
-      .position({ x: this.viewportWidth < 360 ? 120 : 132, y: 12 })
-      Column({ space: 8 }) {
-        Row({ space: 7 }) {
-          Text(this.info.name)
-            .fontSize(20)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(this.info.officialType >= 0 ? this.accent : (this.isDark ? '#F2F2F4' : '#18191C'))
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-          if (this.info.level > 0) {
-            Text('LV' + this.info.level)
-              .fontSize(10).fontWeight(FontWeight.Bold).fontColor('#FFFFFF')
-              .padding({ left: 5, right: 5, top: 2, bottom: 2 })
-              .backgroundColor(this.accent).borderRadius(3)
+    Column({ space: 12 }) {
+      Row({ space: 12 }) {
+        Stack({ alignContent: Alignment.Bottom }) {
+          DecoratedAvatar({
+            face: this.info.face,
+            pendant: this.info.pendant,
+            avatarSize: 64,
+            containerSize: 88,
+            pendantScale: 1.38,
+            avatarBorderWidth: this.info.pendant.length > 0 ? 0 : 3,
+            avatarBorderColor: this.pageSurface(),
+          })
+          if (this.info.liveStatus === 1 && this.info.liveRoomId > 0) {
+            Text('直播中')
+              .width(52).height(20).textAlign(TextAlign.Center)
+              .fontSize(10).fontWeight(FontWeight.Medium).fontColor('#FFFFFF')
+              .backgroundColor(this.accent).borderRadius(10)
           }
         }
-        if (this.info.officialDesc.length > 0) {
-          Text(this.info.officialDesc).fontSize(11).fontColor('#F0C541').maxLines(1)
-        }
-        Text(this.info.sign.length > 0 ? this.info.sign : '这个人很神秘，什么都没有写')
-          .fontSize(13)
-          .fontColor(this.isDark ? '#B8B8BE' : '#61666D')
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text('UID ' + String(this.info.mid))
-          .fontSize(10).fontColor('#9499A0')
-        if (this.info.liveStatus === 1 && this.info.liveRoomId > 0) {
-          Row({ space: 8 }) {
-            Image($r('app.media.ic_live')).width(16).height(16).fillColor('#FFFFFF')
-            Text(this.info.liveTitle.length > 0 ? this.info.liveTitle : '正在直播')
-              .fontSize(12).fontColor('#FFFFFF').maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-            Text('进入直播间 ›').fontSize(11).fontColor('#FFFFFF')
+        .width(88).height(88)
+        .margin({ top: -28 })
+        .onClick(() => this.openLiveRoom())
+        Column({ space: 5 }) {
+          Row({ space: 6 }) {
+            Text(this.info.name)
+              .fontSize(20)
+              .lineHeight(26)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(AppTheme.onSurface())
+              .layoutWeight(1)
+              .maxLines(2)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            if (this.info.level > 0) {
+              Text('LV' + this.info.level)
+                .fontSize(10).fontWeight(FontWeight.Bold).fontColor(this.accent)
+                .padding({ left: 5, right: 5, top: 3, bottom: 3 })
+                .backgroundColor(colorWithAlpha(this.accent, this.isDark ? '26' : '14'))
+                .borderRadius(5)
+                .margin({ top: 4 })
+            }
           }
-          .width('100%').height(36).padding({ left: 10, right: 10 })
-          .backgroundColor(this.accent).borderRadius(8)
-          .onClick(() => this.openLiveRoom())
-        }
-        if (UserStore.current === null || UserStore.current.mid !== this.param.mid) {
-          Text(this.followLoading ? '处理中…' : (this.following ? '已关注' : '+ 关注'))
-            .width('100%').height(36).textAlign(TextAlign.Center)
-            .fontSize(13).fontWeight(FontWeight.Medium)
-            .fontColor(this.following ? '#9499A0' : this.accent)
-            .border({ width: 1, color: this.following ? '#55565B' : this.accent, radius: 5 })
-            .onClick(() => this.toggleFollow())
-          Row({ space: 0 }) {
-            Text('举报')
-              .fontSize(11).fontColor('#B0B3B8')
-              .padding({ left: 10, right: 10, top: 8, bottom: 8 })
-              .onClick(() => this.reportBlockMenu())
-            Text('·').fontSize(11).fontColor('#55565B')
-            Text('分组')
-              .fontSize(11).fontColor('#B0B3B8')
-              .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-              .priorityGesture(TapGesture().onAction(() => this.openFollowGroups()))
-            Text('·').fontSize(11).fontColor('#55565B')
-            Text('拉黑')
-              .fontSize(11).fontColor('#B0B3B8')
-              .padding({ left: 10, right: 10, top: 8, bottom: 8 })
-              .onClick(() => this.blockUser())
+          .width('100%')
+          .alignItems(VerticalAlign.Top)
+          if (this.info.officialDesc.length > 0) {
+            Text(this.info.officialDesc)
+              .fontSize(12).fontColor(this.isDark ? '#DAB464' : '#8D6A20')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
           }
-          .width('100%').justifyContent(FlexAlign.Center).margin({ top: 6 })
-        } else {
-          Text('这是你的空间')
-            .width('100%').height(36).textAlign(TextAlign.Center)
-            .fontSize(13).fontColor('#9499A0')
-            .border({ width: 1, color: '#55565B', radius: 5 })
+          Text('UID ' + String(this.info.mid))
+            .fontSize(11).fontColor(this.secondaryText())
         }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+        .padding({ top: 2 })
+        .id('uspace-identity')
       }
       .width('100%')
-      .padding({ left: 18, right: 18, top: 72, bottom: 14 })
-      .alignItems(HorizontalAlign.Start)
+      .alignItems(VerticalAlign.Top)
+      Text(this.info.sign.length > 0 ? this.info.sign : '这个人很神秘，什么都没有写')
+        .width('100%')
+        .fontSize(13).lineHeight(20)
+        .fontColor(this.secondaryText())
+        .maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      Row() {
+        this.StatCell(this.statFollower >= 0 ? this.statFollower : this.stat.follower, '粉丝', 'follower')
+        Divider().vertical(true).height(24).color(this.isDark ? '#3C3F46' : '#E6E8EC').strokeWidth(0.5)
+        this.StatCell(this.statFollowing >= 0 ? this.statFollowing : this.stat.following, '关注', 'following')
+        Divider().vertical(true).height(24).color(this.isDark ? '#3C3F46' : '#E6E8EC').strokeWidth(0.5)
+        this.StatCell(this.statLikeNum >= 0 ? this.statLikeNum : this.stat.likeNum, '获赞', '')
+      }
+      .width('100%')
+      .backgroundColor(this.controlSurface())
+      .borderRadius(12)
+      .id('uspace-stats')
+      if (this.info.liveStatus === 1 && this.info.liveRoomId > 0) {
+        Row({ space: 8 }) {
+          Image($r('app.media.ic_live')).width(18).height(18).fillColor(this.accent)
+          Text(this.info.liveTitle.length > 0 ? this.info.liveTitle : '正在直播')
+            .fontSize(13).fontColor(AppTheme.onSurface()).maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+          Text('进入直播间 ›').fontSize(11).fontColor(this.accent)
+        }
+        .width('100%').height(40).padding({ left: 12, right: 12 })
+        .backgroundColor(colorWithAlpha(this.accent, this.isDark ? '26' : '14')).borderRadius(10)
+        .onClick(() => this.openLiveRoom())
+      }
+      if (UserStore.current === null || UserStore.current.mid !== this.param.mid) {
+        Row({ space: 8 }) {
+          Text(this.followLoading ? '处理中…' : (this.following ? '已关注' : '+ 关注'))
+            .layoutWeight(1).height(40).textAlign(TextAlign.Center)
+            .fontSize(14).fontWeight(FontWeight.Medium)
+            .fontColor(this.following ? this.secondaryText() : this.accent)
+            .backgroundColor(this.following ? this.controlSurface() :
+              colorWithAlpha(this.accent, this.isDark ? '26' : '14'))
+            .borderRadius(10)
+            .enabled(!this.followLoading)
+            .id('uspace-follow')
+            .onClick(() => this.toggleFollow())
+          Text('分组')
+            .width(60).height(40).textAlign(TextAlign.Center)
+            .fontSize(13).fontColor(this.secondaryText())
+            .backgroundColor(this.controlSurface()).borderRadius(10)
+            .id('uspace-follow-groups')
+            .priorityGesture(TapGesture().onAction(() => this.openFollowGroups()))
+          Button({ type: ButtonType.Normal }) {
+            Image($r('app.media.ic_more')).width(20).height(20).fillColor(this.secondaryText())
+          }
+          .width(40).height(40)
+          .padding(0)
+          .backgroundColor(this.controlSurface()).borderRadius(10)
+          .accessibilityText('更多操作，举报或拉黑')
+          .id('uspace-more-actions')
+          .onClick(() => this.reportBlockMenu())
+        }
+        .width('100%')
+      } else {
+        Text('这是你的空间')
+          .width('100%').height(36).textAlign(TextAlign.Center)
+          .fontSize(13).fontColor(this.secondaryText())
+          .backgroundColor(this.controlSurface()).borderRadius(10)
+      }
     }
     .width('100%')
-    .constraintSize({ minHeight: 190 })
-    .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+    .constraintSize({ maxWidth: LayoutTokens.pageMaxWidth })
+    .alignSelf(ItemAlign.Center)
+    .padding({ left: Math.max(16, LayoutTokens.horizontalPadding(this.viewportWidth)),
+      right: Math.max(16, LayoutTokens.horizontalPadding(this.viewportWidth)), top: 12, bottom: 16 })
+    .alignItems(HorizontalAlign.Start)
+    .backgroundColor(this.pageSurface())
+    .id('uspace-profile-summary')
   }
 
   /** 举报用户入口：选择原因 → 提交；同时提供快捷拉黑。 */
@@ -773,16 +841,21 @@ export struct UserSpacePage {
           }, (opt: Record<string, string>) => opt['value'])
         }
         .width('100%')
-        .padding({ left: 12, right: 12, top: 8, bottom: 2 })
+        .padding({ left: LayoutTokens.horizontalPadding(this.viewportWidth),
+          right: LayoutTokens.horizontalPadding(this.viewportWidth), top: 4, bottom: 4 })
+        .id('uspace-sort-controls')
       } else {
         Row({ space: 7 }) {
-          Text('视频').fontSize(15).fontWeight(FontWeight.Bold)
-            .fontColor(this.isDark ? '#F2F2F4' : '#18191C')
-          Text(formatCount(this.feedState.total)).fontSize(12).fontColor('#9499A0')
+          Text('视频').fontSize(16).fontWeight(FontWeight.Bold)
+            .fontColor(AppTheme.onSurface())
+          Text(formatCount(this.feedState.total)).fontSize(12).fontColor(this.secondaryText())
           Blank()
-          Text('更多  ›').fontSize(12).fontColor('#9499A0')
+          Text('全部投稿  ›').fontSize(12).fontColor(this.secondaryText())
         }
-        .width('100%').height(44).padding({ left: 14, right: 14 })
+        .width('100%').height(48)
+        .padding({ left: LayoutTokens.horizontalPadding(this.viewportWidth),
+          right: LayoutTokens.horizontalPadding(this.viewportWidth) })
+        .id('uspace-video-section')
         .onClick(() => {
           this.visualSpaceTab = 2;
           this.tabsController.changeIndex(2);
@@ -803,7 +876,7 @@ export struct UserSpacePage {
           },
         })
       } else {
-        List({ space: 10 }) {
+        List({ space: 12 }) {
           LazyForEach(this.feed.source, (item: VideoItem) => {
             ListItem() {
               VideoCard({ video: item, compact: true, idPrefix: 'user-', wholeCardTransition: true })
@@ -847,27 +920,30 @@ export struct UserSpacePage {
 
   @Builder
   SpaceTabBar(label: string, index: number) {
-    Column({ space: 3 }) {
+    Column({ space: 6 }) {
       Row({ space: 6 }) {
         Text(label)
           .fontSize(15)
           .fontWeight(this.visualSpaceTab === index ? FontWeight.Bold : FontWeight.Normal)
-          .fontColor(this.visualSpaceTab === index ? this.accent : '#9499A0')
+          .fontColor(this.visualSpaceTab === index ? this.accent : this.secondaryText())
         if ((index === 0 || index === 2) && this.feedState.total > 0) {
           Text(formatCount(this.feedState.total))
             .fontSize(11)
-            .fontColor('#9499A0')
+            .fontColor(this.secondaryText())
         }
       }
       Row()
-        .width(20)
-        .height(2.5)
-        .borderRadius(1.5)
+        .width(24)
+        .height(3)
+        .borderRadius(2)
         .backgroundColor(this.visualSpaceTab === index ? this.accent : '#00000000')
     }
     .width('100%')
-    .height(38)
+    .height(44)
     .justifyContent(FlexAlign.Center)
+    .accessibilityText(label)
+    .accessibilitySelected(this.visualSpaceTab === index)
+    .id('uspace-tab-' + String(index))
     .onClick(() => {
       this.visualSpaceTab = index;
       this.tabsController.changeIndex(index);
@@ -883,7 +959,7 @@ export struct UserSpacePage {
         .width('100%')
         .height('100%')
         .padding({ top: Immersive.statusBarHeight() + 48 })
-        .backgroundColor(this.isDark ? '#18191C' : '#F6F7F8')
+        .backgroundColor(this.pageSurface())
       } else if (this.errorText.length > 0) {
         Column() {
           LoadingView({
@@ -899,9 +975,9 @@ export struct UserSpacePage {
         .width('100%')
         .height('100%')
         .justifyContent(FlexAlign.Center)
-        .backgroundColor(this.isDark ? '#18191C' : '#F6F7F8')
+        .backgroundColor(this.pageSurface())
       } else {
-        List() {
+        List({ scroller: this.outerScroller }) {
           ListItem() {
             this.Header()
           }
@@ -911,7 +987,9 @@ export struct UserSpacePage {
           ListItem() {
             Column() {
               // 外层 List 吸顶到沉浸区域时，为标签栏保留系统栏高度；负 margin 抵消普通位置的额外占位。
+              // 负 margin 下的空白占位会覆盖资料操作行，必须让命中穿过这层。
               Row().width('100%').height(Immersive.statusBarHeight())
+                .hitTestBehavior(HitTestMode.None)
               Tabs({ barPosition: BarPosition.Start, index: this.spaceTab, controller: this.tabsController }) {
                 TabContent() {
                   this.ArcTab(false)
@@ -926,7 +1004,7 @@ export struct UserSpacePage {
                 }
                 .tabBar(this.SpaceTabBar('投稿', 2))
               }
-              .barHeight(40)
+              .barHeight(48)
               .divider(null)
               // Tabs 嵌在垂直 List 里时手势易被外层吞掉，显式开启滑动切页。
               .scrollable(true)
@@ -943,17 +1021,34 @@ export struct UserSpacePage {
               })
               .width('100%')
               .layoutWeight(1)
-              .backgroundColor(this.isDark ? '#18191C' : '#FFFFFF')
+              .backgroundColor(this.pageSurface())
             }
             .width('100%')
             .height('100%')
+            .hitTestBehavior(HitTestMode.Transparent)
             .margin({ top: -Immersive.statusBarHeight() })
           }
+          .hitTestBehavior(HitTestMode.Transparent)
         }
         .width('100%')
         .height('100%')
         .scrollBar(BarState.Off)
-        .backgroundColor(this.isDark ? '#18191C' : '#F6F7F8')
+        .backgroundColor(this.pageSurface())
+        .onDidScroll(() => {
+          this.outerScrollOffset = this.outerScroller.currentOffset().yOffset;
+          this.syncStatusBarSurface();
+        })
+      }
+
+      if (this.statusBarSurfaceVisible) {
+        // 头图滚出后遮住系统栏后方的资料尾部，操作栏不再透过透明状态栏露出。
+        Row()
+          .width('100%')
+          .height(this.statusBarInset > 0 ? this.statusBarInset : Immersive.statusBarHeight())
+          .backgroundColor(this.pageSurface())
+          .position({ x: 0, y: 0 })
+          .hitTestBehavior(HitTestMode.Block)
+          .id('uspace-status-bar-surface')
       }
 
       if (this.groupState.open) {
@@ -974,13 +1069,14 @@ export struct UserSpacePage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.isDark ? '#18191C' : '#F6F7F8')
+    .backgroundColor(this.pageSurface())
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
     .onAreaChange((oldValue: Area, newValue: Area) => {
       const width: number = Number(newValue.width);
       const height: number = Number(newValue.height);
       if (!Number.isNaN(width) && width > 0) this.viewportWidth = width;
       if (!Number.isNaN(height) && height > 0) this.viewportHeight = height;
+      this.syncStatusBarSurface();
     })
   }
 

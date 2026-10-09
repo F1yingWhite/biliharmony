@@ -349,16 +349,15 @@ export struct VideoCard {
       .width('100%')
       .id(this.coverId())
 
-      // 标题（@Builder 不能链式修饰，用 Row 承载左右内缩）
-      // 固定两行高度：卡片高度不随标题长短变化，双列网格每张卡片严格等大、间距一致。
+      // 两行标题需要 38vp 正文空间，内边距另计；短标题保留同样的最小高度。
+      // 使用最小高度而非固定高度，系统放大字体时正文仍可自然撑开。
       Row() {
         FeedCardTitle({ title: this.video.title, isDark: this.isDark })
       }
       .width('100%')
-      // 首页标题预留两行 38vp + 顶部 8vp，避免作者行贴住第二行标题。
-      .height(this.homeStyle ? 50 : (this.showMore ? 46 : 38))
+      .constraintSize({ minHeight: this.compact ? 56 : 46 })
       .alignItems(VerticalAlign.Top)
-      .padding({ left: this.homeStyle ? 12 : 10, right: this.homeStyle ? 12 : 10, top: this.homeStyle ? 10 : 8 })
+      .padding({ left: 10, right: 10, top: 8, bottom: this.compact ? 10 : 0 })
       .onClick(() => this.openDetail())
 
       // 底栏只保留 UP 标识、作者与竖向菜单；播放数据已回到封面叠层。
@@ -391,8 +390,8 @@ export struct VideoCard {
       }
     }
     .width('100%')
-    // 首页底栏整体下移 6vp；收回多余底部留白，保持卡片总高度不变。
-    .padding({ bottom: this.homeStyle ? 6 : (this.showMore ? 2 : 6) })
+    // 隐藏作者行时由标题区保留底部 10vp 留白；有作者行的卡片保持原有收尾。
+    .padding({ bottom: this.compact ? 0 : (this.showMore ? 2 : 6) })
     .alignItems(HorizontalAlign.Start)
     // 白色卡片承载边界：封面通顶、文字区内缩，浅色白底/深色深灰底。
     .backgroundColor(this.isDark ? '#24272E' : '#FFFFFF')

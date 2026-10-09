@@ -17,6 +17,7 @@ import { HomeView } from '../views/HomeView';
 import { DynamicView } from '../views/DynamicView';
 import { MineView } from '../views/MineView';
 import { Immersive } from '../common/Immersive';
+import { UserSpaceChrome } from '../common/UserSpaceChrome';
 import { AppTheme } from '../common/AppTheme';
 import { GlassHeaderBar } from '../components/GlassHeaderBar';
 import { AppNavStack, APP_ROOT_SNAPSHOT_ID, NAV_SEARCH, NAV_VIDEO_DETAIL, NAV_LOGIN, NAV_USER_SPACE, NAV_MESSAGES,
@@ -168,11 +169,21 @@ struct Index {
       Immersive.setBarIcons(true, true);
       return;
     }
-    if (top === NAV_USER_SPACE || top === NAV_BANGUMI_DETAIL) {
+    if (top === NAV_USER_SPACE) {
+      this.applyUserSpaceBarColors(AppNavStack.getParamByIndex(names.length - 1) as Object);
+      return;
+    }
+    if (top === NAV_BANGUMI_DETAIL) {
       Immersive.setBarIcons(true, this.isDark);
       return;
     }
     this.syncBarColors();
+  }
+
+  private applyUserSpaceBarColors(param: Object): void {
+    const space: UserSpaceParam | null = Index.asUserSpaceParam(param);
+    Immersive.setBarIcons(space === null ? this.isDark : UserSpaceChrome.statusIconLight(space, this.isDark),
+      this.isDark);
   }
 
   private returnToHome(): void {
@@ -621,8 +632,8 @@ struct Index {
         }
       }
       .stdDestination(() => {
-        // 顶部为 banner 氛围图 → 状态栏图标浅色
-        Immersive.setBarIcons(true, this.isDark);
+        // 返回时读取此页面的滚动遮罩状态，浅色遮罩上的时钟需要深色图标。
+        this.applyUserSpaceBarColors(param);
       }, () => {
         this.syncBarColors();
       })
