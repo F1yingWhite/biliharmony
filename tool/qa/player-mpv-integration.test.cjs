@@ -136,7 +136,9 @@ test('host mpv decodes separate HTTP audio/video with seek, pause, speed, EOF an
     await command(['set_property', 'http-header-fields', [`Referer: ${referer}`]]);
     const signedQuery = '?token=fixture,colon:value';
     await command(['set_property', 'audio-files', [`${base}/audio.m4a${signedQuery}`]]);
-    await command(['loadfile', `${base}/video.mp4${signedQuery}`, 'replace', -1]);
+    // Replacement needs no insertion index; omit that optional argument so the
+    // same protocol check also runs on Ubuntu's mpv 0.37 host package.
+    await command(['loadfile', `${base}/video.mp4${signedQuery}`, 'replace']);
     await until(() => events.some(event => event.event === 'file-loaded'), `media did not load: ${stderr}`);
     const tracks = await property('track-list');
     assert.equal(tracks.length, 2, 'one mpv session must contain exactly two tracks');
@@ -188,7 +190,7 @@ test('host mpv decodes separate HTTP audio/video with seek, pause, speed, EOF an
     const failedAudioURL = `${base}/missing-audio.m4a${signedQuery}`;
     let loadEventsStart = events.length;
     await command(['set_property', 'audio-files', [failedAudioURL]]);
-    await command(['loadfile', `${base}/video.mp4${signedQuery}`, 'replace', -1]);
+    await command(['loadfile', `${base}/video.mp4${signedQuery}`, 'replace']);
     await until(() => events.slice(loadEventsStart).some(event => event.event === 'file-loaded'),
       'main video did not load when its external audio returned 404');
     const silentTracks = await property('track-list');
@@ -209,7 +211,7 @@ test('host mpv decodes separate HTTP audio/video with seek, pause, speed, EOF an
     fixtures.set('/audio-backup.m4a', fixtures.get('/audio.m4a'));
     loadEventsStart = events.length;
     await command(['set_property', 'audio-files', [`${base}/audio-backup.m4a${signedQuery}`]]);
-    await command(['loadfile', `${base}/video.mp4${signedQuery}`, 'replace', -1]);
+    await command(['loadfile', `${base}/video.mp4${signedQuery}`, 'replace']);
     await until(() => events.slice(loadEventsStart).some(event => event.event === 'file-loaded'),
       'backup audio did not load with the main video');
     const recoveredTracks = await property('track-list');
