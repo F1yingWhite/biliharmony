@@ -1,5 +1,10 @@
 # OHAudio PCM timeline patch
 
+本仓库核心重建脚本依次应用 0001 PCM 时间线、0002 解码初始化保护、0003 HDR 输出与
+0004 尺寸变化保留颜色标签。0004 只移除纯 resize 的颜色缓存失效，真实颜色/元数据变化仍会重建输出 surface。
+脚本同时识别 macOS/Linux 与 Windows SDK 工具文件名；固定输入和真实产物记录在
+`rebuild-report-arm64.json`，应用打包时用包检查器核对剥离后的实际库。
+
 Apply `patches/0001-ohaudio-pcm-timeline.patch` to
 [`ErBWs/mpv`](https://github.com/ErBWs/mpv) commit
 `6edeee00a07b9b76f197aa71eee3d029fb090de4`:

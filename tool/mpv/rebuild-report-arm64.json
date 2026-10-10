@@ -69,16 +69,20 @@
   },
   "local_patches_in_order": [
     {
-      "path": "tool\\mpv\\patches\\0001-ohaudio-pcm-timeline.patch",
+      "path": "tool/mpv/patches/0001-ohaudio-pcm-timeline.patch",
       "sha256": "8638719f964243aa4f738226c97ad13170cba6c0f499d14b168ce6176f5fda76"
     },
     {
-      "path": "tool\\mpv\\patches\\0002-ohcodec-init-failure.patch",
+      "path": "tool/mpv/patches/0002-ohcodec-init-failure.patch",
       "sha256": "5d8ce119bb9297c713b2e394520ec4bec8ed2f2cf0cecb0bee54187d42d658a9"
     },
     {
-      "path": "tool\\mpv\\patches\\0003-ohos-hdr-output.patch",
+      "path": "tool/mpv/patches/0003-ohos-hdr-output.patch",
       "sha256": "8735cfbf347e81173797e771c0155be806175f72c93e897aeddf13ec9899e091"
+    },
+    {
+      "path": "tool/mpv/patches/0004-ohos-resize-preserve-color.patch",
+      "sha256": "ac0dd1da97c79c6d408a54c3da56b74dfeee83211a3a355540aa143992ed55a6"
     }
   ],
   "patched_source_sha256_before_build_overrides": {
@@ -96,13 +100,13 @@
     "video/out/gpu/video.h": "d4a15b3b175c8f844791221594b750ad0e429ac67030f7f67755056bcb3dfb44",
     "video/out/ohos_common.c": "04888009ba11a2ea495c44931c66b04cf14f2bcb3989bd683e8e6cd422839209",
     "video/out/ohos_common.h": "96ed24dbcaf738e20163a20799ea3cedb5bfaea29ded22f3c3b4ca54dd753d1f",
-    "video/out/opengl/context_ohos.c": "6ef0b386aa643065ad490f0c4350a52b5568da5d64b93b201bd03eca8fcb829d",
+    "video/out/opengl/context_ohos.c": "bebaf0c30559c24e8cb110977f8b017c33b7020d316851a4a23a50b2e403d8a2",
     "video/out/opengl/egl_helpers.c": "e49ee9ff8e8d5314c00b10872ca8567f59eb027c353aa91651a98243607ee3cc",
     "video/out/opengl/egl_helpers.h": "befc9084a8b433e774366513b35077b3181da05a2ad970499a3bc39c096d2b3d",
     "video/out/vo_gpu.c": "ec3008f068f5712bbd70c740d24e81fedd20d965873d05e373474270b20b8bbf"
   },
-  "sdk": "C:\\Program Files\\Huawei\\DevEco Studio\\sdk\\default\\openharmony\\native",
-  "python": "C:\\Users\\f1yin\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe",
+  "sdk": "/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/native",
+  "python": "/Users/flyingwhite/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3.12",
   "meson_options": [
     "--auto-features=disabled",
     "-Dlibmpv=true",
@@ -231,6 +235,6 @@
       "__register_frame_info"
     ]
   },
-  "core_sha256": "f904d78b7c227c659f53131e65033218be8b77d5ce49d18acad5be6f5d4597b3",
-  "core_bytes": 2628832
+  "core_sha256": "98f14b2cc6904448b3ca6f72c34a0c8899fa9d2d4545e31e7a48df1eb76f71c9",
+  "core_bytes": 2628944
 }

@@ -23,6 +23,15 @@ REPO = HERE.parent.parent
 MANIFEST = json.loads((HERE / 'rebuild-inputs.json').read_text(encoding='utf-8'))
 
 
+def sdk_tool(sdk, name, cmake=False):
+    directory = 'build-tools/cmake/bin' if cmake else 'llvm/bin'
+    executable = name + ('.exe' if sys.platform == 'win32' else '')
+    path = sdk / directory / executable
+    if not path.is_file():
+        raise RuntimeError('Required SDK tool is missing: ' + str(path))
+    return path
+
+
 def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -167,10 +176,10 @@ def write_crossfile(path, sdk, python):
     fmt = lambda value: str(value).replace('\\', '/')
     sysroot = fmt(sdk / 'sysroot')
     path.write_text(f'''[binaries]
-c = ['{fmt(sdk / 'llvm/bin/clang.exe')}', '--target=aarch64-linux-ohos', '--sysroot={sysroot}']
-cpp = ['{fmt(sdk / 'llvm/bin/clang++.exe')}', '--target=aarch64-linux-ohos', '--sysroot={sysroot}']
-ar = '{fmt(sdk / 'llvm/bin/llvm-ar.exe')}'
-strip = '{fmt(sdk / 'llvm/bin/llvm-strip.exe')}'
+c = ['{fmt(sdk_tool(sdk, 'clang'))}', '--target=aarch64-linux-ohos', '--sysroot={sysroot}']
+cpp = ['{fmt(sdk_tool(sdk, 'clang++'))}', '--target=aarch64-linux-ohos', '--sysroot={sysroot}']
+ar = '{fmt(sdk_tool(sdk, 'llvm-ar'))}'
+strip = '{fmt(sdk_tool(sdk, 'llvm-strip'))}'
 python3 = '{fmt(python)}'
 
 [host_machine]
@@ -196,7 +205,7 @@ def symbol_table(nm, path, undefined=False):
 
 
 def validate(core, original, carrier, sdk):
-    nm, readelf = sdk / 'llvm/bin/llvm-nm.exe', sdk / 'llvm/bin/llvm-readelf.exe'
+    nm, readelf = sdk_tool(sdk, 'llvm-nm'), sdk_tool(sdk, 'llvm-readelf')
     defs = symbol_table(nm, core)
     orig_defs = symbol_table(nm, original)
     carrier_defs = symbol_table(nm, carrier)
@@ -282,7 +291,8 @@ def main():
         apply_patch(deps[spec['component']], patch, args.git, work)
     local_patches = [HERE / 'patches/0001-ohaudio-pcm-timeline.patch',
                      HERE / 'patches/0002-ohcodec-init-failure.patch',
-                     HERE / 'patches/0003-ohos-hdr-output.patch']
+                     HERE / 'patches/0003-ohos-hdr-output.patch',
+                     HERE / 'patches/0004-ohos-resize-preserve-color.patch']
     for patch in local_patches:
         apply_patch(deps['mpv'], patch, args.git, work)
     patch_paths = [relative for patch in local_patches for relative in
@@ -336,7 +346,7 @@ def main():
         env = dict(os.environ)
         if args.meson_path:
             env['PYTHONPATH'] = str(args.meson_path.resolve()) + os.pathsep + env.get('PYTHONPATH', '')
-        ninja = sdk / 'build-tools/cmake/bin/ninja.exe'
+        ninja = sdk_tool(sdk, 'ninja', cmake=True)
         env['PATH'] = str(ninja.parent) + os.pathsep + str(sdk / 'llvm/bin') + os.pathsep + env['PATH']
         build = work / 'build'
         command = [str(args.python), '-m', 'mesonbuild.mesonmain', 'setup', str(build),

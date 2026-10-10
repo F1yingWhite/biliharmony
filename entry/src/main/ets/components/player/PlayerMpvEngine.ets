@@ -194,7 +194,11 @@ export class PlayerMpvEngine implements PlayerEngine {
 
   resize(width: number, height: number): void {
     if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
-    this.viewportWidth = Math.round(width); this.viewportHeight = Math.round(height);
+    const nextWidth: number = Math.round(width);
+    const nextHeight: number = Math.round(height);
+    if (nextWidth <= 0 || nextHeight <= 0 ||
+      (nextWidth === this.viewportWidth && nextHeight === this.viewportHeight)) return;
+    this.viewportWidth = nextWidth; this.viewportHeight = nextHeight;
     if (this.handle !== 0) mpv.resize(this.handle, this.viewportWidth, this.viewportHeight);
   }
 

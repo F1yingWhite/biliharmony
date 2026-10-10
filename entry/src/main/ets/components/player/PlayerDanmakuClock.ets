@@ -59,9 +59,10 @@ export class PlayerDanmakuClock {
 
   start(): void {
     const engine: PlayerDanmakuEngine = this.access.getEngine();
-    if (this.running || !this.access.isDanmakuOn() || engine.active.length === 0) {
+    if (this.running || !this.access.isPlaying() || !this.access.isDanmakuOn() || engine.active.length === 0) {
       return;
     }
+    engine.setDrawingPaused(false);
     engine.lastDrawMs = 0;
     this.lastFrameMs = 0;
     this.running = true;
@@ -70,11 +71,7 @@ export class PlayerDanmakuClock {
         const sync: displaySync.DisplaySync = displaySync.create();
         sync.setExpectedFrameRateRange(this.expectedFrameRateRange());
         sync.on('frame', (info: displaySync.IntervalInfo): void => {
-          if (this.running && this.access.isPlaying() && this.access.isDanmakuOn() &&
-            this.access.getEngine().active.length > 0) {
-            const frameTimeMs: number = info.timestamp / 1_000_000;
-            if (this.shouldRenderFrame(frameTimeMs)) this.renderFrame(true, frameTimeMs);
-          }
+          this.onFrame(info.timestamp / 1_000_000);
         });
         this.displaySync = sync;
       }
@@ -82,11 +79,7 @@ export class PlayerDanmakuClock {
     } catch (e) {
       // API 26 正常走 DisplaySync；仅为异常 ROM 保留可播放兜底。
       this.fallbackTick = setInterval(() => {
-        if (this.running && this.access.isPlaying() && this.access.isDanmakuOn() &&
-          this.access.getEngine().active.length > 0) {
-          const frameTimeMs: number = Date.now();
-          if (this.shouldRenderFrame(frameTimeMs)) this.renderFrame(true, frameTimeMs);
-        }
+        this.onFrame(Date.now());
       }, 16);
     }
   }
@@ -120,9 +113,23 @@ export class PlayerDanmakuClock {
     if (this.access.getEngine().active.length === 0) this.stop(false);
   }
 
+  private onFrame(frameTimeMs: number): void {
+    if (!this.running) return;
+    if (!this.access.isPlaying()) {
+      this.pause();
+      return;
+    }
+    if (!this.access.isDanmakuOn() || this.access.getEngine().active.length === 0) {
+      this.stop(false);
+      return;
+    }
+    if (this.shouldRenderFrame(frameTimeMs)) this.renderFrame(true, frameTimeMs);
+  }
+
   private stopClock(): void {
     this.running = false;
     this.lastFrameMs = 0;
+    this.access.getEngine().setDrawingPaused(true);
     if (this.displaySync !== null) {
       try {
         this.displaySync.stop();

@@ -620,7 +620,7 @@ test('released danmaku clock creates a fresh display callback instead of retaini
       off(){this.callback=null;},start(){},stop(){}};syncs.push(sync);return sync;
   }}}});
   const {PlayerDanmakuClock}=env.load('components/player/PlayerDanmakuClock');
-  const engine={active:[{}],lastDrawMs:0,drawFrame:(_advance,time)=>draws.push(time)};
+  const engine={active:[{}],lastDrawMs:0,setDrawingPaused(){},drawFrame:(_advance,time)=>draws.push(time)};
   const clock=new PlayerDanmakuClock({isPlaying:()=>true,isDanmakuOn:()=>true,getFrameRate:()=>60,
     getEngine:()=>engine,clearPinned(){}});
   clock.start();syncs[0].callback({timestamp:1000000000});

@@ -550,7 +550,7 @@ export struct VideoDetailPage {
   /** 进入全屏前的竖屏播放区高度，旋转退出时的稳定落点。 */
   private playerFullscreenRestoreHeight: number = 0;
   private dmEngineRef: PlayerDanmakuEngine | null = null;
-  // playerCollapse 的精确手势累计值；视觉态仅过滤不足半个 vp 的亚像素抖动。
+  // 手势累计值与可视收放量一致，反向拖动无需跨过额外的阻尼或量化台阶。
   private playerCollapseRaw: number = 0;
   private recommendations: VideoRecommendations = new VideoRecommendations(
     (): boolean => this.destroyed, (): VideoDetail => this.detail,
@@ -904,33 +904,19 @@ export struct VideoDetailPage {
     }
   }
 
-  /**
-   * 收放量跟随手势逐帧写入；只过滤不足 0.5vp 的亚像素抖动。
-   * 旧的 2% 行程量化在高视频区域会形成 6～10vp 台阶，视觉上只有约 15～30fps。
-   */
+  /** 收放量直接跟随手势；滚动和画面共用同一距离，微小增量也不丢失。 */
   private setPlayerCollapse(raw: number): void {
     const maxCollapse: number = Math.max(0, this.playerHeight() - this.minPlayerHeight());
     const clamped: number = Math.max(0, Math.min(maxCollapse, raw));
     this.playerCollapseRaw = clamped;
-    // 轻量阻尼曲线：收起开始响应更积极，接近终点逐渐减速；反向展开自然呈现先缓后快。
-    // 曲线始终单调且端点准确，不使用补间动画，因此不会产生手指拖动延迟。
-    const progress: number = maxCollapse > 0 ? clamped / maxCollapse : 0;
-    let curved: number = maxCollapse * (progress + 0.12 * Math.sin(Math.PI * progress));
-    if (clamped === 0) curved = 0;
-    else if (clamped === maxCollapse) curved = maxCollapse;
-    const threshold: number = 0.5;
-    if (Math.abs(curved - this.playerCollapse) >= threshold ||
-      (clamped === 0 && this.playerCollapse !== 0) ||
-      (clamped === maxCollapse && this.playerCollapse !== maxCollapse)) {
-      this.playerCollapse = curved;
-    }
+    if (this.playerCollapse !== clamped) this.playerCollapse = clamped;
   }
 
   onContentScrollFrame(offset: number, scroller: Scroller, state: ScrollState): number {
     // onScrollStart 在部分系统版本晚于首批 frame 回调，旧门闩会把整次手势漏掉。
     // Idle 代表非动画的程序化滚动；触摸拖动与惯性滚动则直接参与播放器联动。
     if (state === ScrollState.Idle) return offset;
-    if (Math.abs(offset) < 0.1) return offset;
+    if (offset === 0) return offset;
     if (!this.shouldCollapsePlayer()) return offset;
     const maxCollapse: number = Math.max(0, this.playerHeight() - this.minPlayerHeight());
     if (offset > 0 && this.playerCollapseRaw < maxCollapse) {
@@ -2054,6 +2040,8 @@ export struct VideoDetailPage {
               favorited: this.favorited,
               externalDanmakuOn: this.danmakuOn,
               danmakuFixedHeight: this.danmakuCanvasHeight(),
+              videoFixedHeight: this.playerFullscreen ? 0 : this.playerHeight(),
+              videoVisibleHeight: this.playerFullscreen ? 0 : this.visiblePlayerHeight(),
               onDanmakuEngineReady: (engine: PlayerDanmakuEngine) => {
                 this.dmEngineRef = engine;
                 this.syncDanmakuViewport();

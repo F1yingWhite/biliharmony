@@ -2,6 +2,7 @@ import { HotPoint, VideoChapter } from '../../api/BiliApi';
 import { SponsorBlockSegment } from '../../common/SponsorBlock';
 import { formatDuration } from '../../common/Utils';
 import { PlayerProgressBar } from './PlayerProgressBar';
+import { PlayerProgressController } from './PlayerProgressController';
 import { PlayerScrubController, PlayerScrubTarget } from './PlayerGestureOverlay';
 
 @Component
@@ -9,15 +10,24 @@ export struct PlayerCompactControls {
   @Prop playing: boolean = false;
   @Prop progress: number = 0;
   @Prop duration: number = 0;
+  @Prop @Watch('onControlsVisibleChanged') controlsVisible: boolean = true;
+  progressCtl: PlayerProgressController | null = null;
   /** 横滑快进的待落点：进度条跟手显示它，seek 完成后宿主清零回落真实进度。 */
   @State scrubPreview: number = -1;
   scrubCtl: PlayerScrubController | null = null;
   private scrubTarget: PlayerScrubTarget | null = null;
+  private latestScrubPreview: number = -1;
 
   aboutToAppear(): void {
+    this.latestScrubPreview = this.scrubPreview;
     const ctl: PlayerScrubController | null = this.scrubCtl;
     if (ctl !== null) {
-      this.scrubTarget = { showScrub: (value: number): void => { this.scrubPreview = value; } };
+      this.scrubTarget = {
+        showScrub: (value: number): void => {
+          this.latestScrubPreview = value;
+          if (this.controlsVisible) this.scrubPreview = value;
+        },
+      };
       ctl.attach(this.scrubTarget);
     }
   }
@@ -32,6 +42,10 @@ export struct PlayerCompactControls {
 
   private displayProgress(): number {
     return this.scrubPreview >= 0 ? this.scrubPreview : this.progress;
+  }
+
+  onControlsVisibleChanged(): void {
+    if (this.controlsVisible) this.scrubPreview = this.latestScrubPreview;
   }
 
   @Prop chapters: Array<VideoChapter> = [];
@@ -107,7 +121,10 @@ export struct PlayerCompactControls {
           this.IconButton($r('app.media.ic_pause'), 16, 36, true, () => this.onPlay())
           Text(formatDuration(this.displayProgress())).fontSize(10).fontColor(this.titleColor)
           PlayerProgressBar({
-            value: this.displayProgress(),
+            value: this.progress,
+            previewValue: this.scrubPreview,
+            controlsVisible: this.controlsVisible,
+            progressCtl: this.progressCtl,
             duration: this.duration,
             compact: true,
             chapters: this.chapters,

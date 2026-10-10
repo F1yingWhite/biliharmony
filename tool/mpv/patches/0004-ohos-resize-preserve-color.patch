@@ -1,0 +1,14 @@
+diff --git a/video/out/opengl/context_ohos.c b/video/out/opengl/context_ohos.c
+--- a/video/out/opengl/context_ohos.c
++++ b/video/out/opengl/context_ohos.c
+@@ -291,7 +291,9 @@ static bool ohos_reconfig(struct ra_ctx *ctx)
+     ctx->vo->dwidth = w;
+     ctx->vo->dheight = h;
+     ra_gl_ctx_resize(ctx->swapchain, w, h, 0);
+-    vo_ohos_invalidate_color(ctx->vo);
++    // Geometry-only reconfiguration keeps the acknowledged buffer encoding.
++    // Actual color/metadata changes and surface failures negotiate through
++    // set_color, which replaces the EGLSurface when required.
+     return true;
+ }
+ 

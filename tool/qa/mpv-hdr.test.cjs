@@ -13,6 +13,7 @@ const placeboInclude = process.env.MPV_HDR_TEST_PLACEBO_INCLUDE || path.join(roo
 const python = process.env.MPV_TEST_PYTHON || (process.platform === 'win32'
   ? path.join(os.homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe') : 'python3');
 const patch = process.env.MPV_HDR_TEST_PATCH || path.join(root, 'tool/mpv/patches/0003-ohos-hdr-output.patch');
+const resizePatch = process.env.MPV_HDR_TEST_RESIZE_PATCH || path.join(root, 'tool/mpv/patches/0004-ohos-resize-preserve-color.patch');
 const sdkHeaders = ['native_buffer/buffer_common.h', 'window_manager/oh_display_info.h',
   'EGL/egl.h', 'EGL/eglext.h', 'EGL/eglplatform.h', 'KHR/khrplatform.h'];
 const placeboHeaders = ['libplacebo/colorspace.h', 'libplacebo/common.h', 'libplacebo/config.h'];
@@ -40,6 +41,7 @@ if (process.platform === 'win32') {
   checkCommand('C compiler', process.env.CC || 'cc', Boolean(process.env.CC));
 }
 if (!fs.existsSync(patch)) missing.push({reason: `HDR patch missing: ${patch}`, explicit: true});
+if (!fs.existsSync(resizePatch)) missing.push({reason: `Resize patch missing: ${resizePatch}`, explicit: true});
 const prerequisiteMessage = `HDR native fixture prerequisites unavailable: ${missing.map(item => item.reason).join('; ')}`;
 const skipReason = missing.length && process.env.MPV_HDR_TEST_REQUIRED !== '1' && !missing.some(item => item.explicit)
   ? `${prerequisiteMessage}. Configure the dependency paths; MPV_HDR_TEST_REQUIRED=1 requires execution.` : false;
@@ -48,7 +50,8 @@ const cases = ['case_hdr_capability_and_depth', 'case_hdr_pq_hlg_selection',
   'case_hdr_failure_rollback', 'case_hdr_unrecoverable_output', 'case_hdr_verify_driver_override',
   'case_hdr_context_eight_bit_fallback', 'case_hdr_context_tags_before_buffer',
   'case_hdr_context_transition_recovers_sdr', 'case_hdr_context_terminal_failure_stop_once',
-  'case_hdr_context_driver_override_recovers_sdr', 'case_hdr_context_swap_failure'];
+  'case_hdr_context_driver_override_recovers_sdr', 'case_hdr_context_swap_failure',
+  'case_hdr_context_resize_preserves_surface', 'case_hdr_context_resize_then_color_changes'];
 const baseHashes = {
   'ohos_common.c': 'cfda05798da709524f947bb77d6437945bcaa1721556c649e94c6abd3267afd8',
   'ohos_common.h': '1fa7b1efb7aa70fe250dc511f311a02f044dd51457839e800f2ba5a5bb1eddb8',
@@ -80,6 +83,7 @@ if (!missing.length) test.before(() => {
   }
   run('git', ['apply', '--include=video/out/ohos_common.c', '--include=video/out/ohos_common.h',
     '--include=video/out/opengl/context_ohos.c', patch], {cwd: temporary});
+  run('git', ['apply', '--include=video/out/opengl/context_ohos.c', resizePatch], {cwd: temporary});
   fs.cpSync(path.join(__dirname, 'mpv-hdr-stubs'), stubs, {recursive: true});
   // Real SDK declarations prevent a permissive mock from inventing enum or ABI values.
   for (const relative of sdkHeaders)

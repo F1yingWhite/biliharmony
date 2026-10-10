@@ -18,7 +18,7 @@ static struct {
     int fail_mode, fail_hdr_surface, fail_all_surfaces, fail_swap;
     int ten_attempts, eight_attempts, create_count, destroy_count, context_destroy_count;
     int swaps, resizes, gl_inits, gl_uninits, gl_without_context, bad_arguments, stops;
-    int framebuffer_depth;
+    int framebuffer_depth, resized_width, resized_height;
     EGLContext current_context;
     EGLSurface current_surface, last_created;
     struct ra_ctx_params callbacks;
@@ -150,6 +150,8 @@ void ra_gl_ctx_resize(struct ra_swapchain *sw, int width, int height, int fbo)
 {
     (void)fbo;
     egl_capture.resizes++;
+    egl_capture.resized_width = width;
+    egl_capture.resized_height = height;
     if (!sw || width <= 0 || height <= 0) egl_capture.bad_arguments++;
     if (!egl_capture.current_context) egl_capture.gl_without_context++;
 }
@@ -246,6 +248,85 @@ int case_hdr_context_tags_before_buffer(void)
     struct fake_egl_surface *sdr_surface = (struct fake_egl_surface *)egl_capture.last_created;
     CHECK(sdr_surface->requested_color == OH_COLORSPACE_DISPLAY_SRGB && sdr_surface->requested_type == OH_VIDEO_NONE);
     CHECK(sdr_surface->requested_peak == 0 && params.color.transfer == PL_COLOR_TRC_SRGB);
+    CHECK(egl_capture.gl_inits == 1 && egl_capture.context_destroy_count == 0 && egl_capture.stops == 0);
+    ra_ctx_ohos.uninit(&context);
+    CHECK(egl_capture.gl_without_context == 0 && egl_capture.bad_arguments == 0 && capture.bad_arguments == 0);
+    return 0;
+}
+int case_hdr_context_resize_preserves_surface(void)
+{
+    for (int mode = 0; mode < 3; mode++) {
+        reset_context(0);
+        CHECK(ra_ctx_ohos.init(&context));
+        vo.fixture_params.color = mode == 0 ? pl_color_space_srgb :
+            mode == 1 ? pl_color_space_hdr10 : pl_color_space_bt2020_hlg;
+        struct mp_image_params params = wanted();
+        egl_capture.callbacks.set_color(&context, &params);
+        CHECK(egl_capture.callbacks.check_visible(&context));
+        EGLSurface surface = egl_capture.current_surface;
+        uint64_t generation = vo_ohos_color_generation(&vo);
+        int creations = egl_capture.create_count, destroys = egl_capture.destroy_count;
+        int resizes = egl_capture.resizes, colors = capture.color_count;
+        int metadata = capture.metadata_count[0] + capture.metadata_count[1] + capture.metadata_count[2];
+        int display_queries = capture.display_destroy_count;
+        // Collapse/expand changes geometry repeatedly while the source encoding stays fixed.
+        for (int frame = 0; frame < 24; frame++) {
+            options.ohos_surface_size.w = 320 + frame * 8;
+            options.ohos_surface_size.h = 180 - (frame < 12 ? frame : 23 - frame) * 8;
+            CHECK(ra_ctx_ohos.reconfig(&context));
+            CHECK(vo.dwidth == options.ohos_surface_size.w && vo.dheight == options.ohos_surface_size.h);
+            CHECK(egl_capture.resized_width == vo.dwidth && egl_capture.resized_height == vo.dheight);
+            CHECK(egl_capture.resizes == resizes + frame + 1);
+            CHECK(egl_capture.callbacks.check_visible(&context));
+            params = wanted(); egl_capture.callbacks.set_color(&context, &params);
+            CHECK(egl_capture.current_surface == surface && egl_capture.create_count == creations);
+            CHECK(egl_capture.destroy_count == destroys && vo_ohos_color_generation(&vo) == generation);
+            CHECK(capture.color_count == colors && capture.display_destroy_count == display_queries);
+            CHECK(capture.metadata_count[0] + capture.metadata_count[1] + capture.metadata_count[2] == metadata);
+            egl_capture.callbacks.swap_buffers(&context);
+        }
+        CHECK(egl_capture.swaps == 24 && egl_capture.gl_inits == 1 && egl_capture.context_destroy_count == 0);
+        ra_ctx_ohos.uninit(&context);
+        CHECK(egl_capture.gl_without_context == 0 && egl_capture.bad_arguments == 0 && capture.bad_arguments == 0);
+    }
+    return 0;
+}
+int case_hdr_context_resize_then_color_changes(void)
+{
+    reset_context(0);
+    CHECK(ra_ctx_ohos.init(&context));
+    struct mp_image_params params = wanted();
+    egl_capture.callbacks.set_color(&context, &params);
+    struct fake_egl_surface *pq_surface = (struct fake_egl_surface *)egl_capture.current_surface;
+    uint64_t generation = vo_ohos_color_generation(&vo);
+    int creations = egl_capture.create_count, destroys = egl_capture.destroy_count;
+    options.ohos_surface_size.w = 1920; options.ohos_surface_size.h = 1080;
+    CHECK(ra_ctx_ohos.reconfig(&context));
+    params = wanted(); egl_capture.callbacks.set_color(&context, &params);
+    CHECK(egl_capture.current_surface == (EGLSurface)pq_surface && pq_surface->live);
+    CHECK(egl_capture.create_count == creations && egl_capture.destroy_count == destroys);
+    CHECK(vo_ohos_color_generation(&vo) == generation);
+
+    // A genuine metadata/encoding change must still replace the prefetched backbuffer.
+    vo.fixture_params.color.hdr.max_luma = 2000;
+    params = wanted(); egl_capture.callbacks.set_color(&context, &params);
+    struct fake_egl_surface *metadata_surface = (struct fake_egl_surface *)egl_capture.current_surface;
+    CHECK(metadata_surface != pq_surface && !pq_surface->live && metadata_surface->requested_peak == 2000.f);
+    CHECK(egl_capture.create_count == creations + 1 && egl_capture.destroy_count == destroys + 1);
+    CHECK(vo_ohos_color_generation(&vo) > generation);
+    vo.fixture_params.color = pl_color_space_bt2020_hlg;
+    params = wanted(); egl_capture.callbacks.set_color(&context, &params);
+    struct fake_egl_surface *hlg_surface = (struct fake_egl_surface *)egl_capture.current_surface;
+    CHECK(hlg_surface != metadata_surface && !metadata_surface->live);
+    CHECK(params.color.transfer == PL_COLOR_TRC_HLG && hlg_surface->requested_color == OH_COLORSPACE_DISPLAY_BT2020_HLG);
+    CHECK(hlg_surface->requested_type == OH_VIDEO_HDR_HLG && egl_capture.callbacks.check_visible(&context));
+    vo.fixture_params.color = pl_color_space_srgb;
+    params = wanted(); egl_capture.callbacks.set_color(&context, &params);
+    struct fake_egl_surface *sdr_surface = (struct fake_egl_surface *)egl_capture.current_surface;
+    CHECK(sdr_surface != hlg_surface && !hlg_surface->live && sdr(params.color.transfer));
+    CHECK(sdr_surface->requested_color == OH_COLORSPACE_DISPLAY_SRGB && sdr_surface->requested_type == OH_VIDEO_NONE);
+    CHECK(egl_capture.create_count == creations + 3 && egl_capture.destroy_count == destroys + 3);
+    CHECK(egl_capture.resized_width == 1920 && egl_capture.resized_height == 1080);
     CHECK(egl_capture.gl_inits == 1 && egl_capture.context_destroy_count == 0 && egl_capture.stops == 0);
     ra_ctx_ohos.uninit(&context);
     CHECK(egl_capture.gl_without_context == 0 && egl_capture.bad_arguments == 0 && capture.bad_arguments == 0);

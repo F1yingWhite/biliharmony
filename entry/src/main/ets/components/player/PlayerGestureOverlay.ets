@@ -97,7 +97,7 @@ export struct PlayerGestureOverlay {
   }
 
   private seekPreviewTime(): number {
-    return this.sliderSeekPreview >= 0 ? this.sliderSeekPreview : this.scrubPreview;
+    return this.scrubPreview >= 0 ? this.scrubPreview : this.sliderSeekPreview;
   }
 
   /** 预览位置的章节名：视频侧按章节表就地计算（跟随预览时间）；直播侧无章节表，回退 prop。 */

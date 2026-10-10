@@ -10,6 +10,9 @@ import { ActiveDm, colorHex, parseSpecialDanmaku, SpecialTrack } from './PlayerD
 /** 未及时上屏的弹幕最多容忍一次播放器时间回调的抖动，避免繁忙片段形成延迟队列。 */
 const MAX_SPAWN_LATENCY_SECONDS: number = 0.75;
 
+/** 只在两个原生采样间补绘位置；采样停滞时最多预测两个正常轮询周期。 */
+const MAX_VISUAL_PREDICTION_MS: number = 300;
+
 /** 重叠档的绝对同屏上限：只在极端堆积（远超 QA 钉住的 180 条契约）时兜底帧预算。 */
 const OVERLAP_HARD_CAP: number = 240;
 
@@ -35,9 +38,14 @@ export class PlayerDanmakuEngine {
   width: number = 1;
   height: number = 1;
   /** 最近一次播放头时间（秒），用于识别跳变/回退。 */
-  lastPlayerTime: number = 0;
+  private nativePlayerTime: number = 0;
+  private nativeSampleWallMs: number = -1;
+  private visualTime: number = 0;
+  private visualAnchorTime: number = 0;
+  private visualAnchorWallMs: number = -1;
+  private drawingPaused: boolean = false;
   opacity: number = 0.85;
-  /** 视频播放倍速，仅参与滚动位移；固定/高级弹幕直接使用播放头时间。 */
+  /** 视频播放倍速参与滚动位移和高级弹幕的采样间补绘；过期仍由原生播放头确认。 */
   playbackRate: number = 1.0;
   speed: number = 1.0;
   fontScale: number = 1.0;
@@ -83,6 +91,48 @@ export class PlayerDanmakuEngine {
     this.ctx = ctx;
   }
 
+  get lastPlayerTime(): number { return this.nativePlayerTime; }
+
+  set lastPlayerTime(value: number) {
+    if (!Number.isFinite(value) || value < 0 ||
+      (value === this.nativePlayerTime && this.nativeSampleWallMs >= 0)) return;
+    this.nativePlayerTime = value;
+    this.nativeSampleWallMs = Date.now();
+    this.visualAnchorWallMs = this.nativeSampleWallMs;
+    this.visualAnchorTime = Math.max(this.visualTime, value);
+    if (!this.drawingPaused) this.visualTime = this.visualAnchorTime;
+  }
+
+  /** 暂停保留已经展示的位置，恢复时排除暂停期间的墙钟时间。 */
+  setDrawingPaused(paused: boolean): void {
+    if (this.drawingPaused === paused) return;
+    this.drawingPaused = paused;
+    this.visualAnchorTime = this.visualTime;
+    this.visualAnchorWallMs = Date.now();
+    if (!paused) {
+      this.visualAnchorTime = Math.max(this.visualTime, this.nativePlayerTime);
+      this.nativeSampleWallMs = this.visualAnchorWallMs;
+    }
+  }
+
+  private predictedVisualTime(wallMs: number): number {
+    if (this.drawingPaused || this.nativeSampleWallMs < 0) return this.visualTime;
+    const untilMs: number = Math.min(wallMs, this.nativeSampleWallMs + MAX_VISUAL_PREDICTION_MS);
+    const elapsed: number = Math.max(0, untilMs - this.visualAnchorWallMs) / 1000;
+    const predicted: number = this.visualAnchorTime + elapsed * this.playbackRate;
+    const limit: number = this.nativePlayerTime + MAX_VISUAL_PREDICTION_MS / 1000 * this.playbackRate;
+    return Math.max(this.visualTime, Math.min(predicted, limit));
+  }
+
+  /** 真实 seek/换源可以回退时间；普通采样不能倒拉已经绘出的轨迹。 */
+  private resetVisualTime(time: number): void {
+    this.nativePlayerTime = time;
+    this.visualTime = time;
+    this.visualAnchorTime = time;
+    this.nativeSampleWallMs = Date.now();
+    this.visualAnchorWallMs = this.nativeSampleWallMs;
+  }
+
   setList(list: Array<DanmakuItem>): void {
     // seg.so 的条目按服务端选择顺序返回，不能直接交给二分游标和时间线消费。
     this.sourceList = this.remoteWithoutLocal(list).concat(this.localItems)
@@ -100,7 +150,7 @@ export class PlayerDanmakuEngine {
     this.sourceList = [];
     this.list = [];
     this.cursor = 0;
-    this.lastPlayerTime = 0;
+    this.resetVisualTime(0);
     this.clearActive();
   }
 
@@ -486,7 +536,9 @@ export class PlayerDanmakuEngine {
 
   drawFrame(advance: boolean = true, frameTimeMs: number = Date.now()): void {
     this.ctx.clearRect(0, 0, this.width, this.height);
-    const now: number = this.lastPlayerTime;
+    // DisplaySync timestamp 是开机时钟，不能与原生采样的 Date.now 墙钟混算。
+    if (advance) this.visualTime = this.predictedVisualTime(Date.now());
+    const now: number = this.visualTime;
     const fontSize: number = this.fontSize();
     const laneH: number = this.lineHeight();
     // 双缓冲原地复用，避免每帧分配 keep 数组带来的 GC 压力。
@@ -521,18 +573,13 @@ export class PlayerDanmakuEngine {
       }
       if (dm.isFixed) {
         // 固定弹幕：被点击冻结时不过期（保持停住），否则按 fixedUntil 过期。
-        if (!frozen && now > dm.fixedUntil) {
+        if (!frozen && this.nativePlayerTime > dm.fixedUntil) {
           continue;
         }
         // 整数坐标：位置锁死后浮点亚像素每帧取齐会原地抖动，取整避免文字闪烁。
         const x: number = Math.round((this.width - dm.textWidth) / 2);
         const y: number = Math.round(dm.lane * laneH + itemFont);
-        if (appliedColor !== dm.renderColor) {
-          this.ctx.fillStyle = dm.renderColor;
-          appliedColor = dm.renderColor;
-        }
-        this.ctx.strokeText(dm.renderText, x, y);
-        this.ctx.fillText(dm.renderText, x, y);
+        appliedColor = this.drawVisibleText(dm, x, y, appliedColor);
         keep.push(dm);
       } else if (dm.reverse) {
         // 逆向滚动（mode 6）：从左向右推进。
@@ -542,12 +589,7 @@ export class PlayerDanmakuEngine {
         }
         const x: number = Math.round(dm.x);
         const y: number = Math.round(dm.lane * laneH + itemFont);
-        if (appliedColor !== dm.renderColor) {
-          this.ctx.fillStyle = dm.renderColor;
-          appliedColor = dm.renderColor;
-        }
-        this.ctx.strokeText(dm.renderText, x, y);
-        this.ctx.fillText(dm.renderText, x, y);
+        appliedColor = this.drawVisibleText(dm, x, y, appliedColor);
         keep.push(dm);
       } else {
         // 滚动弹幕：被冻结时停在当前位置不再前进。
@@ -557,18 +599,23 @@ export class PlayerDanmakuEngine {
         }
         const x: number = Math.round(dm.x);
         const y: number = Math.round(dm.lane * laneH + itemFont);
-        if (appliedColor !== dm.renderColor) {
-          this.ctx.fillStyle = dm.renderColor;
-          appliedColor = dm.renderColor;
-        }
-        this.ctx.strokeText(dm.renderText, x, y);
-        this.ctx.fillText(dm.renderText, x, y);
+        appliedColor = this.drawVisibleText(dm, x, y, appliedColor);
         keep.push(dm);
       }
     }
     this.ctx.globalAlpha = 1;
     this.activeBack = this.active;
     this.active = keep;
+  }
+
+  /** 只省掉完全离屏文字的描边/填充；活动位置、过期及点击矩形仍照常更新。 */
+  private drawVisibleText(dm: ActiveDm, x: number, y: number, appliedColor: string): string {
+    // 留出描边边缘，文字刚进入视口时不会被过早裁掉。
+    if (x >= this.width + 2 || x + dm.textWidth <= -2) return appliedColor;
+    if (appliedColor !== dm.renderColor) this.ctx.fillStyle = dm.renderColor;
+    this.ctx.strokeText(dm.renderText, x, y);
+    this.ctx.fillText(dm.renderText, x, y);
+    return dm.renderColor;
   }
 
   /**
@@ -579,14 +626,15 @@ export class PlayerDanmakuEngine {
   private drawSpecial(dm: ActiveDm, now: number): boolean {
     const track: SpecialTrack = dm.special as SpecialTrack;
     const elapsedMs: number = (now - dm.born) * 1000;
-    if (elapsedMs < track.delayMs) {
+    if (elapsedMs + 0.001 < track.delayMs) {
       return true; // 延迟中，未到出场时间
     }
-    const t0: number = elapsedMs - track.delayMs;
-    if (t0 > track.durationMs) {
+    // 预测先到终点时保留末帧；只有真实播放头确认过期才移除，缓冲不会提前丢弹幕。
+    if ((this.nativePlayerTime - dm.born) * 1000 > track.delayMs + track.durationMs) {
       return false;
     }
-    let progress: number = t0 / track.durationMs;
+    const t0: number = Math.max(0, elapsedMs - track.delayMs);
+    let progress: number = Math.max(0, Math.min(1, t0 / track.durationMs));
     if (track.easeOut) {
       progress = -progress * (progress - 2);
     }
@@ -608,7 +656,7 @@ export class PlayerDanmakuEngine {
 
   resetAt(time: number): void {
     this.localEchoConsumed.clear();
-    this.lastPlayerTime = time;
+    this.resetVisualTime(time);
     this.clearActive();
     this.syncCursor(time);
   }
@@ -619,6 +667,10 @@ export class PlayerDanmakuEngine {
   }
 
   setPlaybackRate(value: number): void {
+    if (!Number.isFinite(value) || value <= 0 || value === this.playbackRate) return;
+    const wallMs: number = Date.now();
+    this.visualAnchorTime = this.predictedVisualTime(wallMs);
+    this.visualAnchorWallMs = wallMs;
     this.playbackRate = value;
     this.refreshScrollSpeeds();
   }

@@ -41,6 +41,7 @@ import { PlayerDanmakuClock } from './PlayerDanmakuClock';
 import { SubtitleTrack, VideoItem, VideoQualityOption } from '../../model/Models';
 import { BasicDataSource } from '../../common/BasicDataSource';
 import { PlayerGestureOverlay, PlayerScrubController } from './PlayerGestureOverlay';
+import { PlayerProgressController } from './PlayerProgressController';
 import { PlayerFullscreenHeader } from './PlayerFullscreenHeader';
 import { CONTROLS_GRADIENT_COLORS } from './PlayerDanmakuSupport';
 import { PlayerDanmakuEngine } from './PlayerDanmakuEngine';
@@ -105,6 +106,9 @@ export struct PlayerView {
   /** 弹幕画布固定高度（展开态播放区高/全屏高）：收起/展开动画期画布节点尺寸恒定，只有外层裁剪窗口收缩，
    *  Canvas 后备缓冲不被逐帧 resize，避免清缓冲造成的弹幕闪烁。 */
   @Prop danmakuFixedHeight: number = 0;
+  /** 评论区收放只缩放画面层；Surface 保持展开态尺寸，避免逐帧重新分配渲染缓冲。0 表示随窗口布局。 */
+  @Prop videoFixedHeight: number = 0;
+  @Prop videoVisibleHeight: number = 0;
   /** 弹幕引擎就绪（或已绑定外部画布）后回调，外部据此直接驱动视口尺寸。 */
   onDanmakuEngineReady: (engine: PlayerDanmakuEngine) => void = (engine: PlayerDanmakuEngine) => {
   };
@@ -245,6 +249,7 @@ export struct PlayerView {
   // 底部进度条/章节条的「待落点」通道：横滑期间与结束后保持预览位置（条跟手），
   // seek 完成后清零回落到真实播放进度。与 scrubCtl 分开：叠层预览卡要在手势结束时立即消失。
   private seekTargetCtl: PlayerScrubController = new PlayerScrubController();
+  private progressCtl: PlayerProgressController = new PlayerProgressController();
   @State systemVolumeLevel: number = 0;
   private systemVolume: SystemMediaVolume = new SystemMediaVolume();
   @State gestureAdjustKind: string = '';
@@ -311,7 +316,7 @@ export struct PlayerView {
   private dmEngine: PlayerDanmakuEngine = new PlayerDanmakuEngine(this.ctx);
   private dmInteraction: PlayerDanmakuInteractionController = new PlayerDanmakuInteractionController(this.dmEngine);
   private dmClock: PlayerDanmakuClock = new PlayerDanmakuClock({
-    isPlaying: (): boolean => this.playing,
+    isPlaying: (): boolean => this.playing && !this.buffering && !this.seekLocked,
     isDanmakuOn: (): boolean => this.danmakuOn && !this.appInBackground,
     getFrameRate: (): number => this.dmFrameRate,
     getEngine: (): PlayerDanmakuEngine => this.dmEngine,
@@ -389,7 +394,7 @@ export struct PlayerView {
   private seekLocked: boolean = false;
   // 拖动进度条期间滑块以拖动值为准，避免 timeUpdate 回写 curTime 把滑块拽回。
   @State sliderDragging: boolean = false;
-  @State sliderDragValue: number = 0;
+  private sliderDragValue: number = 0;
   @State seekPreviewFrame: image.PixelMap | null = null;
   private seekPreviewSeconds: number = -1;
   @State seekPreviewSprite: string = '';
@@ -425,6 +430,8 @@ export struct PlayerView {
       this.previewPlayback = state.preview;
       this.playbackRate = state.playbackRate;
       this.holdSpeedActive = state.holdSpeedActive;
+      this.progressCtl.publish(state.position,
+        state.playing && !state.buffering && !state.seekLocked && !this.appInBackground);
     },
     event: (event: PlayerPlaybackEvent): void => this.onPlaybackEvent(event),
     progress: (seconds: number, background: boolean): void => this.onPlaybackProgress(seconds, background),
@@ -480,6 +487,7 @@ export struct PlayerView {
         else { this.clearSeekPreviewInteraction(); this.endScreenOpen = true; this.onEnded(); }
         break;
       case 'seek':
+        this.progressCtl.publish(event.value, false);
         this.resetDanmakuAt(event.value);
         this.auxiliary.prefetch(event.value);
         this.interactionCtl.update(event.value);
@@ -513,6 +521,7 @@ export struct PlayerView {
 
   private onPlaybackProgress(seconds: number, background: boolean): void {
     this.playheadSec = seconds;
+    if (!background) this.progressCtl.publish(seconds, this.playing && !this.buffering && !this.seekLocked);
     this.interactionCtl.update(seconds);
     if (!background) {
       if (this.dmEngine.lastPlayerTime > 0 &&
@@ -1388,6 +1397,10 @@ export struct PlayerView {
     return this.duration > 0 ? this.curTime : 0;
   }
 
+  private controlsVisible(): boolean {
+    return this.showControls || (!this.playing && this.compactMode && !this.fullscreen);
+  }
+
   private passiveProgressWidth(): string {
     if (this.duration <= 0) return '0%';
     const percent: number = Math.max(0, Math.min(100, this.curTime * 100 / this.duration));
@@ -1415,9 +1428,14 @@ export struct PlayerView {
     this.seekPreviewCtl.close();
   }
 
-  private finishProgressPreviewInteraction(): void {
+  private finishProgressPreviewInteraction(committed: boolean = false): void {
+    const wasDragging: boolean = this.sliderDragging;
+    if (this.sliderDragging && !committed) this.progressCtl.publish(this.playheadSec, false);
     this.sliderDragging = false;
+    this.scrubCtl.show(-1);
+    this.seekTargetCtl.show(-1);
     this.closeSeekPreview();
+    if (this.playing && (wasDragging || committed)) this.scheduleControlsHide();
   }
 
   private clearSeekPreviewInteraction(): void {
@@ -1783,9 +1801,11 @@ export struct PlayerView {
 
   private scheduleControlsHide(): void {
     if (this.hideTimer >= 0) clearTimeout(this.hideTimer);
+    this.hideTimer = -1;
+    if (this.sliderDragging) return;
     this.hideTimer = setTimeout(() => {
       this.hideTimer = -1;
-      if (this.playing && !this.showMoreMenu && !this.showSideDrawer) {
+      if (this.playing && !this.sliderDragging && !this.showMoreMenu && !this.showSideDrawer) {
         this.showControls = false;
       }
     }, 3000);
@@ -2002,30 +2022,31 @@ export struct PlayerView {
     this.dmEngine.syncCursor(time);
   }
 
-  build() {
+  private videoRenderScale(): number {
+    if (!Number.isFinite(this.videoFixedHeight) || !Number.isFinite(this.videoVisibleHeight) ||
+      this.videoFixedHeight <= 0 || this.videoVisibleHeight <= 0) return 1;
+    return Math.min(1, this.videoVisibleHeight / this.videoFixedHeight);
+  }
+
+  @Builder
+  VideoPicture() {
+    // Surface 与覆盖帧共用固定尺寸及等比变换；控件仍按实际可视高度布局。
     Stack({ alignContent: Alignment.Center }) {
-      AVVolumePanel({ volumeLevel: this.systemVolumeLevel })
-      // 视频画面（外层 Stack 承载镜像翻转：XComponent 自身不支持 transform 属性）
-      Stack() {
-        XComponent({
-          id: 'playerSurface',
-          type: XComponentType.SURFACE,
-          controller: this.xcController,
+      XComponent({
+        id: 'playerSurface',
+        type: XComponentType.SURFACE,
+        controller: this.xcController,
+      })
+        .id('qa_player_surface')
+        .width('100%')
+        .height('100%')
+        .onSizeChange((_previous: SizeOptions, current: SizeOptions) => {
+          this.playback.resize(this.getUIContext().vp2px(Number(current.width ?? 0)),
+            this.getUIContext().vp2px(Number(current.height ?? 0)));
         })
-          .id('qa_player_surface')
-          .width('100%')
-          .height('100%')
-          .onSizeChange((_previous: SizeOptions, current: SizeOptions) => {
-            this.playback.resize(this.getUIContext().vp2px(Number(current.width ?? 0)),
-              this.getUIContext().vp2px(Number(current.height ?? 0)));
-          })
-          .onLoad(() => {
-            this.onSurfaceReady();
-          })
-      }
-      .width('100%')
-      .height('100%')
-      .rotate({ angleY: this.mirrorOn ? 180 : 0 })
+        .onLoad(() => {
+          this.onSurfaceReady();
+        })
 
       // 起播缓冲封面：垫在 surface 之上、弹幕之下，首帧上屏（'playing'）后淡出；
       // 换源/换清晰度后重新垫起，缓冲期看到的是封面而不是黑屏。
@@ -2048,6 +2069,23 @@ export struct PlayerView {
           .objectFit(ImageFit.Cover)
           .hitTestBehavior(HitTestMode.None)
       }
+    }
+    .id('qa_player_picture')
+    .width('100%')
+    .height(this.videoFixedHeight > 0 ? this.videoFixedHeight : '100%')
+    .constraintSize({
+      minHeight: this.videoFixedHeight > 0 ? this.videoFixedHeight : undefined,
+      maxHeight: this.videoFixedHeight > 0 ? this.videoFixedHeight : undefined,
+    })
+    .scale({ x: this.videoRenderScale(), y: this.videoRenderScale(), centerX: '50%', centerY: '50%' })
+    .rotate({ angleY: this.mirrorOn ? 180 : 0 })
+    .hitTestBehavior(HitTestMode.None)
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.Center }) {
+      AVVolumePanel({ volumeLevel: this.systemVolumeLevel })
+      this.VideoPicture()
 
       // 弹幕层：位于视频画面与控件层之间（层级顺序 视频 < 弹幕 < 其他组件），
       // 控制条/弹幕输入/气泡/字幕始终浮在弹幕之上。画布节点高度恒定为 danmakuFixedHeight，
@@ -2252,14 +2290,16 @@ export struct PlayerView {
         .position({ left: 0, bottom: this.showControls ? (this.fullscreen ? 88 : 42) : 0 })
         .zIndex(85)
       }
-      // 控件层（播完结束画面为整幅蒙版，不再叠加控制条）
-      if ((this.showControls || (!this.playing && this.compactMode && !this.fullscreen)) && this.errorText.length === 0 && !this.endScreenOpen) {
+      // 保留控件节点，显隐只更新可见性；反复创建图标/Slider 会占用手势后的首帧。
+      if (this.errorText.length === 0 && !this.endScreenOpen) {
         Column() {
           if (this.compactMode && !this.fullscreen) {
             PlayerCompactControls({
               playing: this.playing,
               hotPoints: this.hotPoints,
-              progress: this.progressDisplayTime(),
+              progress: this.curTime,
+              progressCtl: this.progressCtl,
+              controlsVisible: this.controlsVisible(),
               duration: this.duration,
               chapters: this.chapters,
               scrubCtl: this.seekTargetCtl,
@@ -2325,7 +2365,9 @@ export struct PlayerView {
               sponsorEnabled: this.sponsorSkipEnabled,
               chapters: this.chapters,
               sponsorSegments: this.visibleSponsorSegments(),
-              progress: this.progressDisplayTime(),
+              progress: this.curTime,
+              progressCtl: this.progressCtl,
+              controlsVisible: this.controlsVisible(),
               duration: this.duration,
               scrubCtl: this.seekTargetCtl,
               qualityLoading: this.qualityLoading,
@@ -2352,6 +2394,9 @@ export struct PlayerView {
         }
         .width('100%')
         .height('100%')
+        .id('qa_player_controls')
+        .visibility(this.controlsVisible() ? Visibility.Visible : Visibility.Hidden)
+        .hitTestBehavior(this.controlsVisible() ? HitTestMode.Default : HitTestMode.None)
         .linearGradient({
           angle: 180,
           colors: CONTROLS_GRADIENT_COLORS,
@@ -2503,14 +2548,23 @@ export struct PlayerView {
   private onProgressSliderChange(value: number, mode: SliderChangeMode): void {
     // 拖动期间滑块以拖动值为准，避免 timeUpdate 回写 curTime 把滑块拽回；仍在 End/Click 才 seek。
     if (mode === SliderChangeMode.Begin) {
-      this.sliderDragging = true;
+      if (this.hideTimer >= 0) clearTimeout(this.hideTimer);
+      this.hideTimer = -1;
       this.sliderDragValue = value;
+      this.scrubCtl.show(value);
+      this.seekTargetCtl.show(value);
+      this.sliderDragging = true;
       this.requestSeekPreview(value);
     } else if (mode === SliderChangeMode.Moving) {
       this.sliderDragValue = value;
+      this.scrubCtl.show(value);
+      this.seekTargetCtl.show(value);
       this.requestSeekPreview(value);
     } else {
-      this.finishProgressPreviewInteraction();
+      if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
+        this.progressCtl.publish(value, false);
+      }
+      this.finishProgressPreviewInteraction(mode === SliderChangeMode.End || mode === SliderChangeMode.Click);
       if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
         Haptic.seek();
         // Moving 阶段只更新预览；End/Click 仅提交一次精确 seek，避免落到前一关键帧。

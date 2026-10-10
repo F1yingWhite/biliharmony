@@ -52,8 +52,10 @@ test('progress slider preview keeps whole-video timing and never borrows the pre
   f.show(1010);
   assert.equal(f.text().at(-1), '快进 10 秒');
   f.ui.component.sliderSeekPreview = 5400;
-  f.ui.build();
+  f.show(5400);
   assert.deepEqual(f.text(), ['01:30:00 / 02:00:00']);
+  f.show(5401.25);
+  assert.deepEqual(f.text(), ['01:30:01 / 02:00:00'], 'moving uses the injected latest slider value');
   f.show(-1);
   assert.deepEqual(f.text(), ['01:30:00 / 02:00:00']);
   f.ui.component.sliderSeekPreview = -1;

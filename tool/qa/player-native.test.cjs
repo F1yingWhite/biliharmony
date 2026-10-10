@@ -172,6 +172,47 @@ test('libmpv: surface resize and user rate/volume reach existing instance withou
   await f.owner.release();
 });
 
+test('libmpv: repeated viewport pixels do not enqueue another native resize', async () => {
+  const f = fixture(); await f.owner.open('video', '', 'surface');
+  f.owner.engine.resize(1920.1, 1080.1);
+  f.owner.engine.resize(1920, 1080);
+  f.owner.engine.resize(1920.49, 1080.49);
+  f.owner.engine.resize(1920.51, 1080.49);
+  f.owner.engine.resize(1920.6, 1080.6);
+  f.owner.engine.resize(1920, 1080);
+  assert.deepEqual(f.calls.filter(call => call[0] === 'resize'),
+    [['resize', 1, 1920, 1080], ['resize', 1, 1921, 1080], ['resize', 1, 1921, 1081], ['resize', 1, 1920, 1080]]);
+  assert.equal(f.calls.filter(call => call[0] === 'create').length, 1);
+  assert.equal(f.calls.filter(call => call[0] === 'seek').length, 0);
+  await f.owner.release();
+});
+
+test('libmpv: viewport cached while create is pending reaches its handle once before open', async () => {
+  const f = fixture(), create = deferred(); f.createQueue.push(create.promise);
+  const opening = f.owner.open('video', '', 'surface'); await tick();
+  f.owner.engine.resize(1280, 720);
+  f.owner.engine.resize(1920.1, 1080.1);
+  f.owner.engine.resize(1920.49, 1080.49);
+  assert.equal(f.calls.filter(call => call[0] === 'resize').length, 0);
+  create.resolve(1); await opening;
+  assert.deepEqual(f.calls.filter(call => call[0] === 'resize'), [['resize', 1, 1920, 1080]]);
+  assert(f.calls.findIndex(call => call[0] === 'resize') < f.calls.findIndex(call => call[0] === 'open'));
+  f.owner.engine.resize(1920, 1080);
+  assert.equal(f.calls.filter(call => call[0] === 'resize').length, 1);
+  await f.owner.release();
+});
+
+test('libmpv: invalid or subpixel-zero viewport cannot replace a valid size', async () => {
+  const f = fixture(); await f.owner.open('video', '', 'surface');
+  f.owner.engine.resize(1280, 720);
+  for (const [width, height] of [[0, 720], [-1, 720], [NaN, 720], [1280, Infinity], [0.4, 720], [1280, 0.4]]) {
+    f.owner.engine.resize(width, height);
+  }
+  f.owner.engine.resize(1280, 720);
+  assert.deepEqual(f.calls.filter(call => call[0] === 'resize'), [['resize', 1, 1280, 720]]);
+  await f.owner.release();
+});
+
 test('libmpv: DEBUG rate diagnostics poll every 30 ms for 1200 ms without changing playback controls', async () => {
   const f = fixture({debug: true}); await f.owner.open('https://cdn/video?token=private', 'audio', 'surface'); f.loaded();
   const normalLogs = () => f.logs.filter(log => log[2].startsWith('mpv.clock='));

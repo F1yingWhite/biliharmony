@@ -23,10 +23,13 @@ function viewFixture() {
   const code = ts.transpileModule('class View {\n' + stateBody + methods + '\n}; return View;',
     {compilerOptions: {target: ts.ScriptTarget.ES2020}}).outputText;
   const {PlayerPlaybackConfig} = f.load('components/player/PlayerPlaybackConfig');
+  const {PlayerProgressController} = f.load('components/player/PlayerProgressController');
+  const progressCtl = new PlayerProgressController();
+  progressCtl.attach({updateProgress: (value, smooth) => effects.push(['ui.progress', value, smooth])});
   const View = new Function('Immersive', 'clearTimeout', 'PlayerPlaybackConfig', code)(
     {setKeepScreenOn: value => effects.push(['screen', value])}, f.globals.clearTimeout, PlayerPlaybackConfig);
   const page = Object.assign(new View(), {
-    playback: f.session, playing: false, prepared: false, curTime: 0, playheadSec: 0, duration: 0,
+    playback: f.session, progressCtl, playing: false, prepared: false, curTime: 0, playheadSec: 0, duration: 0,
     firstFrameShown: false, seekPreviewSeconds: -1, seekPreviewFrame: {}, compactMode: true, fullscreen: false,
     hideTimer: -1, timerFireAt: 0, lastSystemPlaybackBucket: -1, playMode: 0, endScreenOpen: true,
     dmEngine: {lastPlayerTime: 0, list: ['loaded'], setPlaybackRate: rate => effects.push(['rate', rate])},
@@ -75,6 +78,10 @@ test('player UI adapter: timeline reaches subtitles, danmaku, prefetch and conti
   assert.equal(f.page.duration, 100); assert.equal(f.page.curTime, 5.05); assert.equal(f.page.playheadSec, 5.05);
   for (const kind of ['subtitle', 'dm.spawn', 'prefetch', 'continue', 'interaction.time']) assert.ok(f.effects.some(e => e[0] === kind && e[1] === 5.05));
   engine.currentTime = 5200; engine.emit('time', 5200); assert.equal(f.page.curTime, 5.05, 'reactive time remains second-granular');
+  assert.deepEqual(f.effects.filter(e => e[0] === 'ui.progress' && e[1] >= 5),
+    [['ui.progress', 5.05, true], ['ui.progress', 5.2, true]], 'subsecond native samples reach the local control once');
+  f.session.pause();
+  assert.deepEqual(f.effects.filter(e => e[0] === 'ui.progress').at(-1), ['ui.progress', 5.2, false]);
   assert.equal(f.page.playheadSec, 5.2); f.session.deactivate();
 });
 

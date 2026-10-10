@@ -36,16 +36,16 @@ EGL 配置、NativeWindow 像素格式和实际 framebuffer 都经过检查，�
 ## 固定的鸿蒙二进制
 
 播放器使用共享库 `libmpv.so` 和依赖载体 `libdep.so`。新内核来自固定源码
-`6edeee00a07b9b76f197aa71eee3d029fb090de4`，依次应用本仓库 `tool/mpv/patches/0001`、`0002` 与 `0003`。
+`6edeee00a07b9b76f197aa71eee3d029fb090de4`，依次应用本仓库 `tool/mpv/patches/0001`、`0002`、`0003` 与 `0004`。
 依赖载体来自原始 OHOS 20260715 发布，只有 ELF SONAME 从 libmpv.so 改为 libdep.so。
 原发布及全部组件、版权和许可证信息仍保留在 sources.json 与 licenses.txt。
 
 | 产物 | 原始构建输入 SHA-256 | 实际 HAP 中剥离后的 SHA-256 |
 | --- | --- | --- |
-| 新 libmpv.so | `f904d78b7c227c659f53131e65033218be8b77d5ce49d18acad5be6f5d4597b3` | `5a8279b527ff889ab273f93aded9ca96006f2d11e4abc391456c5c6bd725c9ce` |
+| 新 libmpv.so | `98f14b2cc6904448b3ca6f72c34a0c8899fa9d2d4545e31e7a48df1eb76f71c9` | `66355d20da77ecf087aa0d31790fc2321c6c2b96654fea3ef1feb0a3d7d960bb` |
 | libdep.so | `098e628f73f1a709bdff16de7eb5fad7d104a0d5bce68c23435b6214d57a35e0` | `098e628f73f1a709bdff16de7eb5fad7d104a0d5bce68c23435b6214d57a35e0` |
 
-新内核剥离后 2,261,536 字节；载体剥离后 35,491,168 字节。
+新内核剥离后 2,261,552 字节；载体剥离后 35,491,168 字节。
 HAP 的散列对应 SDK `llvm-strip --strip-all` 后的产物，构建输入散列不能冒充包内散列。
 完整固定输入、补丁校验值、构建选项与 ELF 检查在 `tool/mpv/rebuild-report-arm64.json`。
 可复现命令见 [内核重建说明](../tool/mpv/README.md)。两库必须一起分发和替换。
@@ -59,6 +59,10 @@ HAP 的散列对应 SDK `llvm-strip --strip-all` 后的产物，构建输入散�
 HDR 到 SDR 切换恢复 sRGB、`NONE`、零静态元数据与零 HDR 白点亮度。
 输出颜色或元数据变化时重建 EGL window surface，让新申请的缓冲携带新标签，保留 EGL context 和 GL 资源；
 普通帧及倍速切换不触发这次重建。协商或提交失败时回退 SDR，无法恢复则停止输出并报告错误。
+0004 保留纯尺寸变化时已协商的颜色标签，避免缩放或旋转后把同一颜色再次提交并重建 EGL surface；
+真正的 HDR/SDR、静态元数据变化及失败回退仍执行原有协商与缓冲更新。
+当前 ARM64 虚拟机上的评论区缩放、定位、全屏返回与弹幕/控件交互记录见
+[界面流畅性验证](player-ui-fluency-validation.md)。
 虚拟机使用的 GLES 格式探测兼容保护不属于 ARM 补丁。
 
 这次核心重建使用 OpenGL，关闭新核心的 Vulkan/shaderc；相关组件仍留在原始载体中。

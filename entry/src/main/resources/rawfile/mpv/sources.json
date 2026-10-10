@@ -11,11 +11,11 @@
   },
   "binary": {
     "name": "libmpv.so",
-    "sha256": "5a8279b527ff889ab273f93aded9ca96006f2d11e4abc391456c5c6bd725c9ce",
-    "bytes": 2261536,
+    "sha256": "66355d20da77ecf087aa0d31790fc2321c6c2b96654fea3ef1feb0a3d7d960bb",
+    "bytes": 2261552,
     "architecture": "aarch64",
-    "input_sha256": "f904d78b7c227c659f53131e65033218be8b77d5ce49d18acad5be6f5d4597b3",
-    "input_bytes": 2628832,
+    "input_sha256": "98f14b2cc6904448b3ca6f72c34a0c8899fa9d2d4545e31e7a48df1eb76f71c9",
+    "input_bytes": 2628944,
     "packaging_transform": "OHOS SDK llvm-strip --strip-all",
     "soname": "libmpv.so"
   },
@@ -348,11 +348,15 @@
     {
       "path": "tool/mpv/patches/0003-ohos-hdr-output.patch",
       "sha256": "8735cfbf347e81173797e771c0155be806175f72c93e897aeddf13ec9899e091"
+    },
+    {
+      "path": "tool/mpv/patches/0004-ohos-resize-preserve-color.patch",
+      "sha256": "ac0dd1da97c79c6d408a54c3da56b74dfeee83211a3a355540aa143992ed55a6"
     }
   ],
   "rebuild_report": {
     "path": "tool/mpv/rebuild-report-arm64.json",
-    "sha256": "3fe8d74f2930e0638ccfc5bf59acd879a8d9ac3441529785a4ace48990f25bb8"
+    "sha256": "f69842de6e660ded1497ac402c0b86dab22840398a9dfd08c293df1074f2f105"
   },
   "derivation": {
     "kind": "local core-only rebuild plus original dependency carrier",

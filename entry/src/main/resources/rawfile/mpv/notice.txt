@@ -1,14 +1,14 @@
 BiliHarmony locally rebuilt OHOS player and dependency carrier.
 
-New libmpv.so HAP SHA-256: 5a8279b527ff889ab273f93aded9ca96006f2d11e4abc391456c5c6bd725c9ce
-New libmpv.so build input SHA-256: f904d78b7c227c659f53131e65033218be8b77d5ce49d18acad5be6f5d4597b3
+New libmpv.so HAP SHA-256: 66355d20da77ecf087aa0d31790fc2321c6c2b96654fea3ef1feb0a3d7d960bb
+New libmpv.so build input SHA-256: 98f14b2cc6904448b3ca6f72c34a0c8899fa9d2d4545e31e7a48df1eb76f71c9
 Dependency libdep.so HAP SHA-256: 098e628f73f1a709bdff16de7eb5fad7d104a0d5bce68c23435b6214d57a35e0
 Dependency libdep.so input SHA-256: 098e628f73f1a709bdff16de7eb5fad7d104a0d5bce68c23435b6214d57a35e0
 
 The original release notice below describes the dependency carrier before its
 SONAME rename. Its original libmpv.so hash identifies that original input,
 not the new playback core. All original licenses and copyright texts remain.
-The new core applies local patches 0001/0002/0003 from tool/mpv/patches, using
+The new core applies local patches 0001/0002/0003/0004 from tool/mpv/patches, using
 the fixed source SHA and inputs in sources.json and tool/mpv/rebuild-inputs.json.
 Rebuild script: tool/mpv/rebuild-ohos-core.py; exact ARM report:
 tool/mpv/rebuild-report-arm64.json. Ship the corresponding sources, original
