@@ -6,6 +6,7 @@ export struct PlayerGestureSurface {
   onPanStart: (event: GestureEvent) => void = () => {};
   onPanUpdate: (event: GestureEvent) => void = () => {};
   onPanEnd: () => void = () => {};
+  onPanCancel: () => void = () => {};
   onLongPressStart: () => void = () => {};
   onLongPressEnd: () => void = () => {};
   onTouchDown: (x: number, y: number) => void = () => {};
@@ -22,7 +23,7 @@ export struct PlayerGestureSurface {
             .onActionStart((event: GestureEvent) => this.onPanStart(event))
             .onActionUpdate((event: GestureEvent) => this.onPanUpdate(event))
             .onActionEnd(() => this.onPanEnd())
-            .onActionCancel(() => this.onPanEnd())
+            .onActionCancel(() => this.onPanCancel())
         )
       )
       .priorityGesture(

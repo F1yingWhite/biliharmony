@@ -162,6 +162,13 @@ export struct PlayerGestureOverlay {
         .fontColor('#FFFFFFFF')
         // Text 上使用组件 shadow 会投影整个矩形边界，表现为时间文字外有一层方框。
         .textShadow({ radius: 3, color: '#CC000000', offsetX: 0, offsetY: 1 })
+      if (this.sliderSeekPreview < 0 && this.scrubPreview >= 0) {
+        Text(this.scrubDeltaText())
+          .fontSize(this.fullscreen ? 15 : 14)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#FFFFFFFF')
+          .textShadow({ radius: 3, color: '#CC000000', offsetX: 0, offsetY: 1 })
+      }
     }
     .align(Alignment.Center)
   }
@@ -172,6 +179,20 @@ export struct PlayerGestureOverlay {
 
   private previewHeight(): number {
     return this.previewWidth() * 9 / 16;
+  }
+
+  /** 用已夹到视频范围的落点和手势起点计算实际位移，预览更新仅重绘本叠层。 */
+  private scrubDeltaText(): string {
+    const delta: number = this.scrubPreview - this.panStartTime;
+    const seconds: number = Math.round(Math.abs(delta) * 10) / 10;
+    if (seconds === 0) return '未移动';
+    const direction: string = delta < 0 ? '后退 ' : '快进 ';
+    if (seconds <= 60) return direction + String(seconds) + ' 秒';
+    const hours: number = Math.floor(seconds / 3600);
+    const minutes: number = Math.floor((seconds % 3600) / 60);
+    const remainder: number = Math.round((seconds % 60) * 10) / 10;
+    return direction + (hours > 0 ? String(hours) + ' 小时 ' : '') +
+      String(minutes) + ' 分 ' + String(remainder) + ' 秒';
   }
 
   private formatSeekTime(seconds: number): string {

@@ -15,6 +15,10 @@ export class PlayerGestureController {
   panGestureActive: boolean = false;
   panMode: string = '';
   private lastGestureApplyMs: number = 0;
+  private panStarted: boolean = false;
+  private panSeekWidth: number = 0;
+  private panSeekDuration: number = 0;
+  private panSeekRange: number = 0;
 
   private onSeekPreview: (value: number) => void;
   private onSeek: (value: number) => void;
@@ -52,8 +56,15 @@ export class PlayerGestureController {
   beginPan(eventX: number, viewWidth: number, playheadSec: number, duration: number): void {
     this.loadInitials();
     this.lastGestureApplyMs = 0;
-    this.panStartTime = playheadSec;
+    this.panStarted = true;
+    this.panStartTime = Number.isFinite(playheadSec) ? playheadSec : 0;
     this.panStartX = eventX;
+    // 一次横滑最多移动 60 秒，长视频的小幅定位不随总时长放大。
+    // 起手时固定比例，旋转/布局与时长更新不能让同一次手势突然跳变。
+    this.panSeekWidth = Number.isFinite(viewWidth) && viewWidth > 1 ? viewWidth : 0;
+    this.panSeekDuration = Number.isFinite(duration) && duration > 0 &&
+      Number.isFinite(playheadSec) && playheadSec >= 0 ? duration : 0;
+    this.panSeekRange = Math.min(this.panSeekDuration, 60);
     this.panGestureActive = false;
     this.panMode = '';
     this.panStartBrightness = this.gestureBrightness;
@@ -63,12 +74,17 @@ export class PlayerGestureController {
   }
 
   updatePan(offsetX: number, offsetY: number, viewWidth: number, duration: number): void {
+    if (!this.panStarted) return;
+    if (!Number.isFinite(offsetX) || !Number.isFinite(offsetY)) {
+      this.cancelPan();
+      return;
+    }
     // 注意：不能在这里刷新 lastGestureApplyMs，否则下面的 16ms 节流永假，
     // onBrightnessApply/onVolumeApply 永远触发不到（亮度调节失效的根因）。
     if (this.panMode.length === 0) {
       const absX: number = Math.abs(offsetX);
       const absY: number = Math.abs(offsetY);
-      if (duration > 0 && absX > absY * 1.15) {
+      if (this.panSeekWidth > 0 && this.panSeekRange > 0 && absX > absY * 1.15) {
         this.panMode = 'seek';
       } else if (absY > absX * 1.15) {
         this.panMode = this.panStartX < viewWidth / 2 ? 'brightness' : 'volume';
@@ -76,12 +92,10 @@ export class PlayerGestureController {
     }
     if (this.panMode === 'seek') {
       this.panGestureActive = true;
-      // 横滑 seek 应“一个屏幕宽度 ≈ 拖动整个视频”，而不是用一个近似常数 1.6vp
-      // 把小幅度手势放大成首/尾跳变。viewWidth 是手势所在区域的 vp 宽度。
-      const secondsPerVp: number = viewWidth > 0 ? duration / viewWidth : duration;
+      const ratio: number = Math.max(-1, Math.min(1, offsetX / this.panSeekWidth));
       // 手势 seek 目标最多到结尾前 0.5s：拖到头不触发"自然播完"，防止误切下一个视频。
-      const maxPreview: number = duration > 0 ? Math.max(0, duration - 0.5) : duration;
-      const preview: number = Math.max(0, Math.min(maxPreview, this.panStartTime + offsetX * secondsPerVp));
+      const maxPreview: number = Math.max(0, this.panSeekDuration - 0.5);
+      const preview: number = Math.max(0, Math.min(maxPreview, this.panStartTime + ratio * this.panSeekRange));
       this.onSeekPreview(preview);
       return;
     }
@@ -90,7 +104,7 @@ export class PlayerGestureController {
       // travel 兜底：viewWidth 在播放器尚未完成布局时为 0/1（弹幕引擎初始值），
       // 直接乘 0.8 会把任何微小 offsetY 的都按 0.8 除 → 亮度瞬间 clamp 到最亮/最暗。
       // 下限 160vp 保证灵敏度有上限：即使视口未知，轻抖最多偏移几个百分点。
-      const travel: number = Math.max(160, viewWidth * 0.8);
+      const travel: number = Number.isFinite(viewWidth) ? Math.max(160, viewWidth * 0.8) : 160;
       const value: number = Math.max(0.02, Math.min(1, this.panStartBrightness - offsetY / travel));
       this.gestureBrightness = value;
       // 提示气泡展示整数百分比（0~100），不能把原始小数/偏移量直接拼进文本。
@@ -108,7 +122,7 @@ export class PlayerGestureController {
     if (this.panMode === 'volume') {
       this.panGestureActive = false;
       // 与亮度共用 travel 下限：viewWidth 未就绪时避免音量一步跳满/归零。
-      const travel: number = Math.max(160, viewWidth * 0.8);
+      const travel: number = Number.isFinite(viewWidth) ? Math.max(160, viewWidth * 0.8) : 160;
       const value: number = Math.max(0, Math.min(100, this.panStartVolume - offsetY * 100 / travel));
       this.gestureVolume = value;
       this.onAdjust('volume', Math.round(value));
@@ -122,14 +136,31 @@ export class PlayerGestureController {
     }
   }
 
+  isPanInProgress(): boolean {
+    return this.panStarted;
+  }
+
   endPan(): void {
-    if (this.panMode === 'seek') {
-      this.onSeek(-1);
-    }
-    if (this.panMode === 'volume') this.onVolumeApply(this.gestureVolume);
-    if (this.panMode === 'brightness') this.onBrightnessApply(this.gestureBrightness);
+    if (!this.panStarted) return;
+    const mode: string = this.panMode;
+    // 先结束本地状态，回调中的换源/重播或重复 End 不可再次提交旧落点。
+    this.panStarted = false;
     this.panMode = '';
     this.panGestureActive = false;
+    if (mode === 'seek') {
+      this.onSeek(-1);
+    }
+    if (mode === 'volume') this.onVolumeApply(this.gestureVolume);
+    if (mode === 'brightness') this.onBrightnessApply(this.gestureBrightness);
+  }
+
+  cancelPan(): void {
+    if (!this.panStarted) return;
+    this.panStarted = false;
+    this.panMode = '';
+    this.panGestureActive = false;
+    this.onSeekPreview(-1);
+    this.onAdjust('', -1);
   }
 
   /**

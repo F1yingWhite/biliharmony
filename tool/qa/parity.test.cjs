@@ -743,10 +743,10 @@ test('disabled player gesture preferences suppress playback, seeking and speed c
     ['  private handleDoubleTap():','  @Builder\n  PlayerGestureArea()', 'handleDoubleTap','doubleTapEnabled'],
     ['  private beginHoldSpeed():','  private endHoldSpeed():','beginHoldSpeed','holdEnabled'],
     ['  private beginPlayerPan(','  private updatePlayerPan(','beginPlayerPan','panEnabled'],
-    ['  private updatePlayerPan(','  private endPlayerPan():','updatePlayerPan','panEnabled'],
+    ['  private updatePlayerPan(','  private progressDisplayTime():','updatePlayerPan','panEnabled'],
   ]) {
     const Harness=env.methodHarness('components/player/PlayerView',start,end);
-    const view=Object.assign(new Harness(),{[flag]:false});
+    const view=Object.assign(new Harness(),{[flag]:false,gestureCtl:null});
     // No player/controllers exist: reaching any side effect would throw.
     assert.doesNotThrow(()=>view[method]({fingerList:[],offsetX:50,offsetY:10}));
   }

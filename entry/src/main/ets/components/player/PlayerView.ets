@@ -233,6 +233,8 @@ export struct PlayerView {
   // 横滑预览时间下沉到 PlayerGestureOverlay 自持（scrubCtl 注入写回），
   // 父结构体不再随手势采样频率全量重渲染。这里只留非响应式镜像供手势结束时的 seekTo 读取落点。
   private gestureScrubValue: number = -1;
+  // 只在起手时更新，让暂停/控件已显示时的位移提示也使用本次手势起点。
+  @State gesturePanStartTime: number = 0;
   private scrubCtl: PlayerScrubController = new PlayerScrubController();
   // 底部进度条/章节条的「待落点」通道：横滑期间与结束后保持预览位置（条跟手），
   // seek 完成后清零回落到真实播放进度。与 scrubCtl 分开：叠层预览卡要在手势结束时立即消失。
@@ -1299,25 +1301,48 @@ export struct PlayerView {
     const volume: number = this.systemVolume.percent();
     if (this.gestureCtl !== null && volume >= 0) this.gestureCtl.gestureVolume = volume;
     this.gestureCtl?.beginPan(x, this.dmEngine.width, this.playheadSec, this.duration);
+    this.gesturePanStartTime = this.gestureCtl?.panStartTime ?? this.playheadSec;
+    // 手势期间保留原命中面的挂载位置，不能因控件显隐切换中断横滑。
+    if (this.hideTimer >= 0) {
+      clearTimeout(this.hideTimer);
+      this.hideTimer = -1;
+    }
   }
 
   private updatePlayerPan(event: GestureEvent): void {
-    if (this.panEnabled === false) return;
-    this.gestureCtl?.updatePan(event.offsetX, event.offsetY, this.dmEngine.width, this.duration);
-    if (this.gestureCtl?.panMode === 'seek') {
-      this.showControls = true;
-      if (this.hideTimer >= 0) {
-        clearTimeout(this.hideTimer);
-        this.hideTimer = -1;
-      }
+    if (this.panEnabled === false || this.endScreenOpen ||
+      !Number.isFinite(event.offsetX) || !Number.isFinite(event.offsetY)) {
+      this.cancelPlayerPan();
+      return;
     }
+    this.gestureCtl?.updatePan(event.offsetX, event.offsetY, this.dmEngine.width, this.duration);
   }
 
   private endPlayerPan(): void {
     const ctl: PlayerGestureController | null = this.gestureCtl;
-    if (ctl === null) return;
+    if (ctl === null || !ctl.isPanInProgress()) return;
+    if (this.panEnabled === false || this.endScreenOpen) {
+      this.cancelPlayerPan();
+      return;
+    }
+    const wasSeeking: boolean = ctl.panMode === 'seek';
     // PlayerGestureController.endPan 会通过 onSeek 唯一提交本次目标；这里不再重复 seek。
     ctl.endPan();
+    if (wasSeeking) this.showControls = true;
+    this.closeSeekPreview();
+    this.gestureAdjustKind = '';
+    this.gestureAdjustPercent = -1;
+    if (this.playing) this.scheduleControlsHide();
+  }
+
+  private cancelPlayerPan(): void {
+    const ctl: PlayerGestureController | null = this.gestureCtl;
+    // 松手导致原命中面卸载时可能迟到 Cancel；不能清掉正在定位的进度条目标。
+    if (ctl === null || !ctl.isPanInProgress()) return;
+    ctl.cancelPan();
+    this.gestureScrubValue = -1;
+    this.scrubCtl.show(-1);
+    this.seekTargetCtl.show(-1);
     this.closeSeekPreview();
     this.gestureAdjustKind = '';
     this.gestureAdjustPercent = -1;
@@ -1362,6 +1387,9 @@ export struct PlayerView {
   }
 
   private clearSeekPreviewInteraction(): void {
+    this.gestureCtl?.cancelPan();
+    this.gestureAdjustKind = '';
+    this.gestureAdjustPercent = -1;
     this.sliderDragging = false;
     this.gestureScrubValue = -1;
     this.scrubCtl.show(-1);
@@ -1370,6 +1398,9 @@ export struct PlayerView {
   }
 
   private releaseSeekPreview(): void {
+    this.gestureCtl?.cancelPan();
+    this.gestureAdjustKind = '';
+    this.gestureAdjustPercent = -1;
     this.sliderDragging = false;
     this.gestureScrubValue = -1;
     this.scrubCtl.show(-1);
@@ -1395,6 +1426,7 @@ export struct PlayerView {
       onPanStart: (event: GestureEvent) => this.beginPlayerPan(event),
       onPanUpdate: (event: GestureEvent) => this.updatePlayerPan(event),
       onPanEnd: () => this.endPlayerPan(),
+      onPanCancel: () => this.cancelPlayerPan(),
       onLongPressStart: () => this.beginHoldSpeed(),
       onLongPressEnd: () => this.endHoldSpeed(),
       onTouchDown: (x: number, y: number) => {
@@ -2122,7 +2154,7 @@ export struct PlayerView {
         seekPreviewSpriteYLen: this.seekPreviewSpriteYLen,
         gestureAdjustKind: this.gestureAdjustKind,
         gestureAdjustPercent: this.gestureAdjustPercent,
-        panStartTime: this.gestureCtl?.panStartTime ?? 0,
+        panStartTime: this.gesturePanStartTime,
         duration: this.duration,
       })
       // 空降提示固定在右下角（旧实现无显式定位，被根 Stack 的 Center 对齐顶到画面中间遮挡内容）。

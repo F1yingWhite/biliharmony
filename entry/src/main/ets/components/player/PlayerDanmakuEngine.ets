@@ -74,6 +74,7 @@ export class PlayerDanmakuEngine {
   // drawFrame 双缓冲，避免每帧分配 keep 数组。
   private activeBack: Array<ActiveDm> = [];
   private textWidthCache: Map<string, number> = new Map<string, number>();
+  private textBottomCache: Map<string, number> = new Map<string, number>();
   private colorCache: Map<number, string> = new Map<number, string>();
   /** 每次 spawn 只构建一次弹道桶，避免每个候选轨道都扫描完整 active 数组。 */
   private laneBuckets: Array<Array<ActiveDm>> = [];
@@ -246,11 +247,12 @@ export class PlayerDanmakuEngine {
     const x: number = Math.max(4, this.width - textWidth - 12);
     const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / this.scrollSpeedFactor();
     const speed: number = (this.width + Math.max(10, size * 0.3) + textWidth) / travelSeconds;
-    let lane: number = this.allocLane(x, speed);
+    let lane: number = this.allocLane(x, speed, size, text);
     if (lane < 0) {
       // Sender confirmation gets one lane even when the incoming remote burst occupies every lane.
-      lane = this.nextScrollLane % this.laneCount();
-      this.nextScrollLane = (lane + 1) % this.laneCount();
+      const laneCount: number = this.laneCount(size, text);
+      lane = this.nextScrollLane % laneCount;
+      this.nextScrollLane = (lane + 1) % laneCount;
     }
     if (this.active.length >= this.maxActive()) {
       const oldest: number = this.active.findIndex((dm: ActiveDm): boolean => dm !== this.pinned);
@@ -282,7 +284,8 @@ export class PlayerDanmakuEngine {
    * 只更新宽高几何，不在此立即全量重绘：
    * - 滚动弹幕的 x 由渲染循环每帧推进没有缓存概念，宽度变化自然被下一帧吸收；
    * - 固定弹幕的横坐标在 drawFrame 中按当前 width 实时计算（width - textWidth）/2，同样无需重排；
-   * - 仅当轨道数量（由行高与可用高度决定）真正变化时才需要 clamp，避免切换/缩放过程中
+   * - 默认轨道数量变化或高度缩小时，按每条文字的可见下沿 clamp，避免大字号末行截字；
+   *   宽度变化无需重排，避免切换/缩放过程中
    *   onAreaChange 高频回调引发「每条弹幕重新分轨 + 整卡重绘」的 CPU 与帧率开销。
    * 调用方负责：渲染循环运行中放任下一帧；暂停态补一次 drawFrame 避免 Canvas 清空白屏。
    */
@@ -293,11 +296,12 @@ export class PlayerDanmakuEngine {
       return;
     }
     const oldLanes: number = this.laneCount();
+    const oldHeight: number = this.height;
     this.width = newW;
     this.height = newH;
     const newLanes: number = this.laneCount();
-    if (newLanes !== oldLanes) {
-      this.clampDanmakuLanes(newLanes);
+    if (newLanes !== oldLanes || newH < oldHeight) {
+      this.clampDanmakuLanes();
     }
   }
 
@@ -313,6 +317,7 @@ export class PlayerDanmakuEngine {
 
   clearCaches(): void {
     this.textWidthCache.clear();
+    this.textBottomCache.clear();
     this.colorCache.clear();
   }
 
@@ -444,7 +449,7 @@ export class PlayerDanmakuEngine {
       const renderColor: string = this.colorFor(item.color);
       if (item.mode === 4 || item.mode === 5) {
         // 固定弹幕：顶部/底部居中，停留 4 秒
-        const fixedLane: number = this.allocFixedLane(item.mode);
+        const fixedLane: number = this.allocFixedLane(item.mode, sizeVp, renderText);
         if (fixedLane < 0) continue;
         const dm: ActiveDm = new ActiveDm(item, -1, fixedLane, 0, now + 4, true, now, textW, renderText, renderColor);
         dm.fontSizeVp = sizeVp;
@@ -456,7 +461,7 @@ export class PlayerDanmakuEngine {
         const spawnX: number = -textWm - Math.max(10, sizeVp * 0.3);
         const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / this.scrollSpeedFactor();
         const speed: number = (this.width - spawnX) / travelSeconds;
-        const lane: number = this.allocReverseLane(spawnX + textWm, speed);
+        const lane: number = this.allocReverseLane(spawnX + textWm, speed, sizeVp, renderText);
         if (lane < 0) continue;
         const dm: ActiveDm = new ActiveDm(item, spawnX, lane, speed, 0, false, now, textWm, renderText, renderColor);
         dm.reverse = true;
@@ -468,7 +473,7 @@ export class PlayerDanmakuEngine {
         const spawnX: number = this.width + Math.max(10, sizeVp * 0.3);
         const travelSeconds: number = (this.fullscreen ? 10 : 8.5) / this.scrollSpeedFactor();
         const speed: number = (spawnX + textW) / travelSeconds;
-        const lane: number = this.allocLane(spawnX, speed);
+        const lane: number = this.allocLane(spawnX, speed, sizeVp, renderText);
         if (lane < 0) continue;
         const dm: ActiveDm = new ActiveDm(item, spawnX, lane, speed, 0, false, now, textW, renderText, renderColor);
         dm.fontSizeVp = sizeVp;
@@ -636,6 +641,7 @@ export class PlayerDanmakuEngine {
   setFontScale(value: number): void {
     this.fontScale = value;
     this.textWidthCache.clear();
+    this.textBottomCache.clear();
     for (let i: number = 0; i < this.active.length; i++) {
       const dm: ActiveDm = this.active[i];
       if (dm.special !== null) {
@@ -651,22 +657,19 @@ export class PlayerDanmakuEngine {
         dm.speed = (this.width + spawnInset + dm.textWidth) / travelSeconds;
       }
     }
-    const laneCount: number = this.laneCount();
-    this.clampDanmakuLanes(laneCount);
+    this.clampDanmakuLanes();
     this.drawFrame(false);
   }
 
   setSpacing(value: number): void {
     this.spacing = Math.max(0.5, Math.min(2, value));
-    this.clampDanmakuLanes(this.laneCount());
+    this.clampDanmakuLanes();
     this.drawFrame(false);
   }
 
   setDensity(value: number): void {
-    const oldLaneCount: number = this.laneCount();
     this.density = Math.round(value);
-    const newLaneCount: number = this.laneCount();
-    if (newLaneCount !== oldLaneCount) this.clampDanmakuLanes(newLaneCount);
+    this.clampDanmakuLanes();
     const maxActive: number = this.maxActive();
     if (this.active.length > maxActive) this.active = this.active.slice(0, maxActive);
   }
@@ -710,10 +713,20 @@ export class PlayerDanmakuEngine {
     return this.fontSize() * (factor + (this.spacing - 1) * 0.4);
   }
 
-  private laneCount(): number {
-    // 弹幕覆盖画面约 94%（对齐 B 站密度观感），只给进度条/字幕留一条窄安全区。
-    const usableHeight: number = Math.max(this.lineHeight(), this.height * 0.94);
-    return Math.max(1, Math.floor(usableHeight / this.lineHeight()));
+  private laneCount(sizeVp: number = 0, text: string = ''): number {
+    const size: number = sizeVp > 0 ? sizeVp : this.fontSize();
+    const key: string = String(Math.round(size * 10)) + ':' + text;
+    let measuredBottom: number | undefined = this.textBottomCache.get(key);
+    if (measuredBottom === undefined && text.length > 0) {
+      // 旋转重排时旧弹幕的测量缓存可能已被淘汰，重新测量后才能保护真实下伸部。
+      this.measure(text, size);
+      measuredBottom = this.textBottomCache.get(key);
+    }
+    // 覆盖完整画布；轨道步进之外只扣除文字从轨道顶到下沿的高度。
+    // 每条使用自身字号/下伸部，额外 1vp 容纳描边和绘制坐标取整，防止末行截字。
+    const bottom: number = (measuredBottom ?? size * 1.2) + 1;
+    const steps: number = Math.max(0, this.height - bottom);
+    return Math.max(1, Math.floor(steps / this.lineHeight()) + 1);
   }
 
   private maxActive(): number {
@@ -763,8 +776,8 @@ export class PlayerDanmakuEngine {
     return true;
   }
 
-  private allocReverseLane(spawnTail: number, speed: number): number {
-    const laneCount: number = this.laneCount();
+  private allocReverseLane(spawnTail: number, speed: number, sizeVp: number, text: string): number {
+    const laneCount: number = this.laneCount(sizeVp, text);
     for (let offset: number = 0; offset < laneCount; offset++) {
       const lane: number = (this.nextScrollLane + offset) % laneCount;
       if (this.laneSafeForReverse(lane, spawnTail, speed)) {
@@ -781,8 +794,8 @@ export class PlayerDanmakuEngine {
     return -1;
   }
 
-  private allocLane(spawnX: number, speed: number): number {
-    const laneCount: number = this.laneCount();
+  private allocLane(spawnX: number, speed: number, sizeVp: number, text: string): number {
+    const laneCount: number = this.laneCount(sizeVp, text);
     for (let offset: number = 0; offset < laneCount; offset++) {
       const lane: number = (this.nextScrollLane + offset) % laneCount;
       if (this.laneSafeForScroll(lane, spawnX, speed)) {
@@ -798,8 +811,8 @@ export class PlayerDanmakuEngine {
     return -1;
   }
 
-  private allocFixedLane(mode: number): number {
-    const laneCount: number = this.laneCount();
+  private allocFixedLane(mode: number, sizeVp: number, text: string): number {
+    const laneCount: number = this.laneCount(sizeVp, text);
     const candidateCount: number = laneCount;
     const start: number = mode === 5 ? this.nextTopLane : this.nextBottomLane;
     for (let offset: number = 0; offset < candidateCount; offset++) {
@@ -834,7 +847,10 @@ export class PlayerDanmakuEngine {
     const cached: number | undefined = this.textWidthCache.get(key);
     if (cached !== undefined) return cached;
     this.ctx.font = '600 ' + sizeVp + 'vp sans-serif';
-    const w: number = this.ctx.measureText(text).width;
+    const metrics: TextMetrics = this.ctx.measureText(text);
+    const w: number = metrics.width;
+    const descent: number = Number(metrics.actualBoundingBoxDescent);
+    this.textBottomCache.set(key, sizeVp + (Number.isFinite(descent) && descent >= 0 ? descent : sizeVp * 0.2));
     const result: number = Math.max(20, w);
     if (this.textWidthCache.size > 512) {
       // 整体清空会造成短时间内大量重复测量；改为淘汰最早插入的一半（Map 迭代序即插入序）。
@@ -842,6 +858,7 @@ export class PlayerDanmakuEngine {
       for (const oldest of this.textWidthCache.keys()) {
         if (evict <= 0) break;
         this.textWidthCache.delete(oldest);
+        this.textBottomCache.delete(oldest);
         evict--;
       }
     }
@@ -875,14 +892,18 @@ export class PlayerDanmakuEngine {
   }
 
   /** 字号/轨道数变化后，保留已上屏弹幕并就近夹到新轨道，避免“行数变少弹幕直接消失”。 */
-  private clampDanmakuLanes(laneCount: number): void {
+  private clampDanmakuLanes(): void {
     const used: Set<number> = new Set<number>();
     for (let i: number = 0; i < this.active.length; i++) {
       const dm: ActiveDm = this.active[i];
+      if (dm.special !== null) continue;
+      const laneCount: number = this.laneCount(dm.fontSizeVp, dm.renderText);
       if (dm.lane < laneCount) used.add(dm.lane);
     }
     for (let i: number = 0; i < this.active.length; i++) {
       const dm: ActiveDm = this.active[i];
+      if (dm.special !== null) continue;
+      const laneCount: number = this.laneCount(dm.fontSizeVp, dm.renderText);
       if (dm.lane < laneCount) continue;
       let lane: number = dm.isFixed && dm.item.mode === 4 ? laneCount - 1 : dm.lane % laneCount;
       if (used.has(lane)) {
