@@ -73,6 +73,14 @@ jobs:
       - name: Install dependencies
         run: ohpm install --all
 
+      - name: Prepare required native HDR regression headers
+        run: |
+          set -euo pipefail
+          python3 tool/qa/prepare-hdr-test-deps.py \
+            --sdk-root "$HOS_SDK_HOME" \
+            --work-dir "$RUNNER_TEMP/mpv-hdr-deps" \
+            --github-env "$GITHUB_ENV"
+
       # 仓库内 build-profile 的 signingConfigs 为空数组（签名材料不入库），
       # 摘除 product 对默认签名配置的悬空引用，hvigor 才会产出未签名 HAP 而非报错。
       - name: Neutralize dangling signing reference
