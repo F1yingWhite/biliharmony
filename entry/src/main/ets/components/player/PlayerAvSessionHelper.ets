@@ -7,6 +7,13 @@ import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { DEBUG } from 'BuildProfile';
 
+export interface PlayerAvSessionCommands {
+  skip?: (seconds: number) => void;
+  next?: () => void;
+  previous?: () => void;
+  speed?: (rate: number) => void;
+}
+
 export class PlayerAvSessionHelper {
   private static readonly DOMAIN: number = 0x0000;
   private static readonly TAG: string = 'BiliPlayback';
@@ -23,6 +30,12 @@ export class PlayerAvSessionHelper {
   private backgroundRequested: boolean = false;
   private backgroundDesired: boolean = false;
   private backgroundBusy: boolean = false;
+  private commands: PlayerAvSessionCommands = {};
+  private nextRegistered: boolean = false;
+  private previousRegistered: boolean = false;
+  private forwardRegistered: boolean = false;
+  private rewindRegistered: boolean = false;
+  private speedRegistered: boolean = false;
 
   constructor(context: common.UIAbilityContext) {
     this.context = context;
@@ -34,10 +47,12 @@ export class PlayerAvSessionHelper {
     onSeek: (timeMs: number) => void,
     metadata: avSession.AVMetadata,
     state: avSession.AVPlaybackState,
+    commands: PlayerAvSessionCommands = {},
   ): Promise<void> {
     if (this.released) return;
     this.latestMetadata = metadata;
     this.latestState = state;
+    this.setCommands(commands);
     if (this.active) {
       this.setMetadata(metadata);
       this.setPlaybackState(state);
@@ -60,6 +75,12 @@ export class PlayerAvSessionHelper {
       if (this.released) return;
       this.session = session;
       this.active = true;
+      this.nextRegistered = false;
+      this.previousRegistered = false;
+      this.forwardRegistered = false;
+      this.rewindRegistered = false;
+      this.speedRegistered = false;
+      this.setCommands(this.commands);
       if (DEBUG) {
         hilog.info(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
           'avsession.active type=audio background=true');
@@ -88,6 +109,70 @@ export class PlayerAvSessionHelper {
     }
   }
 
+  /** Register only available queue commands, so single videos expose no fake next/previous action. */
+  setCommands(commands: PlayerAvSessionCommands): void {
+    this.commands = commands;
+    const session: avSession.AVSession | null = this.session;
+    if (session === null || !this.active) return;
+    const current = (): boolean => this.session === session && this.active && !this.released;
+    const next: boolean = commands.next !== undefined;
+    if (next !== this.nextRegistered) {
+      try {
+        if (next) session.on('playNext', () => { if (current()) this.commands.next?.(); });
+        else session.off('playNext');
+        this.nextRegistered = next;
+      } catch (e) { this.logCommandError('playNext', e); }
+    }
+    const previous: boolean = commands.previous !== undefined;
+    if (previous !== this.previousRegistered) {
+      try {
+        if (previous) session.on('playPrevious', () => { if (current()) this.commands.previous?.(); });
+        else session.off('playPrevious');
+        this.previousRegistered = previous;
+      } catch (e) { this.logCommandError('playPrevious', e); }
+    }
+    const skip: boolean = commands.skip !== undefined;
+    if (skip !== this.forwardRegistered) {
+      try {
+        if (skip) session.on('fastForward', (milliseconds?: number) => {
+          if (current()) this.commands.skip?.(PlayerAvSessionHelper.skipSeconds(milliseconds));
+        });
+        else session.off('fastForward');
+        this.forwardRegistered = skip;
+      } catch (e) { this.logCommandError('fastForward', e); }
+    }
+    if (skip !== this.rewindRegistered) {
+      try {
+        if (skip) session.on('rewind', (milliseconds?: number) => {
+          if (current()) this.commands.skip?.(-PlayerAvSessionHelper.skipSeconds(milliseconds));
+        });
+        else session.off('rewind');
+        this.rewindRegistered = skip;
+      } catch (e) { this.logCommandError('rewind', e); }
+    }
+    const speed: boolean = commands.speed !== undefined;
+    if (speed !== this.speedRegistered) {
+      try {
+        if (speed) session.on('setSpeed', (rate: number) => {
+          if (current() && Number.isFinite(rate) && rate > 0) this.commands.speed?.(rate);
+        });
+        else session.off('setSpeed');
+        this.speedRegistered = speed;
+      } catch (e) { this.logCommandError('setSpeed', e); }
+    }
+  }
+
+  private logCommandError(command: string, error: Object): void {
+    if (DEBUG) hilog.warn(PlayerAvSessionHelper.DOMAIN, PlayerAvSessionHelper.TAG,
+      'avsession.command.error %{public}s %{public}s', command, String(error));
+  }
+
+  private static skipSeconds(milliseconds: number | undefined): number {
+    // API 26 AVSession command callbacks use milliseconds; the player uses seconds.
+    return milliseconds !== undefined && Number.isFinite(milliseconds) && milliseconds > 0 ?
+      Math.min(milliseconds / 1000, 3600) : 10;
+  }
+
   setPlaybackState(state: avSession.AVPlaybackState): void {
     this.latestState = state;
     const session: avSession.AVSession | null = this.session;
@@ -108,6 +193,7 @@ export class PlayerAvSessionHelper {
     this.active = false;
     this.latestMetadata = null;
     this.latestState = null;
+    this.commands = {};
     if (session !== null) this.destroySession(session).catch(() => {});
     this.backgroundDesired = false;
     this.stopBackgroundTask().catch(() => {

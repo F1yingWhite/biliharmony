@@ -78,9 +78,15 @@ function inputPage(controller, query, storage = new Map()) {
   const env = environment({ 'api/SearchApi': { SearchApi: {} } });
   const { SearchQuery } = env.load('components/search/SearchQuery');
   const { SearchResultsView } = env.load('components/search/SearchResultsController');
+  const { AppRecoveryState } = env.load('common/AppRecoveryState');
   const Harness = env.component('pages/Search', 'SearchPage', '  async aboutToAppear()', [
     ['  async aboutToAppear()', '  @Builder\n  SortRow()'],
-  ], { SearchQuery, SearchResultsView, SearchDiscoveryView: class {},
+  ], { SearchQuery, SearchResultsView, SearchDiscoveryView: class {}, AppRecoveryState,
+    Scroller: class {
+      constructor() { this.offset = {xOffset: 0, yOffset: 0}; this.calls = []; }
+      currentOffset() { return this.offset; }
+      scrollTo(offset) { this.calls.push(offset); this.offset = {xOffset: offset.xOffset, yOffset: offset.yOffset}; }
+    },
     SearchResultsController: class {}, SearchDiscoveryController: class {},
     AppStorage: { get: key => storage.get(key), setOrCreate: (key, value) => storage.set(key, value) },
     inputMethod: { getController: () => ({ hideTextInput: async () => {} }) } });
@@ -88,13 +94,16 @@ function inputPage(controller, query, storage = new Map()) {
   page.resultsController = controller;
   page.query = query;
   page.discoveryController = { input() {}, submit() {} };
+  page.recovery = AppRecoveryState;
   return page;
 }
 
-function initialSearchPage({initialKeyword = '', storage = new Map(), ready = Promise.resolve()} = {}) {
-  const search = searchHarness(), history = [];
+function initialSearchPage({initialKeyword = '', storage = new Map(), ready = Promise.resolve(), recovered, api = {}} = {}) {
+  const search = searchHarness(api), history = [];
   const page = inputPage(search.controller, search.query, storage);
   page.initialKeyword = initialKeyword;
+  if (recovered) page.recovery.restore(JSON.stringify({version: 1, rootTab: 0,
+    views: [{key: 'search:' + initialKeyword.trim(), state: recovered}]}));
   page.discoveryController = { input() {}, activate: () => ready, dispose() {}, submit: keyword => history.push(keyword) };
   return {...search, page, storage, history};
 }
@@ -171,6 +180,57 @@ test('late appearance from an earlier lifecycle cannot replace the current route
   await f.page.aboutToAppear(); await tick(); pending.resolve(); await old; await tick();
   assert.deepEqual(f.calls.filter(call => call.method === 'searchAll').map(call => call.args[0]), ['second']);
   assert.equal(f.page.keyword, 'second');
+});
+
+test('system recovery loads the saved search category directly and restores its offset only after data/layout', async () => {
+  const request = deferred();
+  const f = initialSearchPage({initialKeyword: 'route', recovered: {keyword: 'saved query', submitted: true,
+    searchTab: 1, scrollY: 920}, api: {searchVideosByType: () => request.promise}});
+  await f.page.aboutToAppear();
+  assert.deepEqual(f.calls.map(call => call.method), ['searchVideosByType'], 'do not request All first');
+  assert.equal(f.calls[0].args[0], 'saved query');
+  f.page.restoreResultScroll(1);
+  assert.equal(f.page.resultScrollers[1].calls.length, 0, 'loading has no list layout to restore');
+  request.resolve({videos: [video('saved query')], numResults: 1}); await tick();
+  f.page.restoreResultScroll(0);
+  assert.equal(f.page.resultScrollers[0].calls.length, 0, 'inactive categories cannot consume the offset');
+  f.page.restoreResultScroll(1); f.page.restoreResultScroll(1);
+  assert.deepEqual(f.page.resultScrollers[1].calls, [{xOffset: 0, yOffset: 920, animation: false}]);
+  f.page.saveSearchState();
+  const snapshot = JSON.parse(f.page.recovery.serialize()).views[0].state;
+  assert.equal(snapshot.keyword, 'saved query'); assert.equal(snapshot.searchTab, 1); assert.equal(snapshot.scrollY, 920);
+});
+
+test('recovery preserves an unsubmitted draft and ordinary navigation cannot consume a saved view snapshot', async () => {
+  const f = initialSearchPage({recovered: {keyword: 'unfinished draft', submitted: false, searchTab: 6}});
+  await f.page.aboutToAppear(); await tick();
+  assert.equal(f.page.keyword, 'unfinished draft'); assert.equal(f.calls.length, 0);
+  const ordinary = initialSearchPage();
+  ordinary.page.recovery.saveView('search:', {keyword: 'old view', submitted: true, searchTab: 1});
+  await ordinary.page.aboutToAppear(); await tick();
+  assert.equal(ordinary.page.keyword, ''); assert.equal(ordinary.calls.length, 0);
+});
+
+for (const action of ['input', 'submit', 'refresh']) {
+  test(`new search ${action} cancels the pending recovered offset`, async () => {
+    const f = initialSearchPage({recovered: {keyword: 'old query', submitted: true, searchTab: 0, scrollY: 800}});
+    await f.page.aboutToAppear(); await tick();
+    if (action === 'input') f.page.onInput('new draft');
+    else if (action === 'submit') {f.page.keyword = 'new query'; f.page.submitSearch();}
+    else f.page.refreshResults(f.page.query);
+    await tick(); f.page.restoreResultScroll(0);
+    assert.equal(f.page.resultScrollers[0].calls.length, 0, 'a fresh interaction must not jump to old query position');
+  });
+}
+
+test('typing while discovery loads takes precedence over an earlier recovered search', async () => {
+  const ready = deferred(), f = initialSearchPage({ready: ready.promise,
+    recovered: {keyword: 'old query', submitted: true, searchTab: 1, scrollY: 800}});
+  const appear = f.page.aboutToAppear();
+  f.page.onInput('new draft'); ready.resolve(); await appear; await tick();
+  assert.equal(f.page.keyword, 'new draft'); assert.equal(f.calls.length, 0);
+  const snapshot = JSON.parse(f.page.recovery.serialize()).views[0].state;
+  assert.equal(snapshot.keyword, 'new draft'); assert.equal(snapshot.submitted, false);
 });
 function video(keyword, page = 1) { return { bvid: 'BV-' + keyword + '-' + page, aid: page, title: keyword }; }
 function allResult(keyword, total) {

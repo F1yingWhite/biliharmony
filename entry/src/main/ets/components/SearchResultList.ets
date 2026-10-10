@@ -21,6 +21,9 @@ export struct SearchResultList {
   @Prop lanes: number = 1;
   /** 直播双列的左右内边距，其余列表为 0 */
   @Prop horizontalPadding: number = 0;
+  scroller: Scroller = new Scroller();
+  onLayout: () => void = () => {};
+  onScrollStop: () => void = () => {};
   onRetry: () => void = () => {};
   onLoadMore: () => void = () => {};
   @BuilderParam content: () => void = this.emptyContent;
@@ -55,7 +58,7 @@ export struct SearchResultList {
           onRetry: this.onRetry,
         })
       } else {
-        List({ space: this.listSpace }) {
+        List({ space: this.listSpace, scroller: this.scroller }) {
           if (this.lanes > 1) {
             ListItemGroup({ footer: this.ResultFooter(), space: this.listSpace }) {
               this.content()
@@ -72,6 +75,8 @@ export struct SearchResultList {
         .padding(this.horizontalPadding > 0 ? { left: this.horizontalPadding, right: this.horizontalPadding } : 0)
         .cachedCount(5)
         .scrollBar(BarState.Off)
+        .onAreaChange(() => this.onLayout())
+        .onScrollStop(() => this.onScrollStop())
         .onReachEnd((): void => {
           if (this.hasMore && !this.loadingMore && this.moreError.length === 0) this.onLoadMore();
         })

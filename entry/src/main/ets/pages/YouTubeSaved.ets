@@ -6,7 +6,8 @@ import { PageHeader } from '../components/PageHeader';
 import { AppNavStack, NAV_YOUTUBE_DETAIL } from '../common/AppRouter';
 import { Immersive } from '../common/Immersive';
 import { AppTheme } from '../common/AppTheme';
-import { RemoteAssetCache } from '../services/cache/RemoteAssetCache';
+import { BasicDataSource } from '../common/BasicDataSource';
+import { YouTubeSavedThumbnails } from '../components/youtube/YouTubeSavedThumbnails';
 
 /**
  * 本地列表页：稍后观看（mode=later）与观看历史（mode=history）共用同一套行与操作。
@@ -20,12 +21,18 @@ export struct YouTubeSavedPage {
   mode: string = 'later';
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('windowStatusBarHeight') statusInset: number = 0;
-  @State items: Array<YouTubeLocalVideo> = [];
+  @State itemCount: number = 0;
   @State loading: boolean = true;
   /** 封面 → 本地文件：ArkUI Image() 不读应用代理，统一走应用自己的缓存管线。 */
   @State thumbLocal: Map<string, string> = new Map<string, string>();
 
   private loadGeneration: number = 0;
+  private source: BasicDataSource<YouTubeLocalVideo> = new BasicDataSource<YouTubeLocalVideo>();
+  private visibleFirst: number = 0;
+  private visibleLast: number = 5;
+  private thumbnails: YouTubeSavedThumbnails = new YouTubeSavedThumbnails((local: Map<string, string>) => {
+    this.thumbLocal = local;
+  });
 
   private isHistory(): boolean {
     return this.mode === 'history';
@@ -42,13 +49,20 @@ export struct YouTubeSavedPage {
   }
 
   private loaded(list: Array<YouTubeLocalVideo>): void {
-    this.items = list;
+    this.source.reset(list);
+    this.itemCount = list.length;
     this.loading = false;
-    this.primeThumbs(list);
+    this.thumbnails.setItems(list.map((item: YouTubeLocalVideo): string => item.thumbnail));
+    this.primeThumbs(this.visibleFirst, this.visibleLast);
   }
 
   aboutToAppear(): void {
     const generation: number = ++this.loadGeneration;
+    this.loading = true;
+    this.visibleFirst = 0;
+    this.visibleLast = 5;
+    this.thumbLocal = new Map<string, string>();
+    this.thumbnails.activate();
     if (this.isHistory()) {
       YouTubeHistoryStore.ensureLoaded().then((list: Array<YouTubeLocalVideo>) => {
         if (generation !== this.loadGeneration) return;
@@ -68,6 +82,7 @@ export struct YouTubeSavedPage {
 
   aboutToDisappear(): void {
     this.loadGeneration++;
+    this.thumbnails.deactivate();
   }
 
   private localImage(url: string): string {
@@ -75,31 +90,11 @@ export struct YouTubeSavedPage {
     return local !== undefined && local.length > 0 ? local : url;
   }
 
-  private primeThumbs(list: Array<YouTubeLocalVideo>): void {
-    const generation: number = this.loadGeneration;
-    const hits: Map<string, string> = new Map<string, string>();
-    const pending: Array<string> = [];
-    for (const item of list) {
-      const url: string = item.thumbnail;
-      if (url.length === 0 || this.thumbLocal.has(url) || hits.has(url)) continue;
-      const cached: string = RemoteAssetCache.cachedThumbnail(url);
-      if (cached !== url) hits.set(url, cached);
-      else pending.push(url);
-    }
-    if (hits.size > 0) {
-      const merged: Map<string, string> = new Map<string, string>(this.thumbLocal);
-      hits.forEach((value: string, key: string) => merged.set(key, value));
-      this.thumbLocal = merged;
-    }
-    for (const url of pending) {
-      RemoteAssetCache.ensureThumbnail(url).then((local: string) => {
-        if (generation !== this.loadGeneration || local === url || this.thumbLocal.get(url) === local) return;
-        const next: Map<string, string> = new Map<string, string>(this.thumbLocal);
-        next.set(url, local);
-        this.thumbLocal = next;
-      }).catch(() => {
-      });
-    }
+  private primeThumbs(first: number, last: number): void {
+    const maximum: number = Math.max(0, this.itemCount - 1);
+    this.visibleFirst = Math.max(0, Math.min(maximum, first));
+    this.visibleLast = Math.max(this.visibleFirst, Math.min(maximum, last));
+    this.thumbnails.primeVisible(this.visibleFirst, this.visibleLast);
   }
 
   private toast(message: string): void {
@@ -122,21 +117,17 @@ export struct YouTubeSavedPage {
     AppNavStack.pushPathByName(NAV_YOUTUBE_DETAIL, video);
   }
 
-  private removeList(): Array<YouTubeLocalVideo> {
-    return this.isHistory() ? YouTubeHistoryStore.list() : YouTubeWatchLaterStore.list();
-  }
-
   private removeItem(item: YouTubeLocalVideo): void {
-    this.items = this.isHistory()
+    this.loaded(this.isHistory()
       ? YouTubeHistoryStore.remove(item.id)
-      : YouTubeWatchLaterStore.remove(item.id);
+      : YouTubeWatchLaterStore.remove(item.id));
     this.toast(this.isHistory() ? '已从观看历史移除' : '已从稍后观看移除');
   }
 
   private clearAll(): void {
     if (this.isHistory()) YouTubeHistoryStore.clear();
     else YouTubeWatchLaterStore.clear();
-    this.items = [];
+    this.loaded([]);
     this.toast(this.isHistory() ? '已清空观看历史' : '已清空稍后观看');
   }
 
@@ -194,7 +185,7 @@ export struct YouTubeSavedPage {
           LoadingProgress().width(32).height(32).color(AppTheme.DANGER)
           Text('正在读取本地列表…').fontSize(13).fontColor('#9499A0')
         }.width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
-      } else if (this.items.length === 0) {
+      } else if (this.itemCount === 0) {
         Column({ space: 10 }) {
           Text(this.isHistory() ? '还没有观看记录' : '还没有保存的视频')
             .fontSize(16).fontWeight(FontWeight.Medium)
@@ -203,7 +194,7 @@ export struct YouTubeSavedPage {
         }.width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
       } else {
         Row() {
-          Text('共 ' + String(this.items.length) + ' 个视频 · 长按可移除')
+          Text('共 ' + String(this.itemCount) + ' 个视频 · 长按可移除')
             .fontSize(12).fontColor('#9499A0')
           Blank()
           Text('清空')
@@ -214,7 +205,7 @@ export struct YouTubeSavedPage {
         .alignItems(VerticalAlign.Center)
 
         List({ space: 0 }) {
-          ForEach(this.items, (item: YouTubeLocalVideo) => {
+          LazyForEach(this.source, (item: YouTubeLocalVideo) => {
             ListItem() {
               this.SavedRow(item)
             }
@@ -222,6 +213,8 @@ export struct YouTubeSavedPage {
         }
         .width('100%').layoutWeight(1)
         .scrollBar(BarState.Off)
+        .cachedCount(3)
+        .onScrollIndex((first: number, last: number) => this.primeThumbs(first, last))
         .contentEndOffset(Immersive.bottomInset() + 24)
       }
     }

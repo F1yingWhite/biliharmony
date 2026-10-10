@@ -35,6 +35,7 @@ export struct SearchSortBar {
       .scrollBar(BarState.Off)
       .align(Alignment.Start)
 
+      Button({ type: ButtonType.Normal }) {
       Row({ space: 3 }) {
         Image($r('app.media.ic_filter'))
           .width(13)
@@ -47,7 +48,12 @@ export struct SearchSortBar {
       .padding({ left: 12, right: 12, top: 5, bottom: 5 })
       .backgroundColor(this.isDark ? '#2E3136' : '#ECEEF0')
       .borderRadius(14)
+      }
+      .constraintSize({ minWidth: 44, minHeight: 44 }).padding(0)
+      .backgroundColor(Color.Transparent).borderRadius(22)
       .margin({ left: 4, bottom: 8 })
+      .accessibilityGroup(true).accessibilityText('筛选视频')
+      .accessibilityDescription(this.query.hasVideoFilter() ? '已应用筛选' : '')
       .onClick(() => {
         this.onFilter();
       })

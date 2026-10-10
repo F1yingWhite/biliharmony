@@ -31,7 +31,8 @@ export struct BackButton {
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('glassEnabled') glassOn: boolean = true;
 
-  build() {
+  @Builder
+  Content() {
     if (this.variant === BackButtonVariant.GLASS) {
       Row() {
         Image($r('app.media.ic_back'))
@@ -45,10 +46,6 @@ export struct BackButton {
       .backgroundColor(this.glassOn ? '#66000000' : '#B3000000')
       .backdropBlur(this.glassOn ? 10 : 0)
       .justifyContent(FlexAlign.Center)
-      .onClick(() => {
-        Haptic.light();
-        this.onBack();
-      })
     } else if (this.variant === BackButtonVariant.DARK) {
       Stack({ alignContent: Alignment.Center }) {
         Image($r('app.media.ic_back'))
@@ -60,10 +57,6 @@ export struct BackButton {
       .height(36)
       .borderRadius(18)
       .backgroundColor('#73000000')
-      .onClick(() => {
-        Haptic.light();
-        this.onBack();
-      })
     } else {
       Row() {
         Text('‹')
@@ -71,13 +64,23 @@ export struct BackButton {
           .fontColor(this.color.length > 0 ? this.color : (this.isDark ? '#FFFFFF' : '#18191C'))
           .translate({ y: this.nudgeY })
       }
-      .width(this.triggerWidth)
-      .height(this.triggerHeight)
+      .width('100%')
+      .height('100%')
       .justifyContent(FlexAlign.Center)
-      .onClick(() => {
-        Haptic.light();
-        this.onBack();
-      })
     }
+  }
+
+  build() {
+    Button({ type: ButtonType.Normal }) {
+      this.Content()
+    }
+    .width(this.variant === BackButtonVariant.TEXT ? Math.max(44, this.triggerWidth) : 44)
+    .height(this.variant === BackButtonVariant.TEXT ? Math.max(44, this.triggerHeight) : 44)
+    .padding(0).borderRadius(22).backgroundColor(Color.Transparent)
+    .accessibilityGroup(true).accessibilityText('返回')
+    .onClick(() => {
+      Haptic.light();
+      this.onBack();
+    })
   }
 }

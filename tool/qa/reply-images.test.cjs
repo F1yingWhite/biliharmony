@@ -131,9 +131,10 @@ test('reply images: no editing attachments or duplicate operation while uploadin
 test('reply composer: real picker, remove and preview methods share the page transaction', async () => {
   const selected = [], f = fixture();
   const Harness = productionMethods('components/reply/ReplyComposer', '  private hasContent()',
-    '  private onFocusTick()', {picker: {PhotoViewMIMETypes: {IMAGE_TYPE: 'image/*'}, PhotoViewPicker: class {
+    '  private onFocusTick()', {photoAccessHelper: {PhotoViewMIMETypes: {IMAGE_TYPE: 'image/*'}, PhotoViewPicker: class {
+      constructor(...args) {assert.deepEqual(args, [], 'SDK PhotoViewPicker takes no Context constructor argument');}
       async select(options) {selected.push(options); return {photoUris: ['a', 'b']};}
-    }}});
+    }}, PhotoPickerHandoff: {defer: async uris => uris}});
   const view = new Harness(); Object.assign(view, {text: '', images: [], sending: false, submission: f.controller,
     allowImages: true, getUIContext: () => ({getHostContext: () => ({})}), previewOpen: false, previewIndex: 0});
   assert.equal(view.hasContent(), false); view.pickImages(); await tick();

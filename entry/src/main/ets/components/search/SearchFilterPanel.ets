@@ -1,4 +1,5 @@
 import { FilterChip } from '../FilterChip';
+import { AppTheme } from '../../common/AppTheme';
 import { SearchNumOption, VIDEO_PUBTIME_OPTIONS, VIDEO_DURATION_OPTIONS, VIDEO_ZONE_OPTIONS } from '../../model/Models';
 
 @Component
@@ -63,12 +64,13 @@ export struct SearchFilterPanel {
       this.FilterGroup('分区', VIDEO_ZONE_OPTIONS, this.tmpTids, 2)
 
       Row({ space: 12 }) {
-        Text('重置')
+        Button('重置', { type: ButtonType.Normal })
           .fontSize(14)
           .fontColor(this.isDark ? '#C6C7CB' : '#61666D')
           .layoutWeight(1)
           .padding({ top: 9, bottom: 9 })
-          .textAlign(TextAlign.Center)
+          .constraintSize({ minHeight: 44 })
+          .labelStyle({ textAlign: TextAlign.Center })
           .backgroundColor(this.isDark ? '#2E3136' : '#ECEEF0')
           .borderRadius(18)
           .onClick(() => {
@@ -76,12 +78,13 @@ export struct SearchFilterPanel {
             this.tmpPubtime = 0;
             this.tmpTids = 0;
           })
-        Text('完成')
+        Button('完成', { type: ButtonType.Normal })
           .fontSize(14)
-          .fontColor('#FFFFFF')
+          .fontColor(AppTheme.onAccent(this.accent))
           .layoutWeight(1)
           .padding({ top: 9, bottom: 9 })
-          .textAlign(TextAlign.Center)
+          .constraintSize({ minHeight: 44 })
+          .labelStyle({ textAlign: TextAlign.Center })
           .backgroundColor(this.accent)
           .borderRadius(18)
           .onClick(() => {

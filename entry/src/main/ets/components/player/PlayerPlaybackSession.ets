@@ -65,6 +65,7 @@ export class PlayerPlaybackSession {
   get ready(): boolean { return this.core.prepared; }
   get hasSurface(): boolean { return this.surface.length > 0; }
   get sourceUrl(): string { return PlayerPlaybackConfig.sourceUrl(this.source.urls, this.sourceIndex); }
+  get sourceVersion(): number { return this.source.version; }
 
   activate(source: PlayerPlaybackSource): void {
     this.active = true;
@@ -76,12 +77,12 @@ export class PlayerPlaybackSession {
       this.state.position = Math.max(0, source.initialSeek);
       this.state.duration = 0;
       this.state.errorText = '';
-      this.shouldPlayAfterPrepare = true;
+      this.shouldPlayAfterPrepare = source.autoPlay !== false;
     }
     this.publish();
     // 页面返回已有 Surface 时恢复当前位置并保持暂停。
     if (this.surface.length > 0 && !this.core.exists) {
-      this.shouldPlayAfterPrepare = !sameSource;
+      this.shouldPlayAfterPrepare = !sameSource && source.autoPlay !== false;
       this.state.buffering = true;
       this.start();
     }
@@ -111,7 +112,7 @@ export class PlayerPlaybackSession {
     this.adoptSource(source);
     const initial: number = Number.isFinite(source.initialSeek) ? Math.max(0, source.initialSeek) : 0;
     this.resumeAfterPrepare = initial > 0 ? initial : -1;
-    this.shouldPlayAfterPrepare = true;
+    this.shouldPlayAfterPrepare = source.autoPlay !== false;
     this.state.position = initial;
     this.state.duration = 0;
     this.state.qualityLoading = false;
@@ -128,7 +129,7 @@ export class PlayerPlaybackSession {
     value.aid = source.aid; value.bvid = source.bvid; value.cid = source.cid; value.epId = source.epId;
     value.version = source.version; value.urls = source.urls.slice(); value.audioUrls = source.audioUrls.slice();
     value.qualities = source.qualities.slice(); value.quality = source.quality;
-    value.initialSeek = source.initialSeek; value.preview = source.preview;
+    value.initialSeek = source.initialSeek; value.preview = source.preview; value.autoPlay = source.autoPlay !== false;
     this.source = value;
     this.bound = true;
     this.sourceIndex = 0;
@@ -259,7 +260,7 @@ export class PlayerPlaybackSession {
   }
 
   private onTime(time: number): void {
-    if (this.state.seekLocked) return;
+    if (this.state.seekLocked || this.resumeAfterPrepare > 0) return;
     const seconds: number = time / 1000;
     const changed: boolean = Math.floor(seconds) !== Math.floor(this.state.position);
     this.state.position = seconds;

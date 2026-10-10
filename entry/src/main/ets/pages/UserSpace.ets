@@ -518,19 +518,23 @@ export struct UserSpacePage {
       Row({ space: 8 }) {
         BackButton({ variant: BackButtonVariant.GLASS })
         Blank()
-        Stack({ alignContent: Alignment.Center }) {
-          Image($r('app.media.ic_search')).width(20).height(20).fillColor('#FFFFFF')
-        }
-        .width(36).height(36).borderRadius(18)
-        .backgroundColor(this.glassOn ? '#66000000' : '#B3000000')
-        .backdropBlur(this.glassOn ? 10 : 0)
+        Button({ type: ButtonType.Normal }) {
+          Stack({ alignContent: Alignment.Center }) {
+            Image($r('app.media.ic_search')).width(20).height(20).fillColor('#FFFFFF')
+          }.width(36).height(36).borderRadius(18)
+          .backgroundColor(this.glassOn ? '#66000000' : '#B3000000')
+          .backdropBlur(this.glassOn ? 10 : 0)
+        }.width(44).height(44).padding(0).backgroundColor(Color.Transparent).borderRadius(22)
+        .accessibilityGroup(true).accessibilityText('搜索')
         .onClick(() => AppNavStack.pushPathByName(NAV_SEARCH, null))
-        Stack({ alignContent: Alignment.Center }) {
-          Image($r('app.media.ic_more')).width(20).height(20).fillColor('#FFFFFF')
-        }
-        .width(36).height(36).borderRadius(18)
-        .backgroundColor(this.glassOn ? '#66000000' : '#B3000000')
-        .backdropBlur(this.glassOn ? 10 : 0)
+        Button({ type: ButtonType.Normal }) {
+          Stack({ alignContent: Alignment.Center }) {
+            Image($r('app.media.ic_more')).width(20).height(20).fillColor('#FFFFFF')
+          }.width(36).height(36).borderRadius(18)
+          .backgroundColor(this.glassOn ? '#66000000' : '#B3000000')
+          .backdropBlur(this.glassOn ? 10 : 0)
+        }.width(44).height(44).padding(0).backgroundColor(Color.Transparent).borderRadius(22)
+        .accessibilityGroup(true).accessibilityText('查看空间背景图片')
         .onClick(() => this.openHeaderImage())
       }
       .width('100%')
@@ -595,7 +599,7 @@ export struct UserSpacePage {
           if (this.info.liveStatus === 1 && this.info.liveRoomId > 0) {
             Text('直播中')
               .width(52).height(20).textAlign(TextAlign.Center)
-              .fontSize(10).fontWeight(FontWeight.Medium).fontColor('#FFFFFF')
+              .fontSize(10).fontWeight(FontWeight.Medium).fontColor(AppTheme.onAccent(this.accent))
               .backgroundColor(this.accent).borderRadius(10)
           }
         }
@@ -689,7 +693,7 @@ export struct UserSpacePage {
           Button({ type: ButtonType.Normal }) {
             Image($r('app.media.ic_more')).width(20).height(20).fillColor(this.secondaryText())
           }
-          .width(40).height(40)
+          .width(44).height(44)
           .padding(0)
           .backgroundColor(this.controlSurface()).borderRadius(10)
           .accessibilityText('更多操作，举报或拉黑')

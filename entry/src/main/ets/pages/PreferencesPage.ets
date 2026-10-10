@@ -5,21 +5,6 @@ import { Immersive } from '../common/Immersive';
 import { PlayerQualityPreference } from '../common/PlayerQualityPreference';
 import { PageHeader } from '../components/PageHeader';
 
-function linearColorChannel(value: number): number {
-  const channel: number = value / 255;
-  return channel <= 0.04045 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);
-}
-
-/** 预设色包含黄色和粉色，主题色实底的文字需要随亮度选择深浅。 */
-function accentInk(color: string): string {
-  const red: number = parseInt(color.substring(1, 3), 16);
-  const green: number = parseInt(color.substring(3, 5), 16);
-  const blue: number = parseInt(color.substring(5, 7), 16);
-  const luminance: number = 0.2126 * linearColorChannel(red) + 0.7152 * linearColorChannel(green) +
-    0.0722 * linearColorChannel(blue);
-  return 1.05 / (luminance + 0.05) >= (luminance + 0.05) / 0.05 ? '#FFFFFF' : '#000000';
-}
-
 @Component
 struct PreferenceRow {
   @Prop title: string = '';
@@ -33,7 +18,12 @@ struct PreferenceRow {
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
 
-  build() {
+  private changeChecked(value: boolean): void {
+    if (this.rowEnabled && value !== this.checked) this.onChange(value);
+  }
+
+  @Builder
+  Content() {
     Row({ space: 14 }) {
       Column({ space: 6 }) {
         Text(this.title).fontSize(16).fontWeight(FontWeight.Medium)
@@ -52,13 +42,32 @@ struct PreferenceRow {
       if (this.toggle) {
         Toggle({ type: ToggleType.Switch, isOn: this.checked }).selectedColor(this.accent)
           .hitTestBehavior(HitTestMode.None)
-          .accessibilityText(this.title)
+          .focusable(false).accessibilityLevel('no-hide-descendants')
       } else {
         Text('›').fontSize(22).fontColor('#9499A0')
       }
     }.width('100%').constraintSize({ minHeight: 76 }).padding(18)
-    .enabled(this.rowEnabled).opacity(this.rowEnabled ? 1 : 0.45)
-    .onClick(() => { if (this.toggle) this.onChange(!this.checked); else this.onOpen(); })
+  }
+
+  build() {
+    if (this.toggle) {
+      // 整行只有一个原生开关动作，触摸、键盘和读屏共用 onChange。
+      Toggle({ type: ToggleType.Button, isOn: this.checked }) {
+        this.Content()
+      }
+      .width('100%').padding(0).backgroundColor(Color.Transparent).selectedColor(Color.Transparent)
+      .borderRadius(0).enabled(this.rowEnabled).opacity(this.rowEnabled ? 1 : 0.45)
+      .accessibilityGroup(true).accessibilityText(this.title).accessibilityDescription(this.detail)
+      .onChange((value: boolean) => this.changeChecked(value))
+    } else {
+      Button({ type: ButtonType.Normal }) {
+        this.Content()
+      }
+      .width('100%').padding(0).backgroundColor(Color.Transparent).borderRadius(0)
+      .enabled(this.rowEnabled).opacity(this.rowEnabled ? 1 : 0.45)
+      .accessibilityGroup(true).accessibilityText(this.title + (this.value.length > 0 ? '，' + this.value : ''))
+      .accessibilityDescription(this.detail).onClick(() => this.onOpen())
+    }
   }
 }
 
@@ -223,8 +232,8 @@ export struct PreferencesPage {
       Text('显示模式').fontSize(16).fontWeight(FontWeight.Medium).fontColor(this.ink()).width('100%')
       Row({ space: 8 }) {
         ForEach(['跟随系统', '浅色', '深色'], (label: string, index: number) => {
-          Button(label).fontSize(12).layoutWeight(1).height(38)
-            .fontColor(this.themeMode === ['system', 'light', 'dark'][index] ? accentInk(this.accent) : this.ink())
+          Button(label).fontSize(12).layoutWeight(1).constraintSize({ minHeight: 44 })
+            .fontColor(this.themeMode === ['system', 'light', 'dark'][index] ? AppTheme.onAccent(this.accent) : this.ink())
             .backgroundColor(this.themeMode === ['system', 'light', 'dark'][index] ? this.accent : (this.isDark ? '#34353D' : '#F0F1F5'))
             .accessibilitySelected(this.themeMode === ['system', 'light', 'dark'][index])
             .onClick(() => AppTheme.setMode(['system', 'light', 'dark'][index]))
@@ -234,13 +243,17 @@ export struct PreferencesPage {
       Text('主题色').fontSize(16).fontWeight(FontWeight.Medium).fontColor(this.ink()).width('100%')
       Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
         ForEach(AppTheme.PRESET_COLORS, (color: string) => {
-          Stack() {
-            Circle().fill(color).width(28).height(28)
-            if (this.userAccent === color) {
-              Circle().fill(Color.Transparent).stroke(color).strokeWidth(2).width(36).height(36)
-              Text('✓').fontSize(18).fontWeight(FontWeight.Bold).fontColor(accentInk(color))
-            }
-          }.width(this.contentWidth < 400 ? '25%' : '12.5%').height(44)
+          Button({ type: ButtonType.Normal }) {
+            Stack() {
+              Circle().fill(color).width(28).height(28)
+              if (this.userAccent === color) {
+                Circle().fill(Color.Transparent).stroke(color).strokeWidth(2).width(36).height(36)
+                Text('✓').fontSize(18).fontWeight(FontWeight.Bold).fontColor(AppTheme.onAccent(color))
+              }
+            }.width(44).height(44)
+          }.width(this.contentWidth < 400 ? '25%' : '12.5%').constraintSize({ minWidth: 44, minHeight: 44 })
+            .padding(0).backgroundColor(Color.Transparent).borderRadius(22)
+            .accessibilityGroup(true)
             .accessibilityText('主题色 ' + color + (this.userAccent === color ? '，已选择' : ''))
             .accessibilitySelected(this.userAccent === color)
             .onClick(() => AppTheme.setAccent(color))
@@ -289,8 +302,9 @@ export struct PreferencesPage {
             }.layoutWeight(1)
           }.padding(12)
           Row({ space: 12 }) {
-            Button('取消').layoutWeight(1).onClick(() => { this.editingTime = false; })
-            Button('保存时段').layoutWeight(1).fontColor(accentInk(this.accent)).backgroundColor(this.accent).onClick(() => this.saveTime())
+            Button('取消').layoutWeight(1).constraintSize({ minHeight: 44 }).onClick(() => { this.editingTime = false; })
+            Button('保存时段').layoutWeight(1).constraintSize({ minHeight: 44 })
+              .fontColor(AppTheme.onAccent(this.accent)).backgroundColor(this.accent).onClick(() => this.saveTime())
           }.padding(18)
         }
       }

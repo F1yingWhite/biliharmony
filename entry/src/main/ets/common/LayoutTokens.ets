@@ -5,9 +5,9 @@
 export class LayoutTokens {
   /** 视频网格卡片与骨架共用的视觉尺度。 */
   static readonly cardRadius: number = 14;
-  static readonly cardMetaHeight: number = 36;
+  static readonly cardMetaHeight: number = 44;
   static readonly cardMetaFontSize: number = 12;
-  static readonly cardControlSize: number = 36;
+  static readonly cardControlSize: number = 44;
   static readonly phonePadding: number = 10;
   static readonly widePadding: number = 18;
   static readonly readingMaxWidth: number = 760;
@@ -20,11 +20,12 @@ export class LayoutTokens {
     return width >= 600 ? LayoutTokens.widePadding : LayoutTokens.phonePadding;
   }
 
-  /** 手机保持双列；折叠屏、平板逐级增加列数，单卡不会被横向拉得过宽。 */
+  /** 窄窗保留可读的单列；普通手机双列，折叠屏、平板逐级增加列数。 */
   static feedColumns(width: number): number {
     if (width >= 1040) return 5;
     if (width >= 820) return 4;
     if (width >= 560) return 3;
+    if (width < 360) return 1;
     return 2;
   }
 

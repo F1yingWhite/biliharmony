@@ -7,8 +7,8 @@ const ts = require(process.env.ARKTS_TEST_TYPESCRIPT ||
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const ANCHOR = {
   prepare: ['  private prepare(): void {', '  private bg(): string {'],
-  confirm: ['  private confirm(', '  private exportItem('],
-  export: ['  private exportItem(', '  private jumpItem('],
+  confirm: ['  private confirm(', '  private async exportItem('],
+  export: ['  private async exportItem(', '  private jumpItem('],
 };
 function deferred() {
   let resolve, reject;
@@ -23,7 +23,7 @@ function compile(source, names = [], values = []) {
   new Function('module', 'exports', ...names, code)(module, module.exports, ...values);
   return module.exports;
 }
-function fixture({init = async () => {}, menu = () => Promise.resolve({index: 0}), io = {}, targets = ['target']} = {}) {
+function fixture({init = async () => {}, menu = () => Promise.resolve({index: 0}), io = {}, targets = ['target'], pick} = {}) {
   const filename = process.env.ARKTS_TEST_SOURCE_ROOT
     ? path.join(process.env.ARKTS_TEST_SOURCE_ROOT, 'pages/DownloadCenterPage.ets')
     : 'entry/src/main/ets/pages/DownloadCenterPage.ets';
@@ -33,20 +33,21 @@ function fixture({init = async () => {}, menu = () => Promise.resolve({index: 0}
     assert.ok(begin >= 0 && finish > begin, `method anchors: ${start} -> ${end}`);
     return source.slice(begin, finish);
   }).join('\n');
-  const picker = {DocumentViewPicker: class {save() {return Promise.resolve(targets);}}, DocumentSaveOptions: class {}};
+  const picker = {DocumentViewPicker: class {save() {return pick ? pick() : Promise.resolve(targets);}}, DocumentSaveOptions: class {}};
   const fileIo = {OpenMode: {READ_ONLY: 1, READ_WRITE: 2, CREATE: 4, TRUNC: 8}, ...io};
   const {Harness} = compile('export class Harness {\n' + methods + '\n}',
-    ['DownloadCenter', 'picker', 'fs', 'AppTheme'], [{init}, picker, fileIo, {DANGER: '#FF0000'}]);
+    ['DownloadCenter', 'picker', 'fs', 'AppTheme', 'DOWNLOAD_STATUS_DONE'], [{onForeground: init}, picker, fileIo, {DANGER: '#FF0000'}, 2]);
   const {RequestEpoch} = compile(fs.readFileSync('entry/src/main/ets/common/RequestEpoch.ets', 'utf8'));
   const page = new Harness(), messages = [], refreshes = [];
   Object.assign(page, {
     destroyed: false, prepareEpoch: new RequestEpoch(), preparing: false, prepareError: '',
+    exportBusy: false, exportTaskId: '', exportGeneration: 0,
     getUIContext: () => ({getHostContext: () => ({}), getPromptAction: () => ({showDialog: menu})}),
     toast: message => messages.push(message), refreshTasks: () => refreshes.push(true), isDark: false,
   });
   return {page, messages, refreshes};
 }
-const item = {filePath: 'source', title: 'media', kind: 1, extension: () => '.m4a'};
+const item = {id: 'download', status: 2, filePath: 'source', title: 'media', kind: 1, extension: () => '.m4a'};
 
 test('confirmation failure never executes a destructive action', async () => {
   let actions = 0;
@@ -79,8 +80,8 @@ test('confirmation requires acceptance from a still-active page', async () => {
 test('source-open failure never opens or truncates the export target', async () => {
   const opened = [], closed = [];
   const {page, messages} = fixture({io: {
-    openSync(path) {opened.push(path); if (path === 'source') throw new Error('missing'); return {fd: 2};},
-    closeSync(file) {closed.push(file.fd);}, copyFileSync() {},
+    async open(path) {opened.push(path); if (path === 'source') throw new Error('missing'); return {fd: 2};},
+    async close(file) {closed.push(file.fd);}, async copyFile() {},
   }});
   page.exportItem(item); await tick();
   assert.deepEqual(opened, ['source']);
@@ -92,12 +93,12 @@ for (const failure of ['target-open', 'copy', 'target-close', 'none']) {
   test(`export closes each acquired file even after ${failure}`, async () => {
     const closed = [], copied = [];
     const {page, messages} = fixture({io: {
-      openSync(path) {
+      async open(path) {
         if (path === 'target' && failure === 'target-open') throw new Error('target unavailable');
         return {fd: path === 'source' ? 1 : 2};
       },
-      copyFileSync(source, target) {copied.push([source, target]); if (failure === 'copy') throw new Error('copy failure');},
-      closeSync(file) {closed.push(file.fd); if (file.fd === 2 && failure === 'target-close') throw new Error('close failure');},
+      async copyFile(source, target) {copied.push([source, target]); if (failure === 'copy') throw new Error('copy failure');},
+      async close(file) {closed.push(file.fd); if (file.fd === 2 && failure === 'target-close') throw new Error('close failure');},
     }});
     page.exportItem(item); await tick();
     assert.deepEqual(closed, failure === 'target-open' ? [1] : [2, 1]);
@@ -137,4 +138,49 @@ test('restore settling after page exit never changes view state', async () => {
   pending.reject(new Error('late failure')); await tick();
   assert.equal(page.preparing, true);
   assert.equal(page.prepareError, '');
+});
+
+test('picker and async copy share the export lock; file handles remain open until copy settles', async () => {
+  const selected = deferred(), copied = deferred(); let pickers = 0;
+  const opened = [], closed = [];
+  const {page, messages} = fixture({pick: () => {pickers++; return selected.promise;}, io: {
+    async open(path) {opened.push(path); return {fd: path === 'source' ? 1 : 2};},
+    copyFile: () => copied.promise,
+    async close(file) {closed.push(file.fd);},
+    copyFileSync() {assert.fail('must never perform a synchronous media copy');},
+  }});
+  const run = page.exportItem(item);
+  await page.exportItem(item); assert.equal(pickers, 1);
+  assert.equal(page.exportTaskId, item.id); assert.equal(page.exportBusy, true);
+  selected.resolve(['target']); await tick();
+  await page.exportItem(item); assert.equal(pickers, 1);
+  assert.deepEqual(opened, ['source', 'target']); assert.deepEqual(closed, []);
+  let deleted = false; page.confirm('delete', () => {deleted = true;}); await tick();
+  assert.equal(deleted, false);
+  copied.resolve(); await run;
+  assert.deepEqual(closed, [2, 1]); assert.equal(page.exportBusy, false);
+  assert.equal(page.exportTaskId, ''); assert.deepEqual(messages, ['已导出到所选位置']);
+});
+
+test('copy failure after page exit still closes both handles and does not toast into another page generation', async () => {
+  const pending = deferred(); const closed = [];
+  const {page, messages} = fixture({io: {
+    async open(path) {return {fd: path === 'source' ? 1 : 2};},
+    copyFile: () => pending.promise, async close(file) {closed.push(file.fd);},
+  }});
+  const run = page.exportItem(item); await tick();
+  page.destroyed = true; page.exportGeneration++;
+  pending.reject(new Error('copy failure')); await run;
+  assert.deepEqual(closed, [2, 1]); assert.deepEqual(messages, []); assert.equal(page.exportBusy, false);
+});
+
+test('late picker from a departed generation cannot open/truncate a target, and cancellation unlocks retry', async () => {
+  const pending = deferred(); const opened = [];
+  const {page, messages} = fixture({pick: () => pending.promise, io: {async open(path) {opened.push(path);}}});
+  const run = page.exportItem(item); page.exportGeneration++;
+  pending.resolve(['target']); await run;
+  assert.deepEqual(opened, []); assert.deepEqual(messages, []); assert.equal(page.exportBusy, false);
+  assert.equal(page.exportTaskId, '');
+  const cancel = fixture({targets: []}); await cancel.page.exportItem(item);
+  assert.equal(cancel.page.exportBusy, false); assert.deepEqual(cancel.messages, []);
 });

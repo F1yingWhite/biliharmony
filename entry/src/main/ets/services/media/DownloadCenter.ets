@@ -3,12 +3,12 @@
  *
  * 与 VideoDownloadService（导出到用户自选位置的一次性任务）互补：
  * - 任务先落盘到应用沙箱 filesDir/downloads，完成后可导出/直接删除；
- * - 队列单并发，FIFO；任务记录持久化到 Preferences，重启后运行中的任务标记为
- *   「已中断」，可重试（重试会重新解析播放地址，旧 CDN URL 会过期）；
- * - 进度经 request.downloadFile 的 background 通知同步展示。
+ * - 队列单并发，FIFO；保存系统任务 ID，重启后接管后台任务；
+ * - 重试重新解析地址，并用独立临时文件隔离无法接管的旧下载；
+ * - 进度经 request.agent 的后台通知同步展示，前台主动补查状态。
  */
 import { common } from '@kit.AbilityKit';
-import { request } from '@kit.BasicServicesKit';
+import { request, BusinessError } from '@kit.BasicServicesKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { preferences } from '@kit.ArkData';
 import { HttpClient } from '../network/HttpClient';
@@ -32,6 +32,8 @@ export const DOWNLOAD_STATUS_RUNNING: number = 1;
 export const DOWNLOAD_STATUS_DONE: number = 2;
 export const DOWNLOAD_STATUS_FAILED: number = 3;
 export const DOWNLOAD_STATUS_INTERRUPTED: number = 4;
+export const DOWNLOAD_STATUS_WAITING: number = 5;
+export const DOWNLOAD_STATUS_PAUSED: number = 6;
 
 export class DownloadTaskItem {
   id: string = '';
@@ -50,6 +52,11 @@ export class DownloadTaskItem {
   message: string = '';
   /** 沙箱内最终文件路径；完成前为空串。 */
   filePath: string = '';
+  systemTaskId: string = '';
+  partPath: string = '';
+  attempt: number = 0;
+  receivedBytes: number = 0;
+  totalBytes: number = -1;
   createdAt: number = 0;
 
   extension(): string {
@@ -68,6 +75,10 @@ export class DownloadTaskItem {
         return '失败';
       case DOWNLOAD_STATUS_INTERRUPTED:
         return '已中断';
+      case DOWNLOAD_STATUS_WAITING:
+        return '等待网络或系统资源';
+      case DOWNLOAD_STATUS_PAUSED:
+        return '已暂停';
       default:
         return '';
     }
@@ -89,6 +100,11 @@ export class DownloadTaskItem {
     t.progress = typeof j['progress'] === 'number' ? j['progress'] as number : -1;
     t.message = typeof j['message'] === 'string' ? j['message'] as string : '';
     t.filePath = typeof j['filePath'] === 'string' ? j['filePath'] as string : '';
+    t.systemTaskId = typeof j['systemTaskId'] === 'string' ? j['systemTaskId'] as string : '';
+    t.partPath = typeof j['partPath'] === 'string' ? j['partPath'] as string : '';
+    t.attempt = typeof j['attempt'] === 'number' ? Math.max(0, Math.floor(j['attempt'] as number)) : 0;
+    t.receivedBytes = typeof j['receivedBytes'] === 'number' ? j['receivedBytes'] as number : 0;
+    t.totalBytes = typeof j['totalBytes'] === 'number' ? j['totalBytes'] as number : -1;
     t.createdAt = typeof j['createdAt'] === 'number' ? j['createdAt'] as number : 0;
     return t;
   }
@@ -103,11 +119,15 @@ export class DownloadCenter {
   private static context: common.UIAbilityContext | null = null;
   private static running: boolean = false;
   private static currentRequestId: string = '';
+  private static currentRun: Promise<void> | null = null;
   private static version: number = 0;
   private static progressPersistTimer: number = -1;
   /** 当前系统下载句柄：删除任务时用于取消。 */
-  static activeSystemTask: request.DownloadTask | null = null;
+  static activeSystemTask: request.agent.Task | null = null;
   private static activeCancel: (() => void) | null = null;
+  private static activeSync: (() => Promise<void>) | null = null;
+  private static foregroundSync: Promise<void> | null = null;
+  private static mutations: Map<string, Promise<void>> = new Map<string, Promise<void>>();
 
   /** 由 EntryAbility/页面首次访问前调用：恢复记录并把中断任务标记出来。 */
   static init(context: common.UIAbilityContext): Promise<void> {
@@ -136,18 +156,24 @@ export class DownloadCenter {
     // 读取和解析全部成功后才发布 store，避免失败后把原记录覆盖成空列表。
     DownloadCenter.tasks = restored;
     DownloadCenter.store = store;
-    // 上次退出时还在排队/下载的任务：CDN URL 已失效，标记为中断等待重试。
+    // 可接管的系统任务保留 ID；旧版本无 ID 的下载不能确认是否仍写入，保留旧文件。
     let changed: boolean = false;
     for (let i: number = 0; i < DownloadCenter.tasks.length; i++) {
       const t: DownloadTaskItem = DownloadCenter.tasks[i];
-      if (t.status === DOWNLOAD_STATUS_QUEUED || t.status === DOWNLOAD_STATUS_RUNNING) {
+      if (t.status !== DOWNLOAD_STATUS_DONE && t.systemTaskId.length > 0) {
+        t.status = DOWNLOAD_STATUS_WAITING;
+        t.message = '正在恢复系统下载';
+        changed = true;
+      } else if (t.status === DOWNLOAD_STATUS_QUEUED || t.status === DOWNLOAD_STATUS_RUNNING ||
+        t.status === DOWNLOAD_STATUS_WAITING || t.status === DOWNLOAD_STATUS_PAUSED) {
         t.status = DOWNLOAD_STATUS_INTERRUPTED;
         t.progress = -1;
-        t.message = '应用退出导致下载中断，可重试';
+        t.message = '旧下载无法接管，可重试；重试使用独立临时文件';
         changed = true;
       }
     }
     if (changed) await DownloadCenter.persist();
+    DownloadCenter.pump();
   }
 
   static async ensureLoaded(): Promise<void> {
@@ -164,21 +190,47 @@ export class DownloadCenter {
     return DownloadCenter.tasks;
   }
 
+  /** EntryAbility.onForeground 与页面进入时调用；单飞补查后台丢失的状态/进度。 */
+  static onForeground(context: common.UIAbilityContext): Promise<void> {
+    if (DownloadCenter.foregroundSync !== null) return DownloadCenter.foregroundSync;
+    const pending: Promise<void> = DownloadCenter.init(context).then(async (): Promise<void> => {
+      if (DownloadCenter.activeSync !== null) {
+        await DownloadCenter.activeSync();
+      } else {
+        for (const item of DownloadCenter.tasks) {
+          if (!DownloadCenter.mutations.has(item.id) && item.systemTaskId.length > 0 &&
+            item.status === DOWNLOAD_STATUS_INTERRUPTED) {
+            item.status = DOWNLOAD_STATUS_WAITING;
+          }
+        }
+        DownloadCenter.pump();
+      }
+    }).finally(() => { DownloadCenter.foregroundSync = null; });
+    DownloadCenter.foregroundSync = pending;
+    return pending;
+  }
+
   static hasActive(): boolean {
     return DownloadCenter.running ||
       DownloadCenter.tasks.some((t: DownloadTaskItem): boolean =>
-        t.status === DOWNLOAD_STATUS_QUEUED || t.status === DOWNLOAD_STATUS_RUNNING);
+        t.status === DOWNLOAD_STATUS_QUEUED || t.status === DOWNLOAD_STATUS_RUNNING ||
+        t.status === DOWNLOAD_STATUS_WAITING || t.status === DOWNLOAD_STATUS_PAUSED ||
+        (t.systemTaskId.length > 0 && t.status !== DOWNLOAD_STATUS_DONE));
   }
 
-  private static async persist(): Promise<void> {
+  private static async persist(required: boolean = false): Promise<void> {
     DownloadCenter.version++;
-    if (DownloadCenter.store === null) return;
+    if (DownloadCenter.store === null) {
+      if (required) throw new Error('下载记录尚未恢复，无法启动系统任务');
+      return;
+    }
     const raw: string = JSON.stringify(DownloadCenter.tasks);
     try {
       DownloadCenter.store.putSync(DownloadCenter.TASKS_KEY, raw);
       await DownloadCenter.store.flush();
     } catch (e) {
       // 落盘失败保内存态，下次操作再写。
+      if (required) throw new Error('下载记录保存失败，请重试');
     }
   }
 
@@ -222,11 +274,16 @@ export class DownloadCenter {
 
   private static pump(): void {
     if (DownloadCenter.running) return;
+    // 未确认旧系统任务停止时，不启动第二个后台任务破坏单并发。
+    if (DownloadCenter.tasks.some((t: DownloadTaskItem): boolean => t.systemTaskId.length > 0 &&
+      (t.status === DOWNLOAD_STATUS_INTERRUPTED || t.status === DOWNLOAD_STATUS_FAILED))) return;
     let next: DownloadTaskItem | null = null;
     for (let i: number = DownloadCenter.tasks.length - 1; i >= 0; i--) {
       // tasks 是新任务在前的数组：从尾部找最早的排队任务，保持 FIFO。
       const t: DownloadTaskItem = DownloadCenter.tasks[i];
-      if (t.status === DOWNLOAD_STATUS_QUEUED) {
+      if (t.status === DOWNLOAD_STATUS_QUEUED || (t.systemTaskId.length > 0 &&
+        (t.status === DOWNLOAD_STATUS_WAITING || t.status === DOWNLOAD_STATUS_PAUSED ||
+        t.status === DOWNLOAD_STATUS_RUNNING))) {
         next = t;
         break;
       }
@@ -235,27 +292,46 @@ export class DownloadCenter {
     const task: DownloadTaskItem = next;
     DownloadCenter.running = true;
     DownloadCenter.currentRequestId = task.id;
-    DownloadCenter.runOne(task).catch(() => {
+    const pending: Promise<void> = DownloadCenter.runOne(task).catch(() => {
     }).finally(() => {
       const isCurrent: boolean = DownloadCenter.currentRequestId === task.id;
-      DownloadCenter.running = false;
-      DownloadCenter.currentRequestId = '';
-      if (isCurrent) DownloadCenter.pump();
+      if (isCurrent) {
+        DownloadCenter.running = false;
+        DownloadCenter.currentRequestId = '';
+        DownloadCenter.currentRun = null;
+        DownloadCenter.pump();
+      }
     });
+    DownloadCenter.currentRun = pending;
   }
 
   private static async runOne(task: DownloadTaskItem): Promise<void> {
     if (DownloadCenter.context === null) return;
+    if (task.systemTaskId.length > 0) {
+      try {
+        const system: request.agent.Task = await request.agent.getTask(DownloadCenter.context, task.systemTaskId);
+        if (DownloadCenter.isCancelled(task)) return;
+        await DownloadCenter.waitForSystem(task, system, false);
+        await DownloadCenter.finishFile(task);
+      } catch (e) {
+        if (!DownloadCenter.isCancelled(task)) {
+          task.status = DOWNLOAD_STATUS_INTERRUPTED;
+          task.message = '系统下载恢复失败，可返回前台再试或重试';
+          await DownloadCenter.persist();
+        }
+      }
+      return;
+    }
     task.status = DOWNLOAD_STATUS_RUNNING;
     task.progress = -1;
     task.message = '';
     await DownloadCenter.persist();
     try {
-      if (task.status === DOWNLOAD_STATUS_INTERRUPTED) return;
+      if (DownloadCenter.isCancelled(task)) return;
       // 解析下载地址（重试场景下旧地址已过期，必须每次重取）。
       const info: PlayUrlInfo | null = await BiliApi.getPlayUrl(task.aid, task.bvid, task.cid,
         task.qn > 0 ? task.qn : 127, task.epId, false);
-      if (task.status === DOWNLOAD_STATUS_INTERRUPTED) return;
+      if (DownloadCenter.isCancelled(task)) return;
       if (info === null) throw new Error('暂时无法获取下载地址');
       const urls: Array<string> = task.kind === DOWNLOAD_KIND_AUDIO ? info.downloadAudioUrls : info.urls;
       if (urls.length === 0) {
@@ -271,25 +347,44 @@ export class DownloadCenter {
       } catch (e) {
         // 目录已存在。
       }
-      const partPath: string = dir + '/' + task.id + '.part';
-      const finalPath: string = dir + '/' + task.id + task.extension();
       const refererId: string = task.bvid.length > 0 ? task.bvid : 'av' + String(task.aid);
-      await VideoDownloadServiceLike.downloadToFile(DownloadCenter.context, urls, partPath, finalPath,
-        HttpClient.getDownloadHeaders('https://www.bilibili.com/video/' + refererId),
-        (received: number, total: number): void => {
-          if (task.status !== DOWNLOAD_STATUS_RUNNING) return;
-          const nextProgress: number = total > 0 ? Math.max(0, Math.min(100, Math.floor(received * 100 / total))) : -1;
-          if (nextProgress === task.progress) return;
-          task.progress = nextProgress;
-          DownloadCenter.scheduleProgressPersist();
-        }, (): boolean => task.status === DOWNLOAD_STATUS_INTERRUPTED,
-        (cancel: (() => void) | null): void => { DownloadCenter.activeCancel = cancel; });
-      if (task.status === DOWNLOAD_STATUS_INTERRUPTED) return;
-      task.filePath = finalPath;
-      task.progress = 100;
-      task.status = DOWNLOAD_STATUS_DONE;
+      let lastError: Error = new Error('所有下载线路均不可用');
+      for (const url of urls) {
+        if (DownloadCenter.isCancelled(task)) return;
+        task.attempt++;
+        task.partPath = dir + '/' + task.id + '.a' + String(task.attempt) + '.part';
+        await DownloadCenter.persist(true);
+        if (DownloadCenter.isCancelled(task)) return;
+        try {
+          const system: request.agent.Task = await request.agent.create(DownloadCenter.context, {
+            action: request.agent.Action.DOWNLOAD, mode: request.agent.Mode.BACKGROUND,
+            url: url, headers: HttpClient.getDownloadHeaders('https://www.bilibili.com/video/' + refererId),
+            saveas: task.partPath, overwrite: false, metered: true, roaming: false,
+            retry: true, gauge: true, title: 'BiliHaromny 下载中心', description: '媒体下载',
+          });
+          if (DownloadCenter.isCancelled(task)) {
+            await request.agent.remove(system.tid);
+            DownloadCenter.cleanPart(task);
+            return;
+          }
+          task.systemTaskId = system.tid;
+          // 先落盘 ID，再启动；创建与保存之间退出只留下未启动的系统任务。
+          await DownloadCenter.persist(true);
+          if (DownloadCenter.isCancelled(task)) return;
+          await DownloadCenter.waitForSystem(task, system, true);
+          await DownloadCenter.finishFile(task);
+          return;
+        } catch (e) {
+          if (DownloadCenter.isCancelled(task)) return;
+          lastError = e instanceof Error ? e : new Error(String(e));
+          // remove 确认系统停止后才回收临时文件或尝试另一线路。
+          await DownloadCenter.stopSystem(task);
+          DownloadCenter.cleanPart(task);
+        }
+      }
+      throw lastError;
     } catch (e) {
-      if (task.status === DOWNLOAD_STATUS_INTERRUPTED) return; // 用户已删除任务
+      if (DownloadCenter.isCancelled(task)) return; // 用户已删除任务
       task.status = DOWNLOAD_STATUS_FAILED;
       task.progress = -1;
       task.message = e instanceof Error ? e.message : String(e);
@@ -300,11 +395,23 @@ export class DownloadCenter {
   }
 
   /** 重试：重新解析地址并排队。 */
-  static async retry(id: string): Promise<void> {
+  static retry(id: string): Promise<void> {
+    return DownloadCenter.mutate(id, (): Promise<void> => DownloadCenter.retryOne(id));
+  }
+
+  private static async retryOne(id: string): Promise<void> {
     await DownloadCenter.ensureLoaded();
     const task: DownloadTaskItem | null = DownloadCenter.find(id);
     if (task === null) return;
-    if (task.status === DOWNLOAD_STATUS_RUNNING) return;
+    if (task.status === DOWNLOAD_STATUS_RUNNING || task.status === DOWNLOAD_STATUS_QUEUED) return;
+    const previousStatus: number = task.status;
+    const oldRun: Promise<void> | null = DownloadCenter.currentRequestId === id ? DownloadCenter.currentRun : null;
+    task.status = DOWNLOAD_STATUS_INTERRUPTED;
+    try { await DownloadCenter.stopSystem(task); } catch (e) { task.status = previousStatus; throw (e as Error); }
+    if (DownloadCenter.currentRequestId === id && DownloadCenter.activeCancel !== null) DownloadCenter.activeCancel();
+    if (oldRun !== null) await oldRun;
+    if (DownloadCenter.find(id) !== task) return;
+    DownloadCenter.cleanPart(task);
     try {
       if (fileExists(task.filePath)) fs.unlinkSync(task.filePath);
     } catch (e) {
@@ -314,42 +421,72 @@ export class DownloadCenter {
     task.status = DOWNLOAD_STATUS_QUEUED;
     task.progress = -1;
     task.message = '';
+    task.receivedBytes = 0;
+    task.totalBytes = -1;
     await DownloadCenter.persist();
     DownloadCenter.pump();
   }
 
+  static resume(id: string): Promise<void> {
+    return DownloadCenter.mutate(id, (): Promise<void> => DownloadCenter.resumeOne(id));
+  }
+
+  private static async resumeOne(id: string): Promise<void> {
+    await DownloadCenter.ensureLoaded();
+    const item: DownloadTaskItem | null = DownloadCenter.find(id);
+    if (item === null || DownloadCenter.context === null || item.systemTaskId.length === 0 ||
+      item.status !== DOWNLOAD_STATUS_PAUSED) return;
+    const system: request.agent.Task = DownloadCenter.activeSystemTask !== null &&
+      DownloadCenter.currentRequestId === id ? DownloadCenter.activeSystemTask :
+      await request.agent.getTask(DownloadCenter.context, item.systemTaskId);
+    const info: request.agent.TaskInfo = await request.agent.show(system.tid);
+    if (DownloadCenter.find(id) !== item || item.systemTaskId !== system.tid) return;
+    if (info.progress.state === request.agent.State.STOPPED || info.progress.state === request.agent.State.INITIALIZED) {
+      await system.start();
+    } else if (info.progress.state === request.agent.State.PAUSED) {
+      await system.resume();
+    }
+    if (DownloadCenter.find(id) !== item) return;
+    item.status = DOWNLOAD_STATUS_RUNNING;
+    item.message = '';
+    await DownloadCenter.persist();
+    DownloadCenter.pump();
+    if (DownloadCenter.activeSync !== null) await DownloadCenter.activeSync();
+  }
+
   /** 删除任务与已落盘文件。运行中的任务先由下载器感知 remove 停止。 */
-  static async remove(id: string): Promise<void> {
+  static remove(id: string): Promise<void> {
+    return DownloadCenter.mutate(id, (): Promise<void> => DownloadCenter.removeOne(id));
+  }
+
+  private static async removeOne(id: string): Promise<void> {
     await DownloadCenter.ensureLoaded();
     const task: DownloadTaskItem | null = DownloadCenter.find(id);
     if (task === null) return;
-    const wasRunning: boolean = task.status === DOWNLOAD_STATUS_RUNNING;
+    const oldStatus: number = task.status;
+    const oldRun: Promise<void> | null = DownloadCenter.currentRequestId === id ? DownloadCenter.currentRun : null;
     task.status = DOWNLOAD_STATUS_INTERRUPTED;
     task.message = '';
     DownloadCenter.clearProgressPersistTimer();
-    // 运行中先取消系统任务（runOne 的 catch 感知中断后不再回写状态）。
-    if (wasRunning && DownloadCenter.activeSystemTask !== null) {
-      try {
-        await DownloadCenter.activeSystemTask.delete();
-      } catch (e) {
-        // 任务可能已结束。
-      }
+    try {
+      await DownloadCenter.stopSystem(task);
+    } catch (e) {
+      task.status = oldStatus;
+      task.message = '系统下载尚未停止，请稍后重试删除';
+      await DownloadCenter.persist();
+      throw (e as Error);
     }
-    if (wasRunning && DownloadCenter.activeCancel !== null) DownloadCenter.activeCancel();
+    if (DownloadCenter.currentRequestId === id && DownloadCenter.activeCancel !== null) DownloadCenter.activeCancel();
+    if (oldRun !== null) await oldRun;
     try {
       if (task.filePath.length > 0 && fileExists(task.filePath)) fs.unlinkSync(task.filePath);
     } catch (e) {
       // 文件可能已被清理。
     }
     DownloadCenter.tasks = DownloadCenter.tasks.filter((t: DownloadTaskItem): boolean => t.id !== id);
-    try {
-      const part: string = DownloadCenter.context !== null
-        ? DownloadCenter.context.filesDir + '/downloads/' + id + '.part' : '';
-      if (part.length > 0 && fileExists(part)) fs.unlinkSync(part);
-    } catch (e) {
-      // 忽略。
-    }
+    DownloadCenter.cleanPart(task);
     await DownloadCenter.persist();
+    DownloadCenter.pump();
   }
 
   /** 清理已完成/已失败/已中断的记录及其本地文件；调用方需明确告知未导出文件也会删除。 */
@@ -360,23 +497,21 @@ export class DownloadCenter {
       t.status === DOWNLOAD_STATUS_INTERRUPTED);
     for (let i: number = 0; i < finished.length; i++) {
       const t: DownloadTaskItem = finished[i];
-      try {
-        if (t.filePath.length > 0 && fileExists(t.filePath)) fs.unlinkSync(t.filePath);
-      } catch (e) {
-        // 忽略单个文件失败。
-      }
-      // 进程退出时中间文件可能已落盘，恢复记录尚无最终 filePath；清记录前一起回收。
-      try {
-        const part: string = DownloadCenter.context !== null
-          ? DownloadCenter.context.filesDir + '/downloads/' + t.id + '.part' : '';
-        if (part.length > 0 && fileExists(part)) fs.unlinkSync(part);
-      } catch (e) {
-        // 单个文件失败不妨碍清理其它任务。
-      }
+      await DownloadCenter.mutate(t.id, async (): Promise<void> => {
+        const current: DownloadTaskItem | null = DownloadCenter.find(t.id);
+        if (current !== null && (current.status === DOWNLOAD_STATUS_DONE || current.status === DOWNLOAD_STATUS_FAILED ||
+          current.status === DOWNLOAD_STATUS_INTERRUPTED)) await DownloadCenter.removeOne(t.id);
+      });
     }
-    DownloadCenter.tasks = DownloadCenter.tasks.filter((t: DownloadTaskItem): boolean =>
-      t.status === DOWNLOAD_STATUS_QUEUED || t.status === DOWNLOAD_STATUS_RUNNING);
-    await DownloadCenter.persist();
+  }
+
+  private static mutate(id: string, action: () => Promise<void>): Promise<void> {
+    const previous: Promise<void> = DownloadCenter.mutations.get(id) || Promise.resolve();
+    const pending: Promise<void> = previous.catch(() => {}).then(action).finally(() => {
+      if (DownloadCenter.mutations.get(id) === pending) DownloadCenter.mutations.delete(id);
+    });
+    DownloadCenter.mutations.set(id, pending);
+    return pending;
   }
 
   private static find(id: string): DownloadTaskItem | null {
@@ -385,91 +520,145 @@ export class DownloadCenter {
     }
     return null;
   }
-}
 
-/**
- * 复用 VideoDownloadService 的 CDN 容错下载，但落到指定路径而不是用户 URI。
- * 独立成内部包装，避免把导出语义（DocumentSaveOptions）带进下载中心。
- */
-class VideoDownloadServiceLike {
-  static async downloadToFile(context: common.UIAbilityContext, urls: Array<string>, partPath: string,
-    finalPath: string, headers: Record<string, string>, onProgress: (received: number, total: number) => void,
-    isCancelled: () => boolean, setCancel: (cancel: (() => void) | null) => void)
-    : Promise<void> {
-    let lastError: Error = new Error('所有下载线路均不可用');
-    for (let i: number = 0; i < urls.length; i++) {
-      if (isCancelled()) throw new Error('下载已取消');
-      try {
-        const task: request.DownloadTask = await request.downloadFile(context, {
-          url: urls[i],
-          header: headers,
-          filePath: partPath,
-          title: 'BiliHaromny 下载中心',
-          description: 'BiliHaromny 媒体下载',
-          background: true,
-          enableMetered: true,
-        });
-        if (isCancelled()) {
-          try { await task.delete(); } catch (e) {}
-          throw new Error('下载已取消');
-        }
-        DownloadCenter.activeSystemTask = task;
-        await new Promise<void>((resolve: () => void, reject: (e: Error) => void) => {
-          let settled: boolean = false;
-          const progress = (received: number, total: number): void => {
-            if (!isCancelled()) onProgress(received, total);
-          };
-          const complete = (): void => {
-            if (settled) return;
-            settled = true;
-            detach();
-            resolve();
-          };
-          const fail = (reason: number): void => {
-            if (settled) return;
-            settled = true;
-            detach();
-            reject(new Error('下载任务失败：' + String(reason)));
-          };
-          const removed = (): void => {
-            if (settled) return;
-            settled = true;
-            detach();
-            reject(new Error('下载已取消'));
-          };
-          setCancel(removed);
-          const detach = (): void => {
-            setCancel(null);
-            try {
-              task.off('progress', progress);
-              task.off('complete', complete);
-              task.off('fail', fail);
-              task.off('remove', removed);
-            } catch (e) {
-              // 监听器可能已被系统释放。
-            }
-          };
-          task.on('progress', progress);
-          task.on('complete', complete);
-          task.on('fail', fail);
-          task.on('remove', removed);
-        });
-        DownloadCenter.activeSystemTask = null;
-        if (isCancelled()) throw new Error('下载已取消');
-        if (fileExists(partPath)) fs.moveFileSync(partPath, finalPath);
-        return;
-      } catch (e) {
-        DownloadCenter.activeSystemTask = null;
-        setCancel(null);
-        try {
-          if (fileExists(partPath)) fs.unlinkSync(partPath);
-        } catch (err) {
-          // 忽略。
-        }
-        lastError = e instanceof Error ? e : new Error(String(e));
-        if (isCancelled()) throw lastError;
-      }
+  private static isCancelled(item: DownloadTaskItem): boolean {
+    return DownloadCenter.find(item.id) !== item || item.status === DOWNLOAD_STATUS_INTERRUPTED;
+  }
+
+  private static cleanPart(item: DownloadTaskItem): void {
+    if (item.systemTaskId.length > 0 || DownloadCenter.context === null) return;
+    const expected: string = DownloadCenter.context.filesDir + '/downloads/' + item.id + '.a' +
+      String(item.attempt) + '.part';
+    // 无 ID 的旧版 .part 可能仍由系统写入，不能猜测其已停止。
+    if (item.partPath !== expected) return;
+    try { if (fileExists(expected)) fs.unlinkSync(expected); } catch (e) {}
+    item.partPath = '';
+  }
+
+  private static async stopSystem(item: DownloadTaskItem): Promise<void> {
+    if (item.systemTaskId.length === 0) return;
+    try {
+      await request.agent.remove(item.systemTaskId);
+    } catch (e) {
+      if ((e as BusinessError).code !== 21900006) throw (e as Error); // 仅“已删除/不存在”可确认没有写入者。
     }
-    throw lastError;
+    item.systemTaskId = '';
+    await DownloadCenter.persist();
+  }
+
+  private static async finishFile(item: DownloadTaskItem): Promise<void> {
+    if (DownloadCenter.isCancelled(item) || DownloadCenter.context === null) return;
+    const finalPath: string = DownloadCenter.context.filesDir + '/downloads/' + item.id + item.extension();
+    if (fileExists(item.partPath)) fs.moveFileSync(item.partPath, finalPath);
+    else if (!fileExists(finalPath)) throw new Error('下载文件不存在，请重试');
+    item.filePath = finalPath;
+    item.status = DOWNLOAD_STATUS_DONE;
+    item.progress = 100;
+    item.message = '';
+    DownloadCenter.clearProgressPersistTimer();
+    await DownloadCenter.persist();
+    // 文件已完成，保留删除失败的 ID 供下一次清理；不把完成下载改为失败。
+    try { await DownloadCenter.stopSystem(item); } catch (e) {}
+  }
+
+  private static updateProgress(item: DownloadTaskItem, progress: request.agent.Progress): void {
+    if (DownloadCenter.isCancelled(item)) return;
+    item.receivedBytes = progress.processed;
+    item.totalBytes = progress.sizes.length > 0 ? progress.sizes[0] : -1;
+    item.progress = item.totalBytes > 0 ? Math.max(0, Math.min(100,
+      Math.floor(item.receivedBytes * 100 / item.totalBytes))) : -1;
+    if (progress.state === request.agent.State.WAITING) {
+      item.status = DOWNLOAD_STATUS_WAITING;
+      item.message = '等待网络或系统资源，恢复后继续下载';
+    } else if (progress.state === request.agent.State.PAUSED) {
+      item.status = DOWNLOAD_STATUS_PAUSED;
+      item.message = '系统下载已暂停，可恢复或重试';
+    } else if (progress.state === request.agent.State.RUNNING || progress.state === request.agent.State.RETRYING) {
+      item.status = DOWNLOAD_STATUS_RUNNING;
+      item.message = '';
+    }
+    DownloadCenter.scheduleProgressPersist();
+  }
+
+  private static waitForSystem(item: DownloadTaskItem, system: request.agent.Task, start: boolean): Promise<void> {
+    DownloadCenter.activeSystemTask = system;
+    return new Promise<void>((resolve: () => void, reject: (e: Error) => void) => {
+      let settled: boolean = false;
+      let revision: number = 0;
+      let querying: Promise<void> | null = null;
+      const detach = (): void => {
+        try {
+          system.off('progress', progress); system.off('completed', complete);
+          system.off('failed', fail); system.off('pause', progress);
+          system.off('resume', progress); system.off('remove', removed);
+          system.off('wait', waiting);
+        } catch (e) {}
+        if (DownloadCenter.activeSystemTask === system) {
+          DownloadCenter.activeSystemTask = null;
+          DownloadCenter.activeCancel = null;
+          DownloadCenter.activeSync = null;
+        }
+      };
+      const finish = (error: Error | null): void => {
+        if (settled) return;
+        settled = true;
+        detach();
+        if (error !== null) reject(error); else resolve();
+      };
+      const progress = (value: request.agent.Progress): void => {
+        revision++;
+        if (!settled) DownloadCenter.updateProgress(item, value);
+      };
+      const complete = (): void => { revision++; finish(null); };
+      const fail = (): void => { revision++; finish(new Error('系统下载失败，请重试')); };
+      const removed = (): void => { revision++; finish(new Error('下载已取消')); };
+      const waiting = (reason: request.agent.WaitingReason): void => {
+        revision++;
+        if (settled || DownloadCenter.isCancelled(item)) return;
+        item.status = DOWNLOAD_STATUS_WAITING;
+        item.message = reason === request.agent.WaitingReason.NETWORK_NOT_MATCH ?
+          '等待网络连接，恢复后继续下载' : '等待系统资源，恢复后继续下载';
+        DownloadCenter.scheduleProgressPersist();
+      };
+      const sync = (): Promise<void> => {
+        if (querying !== null) return querying;
+        const before: number = revision;
+        querying = request.agent.show(system.tid).then(async (info: request.agent.TaskInfo): Promise<void> => {
+          if (settled || DownloadCenter.isCancelled(item) || item.systemTaskId !== system.tid || before !== revision) return;
+          DownloadCenter.updateProgress(item, info.progress);
+          switch (info.progress.state) {
+            case request.agent.State.COMPLETED: complete(); break;
+            case request.agent.State.FAILED: fail(); break;
+            case request.agent.State.REMOVED: removed(); break;
+            case request.agent.State.STOPPED:
+              item.status = DOWNLOAD_STATUS_PAUSED;
+              item.message = '系统下载已停止，可重试';
+              break;
+            case request.agent.State.INITIALIZED:
+              if (!start) await system.start(); // 保存 ID 后、首次启动前退出的任务。
+              break;
+          }
+        }).finally(() => { querying = null; });
+        return querying;
+      };
+      DownloadCenter.activeCancel = removed;
+      DownloadCenter.activeSync = sync;
+      try {
+        system.on('progress', progress); system.on('completed', complete);
+        system.on('failed', fail); system.on('pause', progress);
+        system.on('resume', progress); system.on('remove', removed);
+        system.on('wait', waiting);
+      } catch (e) {
+        finish(new Error('无法监听系统下载'));
+        return;
+      }
+      const begin = async (): Promise<void> => {
+        if (DownloadCenter.isCancelled(item)) { removed(); return; }
+        if (start) await system.start();
+        // 查询失败时保留句柄与监听器，前台入口可以补查，不重建仍运行的下载。
+        await sync().catch(() => {});
+      };
+      begin().catch(() => finish(new Error('无法启动系统下载')));
+    });
   }
 }

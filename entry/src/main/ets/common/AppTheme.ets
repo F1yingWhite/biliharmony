@@ -611,6 +611,18 @@ export class AppTheme {
     return AppTheme.palette()['onSurfaceSub'];
   }
 
+  /** 不透明主题色实底上的文字：选择对比度较高的黑或白，浅色主题也保持可读。 */
+  static onAccent(color: string = AppTheme.getAccent()): string {
+    const linear = (value: number): number => {
+      const channel: number = value / 255;
+      return channel <= 0.04045 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);
+    };
+    const luminance: number = 0.2126 * linear(parseInt(color.substring(1, 3), 16)) +
+      0.7152 * linear(parseInt(color.substring(3, 5), 16)) +
+      0.0722 * linear(parseInt(color.substring(5, 7), 16));
+    return 1.05 / (luminance + 0.05) >= (luminance + 0.05) / 0.05 ? '#FFFFFF' : '#000000';
+  }
+
   /** 分割线色 */
   static divider(): string {
     return AppTheme.palette()['line'];

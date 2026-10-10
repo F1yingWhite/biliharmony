@@ -98,11 +98,19 @@ test('home refresh and paging indicators belong to their own channel and newest 
 test('home disappearing invalidates outstanding pages and clears activity indicators', async () => {
   const pending=deferred();const p=await homeChannels(()=>pending.promise,()=>pending.promise);
   const env=environment();
-  const Lifecycle=env.methodHarness('views/HomeView','  aboutToDisappear(): void {\n    this.feed.dispose();','  async onLoginChanged():');
+  const Lifecycle=env.methodHarness('views/HomeView','  aboutToDisappear(): void {','  async onLoginChanged():',
+    '', 'export struct HomeView {');
+  const savedChannels=[];
+  p.saveFeedScroll=index=>savedChannels.push(index);
+  p.recoveryActive=true;
+  p.recoveryOffsets=[{scrollY:100},{scrollY:200},{scrollY:300}];
   let dialogClosed=false;
   p.videoReportDialog={close:()=>{dialogClosed=true;}};
   p.onRefresh(1);p.onReachEnd(2);
   Lifecycle.prototype.aboutToDisappear.call(p);
+  assert.deepEqual(savedChannels,[0,1,2]);
+  assert.equal(p.recoveryActive,false);
+  assert.deepEqual(p.recoveryOffsets,[undefined,undefined,undefined]);
   assert.equal(dialogClosed,true);
   assert.equal(p.videoReportDialog,null);
   pending.resolve([{aid:99,roomId:99}]);await tick();
@@ -155,9 +163,11 @@ function environment(mocks = {}) {
     return cache.get(name);
   }
   // Extract the unchanged production method body; ArkUI's build DSL is verified separately by CompileArkTS.
-  function methodHarness(file, start, end, imports = '') {
+  function methodHarness(file, start, end, imports = '', scope = '') {
     const source = readSource(path.join(root, file + '.ets'));
-    const begin = source.indexOf(start);
+    const scopeBegin = scope ? source.indexOf(scope) : 0;
+    assert.ok(scopeBegin >= 0, `锚点未命中 scope（${file}.ets）：${JSON.stringify(scope)}`);
+    const begin = source.indexOf(start, scopeBegin);
     const finish = source.indexOf(end, begin);
     // 失败时直接指出是哪个锚点漂了：旧消息只有一个裸断言，定位全靠猜。
     assert.ok(begin >= 0, `锚点未命中 start（${file}.ets）：${JSON.stringify(start)}`);

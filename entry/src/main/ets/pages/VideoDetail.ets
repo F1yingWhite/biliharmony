@@ -31,6 +31,8 @@ import { LoadingView } from '../components/LoadingView';
 import { UserStore } from '../services/auth/UserStore';
 import { colorWithAlpha, formatCount, formatDate } from '../common/Utils';
 import { PlayerCommandBus } from '../common/PlayerCommandBus';
+import { VideoSystemQueue, VideoQueueTarget } from '../components/video/VideoSystemQueue';
+import { AppRecoveryState, RecoveryViewState } from '../common/AppRecoveryState';
 import { BasicDataSource } from '../common/BasicDataSource';
 import { ReplyReactionHooks, runReplyDislike, runReplyLike } from '../common/ReplyMutation';
 import { ReplyEmotePanel } from '../components/reply/ReplyEmotePanel';
@@ -945,6 +947,14 @@ export struct VideoDetailPage {
   }
 
   aboutToAppear(): void {
+    const restored: RecoveryViewState | undefined = AppRecoveryState.takeView(this.playbackRecoveryKey());
+    if (restored !== undefined) {
+      // Rebuild identity/progress only: old card rectangles and hero snapshots belong to the previous window.
+      this.param = { bvid: this.param.bvid, aid: this.param.aid, title: this.param.title,
+        epId: this.param.epId, cover: this.param.cover, cid: restored.cid ?? this.param.cid,
+        resumePosition: restored.position ?? this.param.resumePosition,
+        initiallyPaused: restored.playing !== true };
+    }
     this.destroyed = false;
     this.replyLikeBusy = new Set<number>();
     this.replySubmit.reset();
@@ -1103,6 +1113,8 @@ export struct VideoDetailPage {
     this.subtitleTracks = info.subtitles;
     this.currentQuality = info.quality;
     this.initialSeekSeconds = seekSeconds;
+    this.videoProgressSeconds = Math.max(0, seekSeconds);
+    this.playerPlaying = false;
     this.playback.resetHeartbeat();
     this.resetPlaybackSize();
     this.currentCid = cid;
@@ -1206,8 +1218,51 @@ export struct VideoDetailPage {
     if (ep.aid <= 0 && ep.bvid.length === 0) return;
     if (ep.cid === this.currentCid && (ep.bvid === this.detail.bvid ||
       (ep.bvid.length === 0 && ep.aid === this.detail.aid))) return;
-    const param: VideoDetailParam = { bvid: ep.bvid, aid: ep.aid, title: ep.title };
+    const param: VideoDetailParam = { bvid: ep.bvid, aid: ep.aid, cid: ep.cid, resumePosition: 0, title: ep.title };
     this.navigateVideoDetail(param, true);
+  }
+
+  private systemQueueAsset(direction: number): string {
+    return VideoSystemQueue.neighbor(this.detail, this.currentCid, direction)?.assetId ?? '';
+  }
+
+  private playbackRecoveryKey(): string {
+    const epId: number = this.param.epId ?? 0;
+    if (Number.isSafeInteger(epId) && epId > 0) return 'video:ep' + String(epId);
+    return 'video:' + (this.param.bvid.length > 0 ? this.param.bvid : 'av' + String(this.param.aid));
+  }
+
+  private savePlaybackRecovery(): void {
+    if (this.destroyed || this.currentCid <= 0 || this.loading || this.playbackAddressFailed ||
+      !Number.isFinite(this.videoProgressSeconds)) return;
+    AppRecoveryState.saveView(this.playbackRecoveryKey(),
+      { cid: this.currentCid, position: Math.max(0, this.videoProgressSeconds), playing: this.playerPlaying });
+  }
+
+  private onPlaybackPlayingChange(playing: boolean, sourceVersion: number): void {
+    if (this.destroyed || sourceVersion !== this.playerSourceVersion) return;
+    this.onPlayerPlayingChange(playing);
+    this.savePlaybackRecovery();
+  }
+
+  private onPlaybackProgress(seconds: number, sourceVersion: number): void {
+    if (this.destroyed || sourceVersion !== this.playerSourceVersion || !Number.isFinite(seconds)) return;
+    this.videoProgressSeconds = Math.max(0, seconds);
+    this.savePlaybackRecovery();
+    this.playback.reportHeartbeat(seconds, this.playerPlaying);
+  }
+
+  private playSystemNeighbor(direction: number): void {
+    if (this.destroyed || this.closing || this.loading || this.pageSwitchingCid > 0) return;
+    const target: VideoQueueTarget | undefined = VideoSystemQueue.neighbor(this.detail, this.currentCid, direction);
+    if (target === undefined) return;
+    if (target.pageIndex >= 0) {
+      this.playback.switchPage(this.detail.pages[target.pageIndex], target.pageIndex).catch(() => {});
+    } else {
+      this.closing = true;
+      this.navigateVideoDetail({ bvid: target.bvid, aid: target.aid, title: target.title,
+        cid: target.cid, resumePosition: 0 }, true);
+    }
   }
 
   private openInteractionVideo(target: VideoInteractionLink): void {
@@ -1983,8 +2038,13 @@ export struct VideoDetailPage {
               epId: this.detail.epId,
               previewPlayback: this.previewPlayback,
               videoDuration: this.currentPageDuration(),
+              initiallyPaused: this.param.initiallyPaused ?? false,
               videoTitle: this.detail.title,
               videoPartTitle: this.currentPageTitle(),
+              previousAssetId: this.systemQueueAsset(-1),
+              nextAssetId: this.systemQueueAsset(1),
+              onPlayPrevious: (): void => this.playSystemNeighbor(-1),
+              onPlayNext: (): void => this.playSystemNeighbor(1),
               // 卡片原封面持续垫在 Surface 上，直到 PlayerView 同时收到 playing 与官方首帧事件。
               videoCover: this.entryCoverUrl(),
               ownerName: this.detail.upName,
@@ -2032,9 +2092,8 @@ export struct VideoDetailPage {
               onFullscreenExitStart: () => {
                 this.beginPlayerFullscreenExit();
               },
-               onPlayingChange: (playing: boolean) => {
-                 this.onPlayerPlayingChange(playing);
-               },
+              onPlayingChange: (playing: boolean, sourceVersion: number) =>
+                this.onPlaybackPlayingChange(playing, sourceVersion),
                onFirstFrameShown: () => {
                  this.startupCoverVisible = false;
                },
@@ -2055,10 +2114,8 @@ export struct VideoDetailPage {
               onDmSend: () => {
                 this.sendVideoDanmaku();
               },
-              onProgress: (seconds: number) => {
-                this.videoProgressSeconds = seconds;
-                this.playback.reportHeartbeat(seconds, this.playerPlaying);
-              },
+              onProgress: (seconds: number, sourceVersion: number) =>
+                this.onPlaybackProgress(seconds, sourceVersion),
               onOnlineCount: (value: string) => {
                 this.playerOnlineTotal = value;
               },

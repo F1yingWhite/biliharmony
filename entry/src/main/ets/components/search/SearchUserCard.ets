@@ -1,4 +1,5 @@
 import { KeywordSpans } from '../KeywordSpans';
+import { AppTheme } from '../../common/AppTheme';
 import { VideoItem, UserSearchItem } from '../../model/Models';
 import { biliImageThumbnail } from '../../common/ImageUrl';
 import { formatCount, formatDuration, formatRelativeTime } from '../../common/Utils';
@@ -46,7 +47,7 @@ export struct SearchUserCard {
         if (item.liveStatus === 1 && item.liveRoomId > 0) {
           Text('直播')
             .width(38).height(17).textAlign(TextAlign.Center)
-            .fontSize(10).fontWeight(FontWeight.Medium).fontColor('#FFFFFF')
+            .fontSize(10).fontWeight(FontWeight.Medium).fontColor(AppTheme.onAccent(this.accent))
             .backgroundColor(this.accent).borderRadius(9)
         }
       }
@@ -158,7 +159,7 @@ export struct SearchUserCard {
           if (user.liveStatus === 1 && user.liveRoomId > 0) {
             Text('直播')
               .width(40).height(18).textAlign(TextAlign.Center)
-              .fontSize(10).fontWeight(FontWeight.Medium).fontColor('#FFFFFF')
+              .fontSize(10).fontWeight(FontWeight.Medium).fontColor(AppTheme.onAccent(this.accent))
               .backgroundColor(this.accent).borderRadius(9)
           }
         }
@@ -174,7 +175,7 @@ export struct SearchUserCard {
               .textOverflow({ overflow: TextOverflow.Ellipsis })
             if (user.level > 0) {
               Text('LV' + user.level)
-                .fontSize(9).fontWeight(FontWeight.Bold).fontColor('#FFFFFF')
+                .fontSize(9).fontWeight(FontWeight.Bold).fontColor(AppTheme.onAccent(this.accent))
                 .padding({ left: 4, right: 4, top: 1, bottom: 1 })
                 .backgroundColor(this.accent).borderRadius(2)
             }

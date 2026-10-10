@@ -2,6 +2,8 @@
 import { Immersive } from '../common/Immersive';
 import { LayoutTokens } from '../common/LayoutTokens';
 import { AppTheme } from '../common/AppTheme';
+import { MotionTokens } from '../common/MotionTokens';
+import { AppRecoveryState, RecoveryViewState } from '../common/AppRecoveryState';
 import { formatCount } from '../common/Utils';
 import { inputMethod } from '@kit.IMEKit';
 import { VideoItem, UserSearchItem, PgcSearchItem, ArticleSearchItem, SearchAllSection, SearchTypes } from '../model/Models';
@@ -12,7 +14,7 @@ import { LoadMoreFooter } from '../components/LoadMoreFooter';
 import { SearchResultList } from '../components/SearchResultList';
 import { VideoCard } from '../components/video/VideoCard';
 import { LiveRoomCard } from '../components/live/LiveRoomCard';
-import { SearchQuery } from '../components/search/SearchQuery';
+import { SearchCategory, SearchQuery } from '../components/search/SearchQuery';
 import { SearchResultsController, SearchResultsView } from '../components/search/SearchResultsController';
 import { SearchDiscoveryController, SearchDiscoveryView } from '../components/search/SearchDiscoveryController';
 import { SearchDiscoveryContent } from '../components/search/SearchDiscoveryContent';
@@ -24,6 +26,7 @@ import { SearchArticleCard } from '../components/search/SearchArticleCard';
 
 @Component
 export struct SearchPage {
+  @StorageProp(MotionTokens.KEY_REDUCE_MOTION) reduceMotion: boolean = false;
   @Prop initialKeyword: string = '';
   @State keyword: string = '';
   @State searchTab: number = 0;
@@ -40,10 +43,15 @@ export struct SearchPage {
   private lifecycle: number = 0;
   private active: boolean = false;
   private initialKeywordConsumed: boolean = false;
+  private resultScrollers: Array<Scroller> = [new Scroller(), new Scroller(), new Scroller(),
+    new Scroller(), new Scroller(), new Scroller(), new Scroller()];
+  private recoveryOffset: RecoveryViewState | undefined = undefined;
 
   async aboutToAppear(): Promise<void> {
     const lifecycle: number = ++this.lifecycle;
     this.active = true;
+    const restored: RecoveryViewState | undefined = !this.initialKeywordConsumed ?
+      AppRecoveryState.takeView(this.recoveryKey()) : undefined;
     const routeKeyword: string = !this.initialKeywordConsumed && typeof this.initialKeyword === 'string' ?
       this.initialKeyword.trim() : '';
     this.initialKeywordConsumed = true;
@@ -54,11 +62,17 @@ export struct SearchPage {
     if (typeof storedPrefill === 'string' && storedPrefill.length > 0) {
       AppStorage.setOrCreate<string>('searchPrefillKeyword', '');
     }
-    const initial: string = routeKeyword.length > 0 ? routeKeyword : prefill;
+    const initial: string = restored?.keyword ?? (routeKeyword.length > 0 ? routeKeyword : prefill);
+    if (initial.length > 0 || restored !== undefined) this.keyword = initial;
+    if (restored?.submitted === true) {
+      this.recoveryOffset = { keyword: initial, submitted: true, scrollX: restored.scrollX, scrollY: restored.scrollY,
+        searchTab: restored.searchTab !== undefined && restored.searchTab <= 6 ? restored.searchTab : 0 };
+    }
     this.resultsController.onChange = (view: SearchResultsView): void => {
       if (!this.active || lifecycle !== this.lifecycle) return;
       this.results = view;
       this.searchTab = view.tab;
+      this.saveSearchState();
     };
     this.discoveryController.onChange = (view: SearchDiscoveryView): void => {
       if (this.active && lifecycle === this.lifecycle) this.discovery = view;
@@ -70,13 +84,16 @@ export struct SearchPage {
     this.resultsController.activate();
     await this.discoveryController.activate();
     if (!this.active || lifecycle !== this.lifecycle) return;
-    if (initial.length > 0) {
-      this.keyword = initial;
-      this.submitSearch();
+    if (initial.length > 0 && this.keyword === initial) {
+      if (restored !== undefined && restored.submitted !== true) this.onInput(initial);
+      else this.submitSearch(restored !== undefined);
     }
+    this.saveSearchState();
   }
 
   aboutToDisappear(): void {
+    this.saveSearchState();
+    this.recoveryOffset = undefined;
     this.active = false;
     this.lifecycle++;
     this.resultsController.dispose();
@@ -84,19 +101,64 @@ export struct SearchPage {
   }
 
   onInput(value: string): void {
+    this.recoveryOffset = undefined;
     this.keyword = value;
     this.discoveryController.input(value);
     if (value.length === 0) this.resultsController.clear();
+    this.saveSearchState();
   }
 
-  submitSearch(): void {
+  private recoveryKey(): string {
+    return 'search:' + this.initialKeyword.trim();
+  }
+
+  private saveSearchState(): void {
     if (!this.active) return;
+    let scrollX: number = this.recoveryOffset?.scrollX ?? 0;
+    let scrollY: number = this.recoveryOffset?.scrollY ?? 0;
+    if (this.recoveryOffset === undefined && this.results.searching && !this.results.loading) {
+      try {
+        const offset: OffsetResult = this.resultScrollers[this.searchTab].currentOffset();
+        scrollX = offset.xOffset;
+        scrollY = offset.yOffset;
+      } catch (e) {
+        // 空态或数据尚未布局时，Scroller 可能尚未绑定。
+      }
+    }
+    AppRecoveryState.saveView(this.recoveryKey(), { keyword: this.keyword,
+      submitted: this.recoveryOffset?.submitted ?? (this.results.searching && this.keyword.trim() === this.results.keyword),
+      searchTab: this.recoveryOffset?.searchTab ?? this.searchTab, scrollX: scrollX, scrollY: scrollY });
+  }
+
+  private restoreResultScroll(index: number): void {
+    const state: RecoveryViewState | undefined = this.recoveryOffset;
+    if (!this.active || state === undefined || this.results.loading || index !== this.searchTab ||
+      index !== (state.searchTab ?? 0) || this.results.keyword !== this.keyword.trim()) return;
+    this.recoveryOffset = undefined;
+    // 布局后按已加载结果的可用范围恢复，不触发额外分页。
+    try {
+      this.resultScrollers[index].scrollTo({ xOffset: state.scrollX ?? 0, yOffset: state.scrollY ?? 0, animation: false });
+    } catch (e) {
+      // 布局已解绑时放弃本次偏移恢复，不影响搜索结果的正常使用。
+    }
+  }
+
+  private refreshResults(query: SearchQuery): void {
+    this.recoveryOffset = undefined;
+    this.resultsController.refresh(query).catch(() => {});
+  }
+
+  submitSearch(restoring: boolean = false): void {
+    if (!this.active) return;
+    if (!restoring) this.recoveryOffset = undefined;
     if (this.keyword.trim().length === 0) this.keyword = this.suggestedKeyword;
     const keyword: string = this.keyword.trim();
     if (keyword.length === 0) return;
     inputMethod.getController().hideTextInput().catch(() => {});
     this.discoveryController.submit(keyword);
-    this.resultsController.submit(keyword, this.query).catch(() => {});
+    const restoredTab: number = this.recoveryOffset?.searchTab ?? 0;
+    this.resultsController.submit(keyword, this.query,
+      (restoring && restoredTab >= 0 && restoredTab <= 6 ? restoredTab : 0) as SearchCategory).catch(() => {});
   }
 
   @Builder
@@ -106,7 +168,7 @@ export struct SearchPage {
       tab: this.searchTab,
       onChange: (query: SearchQuery): void => {
         this.query = query;
-        this.resultsController.refresh(query).catch(() => {});
+        this.refreshResults(query);
       },
       onFilter: (): void => { this.showFilter = true; },
     })
@@ -125,7 +187,7 @@ export struct SearchPage {
         query.tids = tids;
         this.query = query;
         this.showFilter = false;
-        this.resultsController.refresh(query).catch(() => {});
+        this.refreshResults(query);
       },
     })
   }
@@ -152,7 +214,9 @@ export struct SearchPage {
         .backgroundColor(this.searchTab === index ? this.accent : '#00000000')
     }
     .padding({ left: 13, right: 13, top: 6 })
-    .animation({ duration: 180, curve: Curve.EaseOut })
+    .constraintSize({ minHeight: 44 }).accessibilityGroup(true)
+    .accessibilitySelected(this.searchTab === index)
+    .animation({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseOut })
   }
 
   // ===== 结果态：视频 Tab 内容 =====
@@ -170,6 +234,8 @@ export struct SearchPage {
     Column() {
       this.SortRow()
       SearchResultList({
+        scroller: this.resultScrollers[1], onLayout: () => this.restoreResultScroll(1),
+        onScrollStop: () => this.saveSearchState(),
         loading: this.results.loading,
         errorText: this.results.error,
         moreError: this.results.moreError,
@@ -178,8 +244,7 @@ export struct SearchPage {
         count: this.resultsController.store.videos.totalCount(),
         emptyText: '没有找到相关视频',
         onRetry: (): void => {
-          this.resultsController.refresh(this.query).catch(() => {
-          });
+          this.refreshResults(this.query);
         },
         onLoadMore: (): void => {
           this.resultsController.loadMore(true);
@@ -208,6 +273,8 @@ export struct SearchPage {
     Column() {
       this.SortRow()
       SearchResultList({
+        scroller: this.resultScrollers[6], onLayout: () => this.restoreResultScroll(6),
+        onScrollStop: () => this.saveSearchState(),
         skeleton: 'sessions',
         loading: this.results.loading,
         errorText: this.results.error,
@@ -217,8 +284,7 @@ export struct SearchPage {
         count: this.resultsController.store.users.totalCount(),
         emptyText: '没有找到相关用户',
         onRetry: (): void => {
-          this.resultsController.refresh(this.query).catch(() => {
-          });
+          this.refreshResults(this.query);
         },
         onLoadMore: (): void => {
           this.resultsController.loadMore(true);
@@ -255,6 +321,8 @@ export struct SearchPage {
   MediaResultTab(isBangumi: boolean, emptyText: string) {
     Column() {
       SearchResultList({
+        scroller: this.resultScrollers[isBangumi ? 2 : 3],
+        onLayout: () => this.restoreResultScroll(isBangumi ? 2 : 3), onScrollStop: () => this.saveSearchState(),
         skeleton: 'mediaList',
         loading: this.results.loading,
         errorText: this.results.error,
@@ -264,8 +332,7 @@ export struct SearchPage {
         count: this.resultsController.store.media(isBangumi).totalCount(),
         emptyText: emptyText,
         onRetry: (): void => {
-          this.resultsController.refresh(this.query).catch(() => {
-          });
+          this.refreshResults(this.query);
         },
         onLoadMore: (): void => {
           this.resultsController.loadMore(true);
@@ -298,6 +365,8 @@ export struct SearchPage {
     Column() {
       this.SortRow()
       SearchResultList({
+        scroller: this.resultScrollers[4], onLayout: () => this.restoreResultScroll(4),
+        onScrollStop: () => this.saveSearchState(),
         loading: this.results.loading,
         errorText: this.results.error,
         moreError: this.results.moreError,
@@ -309,8 +378,7 @@ export struct SearchPage {
         lanes: 2,
         horizontalPadding: 12,
         onRetry: (): void => {
-          this.resultsController.refresh(this.query).catch(() => {
-          });
+          this.refreshResults(this.query);
         },
         onLoadMore: (): void => {
           this.resultsController.loadMore(true);
@@ -338,6 +406,8 @@ export struct SearchPage {
   ArticleResultTab() {
     Column() {
       SearchResultList({
+        scroller: this.resultScrollers[5], onLayout: () => this.restoreResultScroll(5),
+        onScrollStop: () => this.saveSearchState(),
         loading: this.results.loading,
         errorText: this.results.error,
         moreError: this.results.moreError,
@@ -346,8 +416,7 @@ export struct SearchPage {
         count: this.resultsController.store.articles.totalCount(),
         emptyText: '没有找到相关专栏',
         onRetry: (): void => {
-          this.resultsController.refresh(this.query).catch(() => {
-          });
+          this.refreshResults(this.query);
         },
         onLoadMore: (): void => {
           this.resultsController.loadMore(true);
@@ -400,19 +469,18 @@ export struct SearchPage {
       if (this.results.loading) {
         LoadingView({ skeleton: 'list', loading: true })
       } else if (this.results.error.length > 0) {
-        LoadingView({ skeleton: 'list', loading: false, errorText: this.results.error, onRetry: () => this.resultsController.refresh(this.query) })
+        LoadingView({ skeleton: 'list', loading: false, errorText: this.results.error, onRetry: () => this.refreshResults(this.query) })
       } else if (this.results.sections.length === 0) {
         LoadingView({ skeleton: 'list',
           loading: false,
           empty: true,
           emptyText: '没有找到相关内容',
           onRetry: () => {
-            this.resultsController.refresh(this.query).catch(() => {
-            });
+            this.refreshResults(this.query);
           },
         })
       } else {
-        List() {
+        List({ scroller: this.resultScrollers[0] }) {
           // 视频分区置顶：标题与行直接作为 List 子节点，由 allVideoSource 懒加载驱动。
           // LazyForEach 必须直接挂在滚动容器下，故视频分区不再包 ListItemGroup。
           if (!this.resultsController.store.allVideos.isEmpty()) {
@@ -476,6 +544,8 @@ export struct SearchPage {
         .layoutWeight(1)
         .cachedCount(5)
         .scrollBar(BarState.Off)
+        .onAreaChange(() => this.restoreResultScroll(0))
+        .onScrollStop(() => this.saveSearchState())
         .onReachEnd(() => {
           this.resultsController.loadMore();
         })
@@ -497,7 +567,7 @@ export struct SearchPage {
               .height(21)
               .fillColor(this.accent)
             TextInput({ placeholder: this.suggestedKeyword.length > 0 ? this.suggestedKeyword : '搜索视频', text: this.keyword })
-              .height(36)
+              .height(44)
               .layoutWeight(1)
               .fontSize(14)
               .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
@@ -510,16 +580,19 @@ export struct SearchPage {
                 this.submitSearch();
               })
           }
-          .height(36)
+          .height(44)
           .layoutWeight(1)
           .padding({ left: 10, right: 10 })
-          .borderRadius(18)
+          .borderRadius(22)
           .backgroundColor(this.isDark ? '#4DFFFFFF' : '#B3FFFFFF')
           .backgroundBlurStyle(AppTheme.floatBlur(this.glassOn))
           .border({ width: 0.5, color: this.isDark ? '#2EFFFFFF' : '#26000000' })
-          Text('搜索')
+          Button('搜索', { type: ButtonType.Normal })
             .fontSize(14)
             .fontColor(this.accent)
+            .constraintSize({ minWidth: 44, minHeight: 44 }).padding({ left: 8, right: 8 })
+            .backgroundColor(Color.Transparent).borderRadius(12)
+            .accessibilityText('搜索')
             .onClick(() => {
               this.submitSearch();
             })
@@ -561,10 +634,11 @@ export struct SearchPage {
           }
           .barMode(BarMode.Scrollable)
           .barBackgroundColor(this.isDark ? '#18191C' : '#F6F7F8')
-          .barHeight(40)
+          .barHeight(44)
           .divider(null)
-          .animationDuration(200)
+          .animationDuration(MotionTokens.duration(MotionTokens.content, this.reduceMotion))
           .onChange((index: number) => {
+            if (this.recoveryOffset !== undefined && index !== this.recoveryOffset.searchTab) this.recoveryOffset = undefined;
             this.resultsController.select(index, this.query);
           })
           .width('100%')

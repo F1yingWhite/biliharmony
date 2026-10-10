@@ -7,6 +7,7 @@ import { YouTubeVideo, YouTubeApi } from '../api/YouTubeApi';
 import { NAV_YOUTUBE_DETAIL, NAV_YOUTUBE_SAVED } from '../common/AppRouter';
 import { PlatformStore } from '../common/PlatformStore';
 import { MotionTokens } from '../common/MotionTokens';
+import { AppRecoveryState } from '../common/AppRecoveryState';
 /**
  * 主界面：HarmonyOS 7 沉浸光感风格
  * - Navigation 根：Search / VideoDetail / Login 以 NavDestination 入栈
@@ -71,6 +72,7 @@ const DOCK_BAR_HEIGHT: number = 56;
 @Extend(NavDestination)
 function stdDestination(onShownCb: () => void, onWillDisappearCb: () => void) {
   .hideTitleBar(true)
+  .recoverable(true)
   .onShown(() => {
     onShownCb();
   })
@@ -105,6 +107,9 @@ struct Index {
   private cardNavigationReady: boolean = false;
 
   aboutToAppear(): void {
+    const restoredTab: number | undefined = AppRecoveryState.takeRootTab();
+    if (restoredTab !== undefined) this.currentTab = restoredTab;
+    AppRecoveryState.saveRootTab(this.currentTab);
     this.onMotionPreferenceChanged();
     this.reapplyBarColors();
     UserStore.ensureLoaded();
@@ -120,7 +125,10 @@ struct Index {
   }
 
   private onMotionPreferenceChanged(): void {
-    if (this.reduceMotion) this.finishHeroNavTransition();
+    if (this.reduceMotion) {
+      this.finishHeroNavTransition();
+      this.tabScale = this.tabScale.map(() => 1);
+    }
     AppNavStack.disableAnimation(this.reduceMotion);
   }
 
@@ -213,6 +221,7 @@ struct Index {
 
   /** 广播主 Tab 索引：「我的」页借此在切回时重算缓存大小（Tabs 保活不重走 aboutToAppear）。 */
   private onCurrentTabChanged(): void {
+    AppRecoveryState.saveRootTab(this.currentTab);
     // YouTube 激活时哔哩哔哩的 Tabs 没有宿主，广播会让宿主读到过期下标。
     if (this.platform === PlatformStore.YOUTUBE) return;
     AppStorage.setOrCreate('mainTabIndex', this.currentTab);
@@ -647,11 +656,13 @@ struct Index {
   private tapTabItem(index: number): void {
     Haptic.light();
     if (this.currentTab === index) return;
-    this.tabScale = this.tabScale.map((v: number, i: number) => (i === index ? 0.78 : v));
-    const pending: number = index;
-    setTimeout(() => {
-      this.tabScale = this.tabScale.map((v: number, i: number) => (i === pending ? 1 : v));
-    }, 30);
+    if (!this.reduceMotion) {
+      this.tabScale = this.tabScale.map((v: number, i: number) => (i === index ? 0.78 : v));
+      const pending: number = index;
+      setTimeout(() => {
+        this.tabScale = this.tabScale.map((v: number, i: number) => (i === pending ? 1 : v));
+      }, 30);
+    }
     // 自定义 tabBar 的 onClick 会拦截默认切换逻辑，必须显式驱动索引切换。
     this.currentTab = index;
   }
@@ -663,7 +674,7 @@ struct Index {
         .width(24)
         .height(24)
         .fillColor(this.currentTab === index ? this.accent :
-          (this.isDark ? '#D1D4DA' : '#62676D'))
+          (this.isDark ? '#D1D4DA' : '#3C4048'))
         .scale({ x: this.tabScale[index], y: this.tabScale[index] })
         .animation({ duration: MotionTokens.duration(MotionTokens.navigation, this.reduceMotion),
           curve: this.reduceMotion ? Curve.Linear : curves.springMotion(0.35, 0.7) })
@@ -671,7 +682,7 @@ struct Index {
         .fontSize(11)
         .fontWeight(this.currentTab === index ? FontWeight.Medium : FontWeight.Normal)
         .fontColor(this.currentTab === index ? (this.isDark ? '#F5F6F8' : '#24272E') :
-          (this.isDark ? '#D1D4DA' : '#62676D'))
+          (this.isDark ? '#D1D4DA' : '#3C4048'))
     }
     .width('100%')
     .height('100%')
@@ -809,8 +820,8 @@ struct Index {
             this.DockNavigation()
           }
           .width(this.dockBarWidth())
-          // 浅色保持透明，避免白色底衬遮住原生沉浸光感的背景采样；深色沿用原有对比度底衬。
-          .backgroundColor(this.glassOn && this.isDark ? '#CC101114' : Color.Transparent)
+          // 深浅两种底衬为自定义文字保留对比度，仍透出封面并使用系统光感材质。
+          .backgroundColor(this.glassOn ? (this.isDark ? '#CC101114' : '#CCFFFFFF') : Color.Transparent)
           .borderRadius(DOCK_BAR_HEIGHT / 2)
           .alignItems(HorizontalAlign.Center)
         }
@@ -869,6 +880,7 @@ struct Index {
       .width('100%')
       .height('100%')
       .id('bili_main_navigation')
+      .recoverable(true)
       .hideTitleBar(true)
       .mode(this.splitActive() ? NavigationMode.Split : NavigationMode.Stack)
       .navBarWidth('46%')

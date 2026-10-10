@@ -9,21 +9,27 @@ import { PageHeader } from '../components/PageHeader';
 import { LoadingView } from '../components/LoadingView';
 import { DownloadCenter, DownloadTaskItem, DOWNLOAD_STATUS_DONE, DOWNLOAD_STATUS_FAILED,
   DOWNLOAD_STATUS_INTERRUPTED, DOWNLOAD_STATUS_QUEUED, DOWNLOAD_STATUS_RUNNING } from '../services/media/DownloadCenter';
+import { DOWNLOAD_STATUS_PAUSED, DOWNLOAD_STATUS_WAITING } from '../services/media/DownloadCenter';
 
 @Component
 export struct DownloadCenterPage {
   @State preparing: boolean = true;
   @State prepareError: string = '';
   @State visibleTasks: Array<DownloadTaskItem> = [];
+  @State exportTaskId: string = '';
   @StorageProp('accentColor') accent: string = '#FB7299';
   @StorageProp('isDarkMode') isDark: boolean = false;
   private prepareEpoch: RequestEpoch = new RequestEpoch();
   private destroyed: boolean = false;
   private refreshTimer: number = -1;
   private lastTaskSnapshot: string = '';
+  private exportBusy: boolean = false;
+  private exportGeneration: number = 0;
 
   aboutToAppear(): void {
     this.destroyed = false;
+    this.exportGeneration++;
+    if (!this.exportBusy) this.exportTaskId = '';
     this.prepare();
     this.refreshTasks();
     this.refreshTimer = setInterval(() => {
@@ -35,6 +41,7 @@ export struct DownloadCenterPage {
 
   aboutToDisappear(): void {
     this.destroyed = true;
+    this.exportGeneration++;
     this.prepareEpoch.invalidate();
     if (this.refreshTimer >= 0) clearInterval(this.refreshTimer);
     this.refreshTimer = -1;
@@ -42,7 +49,8 @@ export struct DownloadCenterPage {
 
   private taskSnapshot(): string {
     return DownloadCenter.list().map((task: DownloadTaskItem): string =>
-      task.id + ':' + String(task.status) + ':' + String(task.progress)).join('|');
+      task.id + ':' + String(task.status) + ':' + String(task.progress) + ':' +
+      String(task.receivedBytes) + ':' + task.message).join('|');
   }
 
   private refreshTasks(): void {
@@ -69,7 +77,7 @@ export struct DownloadCenterPage {
       this.prepareError = '下载记录加载失败，请返回后重试';
       return;
     }
-    DownloadCenter.init(context).then(() => {
+    DownloadCenter.onForeground(context).then(() => {
       if (this.destroyed || !this.prepareEpoch.isCurrent(epoch)) return;
       this.preparing = false;
       this.refreshTasks();
@@ -109,6 +117,7 @@ export struct DownloadCenterPage {
   }
 
   private confirm(title: string, action: () => void): void {
+    if (this.exportBusy) return;
     try {
       this.getUIContext().getPromptAction().showDialog({
         title: '确认删除',
@@ -118,7 +127,7 @@ export struct DownloadCenterPage {
           { text: '确定', color: AppTheme.DANGER },
         ],
       }).then((result) => {
-        if (!this.destroyed && Number(result.index) === 1) action();
+        if (!this.destroyed && !this.exportBusy && Number(result.index) === 1) action();
       }).catch(() => {
         // 用户取消或确认窗口不可用时，不执行删除。
       });
@@ -127,36 +136,41 @@ export struct DownloadCenterPage {
     }
   }
 
-  private exportItem(item: DownloadTaskItem): void {
+  private async exportItem(item: DownloadTaskItem): Promise<void> {
+    if (this.destroyed || this.exportBusy || item.status !== DOWNLOAD_STATUS_DONE) return;
     const context: common.UIAbilityContext | undefined =
       this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
     if (context === undefined || item.filePath.length === 0) return;
-    const picker2 = new picker.DocumentViewPicker(context);
-    const options: picker.DocumentSaveOptions = new picker.DocumentSaveOptions();
-    options.newFileNames = [item.title + item.extension()];
-    options.fileSuffixChoices = [item.kind === 1 ? '音频文件|.m4a' : '视频文件|.mp4'];
-    picker2.save(options).then((targets: Array<string>) => {
-      if (targets.length === 0 || this.destroyed) return;
+    this.exportBusy = true;
+    this.exportTaskId = item.id;
+    const generation: number = this.exportGeneration;
+    let copying: boolean = false;
+    try {
+      const picker2 = new picker.DocumentViewPicker(context);
+      const options: picker.DocumentSaveOptions = new picker.DocumentSaveOptions();
+      options.newFileNames = [item.title + item.extension()];
+      options.fileSuffixChoices = [item.kind === 1 ? '音频文件|.m4a' : '视频文件|.mp4'];
+      const targets: Array<string> = await picker2.save(options);
+      if (targets.length === 0 || this.destroyed || generation !== this.exportGeneration) return;
+      copying = true;
+      const source: fs.File = await fs.open(item.filePath, fs.OpenMode.READ_ONLY);
       try {
-        const source: fs.File = fs.openSync(item.filePath, fs.OpenMode.READ_ONLY);
+        const target: fs.File = await fs.open(targets[0], fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
         try {
-          const target: fs.File = fs.openSync(targets[0],
-            fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-          try {
-            fs.copyFileSync(source.fd, target.fd);
-          } finally {
-            fs.closeSync(target);
-          }
+          await fs.copyFile(source.fd, target.fd);
         } finally {
-          fs.closeSync(source);
+          await fs.close(target);
         }
-        this.toast('已导出到所选位置');
-      } catch (e) {
-        this.toast('导出失败，请重试');
+      } finally {
+        await fs.close(source);
       }
-    }).catch(() => {
-      // 用户取消选择。
-    });
+      if (!this.destroyed && generation === this.exportGeneration) this.toast('已导出到所选位置');
+    } catch (e) {
+      if (copying && !this.destroyed && generation === this.exportGeneration) this.toast('导出失败，请重试');
+    } finally {
+      this.exportBusy = false;
+      if (!this.destroyed) this.exportTaskId = '';
+    }
   }
 
   private jumpItem(item: DownloadTaskItem): void {
@@ -210,9 +224,15 @@ export struct DownloadCenterPage {
 
       Row({ space: 6 }) {
         if (item.status === DOWNLOAD_STATUS_DONE) {
-          this.ActionChip('导出', (): void => this.exportItem(item))
+          this.ActionChip(this.exportTaskId === item.id ? '导出中…' : '导出', (): void => { void this.exportItem(item); })
         }
-        if (item.status === DOWNLOAD_STATUS_FAILED || item.status === DOWNLOAD_STATUS_INTERRUPTED) {
+        if (item.status === DOWNLOAD_STATUS_PAUSED) {
+          this.ActionChip('继续', (): void => {
+            DownloadCenter.resume(item.id).then(() => this.refreshTasks()).catch(() => this.toast('恢复失败，可重试'));
+          })
+        }
+        if (item.status === DOWNLOAD_STATUS_FAILED || item.status === DOWNLOAD_STATUS_INTERRUPTED ||
+          item.status === DOWNLOAD_STATUS_PAUSED || item.status === DOWNLOAD_STATUS_WAITING) {
           this.ActionChip('重试', (): void => {
             DownloadCenter.retry(item.id).then(() => this.refreshTasks()).catch(() => this.toast('重试失败'));
           })
@@ -239,7 +259,9 @@ export struct DownloadCenterPage {
       .padding({ left: 10, right: 10, top: 5, bottom: 5 })
       .borderRadius(12)
       .border({ width: 0.8, color: label === '删除' ? AppTheme.DANGER : this.accent })
-      .onClick(() => onTap())
+      .enabled(this.exportTaskId.length === 0)
+      .opacity(this.exportTaskId.length > 0 ? 0.6 : 1)
+      .onClick(() => { if (!this.exportBusy) onTap(); })
   }
 
   build() {
@@ -270,6 +292,7 @@ export struct DownloadCenterPage {
             Text('清理已完成')
               .fontSize(12)
               .fontColor(AppTheme.DANGER)
+              .enabled(this.exportTaskId.length === 0)
               .onClick(() => {
                 this.confirm('删除已完成、失败或中断的任务及本地下载文件？未导出的文件也会删除，已导出的副本不受影响。', (): void => {
                   DownloadCenter.clearFinished().then(() => this.refreshTasks())
@@ -286,7 +309,8 @@ export struct DownloadCenterPage {
                 ListItem() {
                   this.TaskRow(item)
                 }
-              }, (item: DownloadTaskItem) => item.id + '_' + String(item.status) + '_' + String(item.progress))
+              }, (item: DownloadTaskItem) => item.id + '_' + String(item.status) + '_' +
+                String(item.progress) + '_' + item.message)
             }
             .width('100%')
             .layoutWeight(1)

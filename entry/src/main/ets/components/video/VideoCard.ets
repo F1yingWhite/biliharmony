@@ -191,12 +191,12 @@ export struct VideoCard {
 
       // 信息区内缩：标题 → UP 行（底部收尾），播放/弹幕已上封面叠层，卡片不放点赞。
       Column() {
-        // 标题（两行固定，卡片等高）
+        // 默认保留两行高度，系统放大字体时允许自然撑高。
         Row() {
           FeedCardTitle({ title: this.video.title, isDark: this.isDark, highlightKeyword: this.highlightKeyword })
         }
         .width('100%')
-        .height(40)
+        .constraintSize({ minHeight: 40 })
         .alignItems(VerticalAlign.Top)
         .onClick(() => this.openDetail())
 
@@ -240,7 +240,7 @@ export struct VideoCard {
           }
         }
         .width('100%')
-        .height(LayoutTokens.cardMetaHeight)
+        .constraintSize({ minHeight: LayoutTokens.cardMetaHeight })
         .margin({ top: 7 })
         .alignItems(VerticalAlign.Center)
       }
@@ -384,7 +384,7 @@ export struct VideoCard {
           }
         }
         .width('100%')
-        .height(LayoutTokens.cardMetaHeight)
+        .constraintSize({ minHeight: LayoutTokens.cardMetaHeight })
         .padding({ left: this.homeStyle ? 12 : 10, right: this.homeStyle ? 8 : 5 })
         .alignItems(VerticalAlign.Center)
       }
@@ -413,7 +413,7 @@ export struct VideoCard {
   /** 卡片右下角 ⋮（竖三点）：点击弹「举报/不想看」浮层，向上展开、箭头指回 ⋮。 */
   @Builder
   MoreDot() {
-    Stack() {
+    Button({ type: ButtonType.Normal }) {
       Image($r('app.media.ic_more'))
         .width(14)
         .height(14)
@@ -422,8 +422,9 @@ export struct VideoCard {
     }
     .width(LayoutTokens.cardControlSize)
     .height(LayoutTokens.cardControlSize)
+    .padding(0).backgroundColor(Color.Transparent).borderRadius(22)
+    .accessibilityGroup(true)
     .accessibilityText('更多视频操作')
-    .alignContent(Alignment.Center)
     .onClick(() => {
       Haptic.light();
       this.moreOpen = !this.moreOpen;

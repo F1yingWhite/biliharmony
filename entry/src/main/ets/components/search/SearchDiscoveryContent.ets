@@ -21,9 +21,11 @@ export struct SearchDiscoveryContent {
           .fontWeight(FontWeight.Bold)
           .fontColor(this.isDark ? '#FFFFFF' : '#18191C')
         Blank()
-        Text('清空')
+        Button('清空', { type: ButtonType.Normal })
           .fontSize(12)
           .fontColor('#9499A0')
+          .constraintSize({ minWidth: 44, minHeight: 44 }).padding({ left: 8, right: 8 })
+          .backgroundColor(Color.Transparent).borderRadius(12).accessibilityText('清空搜索历史')
           .onClick(() => {
             this.onClearHistory();
           })
@@ -31,26 +33,27 @@ export struct SearchDiscoveryContent {
       .width('100%')
       Flex({ wrap: FlexWrap.Wrap }) {
         ForEach(this.view.history, (word: string) => {
-          Row({ space: 5 }) {
-            Text(word)
+          Row() {
+            Button(word, { type: ButtonType.Normal })
               .fontSize(12)
               .fontColor(this.isDark ? '#E6E6E6' : '#454A50')
-              .maxLines(1)
-              .constraintSize({ maxWidth: 150 })
+              .labelStyle({ maxLines: 1, overflow: TextOverflow.Ellipsis })
+              .constraintSize({ minWidth: 44, minHeight: 44, maxWidth: 170 })
+              .padding({ left: 10, right: 5 }).backgroundColor(Color.Transparent).borderRadius(22)
+              .accessibilityText('搜索 ' + word)
               .onClick(() => {
                 this.onSearch(word);
               })
-            Image($r('app.media.ic_close'))
-              .width(10)
-              .height(10)
-              .fillColor('#9499A0')
+            Button({ type: ButtonType.Normal }) {
+              Image($r('app.media.ic_close')).width(10).height(10).fillColor('#9499A0')
+            }.width(44).height(44).padding(0).backgroundColor(Color.Transparent).borderRadius(22)
+              .accessibilityGroup(true).accessibilityText('删除搜索历史 ' + word)
               .onClick(() => {
                 this.onRemoveHistory(word);
               })
           }
-          .padding({ left: 10, right: 8, top: 6, bottom: 6 })
           .margin({ right: 7, bottom: 7 })
-          .borderRadius(15)
+          .borderRadius(22)
           .backgroundColor(this.isDark ? '#2E3136' : '#E9EBEE')
         }, (word: string) => word)
       }
@@ -106,6 +109,7 @@ export struct SearchDiscoveryContent {
 
   @Builder
   HotRow(item: HotSearchItem, index: number) {
+    Button({ type: ButtonType.Normal }) {
     Row({ space: 10 }) {
       Text(String(index + 1))
         .fontSize(15)
@@ -130,6 +134,11 @@ export struct SearchDiscoveryContent {
     }
     .width('100%')
     .padding({ left: 14, right: 14, top: 10, bottom: 10 })
+    }
+    .width('100%').constraintSize({ minHeight: 44 }).padding(0)
+    .backgroundColor(Color.Transparent).borderRadius(0)
+    .accessibilityGroup(true).accessibilityText('搜索 ' + item.showName)
+    .accessibilityDescription(item.heatScore > 0 ? formatCount(item.heatScore) + ' 热度' : '')
     .onClick(() => {
       this.onSearch(item.keyword);
     })
@@ -139,6 +148,7 @@ export struct SearchDiscoveryContent {
   SuggestList() {
     Column() {
       ForEach(this.view.suggests, (s: string) => {
+        Button({ type: ButtonType.Normal }) {
         Row({ space: 8 }) {
           Image($r('app.media.ic_search'))
             .width(18)
@@ -152,6 +162,10 @@ export struct SearchDiscoveryContent {
         }
         .width('100%')
         .padding({ left: 16, right: 16, top: 11, bottom: 11 })
+        }
+        .width('100%').constraintSize({ minHeight: 44 }).padding(0)
+        .backgroundColor(Color.Transparent).borderRadius(0)
+        .accessibilityGroup(true).accessibilityText('搜索 ' + s)
         .onClick(() => {
           this.onSearch(s);
         })

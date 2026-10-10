@@ -56,6 +56,8 @@ export interface VideoDetailParam {
   cid?: number;
   /** 本地继续观看进度（秒），必须与 cid 一起使用。 */
   resumePosition?: number;
+  /** Restore a paused session without starting audio while its surface is recreated. */
+  initiallyPaused?: boolean;
   /** 卡片封面：detail 数据回来前先垫在播放区/底图，入场期不出"加载中"占位。 */
   cover?: string;
   /** 点击卡片的窗口矩形（vp）：有值时详情页从卡片位置手动放大入场（根页面 push 无共享元素转场）。 */

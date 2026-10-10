@@ -1,4 +1,5 @@
 import { MotionTokens } from '../common/MotionTokens';
+import { AppRecoveryState, RecoveryViewState } from '../common/AppRecoveryState';
 /**
  * 首页视图：推荐（app 端接口）+ 热门，双列瀑布流、下拉刷新、触底加载
  */
@@ -41,7 +42,7 @@ struct FloatingSubTabs {
 
   onHandSideChanged(): void {
     if (!this.handLayoutMounted) return;
-    this.getUIContext().animateTo({ duration: 320, curve: Curve.EaseInOut }, () => {
+    this.getUIContext().animateTo({ duration: MotionTokens.duration(320, this.reduceMotion), curve: Curve.EaseInOut }, () => {
       this.handPosition = this.handSide === Handedness.LEFT ? 1 : 0;
     });
   }
@@ -93,6 +94,8 @@ export struct HomeView {
   private recScroller: Scroller = new Scroller();
   private hotScroller: Scroller = new Scroller();
   private liveScroller: Scroller = new Scroller();
+  private recoveryOffsets: Array<RecoveryViewState | undefined> = [undefined, undefined, undefined];
+  private recoveryActive: boolean = false;
   private feed: HomeFeedController = new HomeFeedController((snapshot: HomeFeedSnapshot): void => {
     this.recCount = snapshot.channels[0].count;
     this.hotCount = snapshot.channels[1].count;
@@ -117,18 +120,63 @@ export struct HomeView {
   private videoReportDialog: CustomDialogController | null = null;
 
   async aboutToAppear(): Promise<void> {
+    this.recoveryActive = true;
+    const restored: RecoveryViewState | undefined = AppRecoveryState.takeView('home');
+    if (restored?.tab !== undefined && restored.tab >= 0 && restored.tab <= 2) {
+      this.tab = restored.tab;
+      this.visualTab = this.tab;
+    }
+    for (let index: number = 0; index < 3; index++) {
+      this.recoveryOffsets[index] = AppRecoveryState.takeView('home:' + String(index));
+    }
+    AppRecoveryState.saveView('home', { tab: this.tab });
     AppTheme.resetHeaderFade();
     await this.feed.activate(this.tab);
   }
 
   aboutToDisappear(): void {
+    for (let index: number = 0; index < 3; index++) this.saveFeedScroll(index);
+    this.recoveryActive = false;
+    this.recoveryOffsets = [undefined, undefined, undefined];
     this.feed.dispose();
     this.videoReportDialog?.close();
     this.videoReportDialog = null;
   }
 
-  async onLoginChanged(): Promise<void> { await this.feed.accountChanged(this.tab); }
-  private async onRecommendModeChanged(): Promise<void> { await this.feed.recommendModeChanged(); }
+  async onLoginChanged(): Promise<void> {
+    this.recoveryOffsets = [undefined, undefined, undefined];
+    await this.feed.accountChanged(this.tab);
+  }
+  private async onRecommendModeChanged(): Promise<void> {
+    this.recoveryOffsets[0] = undefined;
+    await this.feed.recommendModeChanged();
+  }
+
+  private feedScroller(index: number): Scroller {
+    return index === 0 ? this.recScroller : (index === 1 ? this.hotScroller : this.liveScroller);
+  }
+
+  private saveFeedScroll(index: number): void {
+    if (!this.recoveryActive || this.recoveryOffsets[index] !== undefined) return;
+    try {
+      const offset: OffsetResult = this.feedScroller(index).currentOffset();
+      AppRecoveryState.saveView('home:' + String(index), { scrollX: offset.xOffset, scrollY: offset.yOffset });
+    } catch (e) {
+      // 未加载频道的 Scroller 尚未绑定，不覆盖其恢复记录。
+    }
+  }
+
+  private restoreFeedScroll(index: number): void {
+    const state: RecoveryViewState | undefined = this.recoveryOffsets[index];
+    if (!this.recoveryActive || state === undefined || this.channelEmpty(index)) return;
+    this.recoveryOffsets[index] = undefined;
+    // 只恢复到已加载列表可用范围，超出部分由原生 Scroller clamp，不循环请求分页。
+    try {
+      this.feedScroller(index).scrollTo({ xOffset: state.scrollX ?? 0, yOffset: state.scrollY ?? 0, animation: false });
+    } catch (e) {
+      // 列表已解绑时保留正常页面，不让系统恢复失败阻断首页。
+    }
+  }
 
   /** 首页推荐和热门卡片共用视频举报表单。 */
   private reportCard(item: VideoItem): void {
@@ -175,12 +223,16 @@ export struct HomeView {
     return feedTab === 0 ? this.recCount === 0 : (feedTab === 1 ? this.hotCount === 0 : this.liveCount === 0);
   }
 
-  onRefresh(feedTab: number): void { this.feed.load(feedTab, true); }
+  onRefresh(feedTab: number): void {
+    this.recoveryOffsets[feedTab] = undefined;
+    this.feed.load(feedTab, true);
+  }
   onReachEnd(feedTab: number): void { this.feed.load(feedTab, false); }
   private retryMore(feedTab: number): void { this.feed.retry(feedTab); }
 
   @Builder
   SubTabItem(label: string, index: number) {
+    Button({ type: ButtonType.Normal }) {
     Stack({ alignContent: Alignment.Center }) {
       Text(label)
         .fontSize(17)
@@ -196,9 +248,11 @@ export struct HomeView {
     .shadow(this.visualTab === index ? {
       radius: 10, color: this.isDark ? '#40000000' : '#1E4A5568', offsetX: 0, offsetY: 2,
     } : { radius: 0, color: Color.Transparent, offsetX: 0, offsetY: 0 })
-    .accessibilityText(label)
+    .animation({ duration: MotionTokens.duration(MotionTokens.content, this.reduceMotion), curve: Curve.EaseOut })
+    }
+    .width(60).height(44).padding(0).backgroundColor(Color.Transparent).borderRadius(22)
+    .accessibilityGroup(true).accessibilityText(label)
     .accessibilitySelected(this.visualTab === index)
-    .animation({ duration: 180, curve: Curve.EaseOut })
     .onClick(() => {
       Haptic.light();
       this.switchTab(index);
@@ -210,6 +264,7 @@ export struct HomeView {
     // 选中胶囊自身仍有 180ms 微动效；手势滑动切页才走 Tabs 的滑动动画。
     this.visualTab = index;
     this.tab = index;
+    AppRecoveryState.saveView('home', { tab: index });
     if (index === 0 && this.recSource.isEmpty()) {
       this.loadRecommend(true).catch(() => {
       });
@@ -277,7 +332,7 @@ export struct HomeView {
     .margin({ top: this.statusBarInset + 88 })
     // Done 等结束态不再显示；即使系统状态回调稍晚，请求完成后也立即消失。
     .opacity(this.refreshingChannels[this.tab] ? 1 : 0)
-    .animation({ duration: 120, curve: Curve.EaseOut })
+    .animation({ duration: MotionTokens.duration(MotionTokens.feedback, this.reduceMotion), curve: Curve.EaseOut })
     .hitTestBehavior(HitTestMode.None)
   }
 
@@ -401,6 +456,8 @@ export struct HomeView {
     .constraintSize({ maxWidth: LayoutTokens.feedMaxWidth })
     .alignSelf(ItemAlign.Center)
     .scrollBar(BarState.Off)
+    .onAreaChange(() => this.restoreFeedScroll(feedTab))
+    .onScrollStop(() => this.saveFeedScroll(feedTab))
     .onDidScroll((offset: number) => {
       AppTheme.updateHeaderFade(offset);
     })
@@ -451,6 +508,8 @@ export struct HomeView {
     .constraintSize({ maxWidth: LayoutTokens.feedMaxWidth })
     .alignSelf(ItemAlign.Center)
     .scrollBar(BarState.Off)
+    .onAreaChange(() => this.restoreFeedScroll(2))
+    .onScrollStop(() => this.saveFeedScroll(2))
     .onDidScroll((offset: number) => AppTheme.updateHeaderFade(offset))
     .onReachEnd(() => this.onReachEnd(2))
   }
@@ -521,6 +580,7 @@ export struct HomeView {
       .onChange((index: number) => {
         this.tab = index;
         this.visualTab = index;
+        AppRecoveryState.saveView('home', { tab: index });
         // 滑动切换时也要触发懒加载，避免热门/直播切过去是空白，必须再点一次才能出来。
         if (index === 0 && this.recSource.isEmpty()) {
           this.loadRecommend(true).catch(() => {

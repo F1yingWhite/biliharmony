@@ -13,6 +13,7 @@ export class PlayerPlaybackSource {
   quality: number = 0;
   initialSeek: number = 0;
   preview: boolean = false;
+  autoPlay: boolean = true;
 }
 
 /** 起播前实时读取系统策略；Watch 与原生事件的到达顺序不能决定是否允许出声。 */

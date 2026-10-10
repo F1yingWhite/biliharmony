@@ -21,7 +21,8 @@ import { PlayerMediaExportController, PlayerMediaExportSnapshot, PlayerDownloadU
 import { MediaExportFormat } from '../../services/media/MediaExportFormat';
 import { image } from '@kit.ImageKit';
 import { avSession } from '@kit.AVSessionKit';
-import { PlayerAvSessionHelper } from './PlayerAvSessionHelper';
+import { PlayerAvSessionHelper, PlayerAvSessionCommands } from './PlayerAvSessionHelper';
+import { VideoSystemQueue } from '../video/VideoSystemQueue';
 import { PlayerSubtitleController } from './PlayerSubtitleController';
 import { PlayerGestureController } from './PlayerGestureController';
 import { playerPanelTitle } from './PlayerSheetTheme';
@@ -80,6 +81,7 @@ export struct PlayerView {
   @Prop @Watch('onSourceVersionChanged') sourceVersion: number = 0;
   /** 初始续播位置（秒）；首帧 prepared 后自动 seek 到该位置。 */
   @Prop initialSeekSeconds: number = 0;
+  @Prop initiallyPaused: boolean = false;
   @Prop aid: number = 0;
   @Prop bvid: string = '';
   @Prop cid: number = 0;
@@ -89,6 +91,10 @@ export struct PlayerView {
   @Prop videoDuration: number = 0;
   @Prop videoTitle: string = '';
   @Prop videoPartTitle: string = '';
+  @Prop @Watch('onAvQueueChanged') previousAssetId: string = '';
+  @Prop @Watch('onAvQueueChanged') nextAssetId: string = '';
+  onPlayPrevious: () => void = () => {};
+  onPlayNext: () => void = () => {};
   @Prop videoCover: string = '';
   @Prop ownerName: string = '';
   @Prop ownerFace: string = '';
@@ -117,7 +123,7 @@ export struct PlayerView {
   onFullscreenChange: (fullscreen: boolean) => void = () => {};
   /** 系统开始转回竖屏：父页只启动外层裁剪窗口的缩放，此时不改逻辑全屏和弹幕视口。 */
   onFullscreenExitStart: () => void = () => {};
-  onPlayingChange: (playing: boolean) => void = () => {};
+  onPlayingChange: (playing: boolean, sourceVersion: number) => void = () => {};
   /** playing 与 startRenderFrame 均到达后通知父页，父页据此撤掉跨 XComponent 创建期的稳定封面。 */
   onFirstFrameShown: () => void = () => {};
   onResumeRequest: () => void = () => {};
@@ -131,7 +137,7 @@ export struct PlayerView {
   @Prop dmSending: boolean = false;
   onDmDraftChange: (value: string) => void = () => {};
   onDmSend: () => void = () => {};
-  onProgress: (seconds: number) => void = () => {};
+  onProgress: (seconds: number, sourceVersion: number) => void = () => {};
   /** 在线观看人数变化上报：详情页把"X人正在看"显示在信息行（竖屏播放器不再悬浮）。 */
   onOnlineCount: (value: string) => void = () => {};
   onEnded: () => void = () => {};
@@ -397,6 +403,7 @@ export struct PlayerView {
   private fullscreenExitAnimationStarted: boolean = false;
   private fullscreenExitCancel: (() => void) | null = null;
   private playbackSourceGeneration: number = 0;
+  private recoveryPauseConsumed: boolean = false;
   private playback: PlayerPlaybackSession = new PlayerPlaybackSession({
     policy: (): PlayerPlaybackPolicy => ({ background: this.appInBackground, allowBackground: this.backgroundPlaybackEnabled,
       pipKeepsAlive: this.pictureInPicture.keepsPlaybackAlive(),
@@ -432,6 +439,8 @@ export struct PlayerView {
     source.qualities = this.qualityOptions;
     source.quality = this.currentQuality;
     source.initialSeek = this.initialSeekSeconds;
+    source.autoPlay = !this.initiallyPaused || this.recoveryPauseConsumed;
+    if (source.urls.length > 0) this.recoveryPauseConsumed = true;
     source.preview = this.previewPlayback;
     return source;
   }
@@ -445,14 +454,14 @@ export struct PlayerView {
       case 'started':
         this.resumeTransitionActive = false;
         this.applyPgcSkipIntroOnce();
-        this.onPlayingChange(true);
+        this.onPlayingChange(true, this.playback.sourceVersion);
         this.scheduleControlsHide();
         this.ensureAVSession();
         this.updateAVSessionPlaybackState();
         Immersive.setKeepScreenOn(true);
         break;
       case 'playing':
-        this.onPlayingChange(true);
+        this.onPlayingChange(true, this.playback.sourceVersion);
         this.scheduleControlsHide();
         this.updateAVSessionPlaybackState();
         break;
@@ -461,7 +470,7 @@ export struct PlayerView {
         this.showControls = true;
         if (this.hideTimer >= 0) clearTimeout(this.hideTimer);
         this.hideTimer = -1;
-        this.onPlayingChange(false);
+        this.onPlayingChange(false, this.playback.sourceVersion);
         this.updateAVSessionPlaybackState();
         Immersive.setKeepScreenOn(false);
         break;
@@ -474,7 +483,7 @@ export struct PlayerView {
         this.resetDanmakuAt(event.value);
         this.auxiliary.prefetch(event.value);
         this.interactionCtl.update(event.value);
-        this.onProgress(event.value);
+        this.onProgress(event.value, this.playback.sourceVersion);
         this.updateSubtitle(event.value);
         this.updateAVSessionPlaybackState();
         break;
@@ -484,7 +493,7 @@ export struct PlayerView {
       case 'seek.finished': this.seekTargetCtl.show(-1); break;
       case 'foregroundSeek':
         this.interactionCtl.update(event.value);
-        this.onProgress(event.value);
+        this.onProgress(event.value, this.playback.sourceVersion);
         this.updateAVSessionPlaybackState();
         break;
       case 'backgroundAudio': Immersive.setKeepScreenOn(false); this.updateAVSessionPlaybackState(); break;
@@ -497,7 +506,7 @@ export struct PlayerView {
         this.pictureInPicture.sync();
         this.onVideoSizeChange(event.value, event.second);
         break;
-      case 'source': this.onPlayingChange(false); break;
+      case 'source': this.onPlayingChange(false, this.playback.sourceVersion); break;
       case 'fatal': this.release(); break;
     }
   }
@@ -521,7 +530,7 @@ export struct PlayerView {
       this.timerMinutes = 0;
       this.pauseForTimer();
     }
-    this.onProgress(seconds);
+    this.onProgress(seconds, this.playback.sourceVersion);
     if (!background) {
       this.updateSubtitle(seconds);
       this.spawnDanmaku(seconds);
@@ -710,18 +719,43 @@ export struct PlayerView {
       },
       this.avSessionMetadata(),
       this.avSessionPlaybackState(),
+      this.avSessionCommands(),
     ).catch(() => {
     });
   }
 
   private avSessionMetadata(): avSession.AVMetadata {
     return {
-      assetId: this.bvid.length > 0 ? this.bvid : String(this.aid),
+      assetId: VideoSystemQueue.assetId(this.aid, this.bvid, this.cid),
       title: this.videoTitle,
       artist: this.ownerName,
       mediaImage: this.videoCover.length > 0 ? this.videoCover : this.ownerFace,
       duration: this.duration > 0 ? Math.floor(this.duration * 1000) : undefined,
+      previousAssetId: this.previousAssetId.length > 0 ? this.previousAssetId : undefined,
+      nextAssetId: this.nextAssetId.length > 0 ? this.nextAssetId : undefined,
     };
+  }
+
+  private avSessionCommands(): PlayerAvSessionCommands {
+    const commands: PlayerAvSessionCommands = {
+      skip: (seconds: number): void => {
+        if (!this.destroyed && this.prepared) this.seekTo(this.playheadSec + seconds, true);
+      },
+      speed: (rate: number): void => { if (!this.destroyed) this.playback.setSpeed(rate); },
+    };
+    if (this.previousAssetId.length > 0) commands.previous = (): void => {
+      if (!this.destroyed) this.onPlayPrevious();
+    };
+    if (this.nextAssetId.length > 0) commands.next = (): void => {
+      if (!this.destroyed) this.onPlayNext();
+    };
+    return commands;
+  }
+
+  onAvQueueChanged(): void {
+    if (this.destroyed || this.avSessionHelper === null) return;
+    this.avSessionHelper.setCommands(this.avSessionCommands());
+    this.updateAVSessionMetadata();
   }
 
   private avSessionPlaybackState(): avSession.AVPlaybackState {
@@ -1023,7 +1057,7 @@ export struct PlayerView {
     Immersive.restoreWindowBrightness();
     // 销毁阶段写 @State 无效且高风险，只做资源清理；父组件通知保留但隔离异常。
     try {
-      this.onPlayingChange(false);
+      this.onPlayingChange(false, this.playback.sourceVersion);
     } catch (e) {
       // 父组件可能已先行销毁。
     }

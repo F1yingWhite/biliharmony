@@ -1,7 +1,8 @@
 import { DynDraftImage } from '../../common/DynImagePreparer';
 import { DynamicComposerController, DynamicComposerState, DYNAMIC_MAX_IMAGES } from './DynamicComposerController';
-import { picker } from '@kit.CoreFileKit';
+import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { common } from '@kit.AbilityKit';
+import { PhotoPickerHandoff } from '../../common/PhotoPickerHandoff';
 
 /** 发布面板只处理控件与系统相册入口，草稿和事务由页面持有的控制器管理。 */
 @Component
@@ -22,11 +23,11 @@ export struct DynamicComposer {
     const context: common.Context | undefined = this.getUIContext().getHostContext();
     if (context === undefined) return;
     this.controller.pick(context, async (remaining: number): Promise<Array<string>> => {
-      const photoPicker: picker.PhotoViewPicker = new picker.PhotoViewPicker();
-      const result: picker.PhotoSelectResult = await photoPicker.select({
-        MIMEType: picker.PhotoViewMIMETypes.IMAGE_TYPE, maxSelectNumber: remaining,
+      const photoPicker: photoAccessHelper.PhotoViewPicker = new photoAccessHelper.PhotoViewPicker();
+      const result: photoAccessHelper.PhotoSelectResult = await photoPicker.select({
+        MIMEType: photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE, maxSelectNumber: remaining,
       });
-      return result.photoUris;
+      return PhotoPickerHandoff.defer(result.photoUris);
     });
   }
 

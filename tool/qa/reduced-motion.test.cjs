@@ -44,7 +44,8 @@ function environment(boundary = diskFixture(false), initial = {}) {
     AppStorage: { get: key => storage.get(key), setOrCreate: (key, value) => storage.set(key, value), delete: key => storage.delete(key) },
     PersistentStorage: { persistProp: (key, value) => { if (!storage.has(key)) storage.set(key, value); } },
     NavPathStack: class { disableAnimation(value) { navCalls.push(value); } },
-    Curve: { EaseOut: 'ease-out', Linear: 'linear' },
+    Curve: { EaseOut: 'ease-out', EaseInOut: 'ease-in-out', Linear: 'linear' },
+    Handedness: { LEFT: 'left' },
     TransitionEffect: { OPACITY: { animation: options => { transitions.push(options); return options; } } },
     $r: value => value,
     setTimeout: (callback, delay) => { timers.set(++timerId, { callback, delay }); return timerId; },
@@ -86,7 +87,7 @@ function environment(boundary = diskFixture(false), initial = {}) {
       export class Harness {\n` +
       section(source, '  private onMotionPreferenceChanged():', '\n  }\n') + '\n  }\n' +
       section(source, '  private finishHeroNavTransition(', '  /** 路由参数守卫') + '\n}', 'pages/Index');
-    return Object.assign(new Harness(), { reduceMotion: false, heroTransitionProxy: null,
+    return Object.assign(new Harness(), { reduceMotion: false, tabScale: [1, 1, 1, 1], heroTransitionProxy: null,
       heroTransitionToken: 0, heroTransitionInputLocked: false, heroTransitionClock: 0, getUIContext: () => ui });
   }
   function action() {
@@ -100,7 +101,23 @@ function environment(boundary = diskFixture(false), initial = {}) {
       'components/video/VideoActionItem');
     return Object.assign(new VideoActionItem(), { getUIContext: () => ui });
   }
-  return { load, storage, timers, navCalls, animations, haptics, transitions, index, action };
+  function tab() {
+    const method = section(read('pages/Index'), '  private tapTabItem(', '  @Builder\n  TabBarItem');
+    const { Harness } = compile("import { Haptic } from '../common/Haptic';\nexport class Harness {\n" + method + '\n}', 'pages/Index');
+    return Object.assign(new Harness(), { currentTab: 0, tabScale: [1, 1, 1, 1], reduceMotion: true });
+  }
+  function floatingTabs() {
+    const method = section(read('views/HomeView'), '  onHandSideChanged():', "  @StorageProp('windowStatusBarHeight')");
+    const { Harness } = compile("import { MotionTokens } from '../common/MotionTokens';\nexport class Harness {\n" + method + '\n}', 'views/HomeView');
+    return Object.assign(new Harness(), { handLayoutMounted: true, handSide: 'left', handPosition: 0,
+      reduceMotion: true, getUIContext: () => ui });
+  }
+  function preferenceRow() {
+    const method = section(read('pages/PreferencesPage'), '  private changeChecked(', '  @Builder\n  Content()');
+    const { Harness } = compile('export class Harness {\n' + method + '\n}', 'pages/PreferencesPage');
+    return Object.assign(new Harness(), { checked: false, rowEnabled: true, onChange() {} });
+  }
+  return { load, storage, timers, navCalls, animations, haptics, transitions, index, action, tab, floatingTabs, preferenceRow };
 }
 
 test('reduce-motion changes flush to Preferences and recover in new contexts and module graphs', async () => {
@@ -197,4 +214,66 @@ test('reduced action taps execute once without bounce timers and still respect t
   assert.equal(env.timers.size, 1);
   item.aboutToDisappear();
   assert.equal(env.timers.size, 0, 'unmount cancels the outstanding normal feedback timer');
+});
+
+test('accent ink meets text contrast for every selectable theme and platform accent', () => {
+  const Theme = environment().load('common/AppTheme').AppTheme;
+  const luminance = hex => {
+    const rgb = hex.slice(1).match(/../g).map(value => parseInt(value, 16) / 255)
+      .map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+    return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+  };
+  for (const color of [...Theme.PRESET_COLORS, '#FF0000', '#000000', '#FFFFFF']) {
+    const bg = luminance(color), fg = luminance(Theme.onAccent(color));
+    assert.ok((Math.max(bg, fg) + 0.05) / (Math.min(bg, fg) + 0.05) >= 4.5, color);
+  }
+  assert.equal(Theme.onAccent('#FFCC00'), '#000000');
+  assert.equal(Theme.onAccent('#8E24AA'), '#FFFFFF');
+});
+
+test('feed columns retain a readable card width in narrow, phone and wide windows', () => {
+  const Layout = environment().load('common/LayoutTokens').LayoutTokens;
+  for (const width of [240, 320, 359, 360, 560, 820, 1040, 1800]) {
+    const columns = Layout.feedColumns(width);
+    const contentWidth = Math.min(width, Layout.feedMaxWidth) - 2 * Layout.horizontalPadding(width);
+    const cardWidth = (contentWidth - (columns - 1) * Layout.feedGap) / columns;
+    assert.ok(cardWidth >= 150, `${width}vp: ${columns} columns squeeze the card to ${cardWidth}vp`);
+  }
+  assert.equal(Layout.feedColumns(320), 1);
+  assert.equal(Layout.feedColumns(360), 2, 'ordinary phone density remains unchanged');
+});
+
+test('native preference changes persist once and reject unchanged or disabled events', () => {
+  const row = environment().preferenceRow(), values = [];
+  row.onChange = value => { values.push(value); row.checked = value; };
+  row.changeChecked(true); row.changeChecked(true);
+  row.changeChecked(false); row.changeChecked(false);
+  row.rowEnabled = false; row.changeChecked(true);
+  assert.deepEqual(values, [true, false]);
+});
+
+test('reduced tab taps keep selection and haptics without any scale jump or timer', () => {
+  const env = environment(), tab = env.tab();
+  tab.tapTabItem(1);
+  assert.equal(tab.currentTab, 1);
+  assert.deepEqual(tab.tabScale, [1, 1, 1, 1]);
+  assert.equal(env.timers.size, 0);
+  assert.equal(env.haptics.length, 1);
+  tab.reduceMotion = false; tab.tapTabItem(2);
+  assert.equal(tab.currentTab, 2);
+  assert.equal(tab.tabScale[2], 0.78);
+  for (const timer of env.timers.values()) timer.callback();
+  assert.deepEqual(tab.tabScale, [1, 1, 1, 1]);
+});
+
+test('floating home tabs apply handedness immediately when motion is reduced', () => {
+  const env = environment(), tabs = env.floatingTabs();
+  tabs.onHandSideChanged();
+  assert.equal(tabs.handPosition, 1);
+  assert.equal(env.animations.at(-1).duration, 0);
+  tabs.reduceMotion = false; tabs.handSide = 'right'; tabs.onHandSideChanged();
+  assert.equal(tabs.handPosition, 0);
+  assert.equal(env.animations.at(-1).duration, 320);
+  tabs.handLayoutMounted = false; tabs.onHandSideChanged();
+  assert.equal(env.animations.length, 2, 'unmounted pages cannot start decorative animations');
 });

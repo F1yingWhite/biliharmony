@@ -20,6 +20,7 @@ export struct NavEntryRow {
   @StorageProp('isDarkMode') isDark: boolean = false;
 
   build() {
+    Button({ type: ButtonType.Normal }) {
     Row({ space: 10 }) {
       Image(this.icon)
         .width(18)
@@ -38,10 +39,13 @@ export struct NavEntryRow {
       }
     }
     .width('100%')
-    .height(44)
+    .constraintSize({ minHeight: 44 })
     .padding({ left: 14, right: 14 })
+    }
+    .width('100%').padding(0)
     .borderRadius(12)
     .backgroundColor(AppTheme.surface())
+    .accessibilityGroup(true).accessibilityText(this.title)
     .onClick(() => {
       Haptic.light();
       this.onTap();

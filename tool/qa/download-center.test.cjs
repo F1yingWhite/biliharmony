@@ -12,14 +12,38 @@ function deferred() {
   return {promise, resolve};
 }
 
-function fixture(getPlayUrl, downloadFile, preferencesMock, files = new Set()) {
+const STATE = {INITIALIZED: 0, WAITING: 0x10, RUNNING: 0x20, RETRYING: 0x21, PAUSED: 0x30,
+  STOPPED: 0x31, COMPLETED: 0x40, FAILED: 0x41, REMOVED: 0x50};
+function fixture(getPlayUrl, downloadFile, preferencesMock, files = new Set(), hooks = {}) {
   const sourceRoot = process.env.ARKTS_TEST_SOURCE_ROOT || path.resolve(__dirname, '../../entry/src/main/ets');
   const source = fs.readFileSync(path.join(sourceRoot, 'services/media/DownloadCenter.ets'), 'utf8');
   const module = {exports: {}};
   const writes = [];
+  const systems = new Map(); const configs = []; let sequence = 0;
+  const agent = {
+    State: STATE, Action: {DOWNLOAD: 0}, Mode: {BACKGROUND: 0}, WaitingReason: {NETWORK_NOT_MATCH: 1},
+    async create(context, config) {
+      configs.push(config);
+      const system = await downloadFile(context, {url: config.url, filePath: config.saveas});
+      if (!system.tid) system.tid = 'system' + (++sequence);
+      systems.set(system.tid, system);
+      return system;
+    },
+    async getTask(context, id) {
+      if (hooks.getTask) return hooks.getTask(context, id);
+      if (!systems.has(id)) throw Object.assign(new Error('missing'), {code: 21900006});
+      return systems.get(id);
+    },
+    async show(id) {if (hooks.show) return hooks.show(id); return {progress: systems.get(id).info};},
+    async remove(id) {
+      if (hooks.remove) return hooks.remove(id);
+      if (!systems.has(id)) throw Object.assign(new Error('missing'), {code: 21900006});
+      await systems.get(id).delete(); systems.delete(id);
+    },
+  };
   const platform = {
     '@kit.AbilityKit': {common: {}},
-    '@kit.BasicServicesKit': {request: {downloadFile}},
+    '@kit.BasicServicesKit': {request: {agent}},
     '@kit.CoreFileKit': {fileIo: {
       accessSync: name => files.has(name), mkdirSync(name) {files.add(name);},
       unlinkSync(name) {assert.ok(files.delete(name), 'unlink missing file: ' + name);},
@@ -49,17 +73,27 @@ function fixture(getPlayUrl, downloadFile, preferencesMock, files = new Set()) {
     Center.ready = null;
     Center.tasks = [];
   }
-  return {Center, item, writes, files};
+  return {Center, item, writes, files, systems, configs, exports: module.exports};
 }
 
 function systemTask() {
-  const handlers = new Map(); let deletes = 0;
+  const handlers = new Map(); let deletes = 0, starts = 0;
   return {
+    info: {state: STATE.RUNNING, processed: 0, sizes: [100]},
     on(name, fn) {handlers.set(name, fn);},
     off(name) {handlers.delete(name);},
-    emit(name, ...args) {handlers.get(name)?.(...args);},
+    emit(name, ...args) {
+      name = {complete: 'completed', fail: 'failed'}[name] || name;
+      if (name === 'progress' && typeof args[0] === 'number') args = [{state: STATE.RUNNING, processed: args[0], sizes: [args[1]]}];
+      if (args[0]?.state !== undefined) this.info = args[0];
+      handlers.get(name)?.(...args);
+    },
+    async start() {starts++;},
+    async resume() {},
     async delete() {deletes++; this.emit('remove');},
     deletes: () => deletes,
+    starts: () => starts,
+    handlers,
   };
 }
 
@@ -111,15 +145,16 @@ test('many progress callbacks coalesce writes while completion persists immediat
   await tick();
   for (let i = 1; i <= 80; i++) task.emit('progress', i, 100);
   assert.equal(item.progress, 80);
-  assert.equal(writes.length, 1, 'progress events should wait for the coalescing timer');
-  files.add(Center.context.filesDir + '/downloads/' + item.id + '.part');
+  const before = writes.length;
+  assert.equal(before, 3, 'creation path and ID must be saved before starting; progress waits for timer');
+  files.add(item.partPath);
   task.emit('complete');
   await running;
   assert.equal(item.status, 2);
-  assert.equal(writes.length, 2);
+  assert.equal(writes.length, before + 2);
   assert.equal(Center.progressPersistTimer, -1);
   assert.equal(files.has(item.filePath), true);
-  assert.equal(files.has(Center.context.filesDir + '/downloads/' + item.id + '.part'), false);
+  assert.equal(files.has(item.partPath), false);
 });
 
 function restoration(getPreferences) {
@@ -229,7 +264,7 @@ test('empty preferences initialize normally', async () => {
   assert.equal(store.writes.length, 0);
 });
 
-test('clearing restored interrupted downloads removes their partial files and completed files', async () => {
+test('clearing legacy records preserves unknown-writer partial files but removes completed files', async () => {
   const store = savedStore(JSON.stringify([
     {id: 'interrupted', status: 1, filePath: ''},
     {id: 'done', status: 2, filePath: context.filesDir + '/downloads/done.m4a'},
@@ -240,7 +275,7 @@ test('clearing restored interrupted downloads removes their partial files and co
   assert.equal(Center.list()[0].status, 4);
   await Center.clearFinished();
   assert.deepEqual(Center.list(), []);
-  assert.deepEqual([...files], [], 'record cleanup must also reclaim partial media left by a killed process');
+  assert.deepEqual([...files], [context.filesDir + '/downloads/interrupted.part'], 'legacy task has no recoverable ID: never delete a possible live writer');
   assert.equal(store.raw(), '[]');
 });
 
@@ -248,8 +283,221 @@ test('clearing finished records preserves active download records and their part
   const files = new Set(['/tmp/test-downloads/downloads/task1.part', '/tmp/test-downloads/downloads/failed.part']);
   const {Center, item} = fixture(async () => null, async () => systemTask(), null, files);
   item.status = 1;
-  Center.tasks.push({id: 'failed', status: 3, filePath: ''});
+  Center.tasks.push(fixture(async () => null, async () => systemTask()).exports.DownloadTaskItem.from({id: 'failed', status: 3, filePath: ''}));
   await Center.clearFinished();
   assert.deepEqual(Center.list().map(task => task.id), ['task1']);
-  assert.deepEqual([...files], ['/tmp/test-downloads/downloads/task1.part']);
+  assert.deepEqual([...files], ['/tmp/test-downloads/downloads/task1.part', '/tmp/test-downloads/downloads/failed.part']);
+});
+
+test('legacy retry isolates the attempt and never removes a possible old writer', async () => {
+  const old = context.filesDir + '/downloads/task1.part';
+  const system = systemTask();
+  const f = fixture(async () => ({downloadAudioUrls: ['only-cdn']}), async () => system, null, new Set([old]));
+  f.item.status = 4;
+  await f.Center.retry(f.item.id); await tick();
+  assert.equal(f.configs.length, 1);
+  assert.equal(f.configs[0].saveas, context.filesDir + '/downloads/task1.a1.part');
+  assert.equal(f.configs[0].mode, 0);
+  assert.equal(f.configs[0].metered, true);
+  assert.equal(f.configs[0].roaming, false);
+  assert.equal(f.configs[0].overwrite, false);
+  assert.equal(f.configs[0].gauge, true);
+  f.files.add(f.item.partPath);
+  const run = f.Center.currentRun;
+  system.emit('complete'); await run;
+  assert.equal(f.item.status, 2);
+  assert.equal(f.files.has(old), true);
+});
+
+test('failed CDN is stopped before deleting its partial file and trying a distinct second attempt', async () => {
+  const first = systemTask(), second = systemTask(); let calls = 0;
+  const f = fixture(async () => ({downloadAudioUrls: ['cdn1', 'cdn2']}), async () => ++calls === 1 ? first : second);
+  const run = f.Center.runOne(f.item); await tick();
+  const initialPath = f.item.partPath; f.files.add(initialPath);
+  first.emit('fail'); await tick();
+  assert.equal(first.deletes(), 1);
+  assert.equal(f.files.has(initialPath), false);
+  assert.equal(calls, 2);
+  assert.notEqual(f.item.partPath, initialPath);
+  f.files.add(f.item.partPath); second.emit('complete'); await run;
+  assert.equal(f.item.status, 2);
+});
+
+test('failed system removal blocks CDN fallback and preserves the possible live partial file', async () => {
+  const system = systemTask(); let creates = 0;
+  const f = fixture(async () => ({downloadAudioUrls: ['cdn1', 'cdn2']}), async () => {creates++; return system;},
+    null, new Set(), {remove: async () => {throw Object.assign(new Error('service unavailable'), {code: 13400003});}});
+  const run = f.Center.runOne(f.item); await tick();
+  const partial = f.item.partPath; f.files.add(partial); system.emit('fail'); await run;
+  assert.equal(creates, 1);
+  assert.equal(f.files.has(partial), true);
+  assert.ok(f.item.systemTaskId);
+  assert.equal(f.item.status, 3);
+  await assert.rejects(f.Center.remove(f.item.id));
+  assert.equal(f.Center.list()[0], f.item);
+  assert.equal(f.files.has(partial), true);
+});
+
+test('task ID is durably saved before start; save failure removes the initialized system without starting it', async () => {
+  const system = systemTask();
+  const f = fixture(async () => ({downloadAudioUrls: ['cdn']}), async () => system);
+  f.Center.store.flush = async () => {if (f.item.systemTaskId) throw new Error('disk full');};
+  await f.Center.runOne(f.item);
+  assert.equal(system.starts(), 0);
+  assert.equal(system.deletes(), 1);
+  assert.equal(f.item.status, 3);
+  assert.match(f.item.message, /保存失败/);
+});
+
+test('restarting attaches the saved system task without reparsing URLs or creating another download', async () => {
+  const system = systemTask(); system.tid = 'saved-id';
+  const part = context.filesDir + '/downloads/resumed.a3.part';
+  let state = STATE.RUNNING, queries = 0, creates = 0, urls = 0;
+  const store = savedStore(JSON.stringify([{id: 'resumed', kind: 1, status: 1, systemTaskId: system.tid,
+    attempt: 3, partPath: part, progress: 10}]));
+  const f = fixture(async () => {urls++; return null;}, async () => {creates++; return system;},
+    {getPreferences: async () => store}, new Set([part]), {
+      getTask: async (_context, id) => {assert.equal(id, system.tid); return system;},
+      show: async () => {queries++; return {progress: {state, processed: 80, sizes: [100]}};},
+      remove: async () => system.delete(),
+    });
+  await f.Center.init(context); await tick();
+  const restored = f.Center.list()[0];
+  assert.equal(restored.status, 1); assert.equal(restored.progress, 80);
+  assert.equal(system.starts(), 0); assert.equal(creates, 0); assert.equal(urls, 0);
+  // No completion callback while backgrounded: foreground query must complete and rename.
+  state = STATE.COMPLETED;
+  const run = f.Center.currentRun;
+  await f.Center.onForeground(context); await run;
+  assert.equal(restored.status, 2); assert.equal(restored.filePath, context.filesDir + '/downloads/resumed.m4a');
+  assert.equal(f.files.has(restored.filePath), true);
+  assert.ok(queries >= 2);
+});
+
+test('saved initialized task starts once after attaching listeners', async () => {
+  const system = systemTask(); system.tid = 'saved';
+  const f = fixture(async () => null, async () => system, null, new Set(), {
+    getTask: async () => system,
+    show: async () => ({progress: {state: STATE.INITIALIZED, processed: 0, sizes: [-1]}}),
+    remove: async () => system.delete(),
+  });
+  f.item.systemTaskId = 'saved'; f.item.partPath = context.filesDir + '/downloads/task1.a1.part';
+  f.item.attempt = 1; f.item.status = 5;
+  const run = f.Center.runOne(f.item); await tick();
+  assert.equal(system.starts(), 1);
+  f.files.add(f.item.partPath); system.emit('complete'); await run;
+  assert.equal(f.item.status, 2);
+});
+
+test('wait/pause events and foreground synchronization update states without recreating the task', async () => {
+  const system = systemTask(); let state = STATE.RUNNING, queryCount = 0;
+  const f = fixture(async () => ({downloadAudioUrls: ['cdn']}), async () => system, null, new Set(), {
+    show: async () => {queryCount++; return {progress: {state, processed: 44, sizes: [100]}};},
+  });
+  f.Center.pump(); await tick();
+  system.emit('wait', 1); assert.equal(f.item.status, 5); assert.match(f.item.message, /网络/);
+  system.emit('pause', {state: STATE.PAUSED, processed: 46, sizes: [100]});
+  assert.equal(f.item.status, 6); assert.equal(f.item.progress, 46);
+  state = STATE.RUNNING;
+  await f.Center.onForeground(context);
+  assert.equal(f.item.status, 1); assert.equal(f.item.progress, 44); assert.equal(f.item.message, '');
+  assert.equal(f.configs.length, 1); assert.ok(queryCount >= 2);
+  const run = f.Center.currentRun; await f.Center.remove(f.item.id); await run;
+  assert.equal(system.handlers.size, 0); assert.deepEqual(f.Center.list(), []);
+});
+
+test('concurrent foreground checks share one query and a stale response cannot overwrite a newer progress event', async () => {
+  const pending = deferred(); const system = systemTask(); let queries = 0;
+  const f = fixture(async () => ({downloadAudioUrls: ['cdn']}), async () => system, null, new Set(), {
+    show: async () => ++queries === 1 ? {progress: system.info} : pending.promise,
+  });
+  f.Center.pump(); await tick();
+  const first = f.Center.onForeground(context), second = f.Center.onForeground(context);
+  assert.equal(first, second); await tick();
+  system.emit('progress', 80, 100);
+  pending.resolve({progress: {state: STATE.PAUSED, processed: 10, sizes: [100]}});
+  await first;
+  assert.equal(queries, 2); assert.equal(f.item.status, 1); assert.equal(f.item.progress, 80);
+  await f.Center.remove(f.item.id);
+});
+
+test('retrying paused task stops and drains old observers before creating a new attempt', async () => {
+  const first = systemTask(), next = systemTask(); let creates = 0;
+  const f = fixture(async () => ({downloadAudioUrls: ['cdn']}), async () => ++creates === 1 ? first : next);
+  f.Center.pump(); await tick();
+  const oldPart = f.item.partPath; f.files.add(oldPart);
+  first.emit('pause', {state: STATE.PAUSED, processed: 10, sizes: [100]});
+  await f.Center.retry(f.item.id); await tick();
+  assert.equal(first.deletes(), 1); assert.equal(first.handlers.size, 0);
+  assert.equal(creates, 2); assert.equal(f.files.has(oldPart), false);
+  assert.notEqual(f.item.partPath, oldPart); assert.equal(f.item.status, 1);
+  f.files.add(f.item.partPath); const run = f.Center.currentRun; next.emit('complete'); await run;
+  assert.equal(f.item.status, 2);
+});
+
+test('canceling while a saved system handle is being recovered never attaches or resumes it', async () => {
+  const handle = deferred(), system = systemTask(); system.tid = 'old';
+  let removed = 0;
+  const f = fixture(async () => assert.fail('must not parse URLs'), async () => assert.fail('must not create'), null,
+    new Set(), {getTask: () => handle.promise, remove: async id => {assert.equal(id, 'old'); removed++;}});
+  f.item.status = 5; f.item.systemTaskId = 'old'; f.item.attempt = 2;
+  f.item.partPath = context.filesDir + '/downloads/task1.a2.part'; f.files.add(f.item.partPath);
+  f.Center.pump(); await tick();
+  const deleting = f.Center.remove(f.item.id); await tick();
+  assert.equal(removed, 1);
+  handle.resolve(system); await deleting;
+  assert.equal(system.starts(), 0); assert.equal(system.handlers.size, 0);
+  assert.deepEqual(f.Center.list(), []); assert.equal(f.files.size, 0);
+});
+
+test('queue remains FIFO and starts one system download at a time', async () => {
+  const first = systemTask(), second = systemTask(); let creations = 0;
+  const f = fixture(async () => ({downloadAudioUrls: ['cdn']}), async () => ++creations === 1 ? first : second);
+  const newer = new f.exports.DownloadTaskItem(); newer.id = 'newer'; newer.kind = 1;
+  f.Center.tasks.unshift(newer); f.Center.pump(); await tick();
+  assert.equal(creations, 1); assert.equal(f.Center.currentRequestId, f.item.id);
+  f.files.add(f.item.partPath); first.emit('complete'); await tick();
+  assert.equal(creations, 2); assert.equal(f.Center.currentRequestId, newer.id);
+  f.files.add(newer.partPath); const run = f.Center.currentRun; second.emit('complete'); await run;
+  assert.equal(f.item.status, 2); assert.equal(newer.status, 2); assert.equal(f.Center.running, false);
+});
+
+test('unconfirmed old system writer prevents a new queued task from running', async () => {
+  let creates = 0;
+  const f = fixture(async () => ({downloadAudioUrls: ['cdn']}), async () => {creates++; return systemTask();});
+  const uncertain = new f.exports.DownloadTaskItem(); uncertain.id = 'uncertain'; uncertain.status = 4;
+  uncertain.systemTaskId = 'still-may-run'; f.Center.tasks.push(uncertain);
+  f.Center.pump(); await tick();
+  assert.equal(creates, 0); assert.equal(f.Center.hasActive(), true);
+  await f.Center.remove(uncertain.id); await tick();
+  assert.equal(creates, 1);
+  await f.Center.remove(f.item.id);
+});
+
+test('paused resume queries actual state and resumes the existing task without a second download', async () => {
+  const system = systemTask(); let resumed = 0, state = STATE.RUNNING;
+  system.resume = async () => {resumed++; state = STATE.RUNNING;};
+  const f = fixture(async () => ({downloadAudioUrls: ['cdn']}), async () => system, null, new Set(), {
+    show: async () => ({progress: {state, processed: 20, sizes: [100]}}),
+  });
+  f.Center.pump(); await tick(); state = STATE.PAUSED;
+  system.emit('pause', {state, processed: 20, sizes: [100]});
+  await Promise.all([f.Center.resume(f.item.id), f.Center.resume(f.item.id)]);
+  assert.equal(resumed, 1); assert.equal(f.configs.length, 1); assert.equal(f.item.status, 1);
+  await f.Center.remove(f.item.id);
+});
+
+test('transient foreground query failure keeps callbacks attached and a later foreground can complete', async () => {
+  const system = systemTask(); let query = 0;
+  const f = fixture(async () => ({downloadAudioUrls: ['cdn']}), async () => system, null, new Set(), {
+    show: async () => {
+      if (++query === 2) throw Object.assign(new Error('service unavailable'), {code: 13400003});
+      return {progress: {state: query >= 3 ? STATE.COMPLETED : STATE.RUNNING, processed: 100, sizes: [100]}};
+    },
+  });
+  f.Center.pump(); await tick(); const run = f.Center.currentRun;
+  await assert.rejects(f.Center.onForeground(context));
+  assert.ok(system.handlers.has('completed')); assert.equal(f.configs.length, 1);
+  f.files.add(f.item.partPath); await f.Center.onForeground(context); await run;
+  assert.equal(f.item.status, 2); assert.equal(system.handlers.size, 0);
 });

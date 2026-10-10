@@ -59,11 +59,11 @@ export class SearchResultsController {
     this.publish();
   }
 
-  async submit(keyword: string, query: SearchQuery): Promise<void> {
+  async submit(keyword: string, query: SearchQuery, tab: SearchCategory = SearchCategory.All): Promise<void> {
     if (this.disposed || keyword.trim().length === 0) return;
     this.keyword = keyword.trim();
     this.query = query.copy();
-    this.tab = SearchCategory.All;
+    this.tab = tab;
     this.categories.clear();
     this.store.clear();
     await this.search(true);

@@ -1,4 +1,5 @@
 import { KeywordSpans } from '../KeywordSpans';
+import { AppTheme } from '../../common/AppTheme';
 import { PgcSearchItem } from '../../model/Models';
 import { biliImageThumbnail } from '../../common/ImageUrl';
 import { AppNavStack, BangumiDetailParam, NAV_BANGUMI_DETAIL } from '../../common/AppRouter';
@@ -20,7 +21,7 @@ export struct SearchMediaCard {
         if (this.item.seasonTypeName.length > 0) {
           Text(this.item.seasonTypeName)
             .fontSize(9)
-            .fontColor('#FFFFFF')
+            .fontColor(AppTheme.onAccent(this.accent))
             .backgroundColor(this.accent)
             .padding({ left: 5, right: 5, top: 2, bottom: 2 })
             .borderRadius({ topLeft: 6, bottomRight: 6 })

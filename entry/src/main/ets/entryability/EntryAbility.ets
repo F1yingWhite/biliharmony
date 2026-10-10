@@ -19,12 +19,17 @@ import { CookieRefresher } from '../services/auth/CookieRefresher';
 import { NetworkSettingsStore } from '../pages/NetworkPrivacyPage';
 import { WebProxy } from '../services/network/WebProxy';
 import { ContinueWatchingStore } from '../common/ContinueWatchingStore';
+import { AppRecoveryState } from '../common/AppRecoveryState';
+import { DownloadCenter } from '../services/media/DownloadCenter';
 
 const DOMAIN: number = 0x0000;
 const TAG: string = 'BiliHarmony';
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    this.context.setRestoreEnabled(true);
+    AppRecoveryState.restore(launchParam.launchReason === AbilityConstant.LaunchReason.APP_RECOVERY ?
+      want.parameters?.[AppRecoveryState.WANT_KEY] : undefined);
     EntryAbility.enableImageCaches();
     this.handleCardDeepLink(want);
     AppStorage.setOrCreate<boolean>('appInBackground', false);
@@ -132,6 +137,13 @@ export default class EntryAbility extends UIAbility {
     if (DEBUG) hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onDestroy');
   }
 
+  onSaveState(reason: AbilityConstant.StateType, wantParam: Record<string, Object>): AbilityConstant.OnSaveResult {
+    if (reason === AbilityConstant.StateType.APP_RECOVERY) {
+      wantParam[AppRecoveryState.WANT_KEY] = AppRecoveryState.serialize();
+    }
+    return AbilityConstant.OnSaveResult.ALL_AGREE;
+  }
+
   /** 服务卡片 router 深链：取出目标视频，交由根页在导航栈就绪后打开详情。 */
   private handleCardDeepLink(want: Want): void {
     const params: object | undefined = want.parameters;
@@ -191,6 +203,7 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     AppStorage.setOrCreate<boolean>('appInBackground', false);
+    DownloadCenter.onForeground(this.context).catch(() => {});
     if (AppTheme.getMode() === AppTheme.MODE_SYSTEM) this.syncSystemTheme();
     if (DEBUG) hilog.info(DOMAIN, TAG, 'Ability onForeground');
   }

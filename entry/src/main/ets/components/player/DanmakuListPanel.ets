@@ -7,6 +7,7 @@ import { BasicDataSource } from '../../common/BasicDataSource';
 import { playerPanelTitle, playerPanelSub, playerPanelRowBg } from './PlayerSheetTheme';
 import { formatDuration } from '../../common/Utils';
 import { DanmakuItem } from '../../api/BiliApi';
+import { DanmakuListKeys } from './DanmakuListKeys';
 
 @Component
 export struct DanmakuListPanel {
@@ -17,6 +18,7 @@ export struct DanmakuListPanel {
   @StorageProp('isDarkMode') isDark: boolean = false;
   @StorageProp('accentColor') accent: string = '#FB7299';
   source: BasicDataSource<DanmakuItem> = new BasicDataSource<DanmakuItem>();
+  private rowKeys: DanmakuListKeys = new DanmakuListKeys();
   onSeek: (seconds: number) => void = (seconds: number) => {
   };
   onReport: (item: DanmakuItem) => void = (item: DanmakuItem) => {
@@ -87,7 +89,7 @@ export struct DanmakuListPanel {
                   })
               )
             }
-          }, (item: DanmakuItem) => String(item.time) + '_' + item.text)
+          }, (item: DanmakuItem, index: number) => this.rowKeys.keyFor(this.source.getAll(), index))
         }
         .width('100%')
         .height(this.embedded ? 'auto' : 200)

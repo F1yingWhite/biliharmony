@@ -226,7 +226,8 @@ export class DynImagePreparer {
    */
   private static async applyExifOrientation(source: image.ImageSource, pixelMap: image.PixelMap): Promise<void> {
     try {
-      const orientation: string = await source.getImageProperty('Orientation');
+      const orientation: string = await source.getImageProperty(image.PropertyKey.ORIENTATION,
+        { index: 0, defaultValue: '1' });
       if (orientation === '3') {
         await pixelMap.rotate(180);
       } else if (orientation === '6') {

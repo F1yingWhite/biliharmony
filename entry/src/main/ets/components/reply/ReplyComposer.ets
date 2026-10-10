@@ -2,8 +2,9 @@ import { BiliEmote, BiliEmotePackage } from '../../model/Models';
 import { Immersive } from '../../common/Immersive';
 import { DynDraftImage } from '../../common/DynImagePreparer';
 import { ReplySubmissionController } from './ReplySubmissionController';
-import { picker } from '@kit.CoreFileKit';
+import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { common } from '@kit.AbilityKit';
+import { PhotoPickerHandoff } from '../../common/PhotoPickerHandoff';
 
 /** 视频评论与动态评论共用的底部发送栏。父页面只负责草稿与请求。 */
 @Component
@@ -43,11 +44,11 @@ export struct ReplyComposer {
     const context: common.Context | undefined = this.getUIContext().getHostContext();
     if (context === undefined || this.submission === null || this.sending || !this.allowImages) return;
     this.submission.pick(context, async (remaining: number): Promise<Array<string>> => {
-      const photoPicker: picker.PhotoViewPicker = new picker.PhotoViewPicker();
-      const result: picker.PhotoSelectResult = await photoPicker.select({
-        MIMEType: picker.PhotoViewMIMETypes.IMAGE_TYPE, maxSelectNumber: remaining,
+      const photoPicker: photoAccessHelper.PhotoViewPicker = new photoAccessHelper.PhotoViewPicker();
+      const result: photoAccessHelper.PhotoSelectResult = await photoPicker.select({
+        MIMEType: photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE, maxSelectNumber: remaining,
       });
-      return result.photoUris;
+      return PhotoPickerHandoff.defer(result.photoUris);
     }).catch(() => {});
   }
 
