@@ -23,6 +23,77 @@ async function seed(f, type, id, hasMore = true) {
 }
 const ids = source => source.getAll().map(item => item.dynId);
 
+test('refresh removes repeated ids in the same response and preserves first image and order', async () => {
+  const f = fixture(), first = { dynId: '1180000000000000001', images: ['first.jpg'] },
+    second = { dynId: '1180000000000000002', images: ['second.jpg'] };
+  const pending = f.feed.load(true);
+  f.requests[0].resolve({ items: [first, second, { dynId: first.dynId, images: ['duplicate.jpg'] }],
+    offset: 'next-page', hasMore: true });
+  await pending;
+  assert.deepEqual(ids(f.feed.source('all')), [first.dynId, second.dynId]);
+  assert.equal(f.feed.source('all').getData(0), first);
+  assert.deepEqual(f.feed.source('all').getData(0).images, ['first.jpg']);
+  assert.equal(f.feed.state().offset, 'next-page');
+  assert.equal(f.feed.state().hasMore, true); assert.equal(f.feed.state().loaded, true);
+});
+
+test('continuation removes overlap and same-page duplicates without replacing mounted images', async () => {
+  const f = fixture(), first = { dynId: 'a', images: ['original.jpg'] },
+    second = { dynId: 'b', images: ['next.jpg'] }, third = { dynId: 'c', images: ['last.jpg'] };
+  const initial = f.feed.load(true);
+  f.requests[0].resolve({ items: [first], offset: 'page-2', hasMore: true }); await initial;
+  const notices = [], source = f.feed.source('all');
+  source.registerDataChangeListener({ onDataAdd: index => notices.push(index) });
+  const more = f.feed.load(false);
+  assert.equal(f.requests[1].offset, 'page-2');
+  f.requests[1].resolve({ items: [{ dynId: 'a', images: ['overlap.jpg'] }, second,
+    { dynId: 'b', images: ['duplicate.jpg'] }, third], offset: 'done', hasMore: false });
+  await more;
+  assert.deepEqual(ids(source), ['a', 'b', 'c']); assert.deepEqual(notices, [1, 2]);
+  assert.equal(source.getData(0), first); assert.equal(source.getData(1), second);
+  assert.equal(source.getData(2), third);
+  assert.deepEqual(source.getData(0).images, ['original.jpg']);
+  assert.equal(f.feed.state().offset, 'done'); assert.equal(f.feed.state().hasMore, false);
+});
+
+test('fully overlapping continuation still advances the server cursor and permits another page', async () => {
+  const f = fixture(); await seed(f, 'all', 'same');
+  const overlap = f.feed.load(false);
+  f.requests.at(-1).resolve({ items: [{ dynId: 'same' }, { dynId: 'same' }],
+    offset: 'page-3', hasMore: true }); await overlap;
+  assert.deepEqual(ids(f.feed.source('all')), ['same']);
+  assert.equal(f.feed.state().offset, 'page-3'); assert.equal(f.feed.state().hasMore, true);
+  const next = f.feed.load(false); assert.equal(f.requests.at(-1).offset, 'page-3');
+  f.requests.at(-1).resolve(page('new', 'done', false)); await next;
+  assert.deepEqual(ids(f.feed.source('all')), ['same', 'new']);
+});
+
+test('refresh replaces prior images and removes duplicate ids only within the new response', async () => {
+  const f = fixture(); await seed(f, 'all', 'same');
+  f.feed.source('all').getData(0).images = ['old.jpg'];
+  const refreshed = { dynId: 'same', images: ['refreshed.jpg'] }, refresh = f.feed.load(true);
+  f.requests.at(-1).resolve({ items: [refreshed, { dynId: 'same', images: ['duplicate.jpg'] }],
+    offset: 'refresh-next', hasMore: true }); await refresh;
+  assert.equal(f.requests.at(-1).offset, '');
+  assert.deepEqual(ids(f.feed.source('all')), ['same']);
+  assert.equal(f.feed.source('all').getData(0), refreshed);
+  assert.deepEqual(f.feed.source('all').getData(0).images, ['refreshed.jpg']);
+});
+
+test('deduplication stays within each category and resets when the account changes', async () => {
+  const f = fixture(); await seed(f, 'all', 'same'); await seed(f, 'video', 'same');
+  assert.deepEqual(ids(f.feed.source('all')), ['same']);
+  assert.deepEqual(ids(f.feed.source('video')), ['same']);
+  f.session.advance(); f.feed.reset();
+  const current = { dynId: 'same', images: ['current-account.jpg'] }, load = f.feed.load(true);
+  f.requests.at(-1).resolve({ items: [current, { dynId: 'same', images: ['duplicate.jpg'] }],
+    offset: 'current-next', hasMore: true }); await load;
+  assert.deepEqual(ids(f.feed.source('all')), []);
+  assert.deepEqual(ids(f.feed.source('video')), ['same']);
+  assert.equal(f.feed.source('video').getData(0), current);
+  assert.deepEqual(f.feed.source('video').getData(0).images, ['current-account.jpg']);
+});
+
 test('cached return rejects the previous category response and cursor', async () => {
   const f = fixture(); await seed(f, 'all', 'all-original');
   const video = f.feed.select('video'); await f.feed.select('all');

@@ -103,8 +103,9 @@ export class DynamicFeedController {
       const result: DynamicPageData = hostMid > 0 ?
         await DynamicApi.getUserDynamicFeed(hostMid, offset) : await DynamicApi.getDynamicFeed(offset, type);
       if (!isCurrent()) return;
-      if (reset) page.source.reset(result.items);
-      else page.source.append(result.items);
+      const items: Array<DynamicItem> = this.uniqueItems(result.items, reset ? [] : page.source.getAll());
+      if (reset) page.source.reset(items);
+      else page.source.append(items);
       state.offset = result.offset;
       state.hasMore = result.hasMore;
       state.loaded = true;
@@ -139,6 +140,20 @@ export class DynamicFeedController {
         }
       }
     });
+  }
+
+  /** 接口分页可能重叠；每个分类只保留首次出现的动态，避免 LazyForEach 的 dynId key 重复。 */
+  private uniqueItems(items: Array<DynamicItem>, existing: Array<DynamicItem>): Array<DynamicItem> {
+    const ids: Set<string> = new Set<string>();
+    for (let i: number = 0; i < existing.length; i++) ids.add(existing[i].dynId);
+    const unique: Array<DynamicItem> = [];
+    for (let i: number = 0; i < items.length; i++) {
+      const item: DynamicItem = items[i];
+      if (ids.has(item.dynId)) continue;
+      ids.add(item.dynId);
+      unique.push(item);
+    }
+    return unique;
   }
 
   private page(type: string): DynamicFeedPage {

@@ -16,6 +16,15 @@ import { DynamicCardActions, DynamicActionState } from './DynamicCardActions';
 
 interface ReportButtonItem { text: string; color: string; }
 
+interface DynamicImageGridParams {
+  item: DynamicItem;
+  inset: number;
+}
+
+interface DynamicForwardedCardParams {
+  item: DynamicItem;
+}
+
 /** 单条动态卡片：独立 @Component，父组件状态变化不再整列表重建；@Reusable 复用滚动项。 */
 @Reusable
 @Component
@@ -211,27 +220,28 @@ export struct DynCard {
 
   /** 图文动态宫格：单图 2/3 宽正方形，多图三列正方形单元（对齐官方客户端）。
    *  超过 9 张时只展示前 9 张，第 9 张压暗并叠加 +N（官方同款处理）。 */
+  // 单个对象字面量按引用传入；卡片复用换 item 时，图片源、key 和点击目标一起更新。
   @Builder
-  ImageGrid(item: DynamicItem, inset: number) {
-    if (item.images.length === 1) {
+  ImageGrid(params: DynamicImageGridParams) {
+    if (params.item.images.length === 1) {
       // 单图也必须有内容级 key。DynCard 被 LazyForEach 复用时，旧 Image 节点会在新图加载前
       // 保留上一条动态的位图，视觉上就像“下面的图片串到上面”。
-      ForEach(item.images.slice(0, 1), (src: string) => {
+      ForEach(params.item.images.slice(0, 1), (src: string) => {
         Image(biliImageThumbnail(src, 900))
-          .width(this.gridCell(inset) * 2 + 4)
-          .height(this.gridCell(inset) * 2 + 4)
+          .width(this.gridCell(params.inset) * 2 + 4)
+          .height(this.gridCell(params.inset) * 2 + 4)
           .objectFit(ImageFit.Cover)
           .borderRadius(8)
-          .id(this.navigation().imgId(item.dynId, 0))
-          .geometryTransition(this.reduceMotion ? 'dynamic-reduced-' + this.navigation().imgTransitionId(item.dynId, 0) :
-            this.navigation().imgTransitionId(item.dynId, 0))
+          .id(this.navigation().imgId(params.item.dynId, 0))
+          .geometryTransition(this.sharedImageTransition && !this.reduceMotion ?
+            this.navigation().imgTransitionId(params.item.dynId, 0) : '')
           .onClick(() => {
-            this.navigation().openItemImage(item, 0);
+            this.navigation().openItemImage(params.item, 0);
           })
-      }, (src: string) => item.dynId + '-single-' + src)
+      }, (src: string) => params.item.dynId + '-single-' + src)
     } else {
       Grid() {
-        ForEach(item.images.slice(0, 9), (src: string, index: number) => {
+        ForEach(params.item.images.slice(0, 9), (src: string, index: number) => {
           GridItem() {
             Stack({ alignContent: Alignment.Center }) {
               // 宫格缩略图（320w webp）：动态流大批图片时避免原图占满内存。
@@ -239,12 +249,12 @@ export struct DynCard {
                 .width('100%')
                 .aspectRatio(1)
                 .objectFit(ImageFit.Cover)
-                .id(this.navigation().imgId(item.dynId, index))
-                .geometryTransition(this.reduceMotion ? 'dynamic-reduced-' + this.navigation().imgTransitionId(item.dynId, index) :
-                  this.navigation().imgTransitionId(item.dynId, index))
-              if (index === 8 && item.images.length > 9) {
+                .id(this.navigation().imgId(params.item.dynId, index))
+                .geometryTransition(this.sharedImageTransition && !this.reduceMotion ?
+                  this.navigation().imgTransitionId(params.item.dynId, index) : '')
+              if (index === 8 && params.item.images.length > 9) {
                 Column() {
-                  Text('+' + String(item.images.length - 9))
+                  Text('+' + String(params.item.images.length - 9))
                     .fontSize(20)
                     .fontWeight(FontWeight.Medium)
                     .fontColor('#FFFFFF')
@@ -260,16 +270,16 @@ export struct DynCard {
             .clip(true)
             .borderRadius(6)
             .onClick(() => {
-              this.navigation().openItemImage(item, index);
+              this.navigation().openItemImage(params.item, index);
             })
           }
-        }, (src: string, index: number) => item.dynId + '-' + src + String(index))
+        }, (src: string, index: number) => params.item.dynId + '-' + src + String(index))
       }
       .columnsTemplate('1fr 1fr 1fr')
-      .rowsTemplate(this.gridRowsTemplate(Math.min(9, item.images.length)))
+      .rowsTemplate(this.gridRowsTemplate(Math.min(9, params.item.images.length)))
       .rowsGap(4)
       .columnsGap(4)
-      .height(this.imageGridHeightFor(item.images.slice(0, 9), inset))
+      .height(this.imageGridHeightFor(params.item.images.slice(0, 9), params.inset))
       .width('100%')
       .scrollBar(BarState.Off)
     }
@@ -285,17 +295,17 @@ export struct DynCard {
   }
 
   @Builder
-  ForwardedCard(item: DynamicItem) {
+  ForwardedCard(params: DynamicForwardedCardParams) {
     Column({ space: 7 }) {
-      Text('@' + (item.uname.length > 0 ? item.uname : '原动态作者'))
+      Text('@' + (params.item.uname.length > 0 ? params.item.uname : '原动态作者'))
         .width('100%').fontSize(13).fontWeight(FontWeight.Medium).fontColor('#008AC5')
         .onClick(() => {
-          this.navigation().openItemDetail(item);
+          this.navigation().openItemDetail(params.item);
         })
-      if (item.content.length > 0) {
+      if (params.item.content.length > 0) {
         // 行内流：与评论区一致，表情随文字同流换行（Flex 独立 item 会把表情挤到新行），底部对齐。
         Text() {
-          ForEach(contentPartsOf(item, this.emoteVer), (part: DynamicContentPart) => {
+          ForEach(contentPartsOf(params.item, this.emoteVer), (part: DynamicContentPart) => {
             if (part.image.length > 0 && this.emoteFailed.has(part.image)) {
               Span(part.imageLabel.length > 0 ? part.imageLabel : '[表情]')
             } else if (part.image.length > 0) {
@@ -314,39 +324,39 @@ export struct DynCard {
         .width('100%')
         .fontColor(this.isDark ? '#D8D8DC' : '#303236')
         .onClick(() => {
-          this.navigation().openItemDetail(item);
+          this.navigation().openItemDetail(params.item);
         })
       }
-      if (item.images.length > 0) {
-        this.ImageGrid(item, 20)
+      if (params.item.images.length > 0) {
+        this.ImageGrid({ item: params.item, inset: 20 })
       }
-      if (item.title.length > 0) {
+      if (params.item.title.length > 0) {
         Row({ space: 9 }) {
-          if (item.cover.length > 0) {
-            ForEach([item.cover], (cover: string) => {
+          if (params.item.cover.length > 0) {
+            ForEach([params.item.cover], (cover: string) => {
               Image(biliImageThumbnail(cover, 240))
                 .width(112)
                 .height(68)
                 .objectFit(ImageFit.Cover)
                 .borderRadius(6)
-                .id(this.navigation().videoCoverId(item))
-            }, (cover: string) => item.dynId + '-forward-cover-' + cover)
+                .id(this.navigation().videoCoverId(params.item))
+            }, (cover: string) => params.item.dynId + '-forward-cover-' + cover)
           }
           Column({ space: 5 }) {
-            Text(item.title).fontSize(13).fontColor(this.isDark ? '#E6E6E6' : '#18191C').maxLines(2)
-            if (item.badge.length > 0 || item.subtitle.length > 0) {
-              Text(item.badge.length > 0 ? item.badge : item.subtitle).fontSize(10)
-                .fontColor(item.liveRoomId > 0 ? '#FB7299' : '#9499A0')
+            Text(params.item.title).fontSize(13).fontColor(this.isDark ? '#E6E6E6' : '#18191C').maxLines(2)
+            if (params.item.badge.length > 0 || params.item.subtitle.length > 0) {
+              Text(params.item.badge.length > 0 ? params.item.badge : params.item.subtitle).fontSize(10)
+                .fontColor(params.item.liveRoomId > 0 ? '#FB7299' : '#9499A0')
             }
           }.layoutWeight(1).alignItems(HorizontalAlign.Start)
         }
         .width('100%')
-        .id(this.navigation().videoCardId(item))
+        .id(this.navigation().videoCardId(params.item))
         .onClick(() => {
-          this.navigation().openMajor(item);
+          this.navigation().openMajor(params.item);
         })
       }
-      if (item.original !== null) this.ForwardedCard(item.original)
+      if (params.item.original !== null) this.ForwardedCard({ item: params.item.original })
     }
     .width('100%').padding(10).borderRadius(8)
     .backgroundColor(this.isDark ? '#222429' : '#F1F3F5')
@@ -436,7 +446,7 @@ export struct DynCard {
       }
 
       if (this.item.original !== null) {
-        this.ForwardedCard(this.item.original)
+        this.ForwardedCard({ item: this.item.original })
       }
 
       // 图文/专栏动态图片宫格（详情态也走缩略图，内存友好；点击进 ImageViewer 时再拉原图）。
@@ -447,7 +457,7 @@ export struct DynCard {
             .width('100%')
             .height(this.imageGridHeightFor(this.item.images.slice(0, 9), 0))
             .onClick(() => this.navigation().openDetail())
-          this.ImageGrid(this.item, 0)
+          this.ImageGrid({ item: this.item, inset: 0 })
         }
         .width('100%')
         .height(this.imageGridHeightFor(this.item.images.slice(0, 9), 0))
